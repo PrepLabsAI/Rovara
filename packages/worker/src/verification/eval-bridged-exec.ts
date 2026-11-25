@@ -15,7 +15,7 @@ import { realpathSync } from "node:fs";
 import { isIP } from "node:net";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, posix } from "node:path";
-import { seedLockHolds, EMPTY_EVAL_STAND_IN_COUNTS, EVAL_INSTALL_STEP_MAX_MS, evalStandInEngineOfPort, EVAL_QUESTION_LIMIT, isEvalStandInPlanHost, type EvalStandInRunReport, EVAL_VERTEX_PLACEHOLDER, EVAL_VERTEX_ROW, EvalEnvironmentSchema, agentXError, attestRovaraOnlyBaseCheckout, type EvalBaseAttestation, type EvalEnvironment, type EvalInstallCommand, type ModelEgress, type ModelEgressFrame } from "@agentx/contracts";
+import { seedLockHolds, EMPTY_EVAL_STAND_IN_COUNTS, EVAL_INSTALL_STEP_MAX_MS, evalStandInEngineOfPort, EVAL_QUESTION_LIMIT, isEvalStandInPlanHost, type EvalStandInRunReport, EVAL_BEDROCK_ROW, EVAL_VERTEX_PLACEHOLDER, EVAL_VERTEX_ROW, EvalEnvironmentSchema, agentXError, attestRovaraOnlyBaseCheckout, type EvalBaseAttestation, type EvalEnvironment, type EvalInstallCommand, type ModelEgress, type ModelEgressFrame } from "@agentx/contracts";
 import { checkoutSeedReader } from "../service-seed-lock.js";
 import { seedPathInRepository } from "../eval-repository-path.js";
 import { createProcessCandidateGit } from "../e2e-candidate-source.js";
@@ -26,7 +26,7 @@ import { MODEL_BLACKHOLE_ADDRESS, isModelHelperAddress, modelHostAddHostArgs, pl
 import { modelHelperOffer, startModelHelper, type StartedModelHelper } from "../model-helper-network.js";
 import { SERVED_MODEL_FAMILIES, type ModelReplySet } from "@agentx/contracts/model-helper";
 import { buildModelReplyBundle, modelReplyBundleBytes, modelReplyBundleDigest } from "../model-reply-bundle.js";
-import { MODEL_DUMMY_KEY, MODEL_HELPER_BASE_URL, MODEL_METADATA_PORT } from "../model-sandbox-env.js";
+import { MODEL_DUMMY_KEY, MODEL_HELPER_BASE_URL, MODEL_METADATA_PORT, bedrockSandboxVariables } from "../model-sandbox-env.js";
 import { CHECK_SANDBOX_HOSTNAME, SINKHOLE_ALIAS, checkSandboxHostsFile, checkSandboxNames, checkSandboxResolvConf, readSealedDnsRecord, sealedDnsHelperRunArgs, waitForSealedDnsHelper, type RunHostEntry, type SealedDnsRecord } from "../check-sandbox.js";
 import { RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_LABEL, RUN_NETWORK_WORKSPACE_LABEL, runNetworkHelperIp, type ServicesNetwork } from "../run-network.js";
 import type { DockerCli } from "../docker-cli.js";
@@ -129,6 +129,9 @@ export function bridgeMadeEnd(fields: Readonly<Record<string, unknown>>): boolea
   return fields["event"] === "refused" || fields["class"] === "refused" || fields["event"] === "dropped" || (fields["event"] === "call" && fields["reason"] !== undefined);
 }
 
+/** The API shape of an eval product row, for the bridge's error bodies (`bedrock` answers `{message}`, Vertex and Gemini their own). */
+const evalRowFamily = (row: string): "bedrock" | "vertex" | "gemini" => (row === EVAL_BEDROCK_ROW ? "bedrock" : row === EVAL_VERTEX_ROW ? "vertex" : "gemini");
+
 interface RunState { changedPromptCalls: number; open: number; blocked: boolean }
 
 /**
@@ -177,8 +180,8 @@ export function createBridgedEvalExec(options: BridgedEvalExecOptions): EvalSand
           egress: runEgress(request.egress, options, state),
           egressScope: request.scope,
           roundKind: "check_unsealed",
-          // The product route serves two shapes: the Gemini API and, for the `vertex` row, Vertex AI (same error bodies). The frame parser has already refused a row that is not a plain catalog word; the worker's own pin (`modelAllowed`) decides which row may call.
-          familyOf: (row) => (row === EVAL_VERTEX_ROW ? "vertex" : "gemini"),
+          // The product route serves three shapes: the Gemini API, for the `vertex` row Vertex AI (same error bodies) and, for the `bedrock` row (RF-5), Bedrock Runtime (the stage's egress sends it to the gateway's Bedrock product route). The frame parser has already refused a row that is not a plain catalog word; the worker's own pin (`modelAllowed`) decides which row may call.
+          familyOf: evalRowFamily,
           ledger: createModelBridgeLedger({ now }),
           now,
           limits: { calls: EVAL_BRIDGE_CALLS_MAX, concurrent: EVAL_BRIDGE_CONCURRENT_MAX, connections: EVAL_BRIDGE_CONNECTIONS_MAX },
@@ -565,7 +568,10 @@ function realOrSelf(path: string): string {
  * form, which has no project in its path and which the gateway does not serve. A `gemini` row's lines are exactly as before. */
 export function freshEvalEnvironment(input: { rowId: string; token: string; side: "old" | "new"; runs: 1 | 2 | 3; ids: readonly string[]; helperIp?: string; /** L4-E56: the path of the round's PUBLIC certificate inside the box: the trust variables (names and this one path; never a key or PEM text). */ standInCertificate?: string; /** L4-EVS: only when an environment was prepared: a `pip --user` install in the install step lives in the checkout and the run finds it. */ pythonUserBase?: boolean; /** L4-E12 (E1): the connection variables of the run's services (`DATABASE_URL`, `PG*`, `REDIS_URL`, ...): plain `[name, value]` pairs, after the model's and before the run's own. A name already set, or one of Rovara's, is refused. */ services?: ReadonlyArray<readonly [string, string]> }): string {
   const base = `${MODEL_HELPER_BASE_URL}/p/${input.rowId}/x/${input.token}`;
-  const model: [string, string][] = input.rowId === EVAL_VERTEX_ROW
+  const model: [string, string][] = input.rowId === EVAL_BEDROCK_ROW
+    // RF-5: the AWS client's endpoint (with the exec's bridge token, never the gateway's task token), dummy keys, a placeholder Region.
+    ? bedrockSandboxVariables(input.rowId, input.token).map(([name, value]): [string, string] => [name, value])
+    : input.rowId === EVAL_VERTEX_ROW
     ? [
       [VERTEX_BASE_URL_VARIABLE, base],
       ["GOOGLE_CLOUD_PROJECT", EVAL_VERTEX_PLACEHOLDER.projectId], ["GOOGLE_CLOUD_LOCATION", EVAL_VERTEX_PLACEHOLDER.location],
@@ -815,7 +821,7 @@ export function createFreshEvalSandbox(config: FreshEvalSandboxConfig): FreshEva
         // 2. The helper's run files beside the socket (its one mount): the row it serves and an empty reply bundle (mode real answers from the bridge only).
         // A dry run answers every model call from a scripted reply (mode `scripted`, no bridge socket: nothing can reach the gateway, so nothing can cost money); a paid run's helper has no scripted reply (mode `real` over the bridge).
         const bundle = buildModelReplyBundle(dryRun ? DRY_RUN_REPLY_SETS : []);
-        await writeFile(join(bridgeDir, "rows.json"), JSON.stringify([{ id: config.rowId, family: vertexRow ? "vertex" : "gemini" }]), { mode: 0o644 });
+        await writeFile(join(bridgeDir, "rows.json"), JSON.stringify([{ id: config.rowId, family: evalRowFamily(config.rowId), ...(config.rowId === EVAL_BEDROCK_ROW ? { routesTo: "local_aws_front" } : {}) }]), { mode: 0o644 });
         await writeFile(join(bridgeDir, "replies.json"), modelReplyBundleBytes(bundle), { mode: 0o644 });
         // 3. The round network and the helper on it (.9), serving only the sandbox's address (.4), real mode over the bridge socket.
         helper = await startModelHelper(docker, {

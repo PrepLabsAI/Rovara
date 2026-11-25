@@ -47,6 +47,11 @@ export interface SessionRecord { signedInId?: string; sessionId: string; develop
  * check refuses it once the company has its own issuer, and refuses an unmarked session for a company that has none.
  * DEC 254b (f): `joinedByInvite` is set only by the sign-in server, when this sign-in's own join consumed a live pre-approval for the session's company.
  */
+/**
+ * Whether a refresh token for this session may be exchanged by this client. Never for a browser sign-in session (it has reviewExpiresAt: the cookie is its
+ * whole credential and it has no refresh token to give). Spec 063: and only by the client the session was issued to, not across a removal and re-registration.
+ */
+export const refreshableBy = (session: SessionRecord, clientId: string | undefined): boolean => session.reviewExpiresAt === undefined && session.clientId === clientId;
 export interface CodeGrant { /** DEC 254w: the identity that signed in when it is not `developerId` (seated as its person); each redeem and refresh walks it again. */ signedInId?: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; clientId?: string; administrator?: true; scopes?: string[]; companyId?: string; installMethod?: true; joinedByInvite?: true }
 
 
@@ -452,6 +457,16 @@ export class DeveloperSignInStore {
       ],
     }));
     return { session, refreshToken };
+  }
+
+  /**
+   * A browser review sign-in: the SESSION row and nothing else. Its cookie is its whole credential, so no refresh-token row is written for it
+   * (refreshableBy still refuses a session carrying reviewExpiresAt, for any row that already exists).
+   */
+  async createBrowserSession(input: CodeGrant & { reviewExpiresAt: number; endsAt: number }): Promise<{ session: SessionRecord }> {
+    const session: SessionRecord = { ...input, sessionId: randomUUID(), startedAt: this.iso() };
+    await this.input.documentClient.send(new PutCommand({ TableName: this.input.tableName, Item: { pk: `SESSION#${session.sessionId}`, sk: META, entityType: "SESSION", ...session, expiresAt: session.endsAt + 86_400 }, ConditionExpression: "attribute_not_exists(pk)" }));
+    return { session };
   }
 
   async getSession(sessionId: string): Promise<SessionRecord | undefined> {

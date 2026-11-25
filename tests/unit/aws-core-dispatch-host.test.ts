@@ -1,5 +1,6 @@
 import { agentModelIdentity, TestEnvironmentBodySchema, testEnvDigest } from "@agentx/contracts";
 import { documentOf } from "../../packages/broker/src/core/test-env/deps.js";
+import { documentSavedEnvStore } from "../../packages/broker/src/core/test-env/saved-env-store.js";
 import { testEnvLatestKey, testEnvRevisionKey } from "../../packages/broker/src/core/test-env/environment.js";
 import { createAgentModelChoice } from "../../packages/broker/src/core-host/gateway-model-selection.js";
 import { modelSelectionPolicyKey } from "../../packages/broker/src/core/model-selection/policy-store.js";
@@ -310,6 +311,23 @@ describe("the core on the dispatcher", () => {
     await b.flow.deps.store.put({ item: documentOf({ ...testEnvLatestKey(COMPANY_B, "shared-name"), entityType: "TEST_ENV_LATEST", orgId: COMPANY_B, project: "shared-name", revision: 1, digest }) });
     expect(await a.flow.deps.testEnvironment!.forStart({ project: "shared-name", taskId: randomUUID() })).toEqual({});
     expect(await b.flow.deps.testEnvironment!.forStart({ project: "shared-name", taskId: randomUUID() })).not.toEqual({});
+  });
+
+  it("saved images: with the install's switch on each company's runtime on the dispatcher hands out the lease of its OWN jobs only; with it off there is no seam", async () => {
+    const owed = new Set<string>(["admission", "metering", "identity", "approvers", "audit-sink", "model-keys"]);
+    const build = (environment: NodeJS.ProcessEnv) => createDispatcherCoreHost({ ...inputs(environment).inputs, extraModules: createFakeWorld().modules.filter((module) => owed.has(module.point)), flow: { standingInstructions: null, modelAccess: null, learned: null } });
+    expect((await build(env({})).app.runtimeFor(COMPANY_A)).flow.deps.savedEnvLease).toBeUndefined();
+    expect((await build(env({ ROVARA_SAVED_ENVIRONMENTS: "0" })).app.runtimeFor(COMPANY_A)).flow.deps.savedEnvLease).toBeUndefined();
+    const built = build(env({ ROVARA_SAVED_ENVIRONMENTS: "1" }));
+    const [a, b] = [await built.app.runtimeFor(COMPANY_A), await built.app.runtimeFor(COMPANY_B)];
+    expect(Object.keys(a.flow.deps.savedEnvLease ?? {}).sort()).toEqual(["check", "take"]);
+    expect(a.flow.deps.savedEnvLease).not.toBe(b.flow.deps.savedEnvLease);
+    const now = Date.now();
+    const job = { jobId: "job-1", leaseToken: "t".repeat(24), reason: "no_image" as const, approved: { revision: 1, digest: "a".repeat(64) }, commits: { demo: "1".repeat(40) }, expectedKey: "c".repeat(64), createdAt: new Date(now).toISOString(), leaseUntil: new Date(now + 3_600_000).toISOString() };
+    await documentSavedEnvStore({ store: a.flow.deps.store, now: () => now }).commit({ orgId: COMPANY_A, projectId: "shared-name", version: 1, enabled: true, images: [], health: "never_proved", job }, null, { action: "rebuild_queued", orgId: COMPANY_A, projectId: "shared-name", at: job.createdAt });
+    // company B has no such job under the same project name: the registry row is in the company's own partition
+    expect(await b.flow.deps.savedEnvLease!.take({ projectId: "shared-name", jobId: "job-1", operationId: "op-1" })).toEqual({ ok: false, reason: "nothing_to_dispatch" });
+    expect(await a.flow.deps.savedEnvLease!.take({ projectId: "shared-name", jobId: "job-1", operationId: "op-1" })).toEqual({ ok: true, leaseToken: job.leaseToken });
   });
 
   it("L4-TSU: each company's runtime on the dispatcher carries its own taskSpendUsd over its own cost ledger: another company's row for the same task id is never counted, and what is not known throws in fixed words", async () => {

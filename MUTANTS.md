@@ -413,6 +413,57 @@ Each mutant applied singly, tests/unit/machine-check.test.ts, tests/contract/wor
 | same | A cancel fails the active operation even when it is not the cancel's target | killed, 1 failed |
 | ec2-delivery.ts `machineToCheck` | A setup run held to the wrong subnets | killed, 2 failed |
 
+## SI-LEASE-HANDOFF (the dispatcher hands a rebuild its lease token), code head e36884e49
+
+Each mutant applied singly to the production file; tests/unit/saved-env-dispatch-lease.test.ts, aws-core-dispatch-host.test.ts, saved-env-rebuild.test.ts and saved-env-registry.test.ts run (103 tests), restored with git checkout.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| dispatch.ts `savedEnvBuildWithLease` | The token is dropped from the invocation | killed, 4 failed |
+| same | A token stored in the payload wins over the registry's | killed, 1 failed |
+| same | The token is written to a log line | killed, 1 failed |
+| same | The job id asked for is the operation's id (not the stored job's) | killed, 5 failed |
+| same | The project asked for is empty | killed, 5 failed |
+| same | The operation asked for is the workspace's id | killed, 3 failed |
+| same | The worker-feature check removed (the token is taken for a worker that cannot build) | killed, 1 failed |
+| same | No seam wired: the build is sent without a token | killed, 1 failed |
+| same | A refused lease: the build is sent without a token | killed, 5 failed |
+| same | A lost write race is not retried (1 try) | killed, 1 failed |
+| same | After the tries the build is sent without a token | killed, 1 failed |
+| dispatch.ts prepare branch | Every preparation asks for a lease, not only a rebuild's | killed, 1 failed |
+| saved-env.ts `leaseForDispatch` | The named job id is not compared (another job is marked taken) | killed, 2 failed |
+| same | An expired lease is still handed over | killed, 2 failed |
+| saved-env-dispatch-lease.ts `savedEnvDispatchLeaseOf` | The company asked for is the implicit one, not the seam's | killed, 1 failed |
+| `savedEnvDispatchLeaseFor` | A seam is made with the switch off | killed, 2 failed |
+| `savedEnvDispatchLeaseOf` | An empty operation id accepted | first survived (the test's earlier call had already taken the token); killed, 1 failed, by the added test |
+| same | The result carries the whole job, not the token | killed, 3 failed |
+| same | The job-id belt on the registry's answer removed | equivalent (`leaseForDispatch` already answers only for the named job); kept as a belt |
+| dispatcher-core.ts | The dispatcher does not wire the seam | killed, 1 failed |
+
+SI-LEASE-HANDOFF re-run: the lease step moved out of dispatch.ts into task-flow/saved-env-lease-step.ts (complexity ratchet), called from `preparedProject`. All 20 mutants above re-applied on code head 7c3ed5b68 (the dispatch.ts rows now apply to saved-env-lease-step.ts; "every preparation asks" removes the `savedEnvBuild === undefined` guard): 19 killed, only the job-id belt (equivalent) survives.
+
+## SI-LEASE-HANDOFF, pre-review round (M1, S1-S3), code head 17fb72182
+
+Each mutant applied singly; tests/unit/saved-env-dispatch-lease.test.ts, aws-core-dispatch-host, saved-env-rebuild, saved-env-registry and saved-env-ending run (114-116 tests), restored with git checkout.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| saved-env-lease-step.ts `savedEnvBuildFields` | The stored job-id guard removed | first survived (the check before the start refuses first); killed by the added direct tests of the step |
+| `beforeMachine` | The check before the start never runs | killed, 7 failed |
+| `savedEnvPrecheck` | A refusal is ignored | killed, 4 failed |
+| same | A registry that cannot be read ends the operation (not a retry) | killed, 1 failed |
+| same | No seam lets it through | killed, 1 failed |
+| `savedEnvBuildFields` | A fault after the claim ends the operation | killed, 1 failed |
+| same | An exhausted lost race ends the operation | killed, 1 failed |
+| same | The pause between tries removed | first survived (timing); killed by the added pacing test |
+| saved-env-dispatch-lease.ts `check` | The check takes (marks the job taken) | killed, 3 failed |
+| saved-env.ts `leasableJob` | A job given to another operation is given again | killed, 6 failed |
+| same | The named job id is not compared | killed, 3 failed |
+| same | The run-time id guard removed | killed, 1 failed |
+| saved-env-dispatch-lease.ts `wellFormed` | The id guard removed there only | killed, 1 failed (the project id is only guarded here) |
+| both guards | Removed at once | killed, 3 failed |
+
+SI-LEASE-HANDOFF Opus leftovers (N1): `beforeMachine` call in dispatch.ts, "the retry before the start is capped like the standing-instruction read": the cap replaced by `true` (retried without end) is killed by the added test (1 failed).
 
 ## CANARY-SESSION: the beta canary person's session function (2026-11-25)
 
@@ -564,6 +615,49 @@ The earlier SI-2 table above was run on 138b4422f, before the starter and rebuil
 | check.ts `closeSetupCheck` | purpose guard removed; slots not released on close (S2) | killed (2) |
 | usage.ts | the two-hour cap for every kind | killed |
 | saved-env-rebuild.ts `readRebuildFacts` | commit count; approved check; "not handed to a worker" check removed | killed (3) |
+## RF-5-BEDROCK-ROUTE-A (lane commit 848b016b1, stacked on OE-c1 ee74af1b8)
+
+Tests: `tests/unit/worker-eval-bedrock-route.test.ts`, `tests/unit/worker-eval-fresh-sandbox.test.ts` and `tests/unit/product-bedrock-bridge.test.ts`, run together (90 tests) after each mutant of the named source file. M8 was run after rebuilding `packages/contracts` (the tests read its `dist`).
+
+| Mutant | Result |
+| --- | --- |
+| M1 `eval-gateway-access.ts`: a Bedrock path is no longer routed to the Bedrock lane (it falls to the Gemini route) | killed (17 tests) |
+| M2 `eval-gateway-access.ts`: Bedrock calls are no longer taken one at a time | killed (1 test) |
+| M3 `eval-gateway-access.ts`: the Bedrock lane skips the released / stopped / held-count-used guard | killed (2 tests) |
+| M4 `eval-gateway-access.ts`: a Bedrock call stopped before its settle no longer leaves the cost unknown | killed (1 test) |
+| M5 `eval-wiring.ts`: the Bedrock model pin does not accept the SDK's `%3A` | killed (3 tests) |
+| M6 `eval-wiring.ts`: the Bedrock model pin loses its end anchor (a longer path matches) | killed (1 test) |
+| M7 `eval-cost.ts`: the approval sentence ignores the Bedrock row (no "counted by the company's gateway cap") | killed (1 test) |
+| M8 `eval-discovery-report.ts`: the Bedrock row accepts any model name | killed (2 tests) |
+| M9 `model-sandbox-env.ts`: the bridge token segment and row id are not checked | killed (2 tests) |
+| M10 `eval-bridged-exec.ts`: the bridge reads a Bedrock row as a Gemini row (wrong error shape) | killed (1 test) |
+| M11 `eval-bridged-exec.ts`: the helper's row for Bedrock loses `routesTo` | killed (1 test) |
+| M12 `eval-bridged-exec.ts`: the sandbox environment has no Bedrock branch | killed (2 tests) |
+| M13 `eval-gateway-access.ts`: a Bedrock frame under a foreign scope is taken by the Bedrock lane | killed (1 test) |
+
+## SESSION-HARDEN — browser sessions never refresh; sign-in session ids are logged as a short hash
+
+Each mutant applied singly to the production file, tests/contract/developer-identity-server.test.ts run, restored from a copy. All killed.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| developer/store.ts `refreshableBy` (called by `refreshTokenGrant`) | The `reviewExpiresAt` refusal removed (a browser session refreshes) | killed, 1 failed |
+| same | The refusal limited to a GitHub session (earlier form, in server.ts) | killed, 1 failed |
+| developer/server.ts `revoke` | `signin.session_revoked` logs the raw session id | killed, 1 failed |
+| developer/server.ts `refreshTokenGrant` | `signin.refresh_grace` logs the raw session id | killed, 1 failed |
+| developer/server.ts `authorizationCodeGrant` | `signin.session_started` logs the raw session id | killed, 1 failed |
+| developer/session-log-id.ts `sessionLogId` | The hash is the full 64 hex instead of 12 | killed, 1 failed |
+
+## SESSION-HARDEN round 2 — canary logs a session hash; a browser sign-in writes no refresh-token row; a refused browser refresh is logged
+
+Each mutant applied singly to the production file, tests/contract/developer-identity-server.test.ts, developer-signin-store.test.ts and canary-session.test.ts run, restored from a copy. All killed.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| developer/server.ts browser return | The browser sign-in calls `createSession` again (a refresh-token row is written) | killed, 1 failed |
+| developer/server.ts `refreshRefused` | The fixed `signin.browser_refresh_refused` line removed | killed, 1 failed |
+| same | The line also carries the raw session id | killed, 1 failed |
+| developer/canary-session.ts | `signin.canary_session` logs the raw session id | killed, 1 failed |
 | release-pipeline.ts CLOUD_PROD_DEFAULT (tag-trigger) | The variable's default turned back to `on` | killed, 1 failed |
 | release-pipeline.ts CLOUD_REF default (tag-trigger) | The variable's default turned back to `latest` | killed, 1 failed |
 | release-pipeline.ts Production stage (tag-trigger) | The transition into Production left enabled | killed, 1 failed |
@@ -626,3 +720,8 @@ Killed by tests/contract/task-owner-engine-channel.test.ts (7 tests).
 | E2, same | a stamp read that fails or cannot be read counts as an old-engine task (fail open) | red (2 of 7) |
 | E3, `listsAsOwn` | a channel hold is kept for the whole project (the `held` map) | red (1 of 7: one page with an old-engine and a core task of one project) |
 | E4, same check | the engine is not asked at all, channel branch always on | red (4 of 7) |
+| session-binding.ts (session-id-at-rest) | `sameSessionBinding` always true; `sessionBindingOf` returns the raw id | killed (2) |
+| the six state-row families (slack-company-install, github-connect-routes, github-account-link-routes, linear-connections + linear-connect/account-link-routes, sign-in-links) | the row keeps the raw `caller.sessionId` in place of the digest | killed (all six) |
+| same | the spend's in-code digest compare removed alone | survived: equivalent (the DynamoDB condition on the digest still refuses; the two layers are redundant by design) |
+| same | the in-code compare AND the condition's digest value both neutralised (condition compares the row with itself) | killed (all six) |
+| slack-company-install.ts, github-connect-routes.ts, linear-connect-routes.ts `sessionBindingOfCaller` | the empty/missing session-id guard removed | killed (2 each) |

@@ -21,9 +21,9 @@ describe("the worker's model pin per eval row", () => {
 });
 
 describe("the eval product rows", () => {
-  it("the Gemini API and Vertex AI are both Google rows; nothing else is", () => {
-    expect(EVAL_PRODUCT_ROWS).toEqual({ gemini: "google", vertex: "google" });
-    expect([...EVAL_DRAFT_PROVIDERS]).toEqual(["gemini", "vertex"]);
+  it("the Gemini API and Vertex AI are both Google rows, Bedrock (RF-5) is its own API shape; nothing else is", () => {
+    expect(EVAL_PRODUCT_ROWS).toEqual({ gemini: "google", vertex: "google", bedrock: "bedrock" });
+    expect([...EVAL_DRAFT_PROVIDERS]).toEqual(["gemini", "vertex", "bedrock"]);
     expect(Object.isFrozen(EVAL_PRODUCT_ROWS) && Object.isFrozen(EVAL_VERTEX_PLACEHOLDER)).toBe(true);
   });
   it("the placeholder pair is shaped like a real project and location (it passes the gateway's parsers) and is not a real Google name", () => {
