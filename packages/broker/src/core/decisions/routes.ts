@@ -5,7 +5,7 @@
 //   POST /v1/app/decisions/{kind}/{subject}/reject           a reason in one tap; never a way to approve
 // One card, one request: there is no bulk route and a body with a list of ids is refused by the strict schema. The approve and reject DO NOT decide anything themselves: they call the existing
 // endpoint through the injected `performer` (a plan decision, a merge press, a spend decision, ...), which checks the caller's live authority again and answers what really happened:
-// decided, needs the confirmation page (a fresh sign-in), or refused. Only a decided answer is recorded and reported as approved; a surface never says "Approved" for anything else.
+// decided, needs the confirmation page, or refused. Only a decided answer is recorded and reported as approved; a surface never says "Approved" for anything else.
 // Mounting is one call (routeDecisionCards).
 import {
   DECISION_CARDS_MAX, DECISION_RUN_LIMIT_KINDS, DecisionApproveBodySchema, DecisionCardIdSchema, DecisionOpenedBodySchema, DecisionRejectBodySchema, DecisionRequestChangesBodySchema, agentXError, approveReasonProblem, planChoicesProblem, spendUnreadableWords, type DecisionPlanAnswer,
@@ -28,7 +28,7 @@ export interface DecisionSources<C extends DecisionCaller = DecisionCaller> {
 /** What the existing endpoint really answered. */
 export type PerformOutcome =
   | { kind: "done" }
-  /** The endpoint did not decide: the person decides on its confirmation page (an https address), with a fresh sign-in. */
+  /** The endpoint did not decide: the person decides on its confirmation page (an https address). */
   | { kind: "needs_confirmation"; confirmUrl: string; /** A merge: what is about to be merged and into which branch. */ merging?: DecisionNeedsConfirmation["merging"] | undefined }
   | { kind: "refused"; reason: DecisionRefusalReason };
 
@@ -71,7 +71,7 @@ export interface DecisionRouteDependencies<C extends DecisionCaller = DecisionCa
   /** Measure lines go here (METRIC style); a failure to log never changes an answer. */
   log?: ((measure: DecisionMeasure) => void) | undefined;
   /**
-   * Slice 2: the kinds whose HIGH-risk card is approved on the card itself, on its task page, because their handler asks for a browser session and a recent sign-in itself (REAUTH_REQUIRED otherwise). For any
+   * Slice 2: the kinds whose HIGH-risk card is approved on the card itself, on its task page, because their handler asks for a browser session itself (no recent-sign-in step: DEC 254zzz73). For any
    * other kind a high card still has no approve route. Absent: none.
    */
   highOnCard?: ReadonlySet<string> | undefined;
@@ -228,7 +228,7 @@ export async function routeDecisionCards<C extends DecisionCaller>(deps: Decisio
     }
     const pending = pendingCard(await project(deps, caller), cardId);
     const { card, tabs } = pending;
-    // High: there is no approve route for it, whatever the card or a client says; except a kind whose handler asks for the recent sign-in itself (`highOnCard`), decided on its card on the task page.
+    // High: there is no approve route for it, whatever the card or a client says; except a kind whose handler asks for the browser session itself (`highOnCard`), decided on its card on the task page.
     const highOnCard = card.risk === "high" && deps.highOnCard?.has(card.kind) === true;
     if ((card.risk === "high" && !highOnCard) || (!highOnCard && !card.actions.some((action2) => action2.kind === "approve"))) throw agentXError("NOT_FOUND", DECISION_FULL_PAGE_MESSAGE);
     if (tabs === undefined && body.data.tab !== undefined) throw agentXError("CONFIG_INVALID", "tab: this card has no tabs");
@@ -245,7 +245,7 @@ export async function routeDecisionCards<C extends DecisionCaller>(deps: Decisio
     if (reasonProblem !== undefined) throw agentXError("CONFIG_INVALID", reasonProblem);
     if (body.data.acknowledgedRunLimitUsd !== undefined && !DECISION_RUN_LIMIT_KINDS.includes(acting.item.kind)) throw agentXError("CONFIG_INVALID", "acknowledgedRunLimitUsd: this card sets no run limit");
     let openedAt: string | undefined;
-    // A high card decided on its card has the recent sign-in as its check (its handler asks for it), not the evidence record a medium card needs.
+    // A high card decided on its card has the handler's own session check (its handler asks for it), not the evidence record a medium card needs.
     if (card.friction.expandEvidenceFirst && (!highOnCard || deps.evidenceFirstOnHigh?.has(card.kind) === true)) {
       openedAt = await deps.store.evidenceOpenedAt({ ...who, cardId, tab: body.data.tab }, pending.digest);
       if (openedAt === undefined) throw agentXError("CHANGE_STALE", DECISION_OPEN_FIRST_MESSAGE);

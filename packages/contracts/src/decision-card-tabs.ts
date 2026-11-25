@@ -96,7 +96,7 @@ export const DecisionCardsViewSchema = z
     details: z.record(DecisionCardIdSchema, DecisionDetailGroupsSchema),
     digests: z.record(DecisionCardIdSchema, DecisionDigestSchema),
     dropped: z.number().int().min(0).max(100_000),
-    /** High-risk cards whose source gave no confirmation page: they open the item's own page and make no fresh-sign-in claim. A source should supply one; this makes a missing one visible. */
+    /** High-risk cards whose source gave no confirmation page: they open the item's own page and claim no confirmation page. A source should supply one; this makes a missing one visible. */
     unconfirmed: z.array(DecisionCardIdSchema).max(DECISION_CARDS_MAX).optional(),
     /** OWNER DECISION 7: the questions, optional checks and open comments of the requirements and coding plan cards that have any (`DecisionPlanChoicesSchema`). */
     choices: z.record(DecisionCardIdSchema, DecisionPlanChoicesSchema).optional(),
@@ -176,7 +176,7 @@ export const DecisionAnsweredSchema = z
   .strict();
 export type DecisionAnswered = z.infer<typeof DecisionAnsweredSchema>;
 
-/** `202`: the existing endpoint did not decide; the person decides on its confirmation page (a fresh sign-in). Nothing was approved, so no surface may say "Approved". */
+/** `202`: the existing endpoint did not decide; the person decides on its confirmation page. Nothing was approved, so no surface may say "Approved". */
 export const DECISION_MERGING_MAX = 20;
 /** What a merge press is about to merge, so the app can ask "Merge #N into <branch>?" before the person goes on to the confirmation page. Present only on a merge. */
 export const DecisionMergingSchema = z.array(z.object({ repositoryId: z.string().min(1).max(200), number: z.number().int().positive(), baseBranch: z.string().min(1).max(255) }).strict()).min(1).max(DECISION_MERGING_MAX);

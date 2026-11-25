@@ -1,5 +1,5 @@
 // The approval gate (port lane L6b, owner decision 45.3). Approvals are authority: this is the one place that turns "a person says yes" into a committed decision, for every surface (a local
-// page, the CLI, the MCP tools, a pull request comment). It is new in Code; the hosted product's per-surface checks (browser session, recent sign-in, second person) are Approvers-seam rules there.
+// page, the CLI, the MCP tools, a pull request comment). It is new in Code; the hosted product's per-surface checks (browser session, second person) are Approvers-seam rules there.
 //
 // What it guarantees, each one tested:
 //   - the request is built from the CURRENT stored state of the subject (revision, content digest, risk), never from anything the caller sent. The caller sends only what the person SAW
@@ -12,7 +12,7 @@
 //   - policy on top of the seam, which only narrows what it allows: a high-risk approval and every rejection accept only the methods the approvers plug-in names as strong (`ApprovalRequirement.strongMethods`,
 //     `rejectMethods`; default the local session) and NEVER a comment method (`strong-methods.ts`: `code-host-comment`, any `code-host-*`, the plug-in's `commentMethods`), whatever is named, with ONE exception for a rejection (S1, owner DEC 254zzz477): a chat method the requirement itself NAMES in `rejectMethods` (the hosted approvers do, at low and medium risk) may reject, with a reason (a comment is an approval of a change
 //     request, and says nothing about a rejection); a request for changes accepts the methods the plug-in names (default the local session or a comment); the gate's policy option can only narrow the plug-in's sets (or the default when it names none; `createDecisionGate` refuses a policy of only comment methods for a strong set, and `verifyPolicy` refuses one that
-//     is disjoint from the plug-in's sets, instead of a silent lock-out); when the plug-in sets a sign-in rule (`ApprovalRequirement.signIn`, a company setting) the approver's sign-in time must satisfy it for a
+//     is disjoint from the plug-in's sets, instead of a silent lock-out); when the plug-in states a sign-in rule (`ApprovalRequirement.signIn`; no built-in adapter does; the live Merge button (`pressMergeAsPerson`) does not apply it, the unwired old merge press `pressMerge` did) the approver's sign-in time must satisfy it for a
 //     high-risk approval and a rejection; a request that does not allow self-approval refuses the person who asked; `minApprovers` distinct approvers are needed.
 //   - nothing a caller can send widens it: an unknown kind, subject or method is a refusal, not a default.
 // It never throws for a refusal (a refusal is an answer); it throws only for a fault of the store.
@@ -417,7 +417,7 @@ export function createDecisionGate(deps: DecisionGateDependencies): DecisionGate
         }
         const distinct = new Set(approvers.map((approver) => `${approver.provider}\u0000${approver.personId}`));
         if (distinct.size < Math.max(1, requirement.minApprovers)) return refuse("needs_more_approvers", `This needs ${String(requirement.minApprovers)} different approvers.`);
-        // The company's sign-in rule (decision 62), set by the approvers plug-in, for the answers that need a strong proof. Code sets none.
+        // A sign-in rule (decision 62) an approvers plug-in may state, for the answers that need a strong proof. No built-in adapter states one. The live Merge button (`pressMergeAsPerson`) does not apply it; the unwired old merge press `pressMerge` did.
         if (requirement.signIn !== undefined && policyMethods !== undefined && attempt.outcome !== "request_changes") {
           for (const person of approvers) {
             const fresh = checkApprovalSignIn(requirement.signIn, person, at.getTime(), { companySignIn: deps.identity?.capabilities.companySignIn === true });

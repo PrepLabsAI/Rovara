@@ -70,7 +70,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     byCompany.set(companyId, [...(byCompany.get(companyId) ?? []), taskId]);
   }
   const store = readOnlyStore(client, options.table);
-  const total: UnreportedCount = { tasks: 0, running: 0, unreadable: 0, clean: 0, stuck: 0, runs: { gateway_record: 0, no_call: 0, estimate: 0, kept_unbooked: 0 } };
+  const total: UnreportedCount = { tasks: 0, running: 0, unreadable: 0, clean: 0, stuck: 0, runs: { gateway_record: 0, no_call: 0, estimate: 0 } };
   for (const [companyId, taskIds] of byCompany) {
     const count = await countUnreportedRuns(store, companyId, taskIds);
     console.log(JSON.stringify({ companyId, ...count }));

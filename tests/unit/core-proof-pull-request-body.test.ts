@@ -452,7 +452,8 @@ describe("the version 2 pull request description", () => {
     const sensitive = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context({ changedFiles: { files: [file("db/migrations/001.sql")], complete: true } }));
     expect(sensitive).toContain("High risk");
     expect(aboveFold(sensitive)).toContain("db/migrations/001.sql");
-    expect(aboveFold(sensitive)).toContain("Merging needs a fresh sign-in (high risk)");
+    expect(sensitive).not.toContain("sign-in");
+    expect(aboveFold(sensitive)).not.toContain("Merging needs");
     const reviewed = workflowWith({ reviews: workflowWith().reviews!.map((review) => review.role === "CRITIC" ? { ...review, risk: "high" } : review) });
     const body = workflowPullRequestBody(task, reviewed, planOf, SESSION, context());
     expect(body).toContain("High risk");

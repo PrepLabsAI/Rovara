@@ -219,6 +219,11 @@ export interface DesignReviewSteps {
   onEnded(deps: TaskFlowDeps, task: TaskRecord, operation: OperationRecord, ended: { status: "SUCCEEDED" | "FAILED" | "CANCELLED" | "INTERRUPTED"; error?: string | undefined; outcome?: StepOutcome | undefined }): Promise<boolean>;
   /** Understand answered `ready`: the workflow with the design review switched on when the mode says so (Full path forced), else as it was. */
   afterUnderstand(deps: TaskFlowDeps, task: TaskRecord, workflow: WorkflowSnapshot, assessment: unknown, now: string): Promise<WorkflowSnapshot>;
+  /**
+   * Whether a design review could run for this task now: the stage is switched on, the company allows it and the project's effective setting is not `never`. The "bigger than Quick" record reads it (a design reading is only a
+   * reason to offer Full where the review the offer is about can run). Rejects when the setting cannot be read; the caller then reads it as "cannot run". Absent: the review cannot run.
+   */
+  reviewCanRun?(deps: TaskFlowDeps, task: TaskRecord): Promise<boolean>;
   /** The row the workflow's new state makes due (a design handed to the reviewers, the planner's turn to answer them), or undefined. */
   rowFor(workflow: WorkflowSnapshot): "CRITIQUE" | "CRITIC_REPLAN" | undefined;
   /** What the planner is told beside its prompt while the design review is on and the phase is the design (the fixed template), or undefined. */
@@ -305,8 +310,11 @@ export interface TaskFlowDeps {
    * dispatched with the `context-tools` capability and `contextSources: true`, and so only on a worker that lists `task.contextSources.v1`. Absent: no stage has sources.
    */
   contextSources?: { stageHasSources(task: { project: string }, mode: string): Promise<boolean> };
-  /** Told, best effort, after a task was closed and its machines and allowances given back (what a task kept only for its own lifetime, such as live-only source text, goes now). Never fails the close. */
-  taskEnded?: (event: { orgId: OrgId; taskId: string }) => Promise<void>;
+  /**
+   * Told, best effort, after a task ended (closed, or completed by its merge) and its machines and allowances given back (what a task kept only for its own lifetime, such as live-only source text, goes now). Never fails the close.
+   * A host that delivers over a network answers `"pending"` when the notice did not get through (and is not an error): the end is then sent again by `reconcileTaskEnds`.
+   */
+  taskEnded?: (event: { orgId: OrgId; taskId: string }) => Promise<void | "pending">;
   /** How long (seconds) a worker machine may be lost or unhealthy before the operation running on it is ended INTERRUPTED (`sweepLostRuns`). Default `RUN_LOST_GRACE_SECONDS`. */
   runLostGraceSeconds?: number;
   /**

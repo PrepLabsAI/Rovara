@@ -4,7 +4,7 @@
 //   - it waits for answers to Understand's questions (`POST /v1/dev/tasks/{id}/answers`): the message, when it MENTIONS Rovara, answers them (one question: the whole reply; more: one numbered line each, `your call` is an answer).
 //     The move is `answerTaskOnRequest`, the web's own: the task's owner by the company's owner rule, the round checked, one request id one answer. A plain reply (no mention) never answers: a person talking in the thread must not
 //     answer for the task by accident.
-//   - its plan waits for review: the message is an ordinary NOTE (only the words said back differ: "for the plan"). A chat reply decides nothing: a decision on a hosted install is the task page's, with a fresh sign-in
+//   - its plan waits for review: the message is an ordinary NOTE (only the words said back differ: "for the plan"). A chat reply decides nothing: a decision on a hosted install is the task page's, by a signed-in session
 //     (`hosted-approvers.ts`: the one method is the page's proof, `rovara-step-up`), so "Request changes" stays there and the note is what the revised plan reads.
 //   - otherwise: a follow-up NOTE the task's next step reads (`core/sessions/notes.ts`, the web's "message to the agent": `createSessionControlHost().planMessage`, with its hourly limit, the task's note cap and its refusal of an
 //     ended task). Nothing is handed to a running step live from here: the note is read by the next step.

@@ -806,6 +806,48 @@ The two Denies now use `StringEquals ProviderPermissionsRequired = read_write` i
 | release-pipeline.ts preflightProject | The Deny block skipped for the Production Code Preflight | killed, 1 failed |
 | release-pipeline.ts preflightProject | `StringNotEquals` instead of `StringEquals` (denies a request without the key) | killed, 1 failed |
 
+## SF-1a — the "bigger than Quick" record (code of ca9450f2c; the iam and contracts rows re-run on f4f4b8a26)
+
+46 mutants applied singly, each file restored with git checkout / the original text, run against tests/unit/quick-size-rule.test.ts and tests/unit/quick-size-record.test.ts (contracts mutants rebuild packages/contracts first, because the tests read its dist). 44 killed, 2 equivalent.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| quick-size.ts `many` | more than 15 counted files loosened to 15 or more | killed |
+| quick-size.ts `mid_size` | more than 8 loosened to 8 or more; `&& !many` removed (listed beside many_files) | killed (2) |
+| quick-size.ts class | pair needs two different medium codes loosened to one; display-only lines counted as strong | killed (2) |
+| quick-size.ts pair | the Set of codes replaced by a list | equivalent: each medium code is listed once, so the list is already distinct |
+| quick-size.ts `design_reading` | Skip check removed; review-off check removed; high-risk filter removed; `needed === true` removed | killed (4) |
+| quick-size.ts `new_service` | kind `variable` counted as a service | killed |
+| quick-size.ts unread | the early return for an unread plan removed | killed |
+| quick-size.ts path codes | `data_change` and `sensitive_area` read from all named paths (tests and test data included); display lines read test files | killed (3) |
+| change-tier.ts `countedFilesOf` | lock files, other prose, vendored folders, generated folders, tests counted; paths not deduplicated; fixture test removed from `isTestOrFixturePath` | killed (7) |
+| change-tier.ts `countedFilesOf` | `isDocsPath` skipped no more | equivalent: every path `isDocsPath` accepts is also prose, which is skipped next |
+| sensitive-paths.ts `isAccessOrMoneyPath` | document exclusion removed; `iam` kept in the name words (re-run on f4f4b8a26) | killed (2) |
+| risk-tier.ts | `iam` dropped from the infrastructure part; the build part dropped from the `isInfraPath` union | killed (2) |
+| quick-size-record.ts `quickPlanAtGate` | Quick-only check removed; the stage check removed | killed (2) |
+| quick-size-record.ts `quickSizeOps` | the setting asked for every plan; a failed read counted as "can run"; a missing seam counted as "can run"; digest bound wrong; a fault thrown into the plan write | killed (5) |
+| stage-machine.ts plan write | the record dropped from the plan's commit; the record written in a second write after the commit | killed (2) |
+| design-review/steps.ts `reviewCanRun` | mode `never` read as can run; the stage switch not read | killed (2) |
+| contracts quick-size.ts (re-run on f4f4b8a26) | unknown class accepted; plan digest not required; `triggered` not tied to the class; unknown codes dropped by a closed list; paths not capped | killed (5) |
+| contracts task-words.ts (re-run on f4f4b8a26) | sequential replace (plan text read as a placeholder); prototype names taken as codes; non-design names reach the phrase table | killed (3) |
+
+SF-1a, after the complexity split of `quickSizeOf` (e7b661bd9): the 13 mutants of quick-size.ts (many_files, mid_size x2, pair, display-as-strong, design_reading x4, new_service, unread, data_change, sensitive_area, display-reads-tests) were re-applied to the split code and all 13 were killed again. The "Set of codes replaced by a list" row no longer exists: the split code lists each medium code once and counts entries (`medium.length >= 2`), which the `>= 1` mutant covers.
+
+SF-1a, after `quickSizeSentence` moved from task-words.ts (kept type-only by its test) to contracts/src/quick-size.ts: the 8 contracts mutants (reader x5, sentence filler x3) were re-applied there, each with a rebuild of packages/contracts, and all 8 were killed again.
+
+## SF-1a — after the Sonnet pre-review fixes (code and tests of 4f8bd33c3)
+
+The earlier SF-1a rows above were run on ca9450f2c, f4f4b8a26, e7b661bd9 and the contracts move before 05cebd961 (the head the pre-review read). These 17 mutants touch the lines the review fixes changed, applied singly to 4f8bd33c3 and run against tests/unit/quick-size-rule.test.ts and tests/unit/quick-size-record.test.ts (contracts mutants rebuild packages/contracts first). 16 killed first time, 1 survived and was killed by 4f8bd33c3's added assertion (so all 17 killed).
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| quick-size.ts `isHostLikePath` (S1) | the address test removed; host-like paths kept in `named`; host-like text paths counted as `textOnly` | killed (2), survived then killed (1) |
+| quick-size-record.ts `quickSizeOps` (S2) | no removal for a Quick plan with no gate; removal also for a Full plan; no removal after a fault; `kept` not carried (writer and builder) | killed (5) |
+| contracts `readKept` (S2) | kept read without its request id | killed |
+| quick-size-record.ts / quick-size.ts (S3) | a failed read recorded as off, not unseen; `settingUnread` dropped from the record; unseen also marked off | killed (3) |
+| quick-size-record.ts `within` (S4) | the setting read not bounded; the stored-plan read not bounded | killed (2) |
+| contracts reader / words (N3, N5) | an unread record may trigger; "0 code files" shown | killed (2) |
+| quick-size.ts `mediumReasons` (N4) | a CI file counted as sign-in code | killed |
 ## PROJECT-GRANT-RECHECK, channel access holds an old-engine task only (arch ruling a, 2026-11-25)
 
 Killed by tests/contract/task-owner-engine-channel.test.ts (7 tests).
@@ -854,3 +896,76 @@ Review round 1 (Opus FAIL 0d9409cc3: F1 admin on a Slack entry, F2 demoted start
 | M7, `compute` | a starter demoted to viewer or commenter keeps `owner` (only a denial clears it) | tests/unit/session-features-access.test.ts and tests/journeys/session-people-key.test.ts (c3) | red (1 of 20 unit, 1 of 7 journeys) |
 | M5b, `compute` | a denied starter keeps `owner` (now seen in the journey: a company admin starter reads `owner: false`) | same unit file and the journey (c2) | red (1 of 20 unit, 1 of 7 journeys) |
 | M8, `peopleEntryOf` | an entry grants on any stored role, with no grant check (the Slack-entry and company-admin cases) | tests/unit/session-features-access.test.ts | red (2 of 20) |
+## LOST-RUN-ACTUAL-SPEND (money) mutants, exact sha 700db0b7da859aec04a08997565640773742cdc9 (the same code is 33f1aeb9c after the rebase onto 77226d70d, which only reshaped the settler's loop into `settleOneRun`)
+
+Each guard below was removed or inverted in a scratch edit (restored afterwards), and `tests/unit/lost-run-actual-spend.test.ts` + `tests/unit/core-host-money-stop.test.ts` (49 tests) were run on it:
+
+| Mutant | Result |
+|---|---|
+| `settleFromGateway` adds the gateway's whole actual instead of `max(0, actual - worker booked)` (double booking) | 4 failed |
+| a not-final gateway figure is booked at once (the wait for settled calls removed) | 1 failed |
+| the dispatcher's `deferEstimate` guard removed (it estimates before the wait) | 1 failed |
+| the two-run bound on the hold-room estimate (`hasEarlierEstimate`) removed | 3 failed |
+| a worker report after a `gateway-actual` settlement is booked (the late-report guard in `usage-booking.ts` removed) | 1 failed |
+| Retry's spend/cap read (`retry.ts`) removed | 1 failed |
+| a partial report books a lost run (`runIsBooked`'s `usageUnflushed` branch removed) | 1 failed |
+| an unreadable gateway estimates at once instead of waiting (`waitedOut ? "estimate" : "wait"` -> `"estimate"`) | 5 failed |
+
+Not mutated: the HTTP reader's per-field refusals (each has its own `it.each` case in the reader describe), the close plan's `restMicros: 0` (pinned by the close-plan case in core-host-money-stop).
+
+## LOST-RUN-ACTUAL-SPEND pre-review round (money), mutants on the review-fix commit (the sha in the commit named "pre-review fixes")
+
+Each guard removed or inverted in a scratch edit (restored afterwards); `tests/unit/lost-run-actual-spend.test.ts` + `tests/unit/core-host-money-stop.test.ts` (58 tests) run on it. Every one failed at least one test:
+
+| Mutant | Result |
+|---|---|
+| an incomplete gateway record is booked as the actual (`charge?.complete === true` removed) | 1 failed |
+| the hold is not released after the actual is booked | 2 failed |
+| worker checkpoints (`usage-checkpoint:`) not counted in what the worker booked (double booking) | 3 failed |
+| owner rounds read the ledger total, not the flow's spend figure (`hostedRoundCap` wiring) | 1 failed |
+| a non-final gateway figure is booked as final | 1 failed |
+| a route that is not served (404/501) is an hour's wait, not the estimate at the grace | 1 failed |
+| the estimate books under its own entry id (two settlers can double-book one run) | 5 failed |
+| the dispatcher estimates after the wait (`deferEstimate` never estimates) | 1 failed |
+| a run the gateway has not seen (`seen: false`) is read as a record | 2 failed |
+| a closed task's lost run is booked as a $0 estimate, not unknown (`awaiting_usage`) | 2 failed |
+| a run created before the gateway began indexing by run (`indexedSince`) is read as a final sum | 1 failed |
+| a gateway answer with NO `indexedSince` is read (the required-time check in `readRunCharges` removed) | 4 failed |
+## TASK-ENDED-NOTICE: the hosted task-end notice to the model gateway and its reconcile (2026-11-25)
+
+Measured on the lane's working tree over tests/unit/task-ended-notice.test.ts (25 tests). Each mutant was applied alone, the one file run, and the file restored.
+
+| Mutant / location | Mutation | Failing tests (of the file) | Restored |
+|---|---|---|---|
+| M1, core-host/task-ended-http.ts answer check | any 200 body counts as delivered (no same company and task check) | 5 of 25 | green |
+| M2, task-ended-http.ts status split | a 404 (an older gateway) is retried like a 5xx | 3 of 25 | green |
+| M3, task-ended-http.ts `TASK_ENDED_TRIES` | four tries instead of three | 1 of 25 | green |
+| M4, core/task-flow/task-end.ts `reconcileTaskEnds` | another company's markers are sent | 1 of 25 | green |
+| M5, task-end.ts `callTaskEndSeam` | a "pending" answer is recorded as delivered | 5 of 25 | green |
+| M6, task-end.ts `announceTaskEnd` | waits for the host without the time bound | 1 of 25 | green |
+| M7, task-end.ts `reconcileTaskEnds` | the `notifiedAt` filter is dropped | SURVIVES, on purpose not killed: a delivered marker has already left the due-time index, so the filter is a second guard on a row the index no longer lists. |
+| M8, task-end.ts `reconcileTaskEnds` | no age limit | 1 of 25 | green |
+
+## PORT-GUARD-GATEWAY-NARROW: only the model gateway's names pass the gateway words in a deployment path and the AWS-import check (2026-11-25)
+
+Every mutant is a change to `cloudWordsReason` in scripts/port-guard.ts, run against tests/unit/port-guard-boundary.test.ts (305 tests, all green on the real tree).
+
+| Mutant | Change | Result |
+| --- | --- | --- |
+| M1 | the whole gateway block off (every gateway name passes, as after #1483) | red (27 of 305) |
+| M2 | only a word that STARTS with "gateway" counts (glued `sharedgateway`, `mygateway` pass) | red (3) |
+| M3b | `llm`, `llms`, `ai` join the model words AND `llmgateway`/`aigateway` leave the Cloud-only list (`llm-gateway`, `ai-gateway` pass) | red (7) |
+| M3 | `llm`, `llms`, `ai` join the model words alone | survived: equivalent (`llmgateway` and `aigateway` in the Cloud-only list still refuse the same names; M3b removes both) |
+| M4 | the AWS exemption ignores an earlier model/llm/ai word (`model-api-gateway`, `llm-api-gateway` pass) | red (3) |
+| M5 | `llmproxy`, `aiproxy` leave the Cloud-only list (`llm-proxy`, `ai-proxy` pass) | red (5) |
+| M6 | the two-word form `gate-way` is not read | red (4) |
+| M7 | the words before "gateway" are read across slashes (`api/gateway.ts`, `model/gateway.ts` pass) | red (3) |
+| M8 | any earlier model word makes it the model gateway (`model-api-gateway` passes) | red (2) |
+| M9 | `awsImportReason` stops reading the path words for a deployment file (the AWS-import check) | red (20) |
+| M10 | a glued lead (`modelgateway`) is not read as the word before the gateway | red (6) |
+| M11 | `models` leaves the model words (`models-gateway` refused) | red (3) |
+| M12 | "model" before the gateway no longer excuses it (the model gateway refused) | red (18) |
+| M13 | an AWS gateway name (`nat-gateway`, `api-gateway-stack`) is refused too | red (13) |
+| M14 | `llmgateway`, `aigateway` leave the Cloud-only list alone | survived: equivalent (the gateway rule refuses `llmgateway` and `aigateway` itself, as M3 shows from the other side) |
+
+The restored tree passes (305 of 305).

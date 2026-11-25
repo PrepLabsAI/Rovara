@@ -1,6 +1,6 @@
 // The run-lost watchdog's rule for a SETUP run (setup-run-hang, prod P1): the page already reads a run whose worker went silent as stopped (`setupRunGone`, the one rule), but its operation stayed RUNNING, so the
 // project stayed "running" and its hold stayed open. A setup run on a machine that is still up (so the machine-health rule never fires) is ended INTERRUPTED through the worker's own result path, and its unreported
-// usage is kept as spent like a lost run's (`endUnflushed`). Fenced and idempotent exactly as `settleRow`'s own end.
+// usage is marked unflushed like a lost run's (`endUnflushed`) and settled at its actual figure. Fenced and idempotent exactly as `settleRow`'s own end.
 import { AgentXError, effectiveSetupAgentLimits } from "@agentx/contracts";
 import type { TaskFlowDeps } from "./deps.js";
 import type { OperationRecord } from "./records.js";

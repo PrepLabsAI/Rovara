@@ -1,6 +1,6 @@
 import { IMPLICIT_COMPANY_ID as T1_COMPANY, USAGE_CHECKPOINTS_FEATURE } from "@agentx/contracts";
 // The run-lost watchdog also ends a SETUP run whose worker went silent on a machine that is still up (setup-run-hang, prod P1): the page already read such a run as stopped, but its operation stayed
-// RUNNING, so the project stayed "running" and its hold stayed open. The same rule (`setupRunGone`) ends the operation, and the unreported usage is kept as spent.
+// RUNNING, so the project stayed "running" and its hold stayed open. The same rule (`setupRunGone`) ends the operation, and the unreported usage is marked unflushed (settled at its actual figure on the next spend read).
 import { change } from "@agentx/contracts";
 import { describe, expect, it } from "vitest";
 import { operationKey, taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
@@ -32,14 +32,12 @@ async function runningSetup(h: Harness, seenAtSecondsAgo: number | undefined) {
 const statusOf = async (h: Harness, run: { workspaceId: string; operationId: string }) => ((await h.store.get(operationKey(T1_COMPANY, run.workspaceId, run.operationId))) as unknown as OperationRecord);
 
 describe("a setup run whose worker went silent on a machine that is still up", () => {
-  it("keeps the whole hold of the run as spent (its usage never reached the broker)", async () => {
-    const kept: Array<{ operationId: string }> = [];
-    const h = createHarness({ machines: { features: ["task.workflowMode", "task.structuredPlans", USAGE_CHECKPOINTS_FEATURE] }, extra: () => ({ moneyStop: { pollMs: 1_000, sleep: async () => undefined, async keepWholeHold(_reservationId: string | undefined, mark: { operationId: string }) { kept.push(mark); } } satisfies MoneyStop }) });
+  it("marks the run unflushed (its usage never reached the broker; its actual figure is settled from the gateway)", async () => {
+    const h = createHarness({ machines: { features: ["task.workflowMode", "task.structuredPlans", USAGE_CHECKPOINTS_FEATURE] }, extra: () => ({ moneyStop: { pollMs: 1_000, sleep: async () => undefined } satisfies MoneyStop }) });
     await h.registerProject();
     const run = await runningSetup(h, 30);
     h.clock.advance(SETUP_RUN_SILENT_MS / 1_000 + 1);
     expect(await h.flow.sweepRunsOnce()).toMatchObject({ interrupted: 1 });
-    expect(kept.map((entry) => entry.operationId)).toEqual([run.operationId]);
     expect(await statusOf(h, run)).toMatchObject({ usageUnflushed: true });
   });
   it("is ended INTERRUPTED once the worker has been silent past the silence bound, and not before", async () => {
@@ -79,9 +77,8 @@ describe("a setup run whose worker went silent on a machine that is still up", (
 });
 
 describe("review (lead 4 Opus): the worker's own result wins the race with the silence end", () => {
-  it("keeps no hold as spent and records nothing when the operation already ended by the worker's result (its usage was booked)", async () => {
-    const kept: Array<{ operationId: string }> = [];
-    const h = createHarness({ machines: { features: ["task.workflowMode", "task.structuredPlans", USAGE_CHECKPOINTS_FEATURE] }, extra: () => ({ moneyStop: { pollMs: 1_000, sleep: async () => undefined, async keepWholeHold(_reservationId: string | undefined, mark: { operationId: string }) { kept.push(mark); } } satisfies MoneyStop }) });
+  it("marks nothing unflushed and records nothing when the operation already ended by the worker's result (its usage was booked)", async () => {
+    const h = createHarness({ machines: { features: ["task.workflowMode", "task.structuredPlans", USAGE_CHECKPOINTS_FEATURE] }, extra: () => ({ moneyStop: { pollMs: 1_000, sleep: async () => undefined } satisfies MoneyStop }) });
     await h.registerProject();
     const run = await runningSetup(h, 30);
     h.clock.advance(SETUP_RUN_SILENT_MS / 1_000 + 1);
@@ -95,7 +92,6 @@ describe("review (lead 4 Opus): the worker's own result wins the race with the s
     const ended = await statusOf(h, run);
     expect(["SUCCEEDED", "FAILED"]).toContain(ended.status);
     expect(await endSilentSetupRun(h.deps, row, stale)).toBe("cleared");
-    expect(kept).toEqual([]);
     expect((await statusOf(h, run)).usageUnflushed).toBeUndefined();
     expect((await statusOf(h, run)).status).toBe(ended.status);
   });

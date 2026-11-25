@@ -128,6 +128,9 @@ export const STATUS_LINES = {
   // SPEND-UNREPORTED-RUN item 3: what a decision card says when the task's spend cannot be read yet (the stable code is `spend_unreadable`, in `DECISION_REFUSAL_REASONS`): the real reason and what happens next,
   // never "This isn't ready to be decided yet". Rovara settles an ended run that sent no usage report by itself, so the next step is waiting, not an action.
   spendUnreadable: { reason: "Rovara could not read this task's spend yet", next: "Rovara settles the spend on its own. Try again in a little while." },
+  // LOST-RUN-ACTUAL-SPEND (owner, 2026-11-24): a run lost through no fault of the person says so, and the next step is Retry (once the run's spend is settled: until then the status is `spendUnreadable`, see F2-STANDING-PLAN). The stable code is `RUN_LOST_CODE`. Never "this task has used its run limit": a lost run counts only
+  // what it actually spent.
+  runLost: { reason: "the run was lost, through no fault of yours", next: "Choose Retry to run it again." },
 } as const;
 
 /**
@@ -269,3 +272,37 @@ export function stepRetryLabel(stage: string): string {
     default: return ACTION_WORDS["step.retry"].label;
   }
 }
+
+/** LOST-RUN-ACTUAL-SPEND: the stable code of a run that was lost (its machine stopped, or it was stopped before its usage arrived), through no fault of the person. */
+export const RUN_LOST_CODE = "run_lost";
+/** The one sentence a lost run's status says: the reason, then the next step. Served by every surface that tells it (the task standing, Slack, the web). */
+export const runLostWords = (): string => `${STATUS_LINES.runLost.reason[0]!.toUpperCase()}${STATUS_LINES.runLost.reason.slice(1)}. ${STATUS_LINES.runLost.next}`;
+
+// ---- "This looks bigger than Quick" (SWITCH-TO-FULL): the reasons of a Quick plan that looks bigger than Quick, from the stored record's codes. One sentence per code; the sentence says what the plan changes, in the person's words.
+
+/** The card's heading and its lead line (the board's "read the code" is wrong: Rovara read the plan). */
+export const QUICK_SIZE_HEADING = "This looks bigger than Quick";
+export const QUICK_SIZE_LEAD = "Rovara read the plan and found reasons to take more care:";
+/** A code this release does not know (written by a newer Code). */
+export const QUICK_SIZE_UNKNOWN_WORD = "Rovara found another reason to take more care.";
+/** The most reason lines shown; the rest become "and N more reasons". */
+export const QUICK_SIZE_LINES_MAX = 4;
+
+/** Code to sentence. `{paths}` is up to three planned paths and "and N more"; `{count}` the code files counted; `{service}` the outside service; `{design}` the fixed phrase of Understand's reading. Never the word "risky". */
+export const QUICK_SIZE_WORDS: Readonly<Record<string, string>> = {
+  data_change: "Changes the database: {paths}.",
+  infra_change: "Changes infrastructure or permissions: {paths}.",
+  many_files: "Changes {count} code files. Quick is meant for smaller changes.",
+  new_service: "Adds a service the code talks to: {service}.",
+  design_reading: "From the request: this task {design}.",
+  mid_size: "Changes {count} code files.",
+  sensitive_area: "Touches sign-in, permission or payment code: {paths}.",
+  interface_file: "Changes an interface other code depends on: {paths}.",
+  build_file: "Also changes how the app is built: {paths}.",
+  env_file: "Also changes an environment file: {paths}.",
+  git_settings_file: "Also changes git settings: {paths}.",
+  package_source_setting: "Also changes where packages come from: {paths}.",
+  setup_small: "Also changes the test setup.",
+  instruction_file: "Also changes an instruction file for Rovara or another agent: {paths}.",
+  hook_file: "Also changes an editor or tool setting: {paths}.",
+};

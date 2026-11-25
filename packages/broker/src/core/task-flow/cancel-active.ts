@@ -12,7 +12,7 @@ import { workspaceKeys } from "./workspace-location.js";
 export async function finishCancellation(deps: TaskFlowDeps, taskId: string, workspace: WorkspaceRecord, operation: OperationRecord, reason: string, expectedOperationId?: string): Promise<{ nothingRunning: boolean }> {
   const location = await workspaceKeys(deps, workspace.id);
   // A deployed install (money-stop.ts): the worker is asked to stop and send what it spent, and its end is waited for a bounded time, before the machine is stopped. A run whose end did not
-  // come keeps its task's whole hold as spent, marked estimated. Without `moneyStop` this is "nothing_to_flush" and the Stop is as before.
+  // come is marked unflushed (nothing is booked; its actual figure is settled from the gateway's record on the next spend read). Without `moneyStop` this is "nothing_to_flush" and the Stop is as before.
   const flushed = await askWorkerToFlush(deps, workspace, operation);
   // The machine keeps its volume (the instance ends; Retry wakes it on the same volume). A machine that is already gone is the same as one stopped.
   const current = await readWorkspace(deps, workspace.id);

@@ -22,6 +22,7 @@ import { startDesignReviewRound } from "./round-start.js";
 import type { DesignReviewRuntime } from "./round-ports.js";
 import { ROVARA_CODE_PROGRAM } from "../plan/program.js";
 import { designTemplateInstructions } from "./template.js";
+import { readEffectiveWhenAllowed } from "./setting.js";
 import { designReviewEnabled } from "./switch.js";
 import { withDesignReviewMode } from "./understand-mode.js";
 
@@ -114,6 +115,12 @@ export function createDesignReviewSteps(runtime: DesignReviewRuntime): Omit<Desi
         log(deps, { event: "design_review.mode_not_read", error: error instanceof Error ? error.name : "unknown" });
         return workflow;
       }
+    },
+
+    async reviewCanRun(deps, task) {
+      if (!designReviewEnabled(runtime.env)) return false;
+      const effective = await readEffectiveWhenAllowed(runtime.reader, deps.companyId, task.project);
+      return effective !== undefined && effective.setting.mode !== "never";
     },
 
     rowFor: designRowFor,

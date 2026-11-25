@@ -37,8 +37,8 @@ export interface ItemBase {
   /** Where the full page for this decision is: a path under `/app/` or `/v1/app/`. */
   openPath: string;
   /**
-   * The confirmation page that asks for a FRESH sign-in (`/v1/app/approve/<id>`). A high-risk card opens it instead of `openPath`. A source that has no such page for the decision leaves it out: the
-   * card still opens its page but the projection lists it in `unconfirmed`, and no surface claims a fresh sign-in for it.
+   * The confirmation page (`/v1/app/approve/<id>`). A high-risk card opens it instead of `openPath`. A source that has no such page for the decision leaves it out: the
+   * card still opens its page but the projection lists it in `unconfirmed`, and no surface claims a confirmation page for it.
    */
   confirmPath?: string | undefined;
   /**
@@ -109,7 +109,7 @@ export type DecisionItem =
   | (ItemBase & { kind: "spec_choice"; message: string })
   /** Second review (lane cr-settings): the model that gives the second opinion stopped qualifying. `message` is the broker's fixed sentence; the card only opens the settings page. */
   | (ItemBase & { kind: "second_review_notice"; message: string })
-  /** Slice 3b: an outside approval (`apr_`, `spr_`); its evidence is the confirmation page's own view (the item's `details`). Always high: decided on its card with a recent sign-in. */
+  /** Slice 3b: an outside approval (`apr_`, `spr_`); its evidence is the confirmation page's own view (the item's `details`). Always high: decided on its card (a signed-in session; no recent-sign-in step is asked). */
   | (ItemBase & { kind: "approve_request"; prefix: "apr" | "spr" })
   /**
    * Setup and test health (SH17): the project's test environment kept `taskCount` tasks' checks from giving a verdict. `cause` is the auto-fix code that names the fault (a fixed word), `step` the failing step
@@ -119,7 +119,7 @@ export type DecisionItem =
   | (ItemBase & { kind: "fix_setup"; cause: string; step: string; taskCount: number; knownFailingTests: number; unconfirmedFailing: number; eligibleTests: readonly { name: string; checkId: string }[] })
   /**
    * Test services (TS24): a fake (fixture set) for one dependency, pinned by `contentVersion` (its digest). Counts and fixed words only; the sample pairs, schema, ignored paths and faults are the item's `details`, the
-   * broker's own redacted summary (`test-env/fixture-store.ts`). `schemaSynth` and `firstFromTestAccount` raise the card to high (no Approve, a full page with a fresh sign-in).
+   * broker's own redacted summary (`test-env/fixture-store.ts`). `schemaSynth` and `firstFromTestAccount` raise the card to high (no Approve, a full page).
    */
   | (ItemBase & { kind: "approve_fixture_set"; dependency: string; origin: "recorded" | "written" | "imported"; entries: number; faults: number; scanClean: boolean; schemaSynth: boolean; firstFromTestAccount: boolean })
   /**
@@ -152,7 +152,7 @@ export interface Projection {
   digests: Record<string, string>;
   /** OWNER DECISION 7: the choices of the requirements and coding plan cards that have any, by card id (in the digest: a new comment or question is a changed card). */
   choices: Record<string, DecisionPlanChoices>;
-  /** High-risk cards whose source gave no confirmation page: no fresh sign-in is claimed or enforced for them (owner decision pending). */
+  /** High-risk cards whose source gave no confirmation page: no confirmation page is claimed for them (owner decision pending). */
   unconfirmed: string[];
   /** Items left out because they could not become a safe card (a bad id or path, a missing input), counted, never described. */
   dropped: number;
@@ -288,7 +288,7 @@ function wordsOf(item: DecisionItem): { question: string; next: string; costUsd?
     case "spec_choice":
       return { question: plainLine(item.message, 160), next: "You choose on the task page; the code pull requests wait until you do.", evidence: [], why: "Only the task owner can choose." };
     case "approve_request":
-      return { question: item.prefix === "spr" ? "Approve this spend request?" : "Approve what the agent asks?", next: "Approving does what it asks now; Decline stops it.", evidence: [], why: "You are one of the people who may decide this; it needs a recent sign-in." };
+      return { question: item.prefix === "spr" ? "Approve this spend request?" : "Approve what the agent asks?", next: "Approving does what it asks now; Decline stops it.", evidence: [], why: "You are one of the people who may decide this." };
     case "second_review_notice":
       return { question: plainLine(item.message, 160), next: "Choose another model on the settings page, or wait until it qualifies again. Tasks are not stopped.", evidence: [], why: "Only a company admin can choose the model." };
     case "fix_setup":
@@ -358,11 +358,11 @@ function actionsOf(item: DecisionItem, cardId: string, risk: DecisionRisk): { ac
   const changes: CardAction | undefined = DOCUMENT_KINDS.has(item.kind) && !(item.kind === "approve_design" && item.changesAllowed === false)
     ? { kind: "request_changes", label: DECISION_LABELS.requestChanges, href: `${base}/request-changes`, method: "POST" } : undefined;
   // Every link to a decision lands on its card: a card about a task whose page is its session opens `/app/sessions/<id>?decision=<card id>`, and the task page scrolls to that card and marks it (S1a).
-  // A high card with a confirmation page still opens that page (its fresh sign-in); one without opens its card on the task page, where it is decided inline. Never a link to a page that shows the same link.
+  // A high card with a confirmation page still opens that page; one without opens its card on the task page, where it is decided inline. Never a link to a page that shows the same link.
   const focused = item.taskId === undefined ? item.openPath : decisionFocusPath(item.openPath, cardId);
   const page = isSafeRelativePath(focused) ? focused : item.openPath;
   const open: CardAction = { kind: "open", label: DECISION_LABELS.open, href: risk === "high" ? item.confirmPath ?? page : page, method: "GET" };
-  // An outside approval is decided on its card (Approve with a recent sign-in through the high-on-card route, Decline here): it carries Decline as its reject.
+  // An outside approval is decided on its card (Approve through the high-on-card route, Decline here): it carries Decline as its reject.
   if (item.kind === "approve_request") return { actions: [open, { kind: "reject", label: "Decline", href: `${base}/reject`, method: "POST" }], recommended: "open" };
   // A HIGH design cost card keeps its choices (decided on its task page behind the evidence, each under the decide-grade sign-in); it still opens first, and Slack and Home show only Open.
   if (risk === "high" && item.kind === "approve_spend" && item.design !== undefined) {

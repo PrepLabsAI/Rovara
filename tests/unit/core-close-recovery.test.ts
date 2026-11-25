@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { agentSessionKey, change } from "@agentx/contracts";
 import { closeRecoveryHarness as fixture, textField } from "../support/close-recovery-harness.js";
+import { costPartition } from "../../packages/broker/src/core/cost/ledger.js";
 import { flushBeforeClose } from "../../packages/broker/src/core/task-flow/money-stop.js";
 import { readWorkspace } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { CAPABILITY_HEADER, createCallbackHandler } from "../../packages/broker/src/services/callbacks.js";
@@ -165,7 +166,18 @@ describe("accepted close recovery", () => {
     const ws = (await readWorkspace(baseline.h.deps, baseline.task.workspaceId))!;
     await flushBeforeClose(baseline.h.deps, { ...ws, activeOperationId: baseline.run.id });
     await baseline.h.deps.admission.release(textField((await baseline.h.store.get(baseline.tk))!, "admissionReservationId"));
-    const expected = await baseline.money();
+    const legacy = await baseline.money();
+    // LOST-RUN-ACTUAL-SPEND (D3): a run lost at close is no longer charged the hold's whole amount, and nothing is booked as an estimate dollar. The accepted close books ONE `awaiting_usage` marker with no dollar figure
+    // (`usage:<run>:unflushed`, so the task reads unpriced and the run cost it teaches is partial) and settles the closing task's hold as estimated IN THE DAY (kept 4,000,000: the cap stays safe; the task is closed, so no settlement
+    // from the gateway can give it back here). The worker's own checkpoint (1,000,000) stays the task's only dollars. The legacy path (`flushBeforeClose` then a release) books nothing for the lost run, so only the flushed run's
+    // numbers equal it; for the estimated run the marker is the whole difference: one entry more, unpriced, and the day's hold marked estimated.
+    const expected = flushed ? legacy : { ...legacy, entries: legacy.entries + 1, unpriced: legacy.unpriced + 1, estimated: 4_000_000 };
+    if (!flushed) expect(expected).toEqual({ micros: 1_000_000, entries: 2, unpriced: 1, usd: 1_000_000, load: 5_000_000, reserved: 0, settled: 4_000_000, estimated: 4_000_000, hold: "settled", kept: 4_000_000 });
+    const entriesOf = async (w: Awaited<ReturnType<typeof fixture>>) => (await w.h.store.query({ pk: costPartition(w.h.deps.companyId, w.task.taskId), sk: { op: "beginsWith", prefix: "ENTRY#" }, limit: 100 })).items
+      .map((e) => [(e["entryId"] as string).replace(/^(usage(?:-checkpoint)?):[0-9a-f-]{36}:/u, "$1:<run>:").replace(/:[0-9a-f]{40}$/u, ":<call>"), e["modelId"] ?? (e["usage"] as { modelId?: string } | undefined)?.modelId, e["chargeStatus"], e["micros"]]);
+    const entriesExpected = flushed
+      ? [["usage:<run>:<call>", "m", "estimated", 1_000_000]]
+      : [["usage-checkpoint:<run>:<call>", "m", "estimated", 1_000_000], ["usage:<run>:unflushed", "unavailable", "awaiting_usage", undefined]];
     // Enumerate real committed writes and external effects from a complete run, then crash after each one.
     const once = async (crashAt: number) => {
       const w = await fixture({ money: true, flushed, session: true }); let index = 0, crashed = false;
@@ -195,6 +207,8 @@ describe("accepted close recovery", () => {
       for (let retry = 0; retry < 4; retry++) await w.pump();
       expect((await w.accepted())?.closeAcceptance?.phase, `boundary ${crashAt}`).toBe("complete");
       expect(await w.money(), `amount parity at boundary ${crashAt}`).toEqual(expected);
+      // Booked ONCE however often the close replays: the worker's checkpoint, and (a lost run only) the one unknown marker; never a `:settled` estimate, never a second marker.
+      expect((await entriesOf(w)).sort(), `entries at boundary ${crashAt}`).toEqual([...entriesExpected].sort());
       expect(w.terminated.size).toBe(1); expect(w.destroyed.size).toBe(1); expect(w.cleaned.size).toBe(1);
       expect((await w.accepted())?.closeAcceptance?.receipts["delivery"]).toEqual(expect.any(String));
       const task = (await w.h.store.get(w.tk))!;

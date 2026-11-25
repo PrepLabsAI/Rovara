@@ -14,17 +14,38 @@ function claimPaths(claims: readonly PlanClaim[]): string[] {
   ]);
 }
 
-/** The files the plan names: code it cites on a claim, then paths its ordered work items mention. Deduplicated in first-seen order. */
-export function planFiles(plan: PlanDocument): string[] {
-  const fromWork = (plan.workBreakdown?.items ?? []).flatMap((item) => `${item.title} ${item.description}`.match(PATH_TOKEN) ?? []);
+const cleaned = (values: readonly string[]): string[] => {
   const seen = new Set<string>();
   const out: string[] = [];
-  for (const path of [...claimPaths(plan.claims), ...fromWork].map((value) => flat(value).replace(/^\.\//u, ""))) {
+  for (const path of values.map((value) => flat(value).replace(/^\.\//u, ""))) {
     if (path === "" || seen.has(path)) continue;
     seen.add(path);
     out.push(path);
   }
   return out;
+};
+
+/** The code a plan cites on its claims (every cited place, whether the plan changes the file or only reads it as proof). Deduplicated in first-seen order. */
+export const planCitedPaths = (plan: PlanDocument): string[] => cleaned(claimPaths(plan.claims));
+
+const workItemPaths = (plan: PlanDocument): string[] => (plan.workBreakdown?.items ?? []).flatMap((item) => `${item.title} ${item.description}`.match(PATH_TOKEN) ?? []);
+
+/** The paths its ordered work items mention. Deduplicated in first-seen order. */
+export const planWorkPaths = (plan: PlanDocument): string[] => cleaned(workItemPaths(plan));
+
+/** The files the plan names: code it cites on a claim, then paths its ordered work items mention. Deduplicated in first-seen order. */
+export function planFiles(plan: PlanDocument): string[] {
+  return cleaned([...claimPaths(plan.claims), ...workItemPaths(plan)]);
+}
+
+/** Every bit of a plan's own text that may name a path: claims (and their children), risks, decisions and their options, and work items. */
+export function planText(plan: PlanDocument): string {
+  const claims = (list: PlanDocument["claims"]): string[] => list.flatMap((claim) => [claim.text, ...(claim.children === undefined ? [] : claims(claim.children))]);
+  return [
+    ...claims(plan.claims), ...plan.risks, ...plan.notChanging,
+    ...plan.decisions.flatMap((decision) => [decision.question, ...decision.options.flatMap((option) => [option.label, option.consequence])]),
+    ...(plan.workBreakdown?.items ?? []).flatMap((item) => [item.title, item.description]),
+  ].join("\n");
 }
 
 /** The paths a plan's text names (a Markdown plan has no structure to read them from). */

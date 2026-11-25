@@ -10,7 +10,8 @@ import { resolvePolicy } from "../../packages/contracts/src/policy.js";
 // Was a2e7075fe49e2436ef10476ee1abe356349a566c (base c93edabcb). Moved by PR #607 (owner decision 211, identity port gaps G1-G4): an additive Approvers port change only, optional fields and optional methods plus
 // pure helpers; `outcome` now names the same union through `ApprovalAnswer`, and `ApprovalVerdict` gains optional fields. Any later change to the port moves this pin again, on purpose.
 // Moved from 8900876620af844b7248fdf751e426d059e9d095 by MERGE-APPROVAL-NOT-SPENT: one additive optional field, `ApprovalRequest.useRecordedByCaller` (a caller that records the use of a proof itself); nothing existing changed.
-const BASE_POLICY_PORT_BLOB = "2b9c2e84e38956fe27d0afae980760b8b95c4c01";
+// Moved by NO-FALSE-PROTECTION-CLAIMS (owner DEC 254zzz540): doc comments only (the sign-in rule is a plug-in capability, not a company setting, and not applied to merges); no type, field or export changed. Re-pinned after the Opus review: the three sign-in comments now say the live Merge button (`pressMergeAsPerson`) does not apply the rule while the unwired old press `pressMerge` did, which is the exact wording.
+const BASE_POLICY_PORT_BLOB = "7ee2b42af52d9b536db90949f0c2e8fae8d7ce27";
 it("keeps the existing policy port byte-identical to the approved base", () => {
   const bytes = readFileSync("packages/contracts/src/ports/policy.ts");
   const blob = createHash("sha1").update(`blob ${String(bytes.length)}\0`).update(bytes).digest("hex");

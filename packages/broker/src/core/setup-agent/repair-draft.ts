@@ -15,7 +15,7 @@
 //      origin "nightly" (the project pays; the gateway's upkeep cap applies). The host's starter starts the project's setup run as the project's system owner; the door refuses a `setupRepair` request unless the starter declares `startsSetupRepair` (L4-SR2).
 //   3. `advanceRepairDraft` moves it on from the stored facts, safe to call from anywhere and any number of times: the run ended with a proposal Rovara itself finished (`proposed`, not partial) -> the candidate is stored
 //      by `confirmSetupAgent` (the SAME path a person's "Use this setup" takes: every citation re-read from the code host, the candidate stored but not the project's latest, its check started on a NEW workspace) ->
-//      the candidate's check passed -> `ready`: the project's maintainers see "Approve new setup", and the decision is the hosted approval gate's (risk-based approvers, a fresh sign-in, the digest) as for any setup.
+//      the candidate's check passed -> `ready`: the project's maintainers see "Approve new setup", and the decision is the hosted approval gate's (risk-based approvers, the digest) as for any setup.
 //      A run that failed, a proposal nothing could be used from, or a candidate whose check failed ends the draft as `failed`, in fixed words, and the failed candidate is removed. The manual "Fix setup" stays open.
 //
 // L4-SR2 (lead 4, owner DEC 254zzl/254zzt/254zzy): the AUTOMATIC path is wired on a hosted install and is OFF until every one of its locks is open (the company's effective system-runs gate, the project's upkeep switch, an enforced cap

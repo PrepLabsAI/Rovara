@@ -8,7 +8,7 @@ import { describe, expect, it } from "vitest";
 import type { MeterEntry, OrgId, StoredDocument } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { costPartition, companyDayKey } from "../../packages/broker/src/core/cost/ledger.js";
-import { TASK_HOLD_SECONDS, holdItems, holdKey, reservationIdOf } from "../../packages/broker/src/core/cost/holds.js";
+import { TASK_HOLD_SECONDS, closeHold, holdItems, holdKey, reservationIdOf } from "../../packages/broker/src/core/cost/holds.js";
 import { operationKey, taskKey, taskPointerKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { createHostedLedger, createHostedMoneyStop, runsOwed, unflushedEntryId, unreportedSettleEntryId, type HostedAdmissionSettings } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { TASK_SPEND_UNKNOWN, createCompanyTaskSpend, type TaskSpendRefusal } from "../../packages/broker/src/core-host/company-task-spend.js";
@@ -73,7 +73,7 @@ async function world(options: { company?: OrgId; hold?: number; withSettle?: boo
   const run = async (id: string) => await store.get(operationKey(company, workspaceId, id));
   const entry = async (entryId: string) => await store.get({ pk: costPartition(company, taskId), sk: `ENTRY#${entryId}` });
   const total = async () => (await store.get({ pk: costPartition(company, taskId), sk: "TOTAL" }))?.["micros"];
-  return { store, clock, taskId, workspaceId, reservationId, spend, settle, addRun, book, run, entry, total, reasons, logs, moneyStop, settleCalls: () => settleCalls, hold: () => store.get(holdKey(company, reservationId)), day: () => store.get(companyDayKey(company, new Date(START).toISOString().slice(0, 10))) };
+  return { store, ledger, clock, taskId, workspaceId, reservationId, spend, settle, addRun, book, run, entry, total, reasons, logs, moneyStop, settleCalls: () => settleCalls, hold: () => store.get(holdKey(company, reservationId)), day: () => store.get(companyDayKey(company, new Date(START).toISOString().slice(0, 10))) };
 }
 
 /** The reader's answer, or the refusal. */
@@ -92,7 +92,7 @@ describe("no ended run status can leave a task's spend unreadable", () => {
     expect(w.reasons).toEqual([]);
     expect(await w.run(id)).not.toHaveProperty("usageUnflushed");
     expect(await w.hold()).toMatchObject({ state: "released", keptMicros: 0, drawnMicros: 3_000_000 });
-    expect(await w.entry(unflushedEntryId(id))).toMatchObject({ micros: 3_000_000, chargeStatus: "estimated", modelId: "hold-estimate" });
+    expect(await w.entry(unreportedSettleEntryId(id))).toMatchObject({ micros: 3_000_000, chargeStatus: "estimated", modelId: "hold-estimate" });
     expect(w.logs.filter((entry) => entry["event"] === "task_flow.unreported_run_settled")).toEqual([{ component: "task-flow", event: "task_flow.unreported_run_settled", case: "estimate", taskId: w.taskId }]);
   });
 
@@ -114,26 +114,31 @@ describe("no ended run status can leave a task's spend unreadable", () => {
     expect(w.settleCalls()).toBe(0);
   });
 
-  it("a lost run kept as an estimate (INTERRUPTED, marked unflushed, estimate booked by the run watch) is readable too, with what its hold kept added, and a hold that cannot be read refuses", async () => {
+  // The shape an earlier release left (its lost-run rule kept the whole hold and topped the estimate up): still read, and a hold that cannot be read still refuses (rule 8: stored records read tolerantly).
+  it("a lost run an earlier release kept as an estimate (INTERRUPTED, marked unflushed, hold settled estimated, estimate entry booked) is readable, with what its hold kept added; a hold that cannot be read refuses", async () => {
+    const legacy = async (w: Awaited<ReturnType<typeof world>>) => {
+      const id = await w.addRun({ status: "INTERRUPTED", usageUnflushed: true });
+      await closeHold(w.store, w.reservationId, { kind: "settle", actualMicros: undefined, estimated: { operationId: id } }, () => new Date(START));
+      await w.ledger.recordUsage({ companyId: A, entryId: unflushedEntryId(id), at: new Date(START).toISOString(), taskId: w.taskId, usage: { provider: "rovara-unflushed-estimate", modelId: "estimate", tokens: { input: 2_000_000, output: 0, cacheRead: 0, cacheWrite: 0 } } });
+      return id;
+    };
     const w = await world();
-    const id = await w.addRun({ status: "INTERRUPTED", usageUnflushed: true });
-    await w.moneyStop.keepWholeHold(w.reservationId, { operationId: id, taskId: w.taskId });
+    await legacy(w);
     expect(await read(w.spend, w.taskId)).toBe(5);
     expect(w.settleCalls(), "nothing owed: no settle").toBe(0);
     const gone = await world();
-    const lost = await gone.addRun({ status: "INTERRUPTED", usageUnflushed: true });
-    await gone.moneyStop.keepWholeHold(gone.reservationId, { operationId: lost, taskId: gone.taskId });
+    await legacy(gone);
     await gone.store.delete({ key: holdKey(A, gone.reservationId) });
     expect(await read(gone.spend, gone.taskId)).toBe(TASK_SPEND_UNKNOWN);
     expect(gone.reasons).toEqual(["unreadable_figures"]);
   });
 
-  it("a run marked unflushed whose estimate was never booked (the keep failed after the mark) is completed by the next read", async () => {
+  it("a run marked unflushed with nothing booked for it (a lost run: nothing is booked when it is lost) is settled by the next read like any ended run: the hold's room, never the whole hold topped up", async () => {
     const w = await world();
     const id = await w.addRun({ status: "INTERRUPTED", usageUnflushed: true });
-    expect(await read(w.spend, w.taskId)).toBe(5);
-    expect(await w.entry(unflushedEntryId(id))).toBeDefined();
-    expect(await w.hold()).toMatchObject({ state: "settled", estimated: true });
+    expect(await read(w.spend, w.taskId)).toBe(3);
+    expect(await w.entry(unreportedSettleEntryId(id))).toMatchObject({ micros: 3_000_000, chargeStatus: "estimated" });
+    expect(await w.hold()).toMatchObject({ state: "released" });
   });
 });
 
@@ -193,7 +198,7 @@ describe("case (iii): nothing is knowable, only the hold's room is booked, as a 
     const w = await world({ hold: 3_000_000 });
     const id = await w.addRun({ status: "SUCCEEDED" });
     expect(await read(w.spend, w.taskId)).toBe(3);
-    expect(await w.entry(unflushedEntryId(id))).toMatchObject({ micros: 3_000_000, chargeStatus: "estimated" });
+    expect(await w.entry(unreportedSettleEntryId(id))).toMatchObject({ micros: 3_000_000, chargeStatus: "estimated" });
     expect(await w.hold()).toMatchObject({ state: "released" });
     // The day counts it once: drawn from the hold, not added to it.
     expect(await w.day()).toMatchObject({ usdMicros: 3_000_000, reservedMicros: 0, loadMicros: 3_000_000 });
@@ -216,15 +221,18 @@ describe("case (iii): nothing is knowable, only the hold's room is booked, as a 
     const w = await world({ hold: 0 });
     const id = await w.addRun({ status: "FAILED" });
     expect(await read(w.spend, w.taskId)).toBe(0);
-    expect(await w.entry(unflushedEntryId(id))).toMatchObject({ micros: 0, chargeStatus: "estimated" });
+    expect(await w.entry(unreportedSettleEntryId(id))).toMatchObject({ micros: 0, chargeStatus: "estimated" });
   });
 
-  it("a SECOND unreported run books $0 more (its hold is already closed): once each, never two estimates of one hold", async () => {
+  it("a SECOND unreported run is brought to the cap (its hold is already closed; at most two runs per task are counted this way), a third adds nothing: once each, never two estimates of one hold", async () => {
     const w = await world();
     await w.addRun({ status: "FAILED" });
+    expect(await read(w.spend, w.taskId)).toBe(3);
     await w.addRun({ status: "FAILED" });
-    expect(await read(w.spend, w.taskId)).toBe(3);
-    expect(await read(w.spend, w.taskId)).toBe(3);
+    expect(await read(w.spend, w.taskId)).toBe(5);
+    expect(await read(w.spend, w.taskId)).toBe(5);
+    await w.addRun({ status: "FAILED" });
+    expect(await read(w.spend, w.taskId)).toBe(5);
   });
 
   it("the estimate alone never reaches a $5 or $6 cap: a hold of $2 under a $5 cap leaves room, where the fixed estimate used to end the task at its limit", async () => {
@@ -319,7 +327,7 @@ describe("the read-only count of tasks stuck this way (item 4)", () => {
     await clean.addRun({ status: "SUCCEEDED", booked: 1_000_000 });
     const keys = (store: MemoryDocumentStore) => JSON.stringify([...(store as unknown as { rows?: Map<string, unknown> }).rows?.keys() ?? []]);
     const before = [keys(w.store), await w.total(), await w.day(), await w.hold()];
-    expect(await countUnreportedRuns(w.store, A, [w.taskId, randomUUID()])).toEqual({ tasks: 2, running: 0, unreadable: 1, clean: 0, stuck: 1, runs: { gateway_record: 1, no_call: 1, estimate: 1, kept_unbooked: 1 } });
+    expect(await countUnreportedRuns(w.store, A, [w.taskId, randomUUID()])).toEqual({ tasks: 2, running: 0, unreadable: 1, clean: 0, stuck: 1, runs: { gateway_record: 1, no_call: 1, estimate: 2 } });
     expect(await countUnreportedRuns(running.store, A, [running.taskId])).toMatchObject({ running: 1, stuck: 0 });
     expect(await countUnreportedRuns(clean.store, A, [clean.taskId])).toMatchObject({ clean: 1, stuck: 0 });
     expect([keys(w.store), await w.total(), await w.day(), await w.hold()]).toEqual(before);

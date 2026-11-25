@@ -651,7 +651,7 @@ export const handler = withCoreDispatch(workflowHandler, {
         // The per-run stop's dispatch side (core-money-stop): each model run is admitted and goes only to a worker that reports its usage while it runs; a queued cancel is delivered.
         moneyStop: (registry, companyId) => {
           const read = readHostedAdmissionSettings(process.env);
-          return createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: "settings" in read ? read.settings : undefined, now: () => new Date() });
+          return createHostedMoneyStop({ store: registry.require("storage"), companyId, settings: "settings" in read ? read.settings : undefined, projectTaskCap: dispatcherProjectTaskCapOf(), now: () => new Date() });
         },
         // L4-TA6: automatic fixing's per-task dollar cap is the task's live cap, read the way the dispatcher's own Admission reads it (the install's task cap lowered to the project's own limit, through the same reader as above); unreadable asks.
         taskCapUsd: (registry, companyId) => {
