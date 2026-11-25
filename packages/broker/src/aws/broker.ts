@@ -167,7 +167,7 @@ import { slackWorkflowCaller } from "./slack-workflow-caller.js";
 import { can, resolveTaskAccess, type TaskAccess, type TaskAction } from "../developer/task-access.js";
 import { resolveTaskDispatchPeople, taskAccessFence } from "../developer/task-people.js";
 import { MAX_ARTIFACT_BYTES, MAX_SETUP_PROPOSAL_BYTES, MAX_SETUP_EVIDENCE_BYTES, LEGACY_E2E_COMPANY, SETUP_ARTIFACT_CHUNK_BYTES, MAX_WORKFLOW_CANDIDATE_EXPORT_BYTES, WORKFLOW_CANDIDATE_CHUNK_BYTES, EVENT_TRANSACTION_CHUNK, NAMED_COMPANY_CANDIDATE_WAITING, type RegisteredProjectRecord, type MembershipRecord, type PullRequestRecord, type CodeBuildRecord, type AwsBrokerDependencies, type AwsBrokerInput, type SlackServiceConfiguration, DOT_SEGMENT, DEVELOPER_ROUTE_KEY, CORE_APP_ROUTE_KEY, FEEDBACK_REVIEW_ROUTE_KEY, CLIENT_PROJECT_INSTRUCTIONS, TASK_ID_PATTERN, LEGACY_REVISION_GRANT, type WorkflowE2EProjection, type WorkflowE2EVerificationDiagnostic } from "./broker-types.js";
-import { type SlackStopTaskEvent, type SlackWorkflowStartEvent, type SlackWorkflowDecisionEvent, type SlackWorkflowRetryEvent, type SlackWorkflowSendBackEvent, type SlackWorkflowResolveFindingsEvent, type SlackWorkflowCloseEvent, type SlackWorkflowReviewRetryEvent, type SlackWorkflowFeedbackFindingsDecisionEvent, type SlackWorkflowFeedbackNoteEvent, type SlackTaskAuthorizationEvent, type SlackTaskPeopleConfirmEvent, type SlackTaskPeopleReadEvent, type SlackTaskPeopleChangeEvent, type SlackTaskPeopleTakeOwnershipEvent, type SlackIntakeRecordEvent, type SlackWorkflowPublishRetryEvent, type SlackWorkflowKeepPullRequestsEvent, type SlackWorkflowFeedbackReviewRetryEvent, type SlackThreadNoteEvent } from "./broker-slack-events.js";
+import { type SlackStopTaskEvent, type SlackWorkflowStartEvent, type SlackWorkflowDecisionEvent, type SlackWorkflowRetryEvent, type SlackWorkflowSendBackEvent, type SlackWorkflowResolveFindingsEvent, type SlackWorkflowCloseEvent, type SlackWorkflowReviewRetryEvent, type SlackWorkflowFeedbackFindingsDecisionEvent, type SlackWorkflowFeedbackNoteEvent, type SlackTaskAuthorizationEvent, type SlackTaskPeopleConfirmEvent, type SlackTaskPeopleReadEvent, type SlackTaskPeopleChangeEvent, type SlackTaskPeopleTakeOwnershipEvent, type SlackIntakeRecordEvent, type SlackWorkflowPublishRetryEvent, type SlackWorkflowKeepPullRequestsEvent, type SlackWorkflowFeedbackReviewRetryEvent, type SlackThreadNoteEvent } from "./slack-broker-events.js";
 import { projectSetupPolicy, plannedAgentRoute, untestedAgentRouteNote, brokerDependencies, adminCompanyReader, sharedThread, sharedThreadOpen, slackThreadOwnRow, taskLegacyScope, workspaceTaskScope, readWorkspaceTaskLegacyProject, getSlackBinding, developerRequested, requireOwnedWorkspace, requireWorkspace, getDefaultWorkspace, getThreadWorkspace, slackCallerRouteDependencies, channelLinkRouteDependencies, channelConversationDependencies, conversationStarterId, conversationProjectName, requireLatestProject, getProjectModels, putProjectModel, resolveProjectModel, requirePullRequest, adoptLegacyPullRequest, requireMembership, getMembership, grantCompany, storedCompanyOf, requireAdministrator, requireAdministratorGrant, replayRecordView, closeReleasesStorage, workspaceRuntime, workspaceItem, membershipRecord, githubRepositoryFullName, pullRequestMatchesRepository, workspaceKey, pullRequestKey, codeBuildKey, issueRepositoryGrant, requireGithubProjectBinding, verifyCapability, object, parseBody, uuid, name, positiveInteger, encodeCursor, decodeCursor, startsConversation, isStatus, parseStoredEvent, json } from "./broker-primitives.js";
 import { swebenchDependencies, swebenchSlackContext } from "./broker-swebench-routes.js";
 import { dispatchAdminHttpRoute, dispatchCoreAndOperatorEvent, dispatchPreAuthHttpRoute, dispatchSlackIngressEvent } from "./broker-router.js";
@@ -181,9 +181,9 @@ import {
   loadWorkflowE2EArtifact,
   loadWorkflowE2EScenarioResultsWithHooks,
   readStoredCandidateSourceExport,
-  settleBaselineRound,
-  settleGroundingRound,
-  settleReplayRound,
+  settleBaselineRoundWithHooks,
+  settleGroundingRoundWithHooks,
+  settleReplayRoundWithHooks,
   verifyWorkflowE2EEvidence as verifyWorkflowE2EEvidenceWithHooks,
   workflowCandidateSourceExportSchema,
   workflowE2EApplicationAuthorityIsValidWithHooks,
@@ -196,9 +196,9 @@ import {
   type E2EVerificationHooks,
 } from "./broker-e2e-verification.js";
 export { PROJECT_SETUP_CAPTURE_POLICY, NAMED_COMPANY_CANDIDATE_WAITING, type RegisteredProjectRecord, type AwsBrokerInput, type WorkflowE2EVerificationDiagnostic } from "./broker-types.js";
-export { type SlackStopTaskEvent, type SlackWorkflowStartEvent, type SlackWorkflowDecisionEvent, type SlackWorkflowRetryEvent, type SlackWorkflowSendBackEvent, type SlackWorkflowResolveFindingsEvent, type SlackWorkflowCloseEvent, type SlackWorkflowReviewRetryEvent, type SlackWorkflowFeedbackFindingsDecisionEvent, type SlackWorkflowFeedbackNoteEvent, type SlackTaskAuthorizationEvent, type SlackTaskPeopleConfirmEvent, type SlackTaskPeopleReadEvent, type SlackTaskPeopleChangeEvent, type SlackTaskPeopleTakeOwnershipEvent, isSlackTaskPeopleReadEvent, isSlackTaskPeopleChangeEvent, isSlackTaskPeopleTakeOwnershipEvent, isSlackTaskPeopleConfirmEvent, isSlackTaskAuthorizationEvent, isSlackWorkflowStartEvent, type SlackIntakeRecordEvent, isSlackIntakeRecordEvent, isSlackWorkflowDecisionEvent, isSlackWorkflowRetryEvent, isSlackWorkflowSendBackEvent, isSlackWorkflowResolveFindingsEvent, isSlackWorkflowCloseEvent, isSlackWorkflowReviewRetryEvent, type SlackWorkflowPublishRetryEvent, isSlackWorkflowPublishRetryEvent, type SlackWorkflowKeepPullRequestsEvent, isSlackWorkflowKeepPullRequestsEvent, isSlackWorkflowFeedbackFindingsDecisionEvent, isSlackWorkflowFeedbackNoteEvent, type SlackWorkflowFeedbackReviewRetryEvent, isSlackWorkflowFeedbackReviewRetryEvent, type SlackThreadNoteEvent, isSlackThreadNoteEvent, isSlackStopTaskEvent } from "./broker-slack-events.js";
+export { type SlackStopTaskEvent, type SlackWorkflowStartEvent, type SlackWorkflowDecisionEvent, type SlackWorkflowRetryEvent, type SlackWorkflowSendBackEvent, type SlackWorkflowResolveFindingsEvent, type SlackWorkflowCloseEvent, type SlackWorkflowReviewRetryEvent, type SlackWorkflowFeedbackFindingsDecisionEvent, type SlackWorkflowFeedbackNoteEvent, type SlackTaskAuthorizationEvent, type SlackTaskPeopleConfirmEvent, type SlackTaskPeopleReadEvent, type SlackTaskPeopleChangeEvent, type SlackTaskPeopleTakeOwnershipEvent, isSlackTaskPeopleReadEvent, isSlackTaskPeopleChangeEvent, isSlackTaskPeopleTakeOwnershipEvent, isSlackTaskPeopleConfirmEvent, isSlackTaskAuthorizationEvent, isSlackWorkflowStartEvent, type SlackIntakeRecordEvent, isSlackIntakeRecordEvent, isSlackWorkflowDecisionEvent, isSlackWorkflowRetryEvent, isSlackWorkflowSendBackEvent, isSlackWorkflowResolveFindingsEvent, isSlackWorkflowCloseEvent, isSlackWorkflowReviewRetryEvent, type SlackWorkflowPublishRetryEvent, isSlackWorkflowPublishRetryEvent, type SlackWorkflowKeepPullRequestsEvent, isSlackWorkflowKeepPullRequestsEvent, isSlackWorkflowFeedbackFindingsDecisionEvent, isSlackWorkflowFeedbackNoteEvent, type SlackWorkflowFeedbackReviewRetryEvent, isSlackWorkflowFeedbackReviewRetryEvent, type SlackThreadNoteEvent, isSlackThreadNoteEvent, isSlackStopTaskEvent } from "./slack-broker-events.js";
 export { channelLinkRouteDependencies } from "./broker-primitives.js";
-export { settleGroundingRound, loadWorkflowE2EArtifact };
+export { loadWorkflowE2EArtifact };
 import { answerSlackCorePress, isSlackCorePressEvent } from "./slack-core-decision.js";
 export const NAMED_COMPANY_SETUP_APPROVAL_REFUSED = "a company's browser testing is set up on the project's Browser testing page, and the rest of its setup goes through the project's setup flow, not through a setup approval sent with registration";
 
@@ -875,13 +875,16 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
   const adminReads = adminReadDependencies(dependencies);
   const adminChanges = adminChangeDependencies(dependencies, adminReads);
   const operatorHooks = {
-    operatorGithubBindings, brokerLogLine, operatorEventRefused,
+    operatorGithubBindings, brokerLogLine,
+    logStderr: (entry: Record<string, unknown>) => { process.stderr.write(`${JSON.stringify(entry)}\n`); },
+    operatorEventRefused,
     isGithubWebhookRecoveryEvent, retryDueGithubWebhookEvents,
     isWorkflowMergeRecoveryEvent, reconcileWorkflowMergeRecoveryTask,
     isWorkflowDispatchRecoveryEvent, retryDueWorkflowDispatches,
     startDuePlanEvidenceJobs, developerTaskActions,
   };
   const slackHooks = {
+    brokerLogLine,
     namedInstallTeamView, developerTaskActions, unexpectedErrorAnswer, replyNotSavedAnswer,
     stopSlackThreadTask, authorizeSlackTaskAction, confirmSlackTaskPeople, handleSlackTaskPeople,
     startSlackWorkflow, answerSlackWorkflowEvent, decideSlackWorkflow, retrySlackWorkflowChecks,
@@ -7205,8 +7208,21 @@ async function verifyProjectSetupSmokeEvidence(
 const e2eVerificationHooks: E2EVerificationHooks = {
   ensureProjectCatalogPointer,
   catalogKeyFor: (projectName) => projectCatalogKey(projectName),
+  log: brokerLogLine,
   evaluateWorkflowE2EApplicationSelectionNow,
 };
+
+function settleBaselineRound(dependencies: AwsBrokerDependencies, operation: OperationRecord, status: OperationStatus) {
+  return settleBaselineRoundWithHooks(dependencies, e2eVerificationHooks, operation, status);
+}
+
+function settleReplayRound(dependencies: AwsBrokerDependencies, operation: OperationRecord, status: OperationStatus) {
+  return settleReplayRoundWithHooks(dependencies, e2eVerificationHooks, operation, status);
+}
+
+export function settleGroundingRound(dependencies: AwsBrokerDependencies, operation: OperationRecord, status: OperationStatus) {
+  return settleGroundingRoundWithHooks(dependencies, e2eVerificationHooks, operation, status);
+}
 
 function verifyWorkflowE2EEvidence(
   dependencies: AwsBrokerDependencies, operation: OperationRecord, task: DeveloperTaskRecord, candidate: ReturnType<typeof CandidateManifestSchema.parse>,

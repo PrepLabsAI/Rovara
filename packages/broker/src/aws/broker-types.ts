@@ -1,6 +1,7 @@
 // Shared AWS broker record shapes, dependency interfaces, and protocol constants (extracted from aws/broker.ts).
 import { e2ePrivateTransferMaxBytes } from "@agentx/verifier";
-import { type AdminChangeOutcome, type ClientRepositoriesResponse, type CodeBuildCheckResult, type DeveloperRequester, type E2ESourceSnapshot, type Ec2RuntimeBinding, IMPLICIT_COMPANY_ID, type ModelIdentifier, type OfferedAgentModels, OrgIdSchema, type PlanDocument, type ProjectDefinition, type SlackRequester } from "@agentx/contracts";
+import { type AdminChangeOutcome, type ClientRepositoriesResponse, type CodeBuildCheckResult, type DeveloperRequester, type E2ESourceSnapshot, type Ec2RuntimeBinding, IMPLICIT_COMPANY_ID, type ModelIdentifier, type OfferedAgentModels, OrgIdSchema, type PlanDocument, type ProjectDefinition } from "@agentx/contracts";
+import type { SlackRequester } from "./slack-broker-events.js";
 import type { RuntimeBinding } from "./lambda.js";
 import type { BrokerCoreRoot } from "./core-engine-root.js";
 import type { TokenSigner } from "../developer/tokens.js";

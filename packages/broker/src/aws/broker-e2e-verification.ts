@@ -164,6 +164,7 @@ export type ApplicationSelectionNow =
 export interface E2EVerificationHooks {
   ensureProjectCatalogPointer: (dependencies: AwsBrokerDependencies, projectName: string, task?: { companyId?: unknown }) => Promise<void>;
   catalogKeyFor: (projectName: string) => { pk: string; sk: string };
+  log: (entry: Record<string, unknown>) => void;
   evaluateWorkflowE2EApplicationSelectionNow: (
     dependencies: AwsBrokerDependencies,
     task: DeveloperTaskRecord,
@@ -369,6 +370,47 @@ function portableGroupEnvelopeMatches(input: {
     && canonicalJson(groupRun.group) === canonicalJson(planGroup);
 }
 
+async function loadSingleAcceptedPortableGroupRun(input: {
+  raw: unknown;
+  dependencies: AwsBrokerDependencies;
+  operation: OperationRecord;
+  taskId: string;
+  candidateDigest: string;
+  reference: E2EWorkflowAdmissionRef;
+  round: ReturnType<typeof E2ERoundSchema.parse>;
+  planGroups: readonly unknown[];
+  groupAdmissions: ReadonlyArray<Record<string, unknown>>;
+  hasAggregate: boolean;
+  aggregateByRun: Map<string, Record<string, unknown>>;
+  seen: Set<string>;
+}): Promise<{ groupRunId: string; groupRun: Record<string, unknown> } | { unavailable: string }> {
+  const { raw, dependencies, operation, taskId, candidateDigest, reference, round, planGroups, groupAdmissions, hasAggregate, aggregateByRun, seen } = input;
+  const parsedRef = E2EWorkflowGroupEvidenceRefSchema.safeParse(raw);
+  if (!parsedRef.success) return { unavailable: "accepted-group-reference-schema" };
+  const { groupRunId, evidenceRef: storedGroupRef } = parsedRef.data;
+  const index = reference.groupRunIds.indexOf(groupRunId);
+  if (index < 0 || seen.has(groupRunId) || storedGroupRef.key !== `workflow-e2e-group-evidence/sha256/${storedGroupRef.sha256}.json`) {
+    return { unavailable: "accepted-group-reference-subject" };
+  }
+  const expectedCaseCount = groupAdmissions[index]?.expectedCases;
+  if (!Array.isArray(expectedCaseCount)) return { unavailable: "admitted-group-case-count" };
+  const groupText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, storedGroupRef.key,
+    Math.min(WORKFLOW_E2E_ADMISSION_MAX_BYTES, e2ePrivateTransferMaxBytes(expectedCaseCount.length, 1)));
+  if (groupText === undefined || Buffer.byteLength(groupText) !== storedGroupRef.byteLength || sha256Hex(groupText) !== storedGroupRef.sha256) {
+    return { unavailable: "accepted-group-evidence-integrity" };
+  }
+  const envelope = JSON.parse(groupText) as Record<string, unknown>;
+  const groupRun = envelope.groupRun as Record<string, unknown> | undefined;
+  if (!groupRun || !portableGroupEnvelopeMatches({ envelope, groupRun, reference, taskId, operation, candidateDigest, round, planGroup: planGroups[index], index })) {
+    return { unavailable: "accepted-group-evidence-subject" };
+  }
+  const aggregateRun = aggregateByRun.get(groupRunId);
+  if (hasAggregate && (aggregateRun === undefined || canonicalJson(aggregateRun) !== canonicalJson(groupRun))) {
+    return { unavailable: "aggregate-group-evidence-mismatch" };
+  }
+  return { groupRunId, groupRun };
+}
+
 async function loadAcceptedPortableGroupRuns(input: {
   dependencies: AwsBrokerDependencies;
   operation: OperationRecord;
@@ -382,33 +424,13 @@ async function loadAcceptedPortableGroupRuns(input: {
   hasAggregate: boolean;
   aggregateByRun: Map<string, Record<string, unknown>>;
 }): Promise<Map<string, Record<string, unknown>> | { unavailable: string }> {
-  const { dependencies, operation, taskId, candidateDigest, reference, round, planGroups, groupAdmissions, groupEvidenceRefs, hasAggregate, aggregateByRun } = input;
   const groupRunsById = new Map<string, Record<string, unknown>>();
-  for (const raw of groupEvidenceRefs) {
-    const parsedRef = E2EWorkflowGroupEvidenceRefSchema.safeParse(raw);
-    if (!parsedRef.success) return { unavailable: "accepted-group-reference-schema" };
-    const { groupRunId, evidenceRef: storedGroupRef } = parsedRef.data;
-    const index = reference.groupRunIds.indexOf(groupRunId);
-    if (index < 0 || groupRunsById.has(groupRunId) || storedGroupRef.key !== `workflow-e2e-group-evidence/sha256/${storedGroupRef.sha256}.json`) {
-      return { unavailable: "accepted-group-reference-subject" };
-    }
-    const expectedCaseCount = groupAdmissions[index]?.expectedCases;
-    if (!Array.isArray(expectedCaseCount)) return { unavailable: "admitted-group-case-count" };
-    const groupText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, storedGroupRef.key,
-      Math.min(WORKFLOW_E2E_ADMISSION_MAX_BYTES, e2ePrivateTransferMaxBytes(expectedCaseCount.length, 1)));
-    if (groupText === undefined || Buffer.byteLength(groupText) !== storedGroupRef.byteLength || sha256Hex(groupText) !== storedGroupRef.sha256) {
-      return { unavailable: "accepted-group-evidence-integrity" };
-    }
-    const envelope = JSON.parse(groupText) as Record<string, unknown>;
-    const groupRun = envelope.groupRun as Record<string, unknown> | undefined;
-    if (!groupRun || !portableGroupEnvelopeMatches({ envelope, groupRun, reference, taskId, operation, candidateDigest, round, planGroup: planGroups[index], index })) {
-      return { unavailable: "accepted-group-evidence-subject" };
-    }
-    const aggregateRun = aggregateByRun.get(groupRunId);
-    if (hasAggregate && (aggregateRun === undefined || canonicalJson(aggregateRun) !== canonicalJson(groupRun))) {
-      return { unavailable: "aggregate-group-evidence-mismatch" };
-    }
-    groupRunsById.set(groupRunId, groupRun);
+  const seen = new Set<string>();
+  for (const raw of input.groupEvidenceRefs) {
+    const loaded = await loadSingleAcceptedPortableGroupRun({ ...input, raw, seen });
+    if ("unavailable" in loaded) return loaded;
+    seen.add(loaded.groupRunId);
+    groupRunsById.set(loaded.groupRunId, loaded.groupRun);
   }
   return groupRunsById;
 }
@@ -450,6 +472,55 @@ function processSucceeded(proc: Record<string, unknown> | undefined): boolean {
   return proc?.status === 0 && proc.signal === null && proc.aborted === false && proc.timedOut === false;
 }
 
+function compileAndValidateAdmittedGroup(input: {
+  index: number;
+  group: ReturnType<typeof selectE2EExecutionPlan>["groups"][number];
+  admitted: Record<string, unknown> | undefined;
+  bundle: ReturnType<typeof E2EScenarioBundleSchema.parse>;
+  plan: ReturnType<typeof selectE2EExecutionPlan>;
+  selectionInput: Record<string, unknown>;
+  round: ReturnType<typeof E2ERoundSchema.parse>;
+  reference: E2EWorkflowAdmissionRef;
+  taskId: string;
+  operation: OperationRecord;
+  candidateDigest: string;
+}): { compiled: ReturnType<typeof compileE2EScenarios>; binding: ReturnType<typeof E2ERunBindingSchema.parse> } | { unavailable: string } {
+  const { index, group, admitted, bundle, plan, selectionInput, round, reference, taskId, operation, candidateDigest } = input;
+  if (!admitted || canonicalJson(admitted.group) !== canonicalJson(group)) return { unavailable: "admitted-group-identity" };
+  const compiled = compileE2EScenarios(bundle, plan.effectiveTargets, group, { selectionInput, executionPlan: plan, group } as never);
+  if (admitted.expectedConfigDigest !== compiled.expectedConfigDigest || admitted.compiledInventoryDigest !== compiled.inventory.digest
+    || admitted.selectionPacketPath !== compiled.selectionPacketPath || canonicalJson(admitted.expectedCases) !== canonicalJson(compiled.expectedCases)) {
+    return { unavailable: "compiled-group-expectations" };
+  }
+  const binding = E2ERunBindingSchema.parse(admitted.binding);
+  if (binding.runId !== reference.groupRunIds[index] || binding.taskId !== taskId || binding.operationId !== operation.id
+    || binding.operationFence !== operation.fence || binding.workflowRevision !== reference.workflowRevision || binding.candidateDigest !== candidateDigest
+    || binding.roundId !== reference.roundId || canonicalJson(round.groupBindings[index]) !== canonicalJson(binding)) {
+    return { unavailable: "group-run-binding" };
+  }
+  return { compiled, binding };
+}
+
+function finalizePortableGroupQualification(
+  result: ReturnType<typeof collectE2EActualCliRun>,
+  rawActual: Record<string, unknown>,
+  terminalReceipt: { at: string; outcome: "PASS" | "FAILED" } | undefined,
+): { status: "PASS" | "FAILED" | "UNKNOWN"; projectionResult?: unknown } {
+  const qualification = terminalReceipt !== undefined && result.collection !== null && result.oracle !== null
+    ? qualifyE2ECollection(result.oracle, { ...result.collection, receivedAt: terminalReceipt.at })
+    : result.qualification;
+  const okProcess = processSucceeded(rawActual.runProcess as Record<string, unknown> | undefined);
+  const projectionResult = qualification?.result != null
+    ? { ...qualification.result, producer: "broker-independent-e2e-verifier", qualification: "trusted", ...(okProcess ? {} : { status: "failed", reason: "host-process-failed" }) }
+    : undefined;
+  const status: "PASS" | "FAILED" | "UNKNOWN" = !okProcess
+    ? "FAILED"
+    : terminalReceipt?.outcome === "FAILED" && qualification?.status !== "FAILED"
+      ? "UNKNOWN"
+      : (qualification?.status ?? "UNKNOWN");
+  return { status, ...(projectionResult === undefined ? {} : { projectionResult }) };
+}
+
 function collectSinglePortableGroupRun(input: {
   index: number;
   group: ReturnType<typeof selectE2EExecutionPlan>["groups"][number];
@@ -469,19 +540,10 @@ function collectSinglePortableGroupRun(input: {
   runnerToolchain: ReturnType<typeof ProjectSetupRunnerToolchainSchema.parse>;
   terminalReceipt: { at: string; outcome: "PASS" | "FAILED" } | undefined;
 }): { status: "PASS" | "FAILED" | "UNKNOWN"; projectionResult?: unknown } | { unavailable: string } {
-  const { index, group, admitted, run, bundle, plan, selectionInput, round, reference, taskId, operation, candidateDigest, snapshot, semanticApprovalDigests, runnerEnvironment, runnerToolchain, terminalReceipt } = input;
-  if (!admitted || canonicalJson(admitted.group) !== canonicalJson(group)) return { unavailable: "admitted-group-identity" };
-  const compiled = compileE2EScenarios(bundle, plan.effectiveTargets, group, { selectionInput, executionPlan: plan, group } as never);
-  if (admitted.expectedConfigDigest !== compiled.expectedConfigDigest || admitted.compiledInventoryDigest !== compiled.inventory.digest
-    || admitted.selectionPacketPath !== compiled.selectionPacketPath || canonicalJson(admitted.expectedCases) !== canonicalJson(compiled.expectedCases)) {
-    return { unavailable: "compiled-group-expectations" };
-  }
-  const binding = E2ERunBindingSchema.parse(admitted.binding);
-  if (binding.runId !== reference.groupRunIds[index] || binding.taskId !== taskId || binding.operationId !== operation.id
-    || binding.operationFence !== operation.fence || binding.workflowRevision !== reference.workflowRevision || binding.candidateDigest !== candidateDigest
-    || binding.roundId !== reference.roundId || canonicalJson(round.groupBindings[index]) !== canonicalJson(binding)) {
-    return { unavailable: "group-run-binding" };
-  }
+  const validated = compileAndValidateAdmittedGroup(input);
+  if ("unavailable" in validated) return validated;
+  const { compiled, binding } = validated;
+  const { group, run, round, snapshot, semanticApprovalDigests, runnerEnvironment, runnerToolchain, terminalReceipt } = input;
   if (run === undefined) return { status: "UNKNOWN" };
   if (canonicalJson(run.group) !== canonicalJson(group) || canonicalJson(run.binding) !== canonicalJson(binding)) return { unavailable: "group-run-result-binding" };
   const selection = JSON.parse(compiled.files.get(compiled.selectionPacketPath) ?? "null") as unknown;
@@ -500,19 +562,7 @@ function collectSinglePortableGroupRun(input: {
     usage: { discoveredResults: Number(rawActual.selected) + Number(rawActual.filtered), maxAgentContextBytes: 0, maxLedgerBytes: 0, maxObservationBytes: 0, artifactBytes: 0, downloads: 0, events: 0, modelTokens: 0, maxModelCallsInStep: 0, maxActionStepsInStep: 0 },
     limits: { maxAgentContextBytes: 16_384, maxLedgerBytes: 8_192, maxObservationBytes: 262_144, maxEventsPerStep: 1_000, maxModelTokensPerCall: 64_000 },
   });
-  const qualification = terminalReceipt !== undefined && result.collection !== null && result.oracle !== null
-    ? qualifyE2ECollection(result.oracle, { ...result.collection, receivedAt: terminalReceipt.at })
-    : result.qualification;
-  const okProcess = processSucceeded(rawActual.runProcess as Record<string, unknown> | undefined);
-  const projectionResult = qualification?.result != null
-    ? { ...qualification.result, producer: "broker-independent-e2e-verifier", qualification: "trusted", ...(okProcess ? {} : { status: "failed", reason: "host-process-failed" }) }
-    : undefined;
-  const status: "PASS" | "FAILED" | "UNKNOWN" = !okProcess
-    ? "FAILED"
-    : terminalReceipt?.outcome === "FAILED" && qualification?.status !== "FAILED"
-      ? "UNKNOWN"
-      : (qualification?.status ?? "UNKNOWN");
-  return { status, ...(projectionResult === undefined ? {} : { projectionResult }) };
+  return finalizePortableGroupQualification(result, rawActual, terminalReceipt);
 }
 
 function portableAdmissionAndEvidenceIntegrityValid(
@@ -567,6 +617,119 @@ function portablePlanAndRoundValid(input: {
     && canonicalJson(plan) === canonicalJson(admission.plan) && bundle.bundleDigest === e2eScenarioBundleDigest(bundle);
 }
 
+async function loadPortableAdmissionAndGroups(input: {
+  dependencies: AwsBrokerDependencies;
+  operation: OperationRecord;
+  task: DeveloperTaskRecord;
+  candidate: ReturnType<typeof CandidateManifestSchema.parse>;
+  reference: E2EWorkflowAdmissionRef;
+  admissionText: string | undefined;
+}): Promise<{
+  admission: Record<string, unknown>;
+  snapshot: E2ESourceSnapshot;
+  selectionInput: Record<string, unknown>;
+  plan: ReturnType<typeof selectE2EExecutionPlan>;
+  bundle: ReturnType<typeof E2EScenarioBundleSchema.parse>;
+  round: ReturnType<typeof E2ERoundSchema.parse>;
+  runnerEnvironment: ReturnType<typeof ProjectSetupRunnerEnvironmentSchema.parse>;
+  runnerToolchain: ReturnType<typeof ProjectSetupRunnerToolchainSchema.parse>;
+  groupAdmissions: Array<Record<string, unknown>>;
+  groupRunsById: Map<string, Record<string, unknown>>;
+} | { unavailable: string }> {
+  const { dependencies, operation, task, candidate, reference, admissionText } = input;
+  const evidenceRef = operation.workflowE2EEvidenceRef;
+  const groupEvidenceRefs = operation.workflowE2EGroupEvidenceRefs ?? [];
+  const groupEvidenceRunIds = operation.workflowE2EGroupRunIds ?? [];
+  const evidenceText = evidenceRef === undefined ? undefined
+    : await readStoredText(dependencies.s3, dependencies.artifactBucketName, evidenceRef.key, WORKFLOW_E2E_ADMISSION_MAX_BYTES);
+  if (!portableAdmissionAndEvidenceIntegrityValid(admissionText, evidenceText, reference, evidenceRef)) return { unavailable: "admission-or-evidence-reference-integrity" };
+  const admission = JSON.parse(admissionText!) as Record<string, unknown>;
+  const evidence = evidenceText === undefined ? undefined : JSON.parse(evidenceText) as Record<string, unknown>;
+  if (!portableSubjectBindingValid(admission, evidence, reference, task.taskId, operation, candidate.digest)) return { unavailable: "admission-or-evidence-subject-binding" };
+  const snapshot = parseAdmittedSourceSnapshot(admission.sourceSnapshot);
+  if (snapshot === undefined) return { unavailable: "admitted-source-snapshot-shape" };
+  verifyE2ESourceSnapshot(snapshot, candidate);
+  E2EPolicySchema.parse(admission.policy);
+  const selectionInput = { ...(admission.selectionInput as Record<string, unknown>), sourceSnapshot: snapshot };
+  const plan = selectE2EExecutionPlan(selectionInput as never);
+  const bundle = E2EScenarioBundleSchema.parse(admission.bundle);
+  const round = E2ERoundSchema.parse(admission.round);
+  const runtime = admission.runtime as Record<string, unknown>;
+  const runnerEnvironment = ProjectSetupRunnerEnvironmentSchema.parse(runtime.runnerEnvironment);
+  const runnerToolchain = ProjectSetupRunnerToolchainSchema.parse(runtime.runnerToolchain);
+  const groupAdmissions = admission.groupAdmissions as Array<Record<string, unknown>>;
+  if (!portablePlanAndRoundValid({ admission, plan, bundle, round, groupAdmissions, reference, taskId: task.taskId, operation, candidateDigest: candidate.digest })) {
+    return { unavailable: "current-plan-round-or-group-binding" };
+  }
+  const groupRunsById = await loadValidatedPortableGroupEvidence({
+    dependencies, operation, taskId: task.taskId, candidateDigest: candidate.digest, reference, round,
+    planGroups: plan.groups, groupAdmissions, evidence, groupEvidenceRefs, groupEvidenceRunIds,
+  });
+  if ("unavailable" in groupRunsById) return groupRunsById;
+  return { admission, snapshot, selectionInput, plan, bundle, round, runnerEnvironment, runnerToolchain, groupAdmissions, groupRunsById };
+}
+
+async function loadValidatedPortableGroupEvidence(input: {
+  dependencies: AwsBrokerDependencies;
+  operation: OperationRecord;
+  taskId: string;
+  candidateDigest: string;
+  reference: E2EWorkflowAdmissionRef;
+  round: ReturnType<typeof E2ERoundSchema.parse>;
+  planGroups: readonly unknown[];
+  groupAdmissions: Array<Record<string, unknown>>;
+  evidence: Record<string, unknown> | undefined;
+  groupEvidenceRefs: readonly unknown[];
+  groupEvidenceRunIds: readonly string[];
+}): Promise<Map<string, Record<string, unknown>> | { unavailable: string }> {
+  const { evidence, reference, groupEvidenceRefs, groupEvidenceRunIds } = input;
+  const aggregateGroupRuns = evidence?.groupRuns;
+  if (evidence !== undefined && (!Array.isArray(aggregateGroupRuns) || aggregateGroupRuns.length !== reference.groupRunIds.length)) return { unavailable: "aggregate-group-results-incomplete" };
+  if (!validateGroupEvidenceRefList(groupEvidenceRefs, groupEvidenceRunIds, reference.groupRunIds)) return { unavailable: "accepted-group-reference-list-invalid" };
+  if (evidence === undefined && groupEvidenceRefs.length === 0) return { unavailable: "group-results-not-yet-accepted" };
+  const aggregateByRun = indexAggregateGroupRuns(aggregateGroupRuns);
+  if ("unavailable" in aggregateByRun) return aggregateByRun;
+  const groupRunsById = await loadAcceptedPortableGroupRuns({
+    dependencies: input.dependencies, operation: input.operation, taskId: input.taskId, candidateDigest: input.candidateDigest,
+    reference, round: input.round, planGroups: input.planGroups, groupAdmissions: input.groupAdmissions,
+    groupEvidenceRefs, hasAggregate: evidence !== undefined, aggregateByRun,
+  });
+  if ("unavailable" in groupRunsById) return groupRunsById;
+  if (evidence !== undefined && (groupEvidenceRefs.length !== reference.groupRunIds.length
+    || canonicalJson([...groupRunsById.keys()].sort()) !== canonicalJson([...reference.groupRunIds].sort())
+    || canonicalJson([...aggregateByRun.keys()].sort()) !== canonicalJson([...reference.groupRunIds].sort()))) {
+    return { unavailable: "aggregate-does-not-cover-accepted-groups" };
+  }
+  return groupRunsById;
+}
+
+function collectAllPortableGroups(input: {
+  loaded: Exclude<Awaited<ReturnType<typeof loadPortableAdmissionAndGroups>>, { unavailable: string }>;
+  operation: OperationRecord;
+  task: DeveloperTaskRecord;
+  candidateDigest: string;
+  reference: E2EWorkflowAdmissionRef;
+  semanticApprovalDigests: Map<string, string>;
+  staleProjection: boolean;
+}): { qualifications: Array<"PASS" | "FAILED" | "UNKNOWN">; projectionResults: unknown[] } | { unavailable: string } {
+  const { loaded, operation, task, candidateDigest, reference, semanticApprovalDigests, staleProjection } = input;
+  const terminalReceipt = workflowE2ETerminalReceiptAt(operation, task, candidateDigest, reference, loaded.round, staleProjection);
+  const projectionResults: unknown[] = [];
+  const qualifications: Array<"PASS" | "FAILED" | "UNKNOWN"> = [];
+  for (const [index, group] of loaded.plan.groups.entries()) {
+    const collected = collectSinglePortableGroupRun({
+      index, group, admitted: loaded.groupAdmissions[index], run: loaded.groupRunsById.get(reference.groupRunIds[index]!),
+      bundle: loaded.bundle, plan: loaded.plan, selectionInput: loaded.selectionInput, round: loaded.round,
+      reference, taskId: task.taskId, operation, candidateDigest, snapshot: loaded.snapshot,
+      semanticApprovalDigests, runnerEnvironment: loaded.runnerEnvironment, runnerToolchain: loaded.runnerToolchain, terminalReceipt,
+    });
+    if ("unavailable" in collected) return collected;
+    if (collected.projectionResult !== undefined) projectionResults.push(collected.projectionResult);
+    qualifications.push(collected.status);
+  }
+  return { qualifications, projectionResults };
+}
+
 async function verifyPortableWorkflowE2EEvidence(input: {
   dependencies: AwsBrokerDependencies;
   hooks: E2EVerificationHooks;
@@ -581,71 +744,22 @@ async function verifyPortableWorkflowE2EEvidence(input: {
   unavailable: (reason: string) => "UNKNOWN";
 }): Promise<"PASS" | "FAILED" | "UNKNOWN"> {
   const { dependencies, hooks, operation, task, candidate, reference, admissionText, staleProjection, projection, diagnostic, unavailable } = input;
-  const evidenceRef = operation.workflowE2EEvidenceRef;
-  const groupEvidenceRefs = operation.workflowE2EGroupEvidenceRefs ?? [];
-  const groupEvidenceRunIds = operation.workflowE2EGroupRunIds ?? [];
-  const evidenceText = evidenceRef === undefined ? undefined
-    : await readStoredText(dependencies.s3, dependencies.artifactBucketName, evidenceRef.key, WORKFLOW_E2E_ADMISSION_MAX_BYTES);
-  if (!portableAdmissionAndEvidenceIntegrityValid(admissionText, evidenceText, reference, evidenceRef)) return unavailable("admission-or-evidence-reference-integrity");
-  const admission = JSON.parse(admissionText!) as Record<string, unknown>;
-  const evidence = evidenceText === undefined ? undefined : JSON.parse(evidenceText) as Record<string, unknown>;
-  if (!portableSubjectBindingValid(admission, evidence, reference, task.taskId, operation, candidate.digest)) return unavailable("admission-or-evidence-subject-binding");
-  const snapshot = parseAdmittedSourceSnapshot(admission.sourceSnapshot);
-  if (snapshot === undefined) return unavailable("admitted-source-snapshot-shape");
-  verifyE2ESourceSnapshot(snapshot, candidate);
-  E2EPolicySchema.parse(admission.policy);
-  const selectionInput = { ...(admission.selectionInput as Record<string, unknown>), sourceSnapshot: snapshot };
-  const plan = selectE2EExecutionPlan(selectionInput as never);
-  const bundle = E2EScenarioBundleSchema.parse(admission.bundle);
-  const round = E2ERoundSchema.parse(admission.round);
-  const runtime = admission.runtime as Record<string, unknown>;
-  const runnerEnvironment = ProjectSetupRunnerEnvironmentSchema.parse(runtime.runnerEnvironment);
-  const runnerToolchain = ProjectSetupRunnerToolchainSchema.parse(runtime.runnerToolchain);
-  const groupAdmissions = admission.groupAdmissions as Array<Record<string, unknown>>;
-  if (!portablePlanAndRoundValid({ admission, plan, bundle, round, groupAdmissions, reference, taskId: task.taskId, operation, candidateDigest: candidate.digest })) {
-    return unavailable("current-plan-round-or-group-binding");
-  }
-  const aggregateGroupRuns = evidence?.groupRuns;
-  if (evidence !== undefined && (!Array.isArray(aggregateGroupRuns) || aggregateGroupRuns.length !== reference.groupRunIds.length)) return unavailable("aggregate-group-results-incomplete");
-  if (!validateGroupEvidenceRefList(groupEvidenceRefs, groupEvidenceRunIds, reference.groupRunIds)) return unavailable("accepted-group-reference-list-invalid");
-  if (evidence === undefined && groupEvidenceRefs.length === 0) return unavailable("group-results-not-yet-accepted");
-  const aggregateByRun = indexAggregateGroupRuns(aggregateGroupRuns);
-  if ("unavailable" in aggregateByRun) return unavailable(aggregateByRun.unavailable);
-  const groupRunsById = await loadAcceptedPortableGroupRuns({
-    dependencies, operation, taskId: task.taskId, candidateDigest: candidate.digest, reference, round,
-    planGroups: plan.groups, groupAdmissions, groupEvidenceRefs, hasAggregate: evidence !== undefined, aggregateByRun,
-  });
-  if ("unavailable" in groupRunsById) return unavailable(groupRunsById.unavailable);
-  if (evidence !== undefined && (groupEvidenceRefs.length !== reference.groupRunIds.length
-    || canonicalJson([...groupRunsById.keys()].sort()) !== canonicalJson([...reference.groupRunIds].sort())
-    || canonicalJson([...aggregateByRun.keys()].sort()) !== canonicalJson([...reference.groupRunIds].sort()))) {
-    return unavailable("aggregate-does-not-cover-accepted-groups");
-  }
-  const semantic = (admission.portableApprovalBinding as { semanticApproval?: { digest?: unknown } } | undefined)?.semanticApproval?.digest;
+  const loaded = await loadPortableAdmissionAndGroups({ dependencies, operation, task, candidate, reference, admissionText });
+  if ("unavailable" in loaded) return unavailable(loaded.unavailable);
+  const semantic = (loaded.admission.portableApprovalBinding as { semanticApproval?: { digest?: unknown } } | undefined)?.semanticApproval?.digest;
   if (typeof semantic !== "string" || !/^[a-f0-9]{64}$/u.test(semantic)) return unavailable("semantic-approval-binding");
-  const semanticApprovalDigests = new Map(bundle.scenarios.map((scenario) => [scenario.scenarioId, semantic]));
-  const terminalReceipt = workflowE2ETerminalReceiptAt(operation, task, candidate.digest, reference, round, staleProjection);
-  const projectionResults: unknown[] = [];
-  const qualifications: Array<"PASS" | "FAILED" | "UNKNOWN"> = [];
-  for (const [index, group] of plan.groups.entries()) {
-    const collected = collectSinglePortableGroupRun({
-      index, group, admitted: groupAdmissions[index], run: groupRunsById.get(reference.groupRunIds[index]!),
-      bundle, plan, selectionInput, round, reference, taskId: task.taskId, operation, candidateDigest: candidate.digest,
-      snapshot, semanticApprovalDigests, runnerEnvironment, runnerToolchain, terminalReceipt,
-    });
-    if ("unavailable" in collected) return unavailable(collected.unavailable);
-    if (collected.projectionResult !== undefined) projectionResults.push(collected.projectionResult);
-    qualifications.push(collected.status);
-  }
-  const currentAuthorityValid = await workflowE2ECurrentAuthorityIsValidWithHooks(dependencies, hooks, task, candidate, admission, snapshot, diagnostic);
+  const semanticApprovalDigests = new Map(loaded.bundle.scenarios.map((scenario) => [scenario.scenarioId, semantic]));
+  const collected = collectAllPortableGroups({ loaded, operation, task, candidateDigest: candidate.digest, reference, semanticApprovalDigests, staleProjection });
+  if ("unavailable" in collected) return unavailable(collected.unavailable);
+  const currentAuthorityValid = await workflowE2ECurrentAuthorityIsValidWithHooks(dependencies, hooks, task, candidate, loaded.admission, loaded.snapshot, diagnostic);
   if (projection !== undefined) {
-    projection.plan = plan;
-    projection.round = round;
-    if (currentAuthorityValid) projection.results.push(...projectionResults);
+    projection.plan = loaded.plan;
+    projection.round = loaded.round;
+    if (currentAuthorityValid) projection.results.push(...collected.projectionResults);
   }
   if (!currentAuthorityValid) return unavailable(diagnostic?.reason ?? "current-owner-policy-source-or-runtime-authority");
-  if (!e2ePlanHasCompleteRequiredCriteria(plan)) return unavailable("required-criteria-unavailable");
-  return qualifications.includes("FAILED") ? "FAILED" : qualifications.every((item) => item === "PASS") ? "PASS" : "UNKNOWN";
+  if (!e2ePlanHasCompleteRequiredCriteria(loaded.plan)) return unavailable("required-criteria-unavailable");
+  return collected.qualifications.includes("FAILED") ? "FAILED" : collected.qualifications.every((item) => item === "PASS") ? "PASS" : "UNKNOWN";
 }
 
 function nonCandidatePurposeReason(purpose: E2EWorkflowAdmissionRef["purpose"]): string | undefined {
@@ -932,6 +1046,26 @@ function formatAuthorityException(stage: string, error: unknown): string {
   return `current-authority-loader-exception:${stage}:${detail || "empty-error"}`;
 }
 
+async function loadAdmittedFeatureVerifier(
+  dependencies: AwsBrokerDependencies,
+  catalogId: string,
+  profileId: string,
+  runtimeBinding: ReturnType<typeof parseRuntimeBinding>,
+  reject: AuthorityReject,
+): Promise<{ key: { pk: string; sk: string }; featureRow: Record<string, unknown>; feature: ReturnType<typeof E2EFeatureVerifierRecordSchema.parse> } | undefined> {
+  const key = e2eFeatureVerifierKey(catalogId, profileId);
+  const featureRow = await getItem<Record<string, unknown>>(dependencies, key);
+  const parsedFeatureRow = featureRow === undefined || typeof featureRow.pk !== "string" || typeof featureRow.sk !== "string"
+    ? undefined
+    : E2EFeatureVerifierRecordSchema.safeParse(Object.fromEntries(Object.entries(featureRow).filter(([k]) => k !== "pk" && k !== "sk")));
+  if (parsedFeatureRow === undefined || !parsedFeatureRow.success) { reject("current-feature-runtime-schema-invalid"); return undefined; }
+  if (!admitE2EFeatureVerifier(featureRow, { runtimeCatalogId: catalogId, profileId, binding: runtimeBinding, scope: E2E_FEATURE_PROCESS_RESPONSE_SCOPE, now: Date.now() })) {
+    reject(diagnoseFeatureVerifierMismatch(featureRow, parsedFeatureRow.data, catalogId, profileId, runtimeBinding));
+    return undefined;
+  }
+  return { key, featureRow: featureRow!, feature: parsedFeatureRow.data };
+}
+
 export async function workflowE2ECurrentAuthorityIsValidWithHooks(
   dependencies: AwsBrokerDependencies,
   hooks: E2EVerificationHooks,
@@ -958,16 +1092,9 @@ export async function workflowE2ECurrentAuthorityIsValidWithHooks(
     const snapshot = await loadCandidateSourceSnapshot(dependencies, task, candidate, mark, reject);
     if (snapshot === undefined) return false;
     stage = "current-feature-runtime";
-    const key = e2eFeatureVerifierKey(catalogId, policy.defaultSandboxProfileId);
-    const featureRow = await getItem<Record<string, unknown>>(dependencies, key);
     const runtimeBinding = parseRuntimeBinding(project.runtimeBinding);
-    const parsedFeatureRow = featureRow === undefined || typeof featureRow.pk !== "string" || typeof featureRow.sk !== "string"
-      ? undefined
-      : E2EFeatureVerifierRecordSchema.safeParse(Object.fromEntries(Object.entries(featureRow).filter(([k]) => k !== "pk" && k !== "sk")));
-    if (parsedFeatureRow === undefined || !parsedFeatureRow.success) return reject("current-feature-runtime-schema-invalid");
-    if (!admitE2EFeatureVerifier(featureRow, { runtimeCatalogId: catalogId, profileId: policy.defaultSandboxProfileId, binding: runtimeBinding, scope: E2E_FEATURE_PROCESS_RESPONSE_SCOPE, now: Date.now() })) {
-      return reject(diagnoseFeatureVerifierMismatch(featureRow, parsedFeatureRow.data, catalogId, policy.defaultSandboxProfileId, runtimeBinding));
-    }
+    const verifier = await loadAdmittedFeatureVerifier(dependencies, catalogId, policy.defaultSandboxProfileId, runtimeBinding, reject);
+    if (verifier === undefined) return false;
     const planDigest = sha256Hex(canonicalJson({
       domain: "workflow-feature-e2e-approved-plan/v1", taskId: task.taskId, artifactId: canonicalApproval.artifactId, artifactSha256: canonicalApproval.artifactDigest,
       graphDigest: canonicalApproval.graphDigest, graphRunId: canonicalApproval.runId, workflowRevision: canonicalApproval.workflowRevision, actorId: canonicalApproval.actorId,
@@ -975,7 +1102,7 @@ export async function workflowE2ECurrentAuthorityIsValidWithHooks(
     stage = "current-admission-derivation";
     const currentAdmission = deriveE2EFeatureExecutionAdmission({
       intent: portableIntent.intent, snapshot, artifactId: artifact.id, artifactSha256: artifact.sha256,
-      planDigest, policy, runtimeCatalogId: catalogId, runtimeBinding, featureVerifier: featureRow, now: Date.now(),
+      planDigest, policy, runtimeCatalogId: catalogId, runtimeBinding, featureVerifier: verifier.featureRow, now: Date.now(),
     });
     const binding = admission.portableApprovalBinding as { semanticApproval?: { artifactId?: unknown; digest?: unknown }; planDigest?: unknown } | undefined;
     if (binding?.semanticApproval?.artifactId !== artifact.id || binding.semanticApproval.digest !== artifact.sha256 || binding.planDigest !== planDigest) {
@@ -998,7 +1125,7 @@ export async function workflowE2ECurrentAuthorityIsValidWithHooks(
     }, reject);
     if (fences === undefined) return false;
     if (diagnostic !== undefined) {
-      diagnostic.authorityChecks = [...fences.base, featureVerifierConditionCheck(dependencies.tableName, key, parsedFeatureRow.data), ...fences.creator];
+      diagnostic.authorityChecks = [...fences.base, featureVerifierConditionCheck(dependencies.tableName, verifier.key, verifier.feature), ...fences.creator];
     }
     return true;
   } catch (error) {
@@ -1032,6 +1159,44 @@ async function readApplicationGroupUploadReceipt(
   return valid ? (upload.receivedAt as string) : undefined;
 }
 
+async function loadApplicationGroupEvidenceEntry(
+  dependencies: AwsBrokerDependencies,
+  operation: OperationRecord,
+  reference: E2EWorkflowAdmissionRef,
+  raw: unknown,
+  limitsByGroup: ReadonlyMap<string, number>,
+  seen: Set<string>,
+): Promise<{ groupRunId: string; parsed: unknown; receipt: string | undefined } | { unavailable: string }> {
+  const parsedRef = E2EWorkflowGroupEvidenceRefSchema.safeParse(raw);
+  if (!parsedRef.success) return { unavailable: "accepted-group-reference-schema" };
+  const { groupRunId, evidenceRef: stored } = parsedRef.data;
+  const limit = limitsByGroup.get(groupRunId);
+  if (limit === undefined || seen.has(groupRunId) || stored.key !== `workflow-e2e-group-evidence/sha256/${stored.sha256}.json`) {
+    return { unavailable: "accepted-group-reference-subject" };
+  }
+  const groupText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, stored.key, limit);
+  if (groupText === undefined || Buffer.byteLength(groupText) !== stored.byteLength || sha256Hex(groupText) !== stored.sha256) {
+    return { unavailable: "accepted-group-evidence-integrity" };
+  }
+  const receipt = await readApplicationGroupUploadReceipt(dependencies, operation, reference, groupRunId, stored.sha256);
+  return { groupRunId, parsed: JSON.parse(groupText) as unknown, receipt };
+}
+
+async function readApplicationAggregateEvidence(
+  dependencies: AwsBrokerDependencies,
+  evidenceRef: OperationRecord["workflowE2EEvidenceRef"],
+  maxBytes: number,
+): Promise<{ aggregate: unknown } | { unavailable: string }> {
+  if (evidenceRef === undefined) return { aggregate: undefined };
+  const aggregateText = evidenceRef.key === `workflow-e2e-evidence/sha256/${evidenceRef.sha256}.json`
+    ? await readStoredText(dependencies.s3, dependencies.artifactBucketName, evidenceRef.key, maxBytes)
+    : undefined;
+  if (aggregateText === undefined || sha256Hex(aggregateText) !== evidenceRef.sha256 || Buffer.byteLength(aggregateText) !== evidenceRef.byteLength) {
+    return { unavailable: "admission-or-evidence-reference-integrity" };
+  }
+  return { aggregate: JSON.parse(aggregateText) as unknown };
+}
+
 export async function loadApplicationEvidenceInputs(
   dependencies: AwsBrokerDependencies,
   operation: OperationRecord,
@@ -1046,34 +1211,19 @@ export async function loadApplicationEvidenceInputs(
     return { unavailable: "accepted-group-reference-list-invalid" };
   }
   if (evidenceRef === undefined && groupEvidenceRefs.length === 0) return { unavailable: "group-results-not-yet-accepted" };
-  let aggregate: unknown;
-  if (evidenceRef !== undefined) {
-    const aggregateText = evidenceRef.key === `workflow-e2e-evidence/sha256/${evidenceRef.sha256}.json`
-      ? await readStoredText(dependencies.s3, dependencies.artifactBucketName, evidenceRef.key, limits.aggregate) : undefined;
-    if (aggregateText === undefined || sha256Hex(aggregateText) !== evidenceRef.sha256 || Buffer.byteLength(aggregateText) !== evidenceRef.byteLength) {
-      return { unavailable: "admission-or-evidence-reference-integrity" };
-    }
-    aggregate = JSON.parse(aggregateText) as unknown;
-  }
+  const aggregateLoaded = await readApplicationAggregateEvidence(dependencies, evidenceRef, limits.aggregate);
+  if ("unavailable" in aggregateLoaded) return aggregateLoaded;
   const groupEvidence = new Map<string, unknown>();
   const receivedAt = new Map<string, string>();
+  const seen = new Set<string>();
   for (const raw of groupEvidenceRefs) {
-    const parsedRef = E2EWorkflowGroupEvidenceRefSchema.safeParse(raw);
-    if (!parsedRef.success) return { unavailable: "accepted-group-reference-schema" };
-    const { groupRunId, evidenceRef: stored } = parsedRef.data;
-    const limit = limits.byGroup.get(groupRunId);
-    if (limit === undefined || groupEvidence.has(groupRunId) || stored.key !== `workflow-e2e-group-evidence/sha256/${stored.sha256}.json`) {
-      return { unavailable: "accepted-group-reference-subject" };
-    }
-    const groupText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, stored.key, limit);
-    if (groupText === undefined || Buffer.byteLength(groupText) !== stored.byteLength || sha256Hex(groupText) !== stored.sha256) {
-      return { unavailable: "accepted-group-evidence-integrity" };
-    }
-    groupEvidence.set(groupRunId, JSON.parse(groupText) as unknown);
-    const receipt = await readApplicationGroupUploadReceipt(dependencies, operation, reference, groupRunId, stored.sha256);
-    if (receipt !== undefined) receivedAt.set(groupRunId, receipt);
+    const entry = await loadApplicationGroupEvidenceEntry(dependencies, operation, reference, raw, limits.byGroup, seen);
+    if ("unavailable" in entry) return entry;
+    seen.add(entry.groupRunId);
+    groupEvidence.set(entry.groupRunId, entry.parsed);
+    if (entry.receipt !== undefined) receivedAt.set(entry.groupRunId, entry.receipt);
   }
-  return { aggregate, groupEvidence, receivedAt };
+  return { aggregate: aggregateLoaded.aggregate, groupEvidence, receivedAt };
 }
 
 function applyVerifiedApplicationProjection(
@@ -1149,7 +1299,7 @@ async function readVerifiedApplicationAdmission(
   }
 }
 
-export async function settleBaselineRound(dependencies: AwsBrokerDependencies, operation: OperationRecord, status: OperationStatus): Promise<void> {
+export async function settleBaselineRoundWithHooks(dependencies: AwsBrokerDependencies, hooks: E2EVerificationHooks, operation: OperationRecord, status: OperationStatus): Promise<void> {
   const reference = operation.workflowE2EAdmission;
   if (operation.kind !== "task" || reference?.purpose !== "baseline" || reference.baseCommitSha === undefined || reference.attempt === undefined) return;
   try {
@@ -1167,7 +1317,7 @@ export async function settleBaselineRound(dependencies: AwsBrokerDependencies, o
       { verified, expected: { operationId: operation.id, roundId: reference.roundId, admissionSha256: reference.admissionRef.sha256, baseCommitSha: reference.baseCommitSha, attempt: reference.attempt } },
     );
   } catch (error) {
-    console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_baseline_settle_failed", taskId: reference.taskId, operationId: operation.id, errorName: error instanceof Error ? error.name : "unknown" }));
+    hooks.log({ component: "broker", event: "workflow.e2e_baseline_settle_failed", taskId: reference.taskId, operationId: operation.id, errorName: error instanceof Error ? error.name : "unknown" });
   }
 }
 
@@ -1185,7 +1335,7 @@ async function verifyBaselineRound(dependencies: AwsBrokerDependencies, operatio
   });
 }
 
-export async function settleReplayRound(dependencies: AwsBrokerDependencies, operation: OperationRecord, status: OperationStatus): Promise<void> {
+export async function settleReplayRoundWithHooks(dependencies: AwsBrokerDependencies, hooks: E2EVerificationHooks, operation: OperationRecord, status: OperationStatus): Promise<void> {
   const reference = operation.workflowE2EAdmission;
   if (operation.kind !== "task" || reference?.purpose !== "replay" || reference.sourceRoundId === undefined || reference.attempt === undefined) return;
   try {
@@ -1200,7 +1350,7 @@ export async function settleReplayRound(dependencies: AwsBrokerDependencies, ope
     if (verified === undefined) { await unavailable("unverified"); return; }
     await recordWorkflowE2EReplay(dependencies, task, { verified, expected: { ...round, operationId: operation.id, roundId: reference.roundId, admissionSha256: reference.admissionRef.sha256 } });
   } catch (error) {
-    console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_replay_settle_failed", taskId: reference.taskId, operationId: operation.id, errorName: error instanceof Error ? error.name : "unknown" }));
+    hooks.log({ component: "broker", event: "workflow.e2e_replay_settle_failed", taskId: reference.taskId, operationId: operation.id, errorName: error instanceof Error ? error.name : "unknown" });
   }
 }
 
@@ -1217,7 +1367,7 @@ async function verifyReplayRound(dependencies: AwsBrokerDependencies, operation:
   });
 }
 
-export async function settleGroundingRound(dependencies: AwsBrokerDependencies, operation: OperationRecord, status: OperationStatus): Promise<void> {
+export async function settleGroundingRoundWithHooks(dependencies: AwsBrokerDependencies, hooks: E2EVerificationHooks, operation: OperationRecord, status: OperationStatus): Promise<void> {
   const reference = operation.workflowE2EAdmission;
   if (operation.kind !== "task" || reference?.purpose !== "grounding" || reference.baseCommitSha === undefined || reference.attempt === undefined || reference.planArtifactSha256 === undefined) return;
   try {
@@ -1237,7 +1387,7 @@ export async function settleGroundingRound(dependencies: AwsBrokerDependencies, 
       { verified, expected: { operationId: operation.id, roundId: reference.roundId, admissionSha256: reference.admissionRef.sha256, baseCommitSha: reference.baseCommitSha } },
     );
   } catch (error) {
-    console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_grounding_settle_failed", taskId: reference.taskId, operationId: operation.id, errorName: error instanceof Error ? error.name : "unknown" }));
+    hooks.log({ component: "broker", event: "workflow.e2e_grounding_settle_failed", taskId: reference.taskId, operationId: operation.id, errorName: error instanceof Error ? error.name : "unknown" });
   }
 }
 
@@ -1315,6 +1465,38 @@ function validateApplicationPlanAndSelection(
   return { intent: parsedIntent.data, recorded: recorded.data };
 }
 
+async function evaluateCurrentApplicationRuntimeAndSelection(input: {
+  dependencies: AwsBrokerDependencies;
+  hooks: E2EVerificationHooks;
+  task: DeveloperTaskRecord;
+  intent: E2EApplicationPlanIntent;
+  artifact: { id: string; sha256: string };
+  recorded: E2EApplicationSelectionRecord;
+  admission: E2EApplicationExecutionAdmission;
+  diagnostic: WorkflowE2EVerificationDiagnostic | undefined;
+  reject: AuthorityReject;
+}): Promise<TransactItems | undefined> {
+  const { dependencies, hooks, task, intent, artifact, recorded, admission, diagnostic, reject } = input;
+  const current = await hooks.evaluateWorkflowE2EApplicationSelectionNow(dependencies, task, intent, artifact, { mode: "current", pinned: recorded.accountRefs });
+  if (!current.ok) {
+    if (current.kind === "refused" && current.scope === "runtime" && diagnostic !== undefined) diagnostic.runtimeChange = "unusable";
+    if (current.kind === "refused" && current.scope === "accounts" && diagnostic !== undefined) diagnostic.runtimeChange = "accounts";
+    reject(`${current.kind === "unevaluable" ? "application-selection-unavailable" : "application-selection-refused"}: ${current.reason}`);
+    return undefined;
+  }
+  if (!verifyAdmittedRuntimeRowsCurrent(admission, current.inputs.rows, diagnostic, reject)) return undefined;
+  const unchanged = applicationSelectionStillCurrent(recorded, current.selection);
+  if (!unchanged.ok) { reject(`application-selection-changed: ${unchanged.reason}`); return undefined; }
+  if (canonicalJson(admission.selectionInput.approvedSemanticApproval) !== canonicalJson(recorded.semanticApproval)
+    || canonicalJson(admission.selectionInput.setupApproval) !== canonicalJson(recorded.setupApproval)
+    || applicationIntentDigest(intent) !== recorded.intentDigest
+    || admission.intentDigest !== sha256Hex(canonicalJson(admission.intent))) {
+    reject("canonical-approval-binding-mismatch");
+    return undefined;
+  }
+  return current.conditions;
+}
+
 export async function workflowE2EApplicationAuthorityIsValidWithHooks(
   dependencies: AwsBrokerDependencies,
   hooks: E2EVerificationHooks,
@@ -1349,26 +1531,17 @@ export async function workflowE2EApplicationAuthorityIsValidWithHooks(
       return reject("current-admission-runtime-plan-or-source-mismatch");
     }
     mark("current-runtime-rows");
-    const current = await hooks.evaluateWorkflowE2EApplicationSelectionNow(dependencies, task, intent, plan.artifact, { mode: "current", pinned: recorded.accountRefs });
-    if (!current.ok) {
-      if (current.kind === "refused" && current.scope === "runtime" && diagnostic !== undefined) diagnostic.runtimeChange = "unusable";
-      if (current.kind === "refused" && current.scope === "accounts" && diagnostic !== undefined) diagnostic.runtimeChange = "accounts";
-      return reject(`${current.kind === "unevaluable" ? "application-selection-unavailable" : "application-selection-refused"}: ${current.reason}`);
-    }
-    if (!verifyAdmittedRuntimeRowsCurrent(admission, current.inputs.rows, diagnostic, reject)) return false;
-    const unchanged = applicationSelectionStillCurrent(recorded, current.selection);
-    if (!unchanged.ok) return reject(`application-selection-changed: ${unchanged.reason}`);
-    if (canonicalJson(admission.selectionInput.approvedSemanticApproval) !== canonicalJson(recorded.semanticApproval)
-      || canonicalJson(admission.selectionInput.setupApproval) !== canonicalJson(recorded.setupApproval)
-      || applicationIntentDigest(intent) !== recorded.intentDigest
-      || admission.intentDigest !== sha256Hex(canonicalJson(admission.intent))) return reject("canonical-approval-binding-mismatch");
+    const runtimeConditions = await evaluateCurrentApplicationRuntimeAndSelection({
+      dependencies, hooks, task, intent, artifact: plan.artifact, recorded, admission, diagnostic, reject,
+    });
+    if (runtimeConditions === undefined) return false;
     const fences = await currentAuthorityFences(dependencies, task, {
       catalogKey, latestProject, setupApproval, policy,
       creatorAuthority: creator.creatorAuthority, creatorAccess: creator.creatorAccess,
       creatorMembershipKey: creator.creatorMembershipKey, developer: creator.developer,
     }, reject);
     if (fences === undefined) return false;
-    if (diagnostic !== undefined) diagnostic.authorityChecks = [...fences.base, ...(current.conditions as Array<Record<string, unknown>>), ...fences.creator];
+    if (diagnostic !== undefined) diagnostic.authorityChecks = [...fences.base, ...(runtimeConditions as Array<Record<string, unknown>>), ...fences.creator];
     return true;
   } catch (error) {
     return reject(formatAuthorityException(stage, error));
@@ -1451,25 +1624,36 @@ async function readPrivateS3Bytes(dependencies: AwsBrokerDependencies, key: stri
   }
 }
 
+async function loadClosedTaskHistoricalDisplay(
+  dependencies: AwsBrokerDependencies,
+  task: DeveloperTaskRecord,
+  progress: NonNullable<NonNullable<DeveloperTaskRecord["workflow"]>["e2e"]>,
+  candidateDigest: string,
+) {
+  const qualified = progress.qualifiedRound;
+  const failed = progress.failedRound;
+  const round = qualified ?? failed;
+  const roundMatches = round !== undefined && round.candidateDigest === candidateDigest
+    && round.roundId === progress.currentRoundId && round.groupRunIds.length === progress.currentGroupRunIds.length
+    && round.groupRunIds.every((runId, index) => runId === progress.currentGroupRunIds[index]);
+  if (!roundMatches || round === undefined || progress.displayRef === undefined) return undefined;
+  const captured = await readWorkflowE2ENotifierProjection({
+    ref: progress.displayRef, ownerKey: task.ownerKey, workspaceId: task.workspaceId,
+    current: { candidateDigest: round.candidateDigest, roundId: round.roundId, groupRunIds: [...round.groupRunIds], admissionSha256: round.admissionSha256, evidenceSha256: round.evidenceSha256 },
+    readPrivateObject: (key, maxBytes) => readPrivateS3Bytes(dependencies, key, maxBytes),
+  });
+  if (captured === undefined || Date.parse(captured.capturedAt) > Date.parse(task.closedAt!)) return undefined;
+  const statusMatches = qualified !== undefined ? captured.view.e2e.status === "PASS" : failed !== undefined && captured.view.e2e.status === "FAILED";
+  return statusMatches ? captured : undefined;
+}
+
 async function closedTaskWorkflowE2EPresentation(
   dependencies: AwsBrokerDependencies,
   task: DeveloperTaskRecord,
   progress: NonNullable<NonNullable<DeveloperTaskRecord["workflow"]>["e2e"]>,
   candidateDigest: string,
 ): Promise<{ presentation: NonNullable<DeveloperTaskView["e2ePresentation"]>; scenarioResults?: E2EScenarioResults; artifacts: readonly DisplayArtifact[] }> {
-  const qualified = progress.qualifiedRound;
-  const failed = progress.failedRound;
-  const round = qualified ?? failed;
-  const roundMatchesClosedTask = round !== undefined && round.candidateDigest === candidateDigest
-    && round.roundId === progress.currentRoundId && round.groupRunIds.length === progress.currentGroupRunIds.length
-    && round.groupRunIds.every((runId, index) => runId === progress.currentGroupRunIds[index]);
-  const captured = roundMatchesClosedTask && round !== undefined && progress.displayRef !== undefined
-    ? await readWorkflowE2ENotifierProjection({
-      ref: progress.displayRef, ownerKey: task.ownerKey, workspaceId: task.workspaceId,
-      current: { candidateDigest: round.candidateDigest, roundId: round.roundId, groupRunIds: [...round.groupRunIds], admissionSha256: round.admissionSha256, evidenceSha256: round.evidenceSha256 },
-      readPrivateObject: (key, maxBytes) => readPrivateS3Bytes(dependencies, key, maxBytes),
-    })
-    : undefined;
+  const history = await loadClosedTaskHistoricalDisplay(dependencies, task, progress, candidateDigest);
   const current = E2ESharedViewSchema.parse({
     schemaVersion: 1,
     setup: { status: "unavailable", selectedTargetIds: [], executionPlanDigest: null, blockingInputIds: [], mockSubstitutableInputIds: [] },
@@ -1479,8 +1663,6 @@ async function closedTaskWorkflowE2EPresentation(
       unexercisedBehaviors: [], policyPresence: "absent", workflowPhase: "closed", requiredUnexercisedCriteriaIds: [] },
     actions: [],
   });
-  const historyStatusMatches = qualified !== undefined ? captured?.view.e2e.status === "PASS" : failed !== undefined && captured?.view.e2e.status === "FAILED";
-  const history = captured !== undefined && Date.parse(captured.capturedAt) <= Date.parse(task.closedAt!) && historyStatusMatches ? captured : undefined;
   const historicalHtml = history === undefined ? ""
     : `<section aria-labelledby="e2e-historical-${history.roundId}"><h2 id="e2e-historical-${history.roundId}">Recorded historical E2E result</h2><p>Recorded ${history.view.e2e.status} at ${history.capturedAt}; this is not current eligibility.</p>${renderE2EPageHtml(history.view).replaceAll("e2e-summary", `e2e-historical-summary-${history.roundId}`)}</section>`;
   const scope = history === undefined
@@ -1491,11 +1673,12 @@ async function closedTaskWorkflowE2EPresentation(
   const recordedRows = history?.scenarioResults;
   const recordedRowsHtml = recordedRows === undefined ? "" : renderE2EScenarioRowsHtml(recordedRows, { artifactPath: (sha256) => `/review/${task.taskId}/task/api/e2e/artifacts/${sha256}` });
   const closedPageHtml = `${currentHtml}${historicalHtml}`;
+  const historyBlocks = history === undefined ? [] : renderE2ENotifierSlackBlocks(history.view,
+    { candidateDigest: history.candidateDigest, roundId: history.roundId, capturedAt: history.capturedAt, ...(recordedRows === undefined ? {} : { scenarioResults: recordedRows }) });
   return {
     presentation: {
       shared: current,
-      slackBlocks: [currentSlack, ...(history === undefined ? [] : renderE2ENotifierSlackBlocks(history.view,
-        { candidateDigest: history.candidateDigest, roundId: history.roundId, capturedAt: history.capturedAt, ...(recordedRows === undefined ? {} : { scenarioResults: recordedRows }) }))].slice(0, 16),
+      slackBlocks: [currentSlack, ...historyBlocks].slice(0, 16),
       pageHtml: (closedPageHtml.length + recordedRowsHtml.length <= 65_536 ? `${closedPageHtml}${recordedRowsHtml}` : closedPageHtml).slice(0, 65_536),
       mcp: { ...renderE2EMcpProjection(current), scope: `${renderE2EMcpProjection(current).scope} ${scope}`.slice(0, 2_000) },
     },
@@ -1533,6 +1716,44 @@ function operationMatchesPresentationRound(
     && canonicalJson(failedRound.groupRunIds) === canonicalJson(admission.groupRunIds);
 }
 
+async function buildOperationE2EPresentation(input: {
+  dependencies: AwsBrokerDependencies;
+  hooks: E2EVerificationHooks;
+  operation: OperationRecord;
+  task: DeveloperTaskRecord;
+  candidate: ReturnType<typeof CandidateManifestSchema.parse>;
+  staleFailure: boolean;
+  actor: "owner" | "viewer";
+  ending?: { operationId: string; status: "SUCCEEDED" | "FAILED" } | undefined;
+}): Promise<{ presentation: NonNullable<DeveloperTaskView["e2ePresentation"]>; scenarioResults?: E2EScenarioResults; artifacts: readonly DisplayArtifact[] } | undefined> {
+  const { dependencies, hooks, operation, task, candidate, staleFailure, actor, ending } = input;
+  const projection: WorkflowE2EProjection & { allowStaleProjection: boolean } = { results: [], allowStaleProjection: staleFailure };
+  await verifyWorkflowE2EEvidence(dependencies, hooks, operation, task, candidate, projection, undefined, ending?.operationId === operation.id ? { terminalStatus: ending.status } : undefined);
+  if (projection.plan === undefined || projection.round === undefined) return undefined;
+  const plan = projection.plan as Record<string, unknown>;
+  const selectedTargetIds = extractSelectedTargetIds(plan);
+  if (selectedTargetIds === undefined) return undefined;
+  const shared = buildE2ESharedView({
+    plan: projection.plan, currentRound: projection.round, results: staleFailure ? [] : projection.results,
+    setup: { status: "unavailable", selectedTargetIds, executionPlanDigest: plan.digest as string, blockingInputIds: [], mockSubstitutableInputIds: [] },
+    actor, control: { policyPresent: true, workflowPhase: "e2e", ownerActionProposals: [] },
+  });
+  const rows = staleFailure || projection.display === undefined || projection.display.scenarios.length === 0 ? undefined : projection.display;
+  const baseline = rows === undefined ? undefined : await readWorkflowE2EBaseline(dependencies, task).catch(() => undefined);
+  const scenarioResults: E2EScenarioResults | undefined = rows === undefined ? undefined : { scenarios: [...rows.scenarios], ...(baseline === undefined ? {} : { baseline }) };
+  const shown = presentationWithResults(task.taskId, shared, scenarioResults);
+  return {
+    presentation: { shared, slackBlocks: shown.slackBlocks, pageHtml: shown.pageHtml, mcp: renderE2EMcpProjection(shared) },
+    ...(scenarioResults === undefined ? {} : { scenarioResults }),
+    artifacts: rows?.artifacts ?? [],
+  };
+}
+
+function checksOperationIdOf(raw: unknown): string | undefined {
+  if (typeof raw !== "object" || raw === null || !("id" in raw) || typeof raw.id !== "string") return undefined;
+  return "workflowMode" in raw && raw.workflowMode === "CHECKS" ? raw.id : undefined;
+}
+
 export async function workflowE2EPresentationDetailed(
   dependencies: AwsBrokerDependencies,
   hooks: E2EVerificationHooks,
@@ -1551,29 +1772,11 @@ export async function workflowE2EPresentationDetailed(
   const presentationRoundId = staleFailure ? failedRound.roundId : progress.currentRoundId;
   if (presentationRoundId === undefined) return undefined;
   for (const raw of operations) {
-    if (typeof raw !== "object" || raw === null || !("id" in raw) || typeof raw.id !== "string" || !("workflowMode" in raw) || raw.workflowMode !== "CHECKS") continue;
-    const operation = await getItem<OperationRecord>(dependencies, operationKey(task.workspaceId, raw.id));
+    const operationId = checksOperationIdOf(raw);
+    if (operationId === undefined) continue;
+    const operation = await getItem<OperationRecord>(dependencies, operationKey(task.workspaceId, operationId));
     if (!operationMatchesPresentationRound(operation, task.taskId, presentationRoundId, candidateResult.data.digest, staleFailure, failedRound)) continue;
-    const projection: WorkflowE2EProjection & { allowStaleProjection: boolean } = { results: [], allowStaleProjection: staleFailure };
-    await verifyWorkflowE2EEvidence(dependencies, hooks, operation, task, candidateResult.data, projection, undefined, ending?.operationId === operation.id ? { terminalStatus: ending.status } : undefined);
-    if (projection.plan === undefined || projection.round === undefined) return undefined;
-    const plan = projection.plan as Record<string, unknown>;
-    const selectedTargetIds = extractSelectedTargetIds(plan);
-    if (selectedTargetIds === undefined) return undefined;
-    const shared = buildE2ESharedView({
-      plan: projection.plan, currentRound: projection.round, results: staleFailure ? [] : projection.results,
-      setup: { status: "unavailable", selectedTargetIds, executionPlanDigest: plan.digest as string, blockingInputIds: [], mockSubstitutableInputIds: [] },
-      actor, control: { policyPresent: true, workflowPhase: "e2e", ownerActionProposals: [] },
-    });
-    const rows = staleFailure || projection.display === undefined || projection.display.scenarios.length === 0 ? undefined : projection.display;
-    const baseline = rows === undefined ? undefined : await readWorkflowE2EBaseline(dependencies, task).catch(() => undefined);
-    const scenarioResults: E2EScenarioResults | undefined = rows === undefined ? undefined : { scenarios: [...rows.scenarios], ...(baseline === undefined ? {} : { baseline }) };
-    const shown = presentationWithResults(task.taskId, shared, scenarioResults);
-    return {
-      presentation: { shared, slackBlocks: shown.slackBlocks, pageHtml: shown.pageHtml, mcp: renderE2EMcpProjection(shared) },
-      ...(scenarioResults === undefined ? {} : { scenarioResults }),
-      artifacts: rows?.artifacts ?? [],
-    };
+    return buildOperationE2EPresentation({ dependencies, hooks, operation, task, candidate: candidateResult.data, staleFailure, actor, ending });
   }
   return undefined;
 }

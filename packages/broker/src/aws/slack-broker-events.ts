@@ -1,5 +1,22 @@
 // Slack ingress direct-invoke event shapes and type guards (extracted from aws/broker.ts).
-import { type SlackThread, WORKFLOW_RESOLVE_FINDINGS_MAX } from "@agentx/contracts";
+import {
+  SlackChannelIdSchema,
+  SlackTeamIdSchema,
+  WORKFLOW_RESOLVE_FINDINGS_MAX,
+  slackBindingOf,
+  type SlackChannelBinding,
+  type SlackRequester,
+  type SlackThread,
+} from "@agentx/contracts";
+
+export {
+  SlackChannelIdSchema,
+  SlackTeamIdSchema,
+  slackBindingOf,
+  type SlackChannelBinding,
+  type SlackRequester,
+  type SlackThread,
+};
 
 /**
  * The Slack ingress's stop command (#126): a thread's messages queue behind its running task, so a

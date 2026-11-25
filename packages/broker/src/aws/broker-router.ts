@@ -11,7 +11,6 @@ import {
   isAdminChangePressEvent,
   type AdminChangePressEvent,
   type OfferedAgentModels,
-  type SlackThread,
 } from "@agentx/contracts";
 import { z } from "zod";
 import type { AuthenticatedIdentity } from "../auth.js";
@@ -94,7 +93,8 @@ import {
   type SlackWorkflowReviewRetryEvent,
   type SlackWorkflowSendBackEvent,
   type SlackWorkflowStartEvent,
-} from "./broker-slack-events.js";
+  type SlackThread,
+} from "./slack-broker-events.js";
 import { routeEvalBatch, routeStartEvalBatch, routeSwebenchChannel, swebenchDependencies } from "./broker-swebench-routes.js";
 import type { AwsBrokerDependencies, AwsBrokerInput } from "./broker-types.js";
 
@@ -103,6 +103,7 @@ export type BrokerHttpResponse = { statusCode: number; headers: Record<string, s
 export interface OperatorEventHooks {
   operatorGithubBindings: (dependencies: AwsBrokerDependencies) => GithubInstallationBindings;
   brokerLogLine: (entry: Record<string, unknown>) => void;
+  logStderr: (entry: Record<string, unknown>) => void;
   operatorEventRefused: (event: string, error: unknown) => void;
   isGithubWebhookRecoveryEvent: (event: unknown) => event is { source: "agentx.github-webhook-recovery"; continuation?: unknown };
   retryDueGithubWebhookEvents: (dependencies: AwsBrokerDependencies, continuation?: unknown) => Promise<unknown>;
@@ -115,6 +116,7 @@ export interface OperatorEventHooks {
 }
 
 export interface SlackIngressHooks {
+  brokerLogLine: (entry: Record<string, unknown>) => void;
   namedInstallTeamView: (dependencies: AwsBrokerDependencies, teamId: string) => Promise<AwsBrokerDependencies>;
   developerTaskActions: (dependencies: AwsBrokerDependencies) => DeveloperTaskActions;
   unexpectedErrorAnswer: (error: unknown, requestId: string) => BrokerHttpResponse;
@@ -185,13 +187,14 @@ export interface AdminHttpHooks {
 async function handleCoreEngineEvent(
   core: NonNullable<AwsBrokerInput["core"]>,
   event: unknown,
-  context?: { getRemainingTimeInMillis?: () => number },
+  context: { getRemainingTimeInMillis?: () => number } | undefined,
+  logStderr: (entry: Record<string, unknown>) => void,
 ): Promise<BrokerHttpResponse> {
   try {
     const remainingMs = typeof context?.getRemainingTimeInMillis === "function" ? context.getRemainingTimeInMillis() : undefined;
     return json((await core.handleEvent(event, { remainingMs })) ?? { skipped: "not_core" }, "core-engine");
   } catch (error) {
-    process.stderr.write(`${JSON.stringify({ component: "broker", event: "core_engine.event_failed", error: error instanceof Error ? error.name : "unknown" })}\n`);
+    logStderr({ component: "broker", event: "core_engine.event_failed", error: error instanceof Error ? error.name : "unknown" });
     if (error instanceof Error && error.message === "The core engine settings are not readable.") {
       return json({ error: { code: "CORE_SWITCH_BLOCKED", message: "The core engine settings are not readable." } }, "core-engine", 503);
     }
@@ -203,13 +206,14 @@ async function handleAdminChangePress(
   dependencies: AwsBrokerDependencies,
   adminChanges: AdminChangeDependencies | undefined,
   event: AdminChangePressEvent,
+  brokerLogLine: (entry: Record<string, unknown>) => void,
 ): Promise<BrokerHttpResponse> {
   if (dependencies.workspaces !== undefined) return json({ error: { code: "FORBIDDEN", message: SLACK_WEB_SIGNIN_NOTICE } }, "slack-ingress", 403);
   if (adminChanges === undefined) return json({ error: { code: "NOT_FOUND", message: "admin changes are not set up in this deployment" } }, "slack-ingress", 404);
   try {
     return json(await pressAdminChange(adminChanges, event), "slack-ingress");
   } catch (error) {
-    console.log(JSON.stringify({ component: "broker", event: "admin_change.press_failed", changeId: event.changeId, error: error instanceof AgentXError ? error.code : error instanceof Error ? error.name : "unknown" }));
+    brokerLogLine({ component: "broker", event: "admin_change.press_failed", changeId: event.changeId, error: error instanceof AgentXError ? error.code : error instanceof Error ? error.name : "unknown" });
     return json({ outcome: "failed", changeId: event.changeId }, "slack-ingress", 500);
   }
 }
@@ -292,17 +296,17 @@ async function handleWorkflowDispatchRecovery(dependencies: AwsBrokerDependencie
   try {
     const dispatches = await hooks.retryDueWorkflowDispatches(dependencies);
     const planEvidence = await hooks.startDuePlanEvidenceJobs(dependencies).catch((error: unknown) => {
-      console.log(JSON.stringify({ component: "broker", event: "plan_evidence.sweep_failed", error: error instanceof Error ? error.name : "unknown" }));
+      hooks.brokerLogLine({ component: "broker", event: "plan_evidence.sweep_failed", error: error instanceof Error ? error.name : "unknown" });
       return { attempted: 0, started: 0 };
     });
     const releases = await releasePendingFinishedTasks({ tableName: dependencies.tableName, actions: hooks.developerTaskActions(dependencies), documentClient: dependencies.documentClient })
       .catch((error: unknown) => {
-        console.log(JSON.stringify({ component: "broker", event: "developer.finished_task_sweep_failed", error: error instanceof Error ? error.name : "unknown" }));
+        hooks.brokerLogLine({ component: "broker", event: "developer.finished_task_sweep_failed", error: error instanceof Error ? error.name : "unknown" });
         return { attempted: 0, released: 0 };
       });
     return json({ ...dispatches, planEvidence, releases }, "workflow-dispatch-recovery");
   } catch (error) {
-    console.log(JSON.stringify({ component: "broker", event: "workflow.dispatch_recovery_failed", error: error instanceof Error ? error.name : "unknown" }));
+    hooks.brokerLogLine({ component: "broker", event: "workflow.dispatch_recovery_failed", error: error instanceof Error ? error.name : "unknown" });
     return json({ error: "recovery_failed" }, "workflow-dispatch-recovery", 500);
   }
 }
@@ -315,7 +319,7 @@ async function handleRecoveryEvent(
   if (hooks.isGithubWebhookRecoveryEvent(event)) {
     try { return json(await hooks.retryDueGithubWebhookEvents(dependencies, "continuation" in event ? event.continuation : undefined), "github-webhook-recovery"); }
     catch (error) {
-      console.log(JSON.stringify({ component: "broker", event: "github.webhook_recovery_failed", error: error instanceof Error ? error.name : "unknown" }));
+      hooks.brokerLogLine({ component: "broker", event: "github.webhook_recovery_failed", error: error instanceof Error ? error.name : "unknown" });
       return json({ error: "recovery_failed" }, "github-webhook-recovery", 500);
     }
   }
@@ -327,7 +331,7 @@ async function handleRecoveryEvent(
       });
       return json(result, "workflow-merge-recovery");
     } catch (error) {
-      console.log(JSON.stringify({ component: "broker", event: "workflow.merge_recovery_failed", error: error instanceof Error ? error.name : "unknown" }));
+      hooks.brokerLogLine({ component: "broker", event: "workflow.merge_recovery_failed", error: error instanceof Error ? error.name : "unknown" });
       return json({ error: "recovery_failed" }, "workflow-merge-recovery", 500);
     }
   }
@@ -343,9 +347,9 @@ export async function dispatchCoreAndOperatorEvent(
   context: { awsRequestId?: string; getRemainingTimeInMillis?: () => number } | undefined,
   hooks: OperatorEventHooks,
 ): Promise<BrokerHttpResponse | undefined> {
-  if (core !== undefined && (isCoreJobEvent(event) || outboxCompaniesOf(event) !== undefined)) return handleCoreEngineEvent(core, event, context);
+  if (core !== undefined && (isCoreJobEvent(event) || outboxCompaniesOf(event) !== undefined)) return handleCoreEngineEvent(core, event, context, hooks.logStderr);
   if (dependencies.workspaces !== undefined && isSlackLinkNoticeEvent(event)) return json(await answerSlackLinkNotice(dependencies, event), "slack-link-notice");
-  if (isAdminChangePressEvent(event)) return handleAdminChangePress(dependencies, adminChanges, event);
+  if (isAdminChangePressEvent(event)) return handleAdminChangePress(dependencies, adminChanges, event, hooks.brokerLogLine);
   if (isSlackWorkspaceOperatorEvent(event)) return handleSlackWorkspaceOperator(dependencies, event);
   if (isSlackWorkspaceRemovedEvent(event)) return handleSlackWorkspaceRemovedEvent(dependencies, event);
   if (isSlackRovaraEvent(event)) return handleSlackRovaraEvent(dependencies, event);
@@ -429,7 +433,7 @@ async function dispatchSlackNotesAndCore(
   if (isSlackThreadNoteEvent(event)) {
     try {
       const result = await hooks.recordSlackThreadNote(slackView, slackTasks, event);
-      console.log(JSON.stringify({ component: "broker", event: "slack.thread_note", taskId: event.taskId, eventId: event.eventId, outcome: result.outcome }));
+      hooks.brokerLogLine({ component: "broker", event: "slack.thread_note", taskId: event.taskId, eventId: event.eventId, outcome: result.outcome });
       return { statusCode: 200, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: JSON.stringify(result) };
     } catch (error) {
       return hooks.replyNotSavedAnswer(error, event);
@@ -537,6 +541,29 @@ function runtimeInstallationDeps(dependencies: AwsBrokerDependencies): RuntimeIn
   };
 }
 
+async function dispatchAdminCredentialsAndRuntimeStatus(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  request: AdaptedHttpRequest,
+  url: URL,
+  body: unknown,
+): Promise<BrokerHttpResponse | undefined> {
+  if (url.pathname === "/v1/admin/credentials" && (request.method === "POST" || request.method === "GET")) {
+    requireAdminClaim(identity);
+    if (!dependencies.credentialRegistry) throw agentXError("RUNTIME_UNAVAILABLE", "connector credentials are not configured in this deployment");
+    return request.method === "POST"
+      ? json(await dependencies.credentialRegistry.register(identity, body), request.requestId, 201)
+      : json(await dependencies.credentialRegistry.list(identity), request.requestId);
+  }
+  if (request.method === "GET" && url.pathname === "/v1/admin/runtime-installation/status") {
+    requireAdminClaim(identity);
+    if (!dependencies.e2eFeatureRuntimeCatalogId) throw agentXError("NOT_FOUND", "browser and API runtimes are not set up in this deployment");
+    return json(await readE2ERuntimeStatus({ runtimeCatalogId: dependencies.e2eFeatureRuntimeCatalogId, profileId: WEB_API_RUNTIME_PROFILE_ID,
+      read: (key) => getItem<Record<string, unknown>>(dependencies, key) }), request.requestId);
+  }
+  return undefined;
+}
+
 async function dispatchAdminRuntimeAndSetup(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
@@ -556,20 +583,7 @@ async function dispatchAdminRuntimeAndSetup(
   if (request.method === "POST" && url.pathname === "/v1/admin/projects/setup-proposals") return hooks.routeSetupProposal(dependencies, request, identity, body);
   if (request.method === "POST" && url.pathname === "/v1/admin/projects/setup-approvals") return hooks.routeSetupApproval(dependencies, request, identity, body);
   if (request.method === "POST" && url.pathname === "/v1/admin/projects") return json(await hooks.registerProject(dependencies, identity, body), request.requestId, 201);
-  if (url.pathname === "/v1/admin/credentials" && (request.method === "POST" || request.method === "GET")) {
-    requireAdminClaim(identity);
-    if (!dependencies.credentialRegistry) throw agentXError("RUNTIME_UNAVAILABLE", "connector credentials are not configured in this deployment");
-    return request.method === "POST"
-      ? json(await dependencies.credentialRegistry.register(identity, body), request.requestId, 201)
-      : json(await dependencies.credentialRegistry.list(identity), request.requestId);
-  }
-  if (request.method === "GET" && url.pathname === "/v1/admin/runtime-installation/status") {
-    requireAdminClaim(identity);
-    if (!dependencies.e2eFeatureRuntimeCatalogId) throw agentXError("NOT_FOUND", "browser and API runtimes are not set up in this deployment");
-    return json(await readE2ERuntimeStatus({ runtimeCatalogId: dependencies.e2eFeatureRuntimeCatalogId, profileId: WEB_API_RUNTIME_PROFILE_ID,
-      read: (key) => getItem<Record<string, unknown>>(dependencies, key) }), request.requestId);
-  }
-  return undefined;
+  return dispatchAdminCredentialsAndRuntimeStatus(dependencies, identity, request, url, body);
 }
 
 async function handleAdminCompanyImport(dependencies: AwsBrokerDependencies, url: URL, requestId: string): Promise<BrokerHttpResponse> {
@@ -603,6 +617,26 @@ async function handleAdminOfferedModels(
   return json(offered, requestId);
 }
 
+async function dispatchAdminHealthAndModels(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  url: URL,
+  requestId: string,
+): Promise<BrokerHttpResponse | undefined> {
+  if (url.pathname === "/v1/admin/chatgpt") {
+    requireAdminClaim(identity);
+    if (!dependencies.chatgpt) throw agentXError("NOT_FOUND", "Sign in with ChatGPT is not set up in this deployment");
+    return json(await dependencies.chatgpt.health(), requestId);
+  }
+  if (url.pathname === CORE_OFFERED_MODELS_ADMIN_PATH) { requireAdminClaim(identity); return handleAdminOfferedModels(dependencies, identity, url, requestId); }
+  if (url.pathname === "/v1/admin/turns") {
+    requireAdminClaim(identity);
+    if (!dependencies.turnRecords) throw agentXError("RUNTIME_UNAVAILABLE", "turn records are not configured in this deployment");
+    return json(await dependencies.turnRecords.page(url.searchParams), requestId);
+  }
+  return undefined;
+}
+
 async function dispatchAdminDirectoryAndHealth(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
@@ -612,7 +646,8 @@ async function dispatchAdminDirectoryAndHealth(
   hooks: AdminHttpHooks,
 ): Promise<BrokerHttpResponse | undefined> {
   const modelCheck = /^\/v1\/admin\/e2e\/model-checks(?:\/([0-9a-f-]{36}))?$/.exec(url.pathname);
-  if (modelCheck !== null && ((request.method === "POST" && modelCheck[1] === undefined) || (request.method === "GET" && (modelCheck[1] !== undefined || url.pathname.endsWith("/model-checks"))))) {
+  const isModelCheck = modelCheck !== null && ((request.method === "POST" && modelCheck[1] === undefined) || (request.method === "GET" && (modelCheck[1] !== undefined || url.pathname.endsWith("/model-checks"))));
+  if (isModelCheck) {
     requireAdminClaim(identity);
     return hooks.adminModelChecks(dependencies, request.method, modelCheck[1], body, request.requestId);
   }
@@ -630,18 +665,7 @@ async function dispatchAdminDirectoryAndHealth(
     return json(await invites.list(), request.requestId);
   }
   if (url.pathname === "/v1/admin/company-import") { requireAdminClaim(identity); return handleAdminCompanyImport(dependencies, url, request.requestId); }
-  if (url.pathname === "/v1/admin/chatgpt") {
-    requireAdminClaim(identity);
-    if (!dependencies.chatgpt) throw agentXError("NOT_FOUND", "Sign in with ChatGPT is not set up in this deployment");
-    return json(await dependencies.chatgpt.health(), request.requestId);
-  }
-  if (url.pathname === CORE_OFFERED_MODELS_ADMIN_PATH) { requireAdminClaim(identity); return handleAdminOfferedModels(dependencies, identity, url, request.requestId); }
-  if (url.pathname === "/v1/admin/turns") {
-    requireAdminClaim(identity);
-    if (!dependencies.turnRecords) throw agentXError("RUNTIME_UNAVAILABLE", "turn records are not configured in this deployment");
-    return json(await dependencies.turnRecords.page(url.searchParams), request.requestId);
-  }
-  return undefined;
+  return dispatchAdminHealthAndModels(dependencies, identity, url, request.requestId);
 }
 
 async function dispatchAdminChannelAdapterRoute(

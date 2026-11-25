@@ -1,5 +1,6 @@
 // SWE-bench / eval-batch admin and Slack route helpers (extracted from aws/broker.ts).
-import { agentXError, modelKey, type SlackChannelBinding, SlackChannelIdSchema, SlackTeamIdSchema } from "@agentx/contracts";
+import { agentXError, modelKey } from "@agentx/contracts";
+import { SlackChannelIdSchema, SlackTeamIdSchema, type SlackChannelBinding } from "./slack-broker-events.js";
 import { type EvalBatchDependencies, withEvalBatches } from "./eval-batch.js";
 import { approvedSelection, bindingOwnRow, getSlackBinding, requireAdministrator, requireLatestProject, resolveProjectModel } from "./broker-primitives.js";
 import { batchResults, parseStartBody, requireBatchProject, showBatch, startBatch, stopBatchById } from "./eval-batch-admin.js";
