@@ -61,6 +61,7 @@
   "packages/broker/src/core/instructions/company-source.ts": 1,
   "packages/broker/src/core/notify/attention.ts": 2,
   "packages/broker/src/core/playbook/source.ts": 1,
+  "packages/broker/src/core/project-left-out.ts": 1,
   "packages/broker/src/core/script-tokens/store.ts": 1,
   "packages/broker/src/core/sessions/control.ts": 1,
   "packages/broker/src/core/sessions/projector.ts": 1,

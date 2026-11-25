@@ -12,6 +12,7 @@ import { CompanySelfServeNameSchema, COMPANY_INVITE_CODE_MAX, COMPANY_SELF_CREAT
 import { projectSettingsComplianceRoute, projectSettingsRoute, type ProjectSettingsHook } from "./project-settings.js";
 import { Membership, membershipKey, boundedCompanyReads, companyReadActions, ownPartitionRow, recordInCompany, resolveCompany, strictLiveMembership, type CompanyMembershipReader } from "./company-check.js";
 import { grantsPkFor, namedCompany, namedCompanyLatestRevisionRow, namedCompanyProjectArchived } from "./company-layout.js";
+import { isProjectUnreadable, logProjectLeftOut } from "../core/project-left-out.js";
 import { slackChannelBindingPkFor } from "./slack-company-layout.js";
 import type { TaskMergeWiring } from "./task-merge.js"; import { putCodeSettings, readCodeSettings } from "./project-code-settings.js"; import { putEvalNone, putSkip, readProjectSetupStatus } from "./project-setup-status.js"; import { LIFECYCLE_NOT_FOUND, routeProjectLifecycle, type LifecycleAction } from "./project-lifecycle-routes.js";
 // Spec 025 FR-009, FR-013, FR-014 and FR-016: GET projects, and the project access check the task
@@ -912,7 +913,8 @@ async function latestDefinition(deps: DeveloperRouteDependencies, project: strin
  */
 async function namedCompanyDefinition(deps: DeveloperRouteDependencies, company: OrgId, project: string): Promise<{ revision: number; developerTasks?: unknown } | undefined> {
   const [row, archived] = await Promise.all([
-    namedCompanyLatestRevisionRow(deps.documentClient, deps.tableName, company, project),
+    // This feeds LISTS of projects (`projectsWithPolicy`): one project whose current revision cannot be read (arch rule 9 refuses it wherever that project itself is read) is left out, never read from an older revision, and never fails the whole list.
+    namedCompanyLatestRevisionRow(deps.documentClient, deps.tableName, company, project).catch((error: unknown) => { if (!isProjectUnreadable(error)) throw error; logProjectLeftOut(company, project); return undefined; }),
     namedCompanyProjectArchived(deps.documentClient, deps.tableName, company, project),
   ]);
   if (row === undefined) return undefined;
