@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -253,7 +253,8 @@ describe("pull request maintenance", () => {
         stopWorkspaceProcesses: async () => { order.push("processes"); return { stopped: 0 }; },
         pullRequestUpdateSink: sink(),
       });
-      expect(order).toEqual(["containers", "processes", "containers", "credential"]);
+      // The fix runs no checks: its read token and its push token are each fetched after a cleanup.
+      expect(order).toEqual(["containers", "processes", "containers", "credential", "containers", "processes", "containers", "credential"]);
     });
 
     it("fetches no credential and pushes nothing when leftover programs cannot be stopped", async () => {
@@ -526,6 +527,186 @@ describe("pull request maintenance", () => {
 });
 
 // #183: pull request updates run readiness where preparation did, like publication.
+describe("a plain maintenance fetches its push credential only after the cleanup (MAINTAIN-TOKEN-CLEANUP)", () => {
+  const updateSink = () => vi.fn(async () => ({ url: "https://github.com/example/demo/pull/7", state: "open" as const, reconciled: false }));
+  const none = { stopWorkspaceProcesses: async () => ({ stopped: 0 }), sweepWorkspaceContainers: async () => ({ removed: 0 }) };
+
+  it("an append with no workflow fields removes containers and stops processes before the credential, and only then pushes", async () => {
+    const fixture = await createFixture("append");
+    await writeFile(join(fixture.checkout, "APPEND.md"), "review update\n", "utf8");
+    expect(Object.keys(fixture.invocation.payload)).not.toEqual(expect.arrayContaining(["workflowCandidateTreeSha"]));
+    expect(Object.keys(fixture.invocation.payload)).not.toEqual(expect.arrayContaining(["workflowSync"]));
+    const order: string[] = [];
+    const result = await maintainPullRequest({
+      rootPath: fixture.root,
+      invocation: fixture.invocation,
+      credentialProvider: async () => { order.push("credential"); return {}; },
+      sweepWorkspaceContainers: async () => { order.push("containers"); return { removed: 0 }; },
+      stopWorkspaceProcesses: async () => { order.push("processes"); return { stopped: 0 }; },
+      pullRequestUpdateSink: updateSink(),
+    });
+    expect(order).toEqual(["containers", "processes", "containers", "credential", "containers", "processes", "containers", "credential"]);
+    expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).toBe(`${result.commit}\n`);
+  });
+
+  it("a sync with no workflow fields does the same", async () => {
+    const fixture = await createFixture("sync");
+    await writeFile(join(fixture.seed, "UPSTREAM.md"), "latest base\n", "utf8");
+    await git(fixture.seed, ["add", "UPSTREAM.md"]);
+    await commit(fixture.seed, "upstream");
+    await git(fixture.seed, ["push", "origin", "main"]);
+    const order: string[] = [];
+    await maintainPullRequest({
+      rootPath: fixture.root,
+      invocation: fixture.invocation,
+      credentialProvider: async () => { order.push("credential"); return {}; },
+      sweepWorkspaceContainers: async () => { order.push("containers"); return { removed: 0 }; },
+      stopWorkspaceProcesses: async () => { order.push("processes"); return { stopped: 0 }; },
+      pullRequestUpdateSink: updateSink(),
+    });
+    expect(order).toEqual(["containers", "processes", "containers", "credential", "containers", "processes", "containers", "credential"]);
+  });
+
+  it("runs the project's checks with no token in hand: checks, then the cleanup, then the push token, then the push", async () => {
+    const fixture = await createFixture("append");
+    await writeFile(join(fixture.checkout, "APPEND.md"), "review update\n", "utf8");
+    const log = join(fixture.root, "order.log");
+    const note = (what: string) => writeFileSync(log, `${what}\n`, { flag: "a" });
+    const logged = () => readFileSync(log, "utf8").trim().split("\n");
+    const withCheck = {
+      ...fixture.invocation,
+      payload: {
+        ...fixture.invocation.payload,
+        project: {
+          ...fixture.invocation.payload.project,
+          readiness: [{
+            cwd: "repo/demo", executable: process.execPath, timeoutSeconds: 10,
+            args: ["-e", `require("node:fs").appendFileSync(${JSON.stringify(log)}, "check\\n")`],
+          }],
+        },
+      },
+    } as Extract<WorkerInvocation, { kind: "maintain" }>;
+    let remoteAtPushToken = "";
+    const result = await maintainPullRequest({
+      rootPath: fixture.root,
+      invocation: withCheck,
+      credentialProvider: async () => {
+        note("credential");
+        remoteAtPushToken = (await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).trim();
+        return {};
+      },
+      sweepWorkspaceContainers: async () => { note("containers"); return { removed: 0 }; },
+      stopWorkspaceProcesses: async () => { note("processes"); return { stopped: 0 }; },
+      pullRequestUpdateSink: updateSink(),
+    });
+    // The first token only reads the head and the base, and is gone before the checks; the checks run; the cleanup runs again; only then the token that pushes.
+    expect(logged()).toEqual(["containers", "processes", "containers", "credential", "check", "containers", "processes", "containers", "credential"]);
+    // Nothing was pushed when the push token was handed out, and the push followed it.
+    expect(remoteAtPushToken).toBe(fixture.pullRequestHead);
+    expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).toBe(`${result.commit}\n`);
+  });
+
+  it("fetches no push token and pushes nothing when the cleanup after the checks fails", async () => {
+    const fixture = await createFixture("append");
+    await writeFile(join(fixture.checkout, "APPEND.md"), "review update\n", "utf8");
+    const credential = vi.fn(async () => ({}));
+    let stops = 0;
+    await expect(maintainPullRequest({
+      rootPath: fixture.root,
+      invocation: fixture.invocation,
+      credentialProvider: credential,
+      sweepWorkspaceContainers: async () => ({ removed: 0 }),
+      stopWorkspaceProcesses: async () => {
+        stops += 1;
+        if (stops > 1) throw new Error("AgentX could not stop every process left in the workspace, so it did not push");
+        return { stopped: 0 };
+      },
+      pullRequestUpdateSink: updateSink(),
+    })).rejects.toThrow("did not push");
+    expect(credential).toHaveBeenCalledTimes(1); // the read of the head and the base, before the checks; never a push token
+    expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).toBe(`${fixture.pullRequestHead}\n`);
+  });
+
+  it("a sync that leaves nothing to push asks for no push token at all", async () => {
+    const fixture = await createFixture("sync");
+    const credential = vi.fn(async () => ({}));
+    await maintainPullRequest({
+      rootPath: fixture.root,
+      invocation: fixture.invocation,
+      credentialProvider: credential,
+      ...none,
+      pullRequestUpdateSink: updateSink(),
+    });
+    expect(credential).toHaveBeenCalledTimes(1);
+  });
+
+  it("fetches no credential and pushes nothing when the processes cannot be stopped", async () => {
+    const fixture = await createFixture("append");
+    await writeFile(join(fixture.checkout, "APPEND.md"), "review update\n", "utf8");
+    const credential = vi.fn(async () => ({}));
+    const sink = updateSink();
+    await expect(maintainPullRequest({
+      rootPath: fixture.root,
+      invocation: fixture.invocation,
+      credentialProvider: credential,
+      sweepWorkspaceContainers: async () => ({ removed: 0 }),
+      stopWorkspaceProcesses: async () => { throw new Error("AgentX could not stop every process left in the workspace, so it did not push"); },
+      pullRequestUpdateSink: sink,
+    })).rejects.toThrow("did not push");
+    expect(credential).not.toHaveBeenCalled();
+    expect(sink).not.toHaveBeenCalled();
+    expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).toBe(`${fixture.pullRequestHead}\n`);
+  });
+
+  it("fetches no credential and pushes nothing when the containers cannot be removed", async () => {
+    const fixture = await createFixture("append");
+    await writeFile(join(fixture.checkout, "APPEND.md"), "review update\n", "utf8");
+    const credential = vi.fn(async () => ({}));
+    await expect(maintainPullRequest({
+      rootPath: fixture.root,
+      invocation: fixture.invocation,
+      credentialProvider: credential,
+      sweepWorkspaceContainers: async () => { throw new Error("AgentX could not remove a container, so it did not push"); },
+      stopWorkspaceProcesses: async () => ({ stopped: 0 }),
+      pullRequestUpdateSink: updateSink(),
+    })).rejects.toThrow("did not push");
+    expect(credential).not.toHaveBeenCalled();
+    expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).toBe(`${fixture.pullRequestHead}\n`);
+  });
+
+  it("fetches no credential when the containers and processes keep coming back (fixed words)", async () => {
+    const fixture = await createFixture("append");
+    await writeFile(join(fixture.checkout, "APPEND.md"), "review update\n", "utf8");
+    const credential = vi.fn(async () => ({}));
+    await expect(maintainPullRequest({
+      rootPath: fixture.root,
+      invocation: fixture.invocation,
+      credentialProvider: credential,
+      sweepWorkspaceContainers: async () => ({ removed: 1 }),
+      stopWorkspaceProcesses: async () => ({ stopped: 0 }),
+      pullRequestUpdateSink: updateSink(),
+    })).rejects.toThrow("AgentX kept finding programs or containers started from the workspace, so it did not push");
+    expect(credential).not.toHaveBeenCalled();
+  });
+
+  it("fetches no credential and pushes nothing while another operation is still running in the worker", async () => {
+    const fixture = await createFixture("append");
+    await writeFile(join(fixture.checkout, "APPEND.md"), "review update\n", "utf8");
+    const credential = vi.fn(async () => ({}));
+    await expect(maintainPullRequest({
+      rootPath: fixture.root,
+      invocation: fixture.invocation,
+      credentialProvider: credential,
+      ...none,
+      otherOperationActive: () => true,
+      otherOperationWait: { timeoutMs: 60, pollMs: 5 },
+      pullRequestUpdateSink: updateSink(),
+    })).rejects.toThrow(/another operation still running.*did not push/);
+    expect(credential).not.toHaveBeenCalled();
+    expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).toBe(`${fixture.pullRequestHead}\n`);
+  });
+});
+
 describe("pull request maintenance checks in a devcontainer (#183)", () => {
   const UP_OUTPUT = "{\"outcome\":\"success\",\"containerId\":\"f832494aef96\",\"remoteUser\":\"node\",\"remoteWorkspaceFolder\":\"/workspaces/demo\"}";
   function fakeCli(exec: () => DevcontainerProcess, up: () => DevcontainerProcess = () => ({ exitCode: 0, stdout: UP_OUTPUT, stderr: "" })) {
