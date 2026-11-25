@@ -166,7 +166,7 @@ export class ControlPlaneStack extends Stack {
     });
     // Spec 025 phase 25a: declared on the stack itself so the names are exact. The legacy deployment (production) has
     // the developer task settings too, so it runs tasks as named environments do.
-    const signInParameters = developerSignInParameters(this, { tasks: true });
+    const signInParameters = developerSignInParameters(this, { tasks: true, canary: naming.env === undefined });
     // CODE-PUBLIC-URL: declared here, with the other install parameters; every external URL below goes through publicApiBase (public-api-url.ts).
     declarePublicApiUrl(this);
 
@@ -1127,7 +1127,7 @@ export class ControlPlaneStack extends Stack {
     }
     if (taskParameters !== undefined) {
       const developerSignIn = new DeveloperSignIn(this, "DeveloperSignIn", {
-        naming, env: naming.env ?? "production", api, stage: defaultStage, brokerIntegration: integration, broker, dispatcher, slackSecret, parameters: signInParameters, turnRecords, stateTable: state,
+        naming, env: naming.env ?? "production", api, stage: defaultStage, brokerIntegration: integration, broker, dispatcher, slackSecret, parameters: signInParameters, turnRecords, stateTable: state, alerts: operatorAlerts,
         ...(companySignIn === undefined ? {} : { company: companySignIn }),
       });
       // The dispatcher's lessons people port (a worker step's source lessons need the project roster): the sign-in table's name and two projected GetItem reads of it, from the real table, both layouts, no switch.

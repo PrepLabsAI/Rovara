@@ -527,6 +527,8 @@ describe("the control-plane-code unit", () => {
     entries.delete("packages/broker/src/aws/runtime-requalify-handler.ts");
     // The attention email sender (#907) exists only while CoreAttentionEmail is on; it is in CONTROL_PLANE_LAMBDAS_NOT_DEPLOYED.
     entries.delete("packages/broker/src/aws/attention-email-sender.ts");
+    // The canary session function (CANARY-SESSION) is in the legacy control plane only, and only while its five settings are given (beta); no named (test) environment has it.
+    entries.delete("packages/broker/src/aws/canary-session.ts");
     expect([...entries].sort()).toEqual(Object.values(CONTROL_PLANE_LAMBDAS).map((lambda) => lambda.entry).sort());
   });
 

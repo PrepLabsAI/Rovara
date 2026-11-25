@@ -26,6 +26,9 @@ export const CORE_EXPIRY_COLLISIONS: Readonly<Record<string, "keep" | "strip">> 
   WORKFLOW_THREAD_NOTE: "strip",
   // Separate key families too: the core's rate rows are company-scoped (core/script-tokens/rate.ts), the deployed broker's `<task partition>#RATE#...` (developer/page-comments.ts).
   TASK_RATE: "keep",
+  // SI-2 (saved images): the system rebuild run writes its own WORKSPACE with a 62-day expiry (core/test-env/saved-env-run.ts). The deployed broker keeps WORKSPACE items for good
+  // (aws/broker.ts and others write none with an expiry), so on AWS the core's expiry is removed and a rebuild workspace is kept like every other workspace (no deletion decided here).
+  WORKSPACE: "strip",
 });
 
 /**
