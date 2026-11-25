@@ -151,7 +151,7 @@ describe("journey 13b: resilience, the code host, the state table and the owner'
     w.proof.assertAllCore();
   }, 240_000);
 
-  it("09 9.10 (planning): a planning run that fails says so and the owner's retry plans again; KNOWN GAP, pinned: the retried plan then cannot be approved (the card says only \"isn't ready\", the spend being unknown), see A1-10-DONE.md", async () => {
+  it("09 9.10 (planning): a planning run that fails says so, the owner's retry plans again, and the failed run's unreported spend is settled as a marked estimate so the retried plan can be approved", async () => {
     world = await createJourneyWorld();
     const w = world;
     const taskId = await startTask(w);
@@ -168,13 +168,23 @@ describe("journey 13b: resilience, the code host, the state table and the owner'
     expect((await w.runStep("PLAN", [fauxAssistantMessage(HEALTH_PLAN)])).operation.status).toBe("SUCCEEDED");
     expect((await w.runStep("PLAN_CRITIQUE", [fauxAssistantMessage(fenced(PLAN_CRITIQUE_INFO_STRING, { verdict: "ok", points: [] }))])).operation.status).toBe("SUCCEEDED");
     expect(where(w, taskId), "the plan waits for the owner").toEqual({ stage: "PLAN_REVIEW", state: "WAITING" });
-    // KNOWN GAP: the failed run left the task's spend unread ("Rovara cannot tell what this task has spent, so it does not start more work on it": core/decisions/approval-gate.ts's SubjectRefusal, thrown from the
-    // spend read), and two hours of jobs do not settle it. The owner's Approve is answered 409 with the card's generic words, not those. It turns green with a fix that settles a failed run's spend or says why.
+    // The failed run reached a worker machine and reported no usage. Its spend is settled on the next spend read once the 120 s grace has passed (SPEND-UNREPORTED-RUN, train 51): $0 only for a run that never reached a machine,
+    // otherwise the hold's remaining room booked as a MARKED estimate (core-host/unreported-run-settle.ts). Two hours of jobs pass; Approve is the first spend read after the failed run.
     for (let index = 0; index < 4; index += 1) await w.runJobs(1800);
     const listed = await w.maya("GET", "/v1/app/decisions");
     const card = (listed.body.cards as Array<{ id: string; taskId?: string }>).find((item) => item.taskId === taskId)!;
     const approved = await w.maya("POST", `/v1/app/decisions/${card.id.replace(":", "/")}/approve`, { shownDigest: (listed.body.digests as Record<string, string>)[card.id], requestId: randomUUID() });
-    expect({ status: approved.status, error: approved.body.error }).toEqual({ status: 409, error: { code: "MERGE_NOT_READY", message: "This isn't ready to be decided yet." } });
+    expect({ status: approved.status, error: approved.body.error }, "Approve is no longer refused for good: the failed run's spend is settled by the read").toEqual({ status: 200, error: undefined });
+    const failedId = w.harness.db.find((row) => row.entityType === "OPERATION" && row.workflowMode === "PLAN" && row.status === "FAILED")[0]!.id;
+    const entries = w.harness.db.find((row) => row.entityType === "COST_ENTRY");
+    const settled = entries.filter((row) => String(row.entryId).startsWith(`usage:${failedId}:`));
+    // This failed run reached a machine, so it is the marked estimate (not the $0 of a run that never reached one); the task has no hold room left in this journey, so the estimate books $0 and says it is an estimate.
+    expect(settled.map((row) => ({ entryId: row.entryId, provider: row.provider, modelId: row.modelId, chargeStatus: row.chargeStatus, micros: row.micros })), "the failed run is settled once, as a marked $0 estimate").toEqual([{ entryId: `usage:${failedId}:unflushed`, provider: "rovara-unflushed-estimate", modelId: "hold-estimate", chargeStatus: "estimated", micros: 0 }]);
+    const money = ((await w.maya("GET", `/v1/dev/tasks/${taskId}`)).body.task as { money: { state: string; finality: string; spentMicros: { state: string; value: number }; estimatedMicros: { state: string; value: number }; coverage: { estimatedCalls: number } } }).money;
+    const booked = entries.reduce((sum, row) => sum + Number(row.micros), 0);
+    expect({ state: money.state, finality: money.finality, spent: money.spentMicros, estimated: money.estimatedMicros }, "the spend now reads, and every figure of it is marked as an estimate").toEqual({ state: "partial", finality: "provisional", spent: { state: "available", value: booked }, estimated: { state: "available", value: booked } });
+    expect(booked, "the settle added nothing beyond the runs' own estimated usage").toBeGreaterThan(0);
+    expect(money.coverage.estimatedCalls, "the marker is counted as an estimated call with the others").toBe(entries.length);
     w.proof.assertAllCore();
   }, 240_000);
 
