@@ -23,6 +23,7 @@ import {
 import { HeadObjectCommand, PutObjectCommand, type S3Client } from "@aws-sdk/client-s3";
 import { AgentXError, agentXError } from "@agentx/contracts";
 import type { DeployEvent, DeployRequest, StackDeployer, StackOutputs } from "./deployer.js";
+import { carriedParameterNames, declaredParameterNames } from "./carry.js";
 import { sha256Hex } from "./hash.js";
 import { SECRET_PARAMETERS } from "./parameters.js";
 import { assertReleaseCoversRegion, type LoadedRelease } from "./release.js";
@@ -118,6 +119,13 @@ function isChangeSetNotFound(error: unknown): boolean {
   return error instanceof Error && (error.name === "ChangeSetNotFoundException" || error.name === "ChangeSetNotFound");
 }
 
+/** F1 L1a-1, the one carry rule (carry.ts): the UsePreviousValue entries for a stack being updated (none for a new one, which holds no deployed value). */
+function carriedEntries(type: "CREATE" | "UPDATE", current: Stack | undefined, declared: ReadonlySet<string> | undefined, supplied: Record<string, string>): Array<{ ParameterKey: string; UsePreviousValue: true }> {
+  if (type === "CREATE") return [];
+  const deployed = (current?.Parameters ?? []).flatMap((parameter) => (parameter.ParameterKey === undefined ? [] : [parameter.ParameterKey]));
+  return carriedParameterNames({ deployed, declared, supplied: Object.keys(supplied) }).map((ParameterKey) => ({ ParameterKey, UsePreviousValue: true as const }));
+}
+
 /** Replaces every secret parameter's value in text; CloudFormation and the SDK may echo parameter values in reasons and errors. */
 function redactor(parameters: Record<string, string>): (text: string) => string {
   const secrets = [...SECRET_PARAMETERS].map((name) => parameters[name]).filter((value): value is string => value !== undefined && value !== "");
@@ -181,20 +189,21 @@ export function templatesDeployer(input: {
     }
   }
 
-  /** Uploads the template and returns where CreateChangeSet finds it; the access stack's goes inline. */
-  async function templateSource(request: DeployRequest, emit: (event: DeployEvent) => void): Promise<{ TemplateURL: string } | { TemplateBody: string }> {
+  /** Uploads the template and returns where CreateChangeSet finds it (the access stack's goes inline) and the parameter names it declares. */
+  async function templateSource(request: DeployRequest, emit: (event: DeployEvent) => void): Promise<{ source: { TemplateURL: string } | { TemplateBody: string }; declared: ReadonlySet<string> | undefined }> {
     assertReleaseCoversRegion(release, region);
     const text = installTemplate(request);
+    const declared = declaredParameterNames(text);
     if (request.part === "access") {
       if (Buffer.byteLength(text, "utf8") > MAX_INLINE_TEMPLATE_BYTES) throw new Error("the access template is too large to deploy inline");
-      return { TemplateBody: text };
+      return { source: { TemplateBody: text }, declared };
     }
     const bucket = input.artifactBucket();
     await uploadPackages(request, bucket, emit);
     const key = `templates/${version}/${region}/${request.part}.template.json`;
     emit({ kind: "uploading", what: `template ${key}` });
     await clients.s3.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: text, ContentType: "application/json" }));
-    return { TemplateURL: `https://${bucket}.s3.${region}.${s3HostSuffix}/${key}` };
+    return { source: { TemplateURL: `https://${bucket}.s3.${region}.${s3HostSuffix}/${key}` }, declared };
   }
 
   /** Only a template built from a price-serving broker may advertise that capability. Older
@@ -395,16 +404,22 @@ export function templatesDeployer(input: {
       await cloudFormation.send(new UpdateTerminationProtectionCommand({ StackName: stackName, EnableTerminationProtection: true }));
     }
 
-    const source = await templateSource(request, emit);
+    const { source, declared } = await templateSource(request, emit);
     const current = gatewayRead === undefined ? await describeStack(stackName) : gatewayRead.stack;
     const type = changeSetType(stackName, current);
+    // F1 L1a-1, the one carry rule (carry.ts): a parameter this deploy does not name keeps its deployed value (UsePreviousValue), as the cdk engine's CDK CLI does; before, CloudFormation
+    // reset it to the template's default. Only an UPDATE has deployed values to keep; a name the release's template does not declare is never sent.
+    const carried = carriedEntries(type, current, declared, request.parameters);
 
     await cloudFormation.send(
       new CreateChangeSetCommand({
         ...changeSetId,
         ChangeSetType: type,
         ...source,
-        Parameters: Object.entries(request.parameters).map(([ParameterKey, ParameterValue]) => ({ ParameterKey, ParameterValue })),
+        Parameters: [
+          ...Object.entries(request.parameters).map(([ParameterKey, ParameterValue]) => ({ ParameterKey, ParameterValue })),
+          ...carried,
+        ],
         Capabilities: [...CAPABILITIES],
         ...(request.roleArn === undefined ? {} : { RoleARN: request.roleArn }),
       }),

@@ -136,6 +136,10 @@ describe("check 2: the stack parameters and the settings may not grow", () => {
   // The planted examples below add to (or remove from) whatever the tree and the baseline already differ by, so none of them hard-codes today's totals: they count only what each one plants.
   const already = growth.compareToBaseline(now, baseline);
   // Decision lines of the baseline rows added after E1-0: brokerSettings coreOutboxStreamRelay = "G1 / Opus money PASS 4f7ef0856" (CORE-RUN-STOP-RELAY, #1446).
+  // operatorParameters, 19 names (control-plane: DeveloperGithubClientId, DeveloperGithubSince, DeveloperOidcClientId, DeveloperOidcDisplayName, DeveloperOidcIssuer, DeveloperOidcRequiredClaim, DeveloperOidcRequiredValues,
+  // DeveloperOidcSince, DeveloperSignInGithub, DeveloperSignInSlack, DeveloperSignInSlackSince, OpenRouterSecretArn, SlackTeamId; runtime: OpenRouterSecretArn; slack: ChannelEventQueueUrl, ChannelRequestQueueUrl,
+  // OpenRouterSecretArn, SlackAdapterCommandsUrl, SlackAdapterSecretName) = "F1 L1a-1 kept-on-upgrade set (+19: existing parameters an upgrade used to reset), Opus PASS ac76bd063" (owner DEC 254zzz507 beta snapshot).
+  // Not new settings: a one-time, deliberate step in the ratchet.
 
   it("passes on today's tree: nothing above the baseline", () => {
     expect(growth.compareToBaseline(now, baseline).raised).toEqual([]);
