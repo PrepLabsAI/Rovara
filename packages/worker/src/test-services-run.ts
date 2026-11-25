@@ -73,7 +73,7 @@ import { refuseTestServicesWithDevcontainer, withSealedCheckRound } from "./chec
 import { UNREADABLE_AWS_USAGE, buildServiceUsageRecord, countResets, mergeAwsUsage, mergeFakeUsage } from "./service-usage-record.js";
 import { setupWorkspaceKey } from "./setup-network.js";
 import { TEST_SERVICES_BOOT_FACTS_ENVIRONMENT, emitReport, type ReportOutcome } from "./test-services-report.js";
-import { createDockerCli, type DockerCli } from "./swebench/containers.js";
+import { createDockerCli, type DockerCli } from "./docker-cli.js";
 import type { CheckRunners } from "./verification/checks.js";
 import { hiddenWorkspaceDirectories } from "./workspace-state.js";
 import { assertNoInstallSecrets } from "./install-secrets.js";

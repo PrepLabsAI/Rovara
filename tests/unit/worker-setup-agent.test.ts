@@ -16,7 +16,7 @@ import { SETUP_AGENT_NEEDS_CODE_CHANGE_MARKER, asksForCodeChange, setupAgentInst
 import { agentShellTool, piTaskToolCapabilities } from "../../packages/worker/src/pi-session.js";
 import { agentStepTools } from "../../packages/worker/src/agent-step.js";
 import { taskSandboxRunArgs } from "../../packages/worker/src/task-sandbox.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 const run = promisify(execFile);
 const roots: string[] = [];

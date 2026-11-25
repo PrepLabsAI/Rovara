@@ -12,7 +12,7 @@ import { fileOpsExec, type FileOpsTarget } from "./file-ops-exec.js";
 import type { CommandResult } from "./readiness.js";
 import { hiddenWorkspaceDirectories } from "./workspace-state.js";
 import { containerGone, type QuarantinedSandbox } from "./workspace-quarantine.js";
-import { createDockerCli, taskContainerExec, type DockerCli } from "./swebench/containers.js";
+import { createDockerCli, taskContainerExec, type DockerCli } from "./docker-cli.js";
 import { createGatewayNameFiles, GATEWAY_RESOLVER_DIRECTORY } from "./gateway-name-files.js";
 export { GATEWAY_RESOLVER_DIRECTORY } from "./gateway-name-files.js";
 import { isolateSandboxPort } from "./sandbox-port-isolation.js";

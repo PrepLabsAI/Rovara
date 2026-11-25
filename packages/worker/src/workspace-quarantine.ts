@@ -9,7 +9,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { agentXError } from "@agentx/contracts";
 import { groupAlive } from "./collected-process.js";
-import { createDockerCli, type DockerCli } from "./swebench/containers.js";
+import { createDockerCli, type DockerCli } from "./docker-cli.js";
 import { WorkspaceSafety, currentWorkspaceSafety, withWorkspaceSafety, type UnconfirmedStop } from "./workspace-safety.js";
 
 const MARKER_DIRECTORY = ".agentx";

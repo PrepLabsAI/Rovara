@@ -38,7 +38,7 @@ import {
   type StoredProjectDefinition,
 } from "@agentx/contracts";
 import { assertCredentialFreeRemote, runGitWithCredential, type GitCredential } from "../git-auth.js";
-import { createDockerCli, type DockerCli } from "../swebench/containers.js";
+import { createDockerCli, type DockerCli } from "../docker-cli.js";
 import { DEFAULT_LINK_POLICY, inspectLink, type LinkPolicy } from "./links.js";
 import { countNonStandardFlags, minimalGitConfig, unsafeGitEntries } from "./tree-check.js";
 import { runIsolatedGit } from "../isolated-repository.js";

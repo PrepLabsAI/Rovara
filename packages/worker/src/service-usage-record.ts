@@ -39,7 +39,7 @@ import { EmulatorLedgerError, type EmulatorLedger, type EmulatorLedgerPort } fro
 import type { FakeUsagePort } from "./fake-usage.js";
 import type { ServiceRedactor } from "./service-env.js";
 import type { ResetOutcome, ServiceSession } from "./service-runner.js";
-import type { DockerCli } from "./swebench/containers.js";
+import type { DockerCli } from "./docker-cli.js";
 
 export type ServiceUsageRecord = TestServicesUsageRecord;
 export type DependencyUsageRecord = TestServicesDependencyUsage;

@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { GENERAL_FAKES_HELPER_PORT, GENERAL_FAKES_RUN_DIR, buildOpenApiFake, type GeneralFakeServiceFake } from "@agentx/contracts";
 import { generalFakesRunId, startGeneralFakesHelper } from "../../packages/worker/src/general-fakes-hosted.js";
-import { createDockerCli } from "../../packages/worker/src/swebench/containers.js";
+import { createDockerCli } from "../../packages/worker/src/docker-cli.js";
 import { assertFirewallInstalled, docker, reachScript } from "../support/linux-network-walls.js";
 import { APP_NODE_IMAGE, EXECUTOR_IMAGE } from "../support/linux-runtime.js";
 

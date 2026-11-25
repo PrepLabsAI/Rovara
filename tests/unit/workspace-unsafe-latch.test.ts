@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { RunnerKillUnconfirmedError, groupAlive, type GroupProbe } from "../../packages/worker/src/collected-process.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 import { TaskSandbox } from "../../packages/worker/src/task-sandbox.js";
 import { prepareWorkspace } from "../../packages/worker/src/prepare.js";
 import { runChecks, type CheckPlan, type CheckRunners } from "../../packages/worker/src/verification/checks.js";

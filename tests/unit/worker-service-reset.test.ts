@@ -7,7 +7,7 @@ import { controlCallArgs, type HelperCredentials, type HelperFiles } from "../..
 import { runNetworkAddresses, runNetworkBridge, runNetworkHelperIp, runNetworkLabelArgs, runNetworkName, type ServicesNetwork } from "../../packages/worker/src/run-network.js";
 import { REDIS_FLUSH_SCRIPT, RESET_PATH, SeedError, VALKEY_FLUSH_SCRIPT, createResetHooks, flushHook, freshHelpers, httpResetHook, resetForNextCheck, restartHook, runSeeds, templateDbHook, type ResetDependency, type SeedPorts } from "../../packages/worker/src/service-reset.js";
 import type { ResetContext, ResetRequest, ServiceSession } from "../../packages/worker/src/service-runner.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 import { createServer, type IncomingHttpHeaders } from "node:http";
 import type { AddressInfo } from "node:net";
 

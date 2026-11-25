@@ -5,7 +5,7 @@ import { afterEach, expect, it } from "vitest";
 import { evalDatabaseSeed, prepareEvalStandIns } from "../../packages/worker/src/eval-stand-in-plan.js";
 import { STAND_IN_SCHEMA_STATEMENT } from "../../packages/worker/src/service-seed-generate.js";
 import type { EvalServicesStarted } from "../../packages/worker/src/verification/eval-services.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 const roots: string[] = [];
 afterEach(async () => { for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }); });

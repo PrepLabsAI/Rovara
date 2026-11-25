@@ -27,7 +27,7 @@ import { GIT_CHANGED_MESSAGE, RegistryTokenLeakError, gitStates, gitStatesDiffer
 import { runIsolatedGit } from "./isolated-repository.js";
 import { TASK_SANDBOX_LABEL, TASK_SANDBOX_WORKSPACE_LABEL, workspaceKey } from "./task-sandbox.js";
 import type { RegistryCredentialProvider } from "./registry-credentials.js";
-import { createDockerCli, type DockerCli } from "./swebench/containers.js";
+import { createDockerCli, type DockerCli } from "./docker-cli.js";
 
 export const REPOSITORY_INSTALL_MS = 10 * 60_000;
 export const STEP_INSTALL_MS = 20 * 60_000;

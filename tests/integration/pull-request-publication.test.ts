@@ -17,7 +17,7 @@ import { createWorkerCallbackSinks, type PullRequestSink } from "../../packages/
 import { projectCheckKey, recordProjectOutcomes } from "../../packages/worker/src/verification/check-history.js";
 import { readCandidateRepositories } from "../../packages/worker/src/verification/candidate.js";
 import type { PiSessionAdapter, PiSessionInput } from "../../packages/worker/src/pi-session.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
 import { FAUX_MODEL } from "../support/faux-model.js";
 import { processEnded } from "../support/process-liveness.js";

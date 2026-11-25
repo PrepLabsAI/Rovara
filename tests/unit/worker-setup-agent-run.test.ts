@@ -12,7 +12,7 @@ import { createSetupSandbox, type TrackedFilesVerdict } from "../../packages/wor
 import { helperRunArgs, networkCreateArgs, setupNetworkAddresses, setupNetworkName, setupNetworkSlot, startRunNetwork } from "../../packages/worker/src/setup-network.js";
 import type { PiSessionHandle } from "../../packages/worker/src/pi-session.js";
 import type { RunNetwork } from "../../packages/worker/src/setup-network.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))); });

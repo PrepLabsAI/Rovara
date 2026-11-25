@@ -14,7 +14,7 @@
 //   bootFacts                               root's facts from boot (`AGENTX_TEST_SERVICES_BOOT_FACTS`): the metadata block, the run-network walls, the IPv6 drops, the pre-pull and the registry logout
 import { readFile, readdir } from "node:fs/promises";
 import { RUN_NETWORK_LABEL, RUN_NETWORK_WORKSPACE_LABEL } from "./run-network.js";
-import type { DockerCli } from "./swebench/containers.js";
+import type { DockerCli } from "./docker-cli.js";
 
 export const TEST_SERVICES_REPORT_EVENT = "test-services.report";
 export const TEST_SERVICES_BOOT_FACTS_ENVIRONMENT = "AGENTX_TEST_SERVICES_BOOT_FACTS";
