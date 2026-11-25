@@ -657,6 +657,33 @@ describe("plan v3.2: Code's own AWS deployment is public, Cloud-only work in it 
 
   it.each([
     `${INFRA}/lib/${CLD}-identity.ts`,
+    // Every gateway that is not the model gateway is Cloud-only again (PORT-GUARD-GATEWAY-NARROW; #1483 had let every gateway name through).
+    `${INFRA}/lib/gateway.ts`,
+    `${INFRA}/lib/gateways-stack.ts`,
+    `${INFRA}/lib/sharedGateway.ts`,
+    `${INFRA}/lib/sharedgateway.ts`,
+    `${INFRA}/lib/api/gateway.ts`,
+    `${INFRA}/lib/model/gateway.ts`,
+    `${INFRA}/lib/model-gateway/gateway.ts`,
+    `${INFRA}/lib/model-api-gateway.ts`,
+    `${INFRA}/lib/gateway-model.ts`,
+    `${INFRA}/lib/billing-gateway.ts`,
+    `${INFRA}/lib/billingGateway.ts`,
+    `${INFRA}/lib/llmgateway.ts`,
+    `${INFRA}/lib/llm-gateway.ts`,
+    `${INFRA}/lib/aigateway.ts`,
+    `${INFRA}/lib/ai-gateway.ts`,
+    `${INFRA}/lib/LlmGateway.ts`,
+    `${INFRA}/lib/llm-api-gateway.ts`,
+    `${INFRA}/lib/llm-proxy.ts`,
+    `${INFRA}/lib/ai-proxy.ts`,
+    `${INFRA}/lib/llmproxy.ts`,
+    `${INFRA}/lib/aiproxy.ts`,
+    `${INFRA}/lib/gate-way.ts`,
+    `${INFRA}/lib/GateWay.ts`,
+    `${INFRA}/lib/tool-gate-way.ts`,
+    `${INFRA}/lib/mygateway.ts`,
+    `${INFRA}/lib/gateway-stack.ts`,
     `${INFRA}/lib/${CLD}Gateway/stack.ts`,
     `packages/broker/src/${AWS}/billing/invoices.ts`,
     `packages/broker/src/${AWS}/stripe-webhook.ts`,
@@ -720,26 +747,26 @@ describe("plan v3.2: Code's own AWS deployment is public, Cloud-only work in it 
     `${INFRA}/lib/virtual-private-gateway.ts`,
     `${INFRA}/lib/direct-connect-gateway.ts`,
     `${INFRA}/lib/NatGateway.ts`,
+    `${INFRA}/lib/apigateway-stack.ts`,
+    `${INFRA}/lib/natgateway.ts`,
     `${INFRA}/lib/web-application-firewall.ts`,
     `${INFRA}/lib/${CLD[0]!.toUpperCase()}${CLD.slice(1)}9Stack.ts`,
     `docs/billing.md`,
     `packages/broker/src/billing-notes.ts`,
-    // The model gateway, under any of its names: Code's and public since #1478.
+    // The model gateway (and the model proxy): Code's and public since #1478. Only these names; see the refused list for the other gateways.
     `${INFRA}/lib/model-gateway.ts`,
-    `${INFRA}/lib/modelProxy.ts`,
-    `${INFRA}/lib/gateway.ts`,
-    `${INFRA}/lib/gateways-stack.ts`,
+    `${INFRA}/lib/model-gateway-app.ts`,
+    `${INFRA}/lib/model-gateway/handler.ts`,
+    `${INFRA}/lib/modelGateway.ts`,
+    `${INFRA}/lib/ModelGatewayStack.ts`,
     `${INFRA}/lib/models-gateway.ts`,
-    `${INFRA}/lib/llmgateway.ts`,
-    `${INFRA}/lib/aigateway.ts`,
-    `${INFRA}/lib/LlmGateway.ts`,
-    `${INFRA}/lib/sharedGateway.ts`,
-    `${INFRA}/lib/api/gateway.ts`,
-    `${INFRA}/lib/model-api-gateway.ts`,
-    `${INFRA}/lib/llm-proxy.ts`,
-    `${INFRA}/lib/ai-proxy.ts`,
-    `${INFRA}/lib/gate-way.ts`,
-    `${INFRA}/lib/GateWay.ts`,
+    `${INFRA}/lib/modelgateway.ts`,
+    `${INFRA}/lib/modelsgateway.ts`,
+    `${INFRA}/lib/model-gate-way.ts`,
+    `${INFRA}/lib/model-proxy.ts`,
+    `${INFRA}/lib/modelProxy.ts`,
+    `${INFRA}/lib/models-proxy.ts`,
+    `${INFRA}/lib/modelproxy.ts`,
   ])("lets an ordinary Code path through: %s", (path) => {
     expect(cloudDeploymentPathRule(path)).toBeNull();
     expect(addedFileRule(path)).toBeNull();
@@ -884,5 +911,68 @@ describe("plan v3.2: a test may import the AWS SDK and the CDK only as Code's de
       "cloud-aws:packages/x/src/h.test.mts",
       "cloud-aws:tests/unit/billing-meter.test.ts",
     ]);
+  });
+});
+
+describe("PORT-GUARD-GATEWAY-NARROW: only the model gateway's names may import any AWS client or the CDK from a new deployment file", () => {
+  const BEDROCK_RUNTIME = SDK("bedrock-runtime");
+
+  it.each([
+    `${INFRA}/lib/model-gateway.ts`,
+    `${INFRA}/lib/model-gateway-app.ts`,
+    `${INFRA}/lib/model-gateway/handler.ts`,
+    `${INFRA}/lib/modelGateway.ts`,
+    `${INFRA}/lib/models-gateway.ts`,
+    `${INFRA}/lib/modelgateway.ts`,
+    `${INFRA}/lib/model-proxy.ts`,
+    `${INFRA}/lib/modelProxy.ts`,
+    `packages/broker/src/${AWS}/model-gateway.ts`,
+    "tests/unit/model-gateway-stack.test.ts",
+    "tests/unit/model-proxy-routes.test.ts",
+  ])("lets %s import any AWS client and the CDK", (path) => {
+    expect(awsImportReason(path, BEDROCK_RUNTIME, true)).toBeNull();
+    expect(awsImportReason(path, CDK, true)).toBeNull();
+  });
+
+  it.each([
+    `${INFRA}/lib/sharedGateway.ts`,
+    `${INFRA}/lib/sharedgateway.ts`,
+    `${INFRA}/lib/api/gateway.ts`,
+    `${INFRA}/lib/gateway.ts`,
+    `${INFRA}/lib/gateways-stack.ts`,
+    `${INFRA}/lib/billing-gateway.ts`,
+    `${INFRA}/lib/model-gateway/gateway.ts`,
+    `${INFRA}/lib/model-api-gateway.ts`,
+    `${INFRA}/lib/llm-gateway.ts`,
+    `${INFRA}/lib/ai-gateway.ts`,
+    `${INFRA}/lib/llm-proxy.ts`,
+    `${INFRA}/lib/gate-way.ts`,
+    `packages/broker/src/${AWS}/sharedGateway.ts`,
+    "tests/unit/sharedGateway.test.ts",
+    "tests/unit/gateway-answers.test.ts",
+    "tests/unit/billing-gateway.test.ts",
+  ])("refuses %s importing an AWS client or the CDK", (path) => {
+    expect(awsImportReason(path, BEDROCK_RUNTIME, true)).not.toBeNull();
+    expect(awsImportReason(path, CDK, true)).not.toBeNull();
+    // A file Code already had keeps what it imports.
+    expect(awsImportReason(path, BEDROCK_RUNTIME, false)).toBeNull();
+  });
+
+  it.each([`${INFRA}/lib/nat-gateway.ts`, `${INFRA}/lib/NatGateway.ts`, `${INFRA}/lib/api-gateway-stack.ts`, `${INFRA}/lib/apigateway-stack.ts`])(
+    "still lets the AWS gateway file %s import any AWS client",
+    (path) => {
+      expect(awsImportReason(path, BEDROCK_RUNTIME, true)).toBeNull();
+    },
+  );
+
+  it("fails a lane that adds a shared gateway deployment file and passes the model gateway's, and the accepted list cannot excuse it", () => {
+    const lane = new Lane();
+    lane.write(`${INFRA}/lib/sharedGateway.ts`, imp("BedrockRuntimeClient", BEDROCK_RUNTIME) + "export const g = BedrockRuntimeClient;\n");
+    lane.write(`${INFRA}/lib/model-gateway-extra.ts`, imp("BedrockRuntimeClient", BEDROCK_RUNTIME) + "export const m = BedrockRuntimeClient;\n");
+    lane.commit("gateways");
+    const blob = git(lane.dir, "rev-parse", `lane:${INFRA}/lib/sharedGateway.ts`).trim();
+    const accepted = [{ path: `${INFRA}/lib/sharedGateway.ts`, rule: "cloud-aws" as const, blob, reason: "a test that tries to excuse it" }];
+    const findings = runGuard({ cwd: lane.dir, range: "base..lane", gitleaks: "off", names: DEFAULT_NAMES, accepted }).findings;
+    expect([...new Set(findings.map((f) => `${f.rule}:${f.file}`))].sort()).toEqual([`cloud-path:${INFRA}/lib/sharedGateway.ts`]);
   });
 });

@@ -11,7 +11,8 @@
 //                   anywhere else. The list is data (scripts/boundary-allowlist.json), read by this guard and by Cloud's boundary check
 //   cloud-path (deployment)  a NEW file under aws/ or infra/ (a merge that adds one included) whose path names Cloud-only work: billing,
 //                   budgets, the company or org admin backend, the team record, the audit ledger, devices, the Cloud web app or anything called cloud
-//                   (DEC 214: those stay in Cloud), or holds a letter outside ASCII. The model gateway is no longer Cloud-only: it moved into Code (#1478)
+//                   (DEC 214: those stay in Cloud), or holds a letter outside ASCII. Only the model gateway (a name where "model" or "models" comes right before
+//                   "gateway", and the model proxy) moved into Code (#1478); any other gateway name is refused unless it names an AWS gateway (nat, api, vpc, ...)
 //   cloud-import    a TypeScript/JavaScript file (any name that carries a .ts/.js/... extension, or text that reads as such code) that imports one of those (also a vendor/ folder, a `cloud-*` package or an AWS client off the list), or a package/CI file that names one of those packages
 //   stray-file      an editor, merge or sed backup/scratch file (`*-E`, `*.orig`, `*.rej`, `*.bak`, `*~`, `*.swp`, `*.tmp`, `.DS_Store` and kin): a stray
 //                   copy can hold raw Cloud source under a name no other rule reads (a lane once committed 27 `*.ts-E` files from `sed -i -E`)
@@ -265,7 +266,7 @@ export function cloudPathRule(path: string, names: NameSource = DEFAULT_NAMES): 
 // Rule: cloud-aws (decision 72, O2, changed by migration plan v3.2, DEC 214). Only the four generic adapters (DynamoDB storage, SQS queue, S3 objects,
 // Secrets Manager secrets) live in the public adapters package. Code's own AWS deployment (its aws/ handlers and its infra/ CDK) is Code's and public;
 // Cloud-only work (billing, the company admin backend, the team record, the audit ledger, the Cloud web app) stays in Cloud. The model gateway
-// moved into Code and is public (#1478).
+// moved into Code and is public (#1478): a model-gateway or model-proxy name passes, any other gateway name is Cloud-only again.
 
 /** Why a path inside the public adapters package is not allowed there (a private adapter among the four), or null. */
 export function adaptersPackageRule(path: string): string | null {
@@ -297,19 +298,31 @@ const isDeploymentTestPath = (lower: string): boolean => /\.test\.[cm]?[jt]sx?$/
  * - PREFIX: a word or join that STARTS with one of these (spending, budgets, organizations);
  * - WHOLE: a word that IS one of these (org, orgs, price, devices; "organic" and "storage" are ordinary);
  * - a word that starts or ends with "cloud", unless it is an AWS service name (cloudwatch, cloudformation, ...);
+ * - "gateway" (also glued inside a word, sharedgateway, and written in two words, gate-way) unless the word right before it in the same file or
+ *   folder name is "model" or "models" (the model gateway: Code's and public since #1478), or the word right before it names an AWS gateway (nat,
+ *   internet, api, vpc, transit, ...) with no model, llm or ai word earlier in that name, or "endpoint" is next to it. Never across - or /.
+ *   The model proxy is not a Cloud-only word (modelProxy passes), but the llm and ai proxies are;
  * Any letter outside ASCII in a deployment path is refused outright, so a look-alike letter cannot split a word.
  */
 const CLOUD_DEPLOYMENT_ANYWHERE = [
-  // The model gateway (and its old name, the model proxy) left this list when it moved into Code (#1478).
-  "billing", "invoic", "stripe", "metering", "teamrecord", "auditledger", "companyadmin", "orgadmin", "admincons", "embedder", "webapp", "customdomain",
-  "subscription", "entitlement",
+  // The model gateway (and its old name, the model proxy) left this list when it moved into Code (#1478). Only the "model" names: the llm and ai names stay.
+  "billing", "invoic", "stripe", "metering", "teamrecord", "auditledger", "llmgateway", "aigateway", "llmproxy", "aiproxy", "companyadmin", "orgadmin",
+  "admincons", "embedder", "webapp", "customdomain", "subscription", "entitlement",
 ];
 const CLOUD_DEPLOYMENT_PREFIX = ["pricing", "spend", "budget", "organization", "edition", "payment", "quota", "usagequota"];
+/** The only words that make a gateway in the same name the (public) model gateway: right before it. */
+const MODEL_GATEWAY_WORDS = new Set(["model", "models"]);
+/** Words that make a gateway in the same name a model gateway under a Cloud-only name (llm-api-gateway), whatever AWS word sits between. */
+const MODEL_WORDS = new Set(["model", "models", "llm", "llms", "ai"]);
 const CLOUD_DEPLOYMENT_WHOLE = new Set(["org", "orgs", "price", "prices", "meter", "meters", "devices"]);
+const AWS_GATEWAY_BEFORE = new Set([
+  "nat", "internet", "api", "apis", "vpc", "vpn", "transit", "egress", "virtual", "private", "customer", "storage", "http", "rest", "websocket", "lb",
+  "load", "balancer", "connect", "carrier", "local", "iot",
+]);
 const AWS_CLOUD_WORDS = /^cloud(?:watch|formation|front|trail|map|search|hsm|shell|9)/;
 
 const DEPLOYMENT_DETAIL =
-  "a Cloud-only part in Code's deployment (billing, budgets, the company or org admin backend, the team record, the audit ledger, devices, the Cloud web app or anything called cloud stays in Cloud, DEC 214)";
+  "a Cloud-only part in Code's deployment (a gateway that is not the model gateway, billing, budgets, the company or org admin backend, the team record, the audit ledger, devices, the Cloud web app or anything called cloud stays in Cloud, DEC 214)";
 
 /** Why a deployment path names Cloud-only work, or null (also null for a path outside aws/ and infra/). */
 export function cloudDeploymentPathRule(path: string): string | null {
@@ -317,12 +330,33 @@ export function cloudDeploymentPathRule(path: string): string | null {
   return cloudWordsReason(path);
 }
 
+type PathWord = { word: string; segment: number; run: number };
+
+/**
+ * True when the word at `index` is a gateway that is not the model gateway: the word holds "gateway" (also glued, sharedgateway), or is "gate"
+ * followed by "way" in the same name (gate-way). The model gateway ("model" or "models" right before it) and an AWS gateway pass. The words
+ * before it come from the same file or folder name, never across a slash.
+ */
+function isOtherGateway(words: PathWord[], index: number): boolean {
+  const { word, segment } = words[index]!;
+  const next = words[index + 1];
+  const sameName = next !== undefined && next.segment === segment ? next.word : "";
+  const gatewayAt = word.indexOf("gateway");
+  if (gatewayAt < 0 && !(word === "gate" && sameName.startsWith("way"))) return false;
+  const earlier = words.slice(0, index).filter((entry) => entry.segment === segment).map((entry) => entry.word);
+  if (gatewayAt > 0) earlier.push(word.slice(0, gatewayAt));
+  const previous = earlier[earlier.length - 1] ?? "";
+  if (MODEL_GATEWAY_WORDS.has(previous)) return false;
+  const endpointNext = (gatewayAt >= 0 && word.slice(gatewayAt + 7).startsWith("endpoint")) || sameName.startsWith("endpoint");
+  return !((AWS_GATEWAY_BEFORE.has(previous) && !earlier.some((entry) => MODEL_WORDS.has(entry))) || endpointNext);
+}
+
 /** Why a path's words name Cloud-only work (the word rule above, wherever the path is), or null. */
 export function cloudWordsReason(path: string): string | null {
   const unified = path.replaceAll("\\", "/");
   if (/[^\x20-\x7e]/.test(unified)) return "a letter outside ASCII in the path (a look-alike letter could hide a Cloud-only name)";
   // Words with where they came from: the path segment (between slashes) and the run of letters and digits (between separators) each sits in.
-  const words: Array<{ word: string; segment: number; run: number }> = [];
+  const words: PathWord[] = [];
   let run = 0;
   posix.normalize(unified).replace(/^\.\//, "").split("/").forEach((segment, index) => {
     for (const raw of segment.match(/[A-Za-z0-9]+/g) ?? []) {
@@ -344,6 +378,7 @@ export function cloudWordsReason(path: string): string | null {
     // A camel-cased AWS service name (CloudWatch) is split by the humps: read it with the next hump of the same run only (not across - or /).
     const awsName = next !== undefined && next.run === from && AWS_CLOUD_WORDS.test(word + next.word);
     if ((cloudy(word) && !awsName) || CLOUD_DEPLOYMENT_WHOLE.has(word)) return DEPLOYMENT_DETAIL;
+    if (isOtherGateway(words, i)) return DEPLOYMENT_DETAIL;
     for (let n = 1; n <= 3 && i + n <= words.length; n += 1) {
       // "web application" (as in a web application firewall) is an AWS name, not the Cloud web app.
       const candidate = words.slice(i, i + n).map((entry) => entry.word).join("").replaceAll("webapplication", "");
@@ -375,7 +410,7 @@ export function awsImportReason(file: string, specifier: string, isNewFile: bool
   const lower = file.replaceAll("\\", "/").replace(/^\.\//, "").toLowerCase();
   const inAdapters = lower.startsWith(adaptersDir(data));
   if (!inAdapters && !isNewFile) return null;
-  // Code's deployment code and its deployment tests may import any of them, unless the path names Cloud-only work (a "test" that is billing code).
+  // Code's deployment code and its deployment tests may import any of them, unless the path names Cloud-only work (a "test" that is billing code or a gateway that is not the model gateway).
   if (!inAdapters && (DEPLOYMENT_PATH.test(lower) || isDeploymentTestPath(lower)) && cloudWordsReason(file.replaceAll("\\", "/").replace(/^\.\//, "")) === null) return null;
   if (!inAdapters && data.awsSdkPublicPaths.some((prefix) => lower.startsWith(prefix.toLowerCase()))) return null;
   if (!inAdapters && data.awsImportFixturePaths.some((prefix) => lower.startsWith(prefix.toLowerCase()))) return null;
