@@ -12,11 +12,11 @@
 //   5. Where it may be answered, by answer and risk:
 //        approve  low     browser, tool, or an outside place by a linked person;
 //        approve  medium  browser; or an outside place by a linked person whose last INTERACTIVE Rovara sign-in is inside the company's window (default 24 h, 1 h to 7 days); a tool (an AI tool, the CLI or an API token) gets a link;
-//        approve  high    browser only, and only under the company's fresh sign-in (`freshSignIn`, decided by the caller with the rule it has: Code's `checkApprovalSignIn`, or an extra sign-in step an approvers plug-in asks for);
-//        reject   any     browser only (a signed-in session), under the fresh sign-in;
+//        approve  high    browser only, and only when the caller says the sign-in rule was met (`freshSignIn`, decided by the caller with the rule it has: an approvers plug-in may state how recent an approver's sign-in must be, and the decision gate enforces it for high-risk approvals and rejections of decisions; no built-in adapter states one; the live Merge button (`pressMergeAsPerson`) does not apply it, the unwired old merge press `pressMerge` did);
+//        reject   any     browser only (a signed-in session), when the caller says the same rule was met;
 //        request changes  any place a linked person can reach; no sign-in age.
 // The "recent" time is the person's last interactive Rovara sign-in (`Principal.authTime`, the adapter's own fact), never a refresh and never a sign-in at the outside service (decision Q3); a caller that cannot say passes none and the
-// answer is "sign in again". The window is a COMPANY SETTING: shortening applies at once; lengthening needs a second admin's confirmation (decision 83), which `checkRecentSignInChange` reports and the store enforces.
+// answer is "sign in again". The medium-risk window below has no store and no caller in the product today: it is a pure rule only (shortening applies at once; lengthening would need a second admin's confirmation, decision 83, which `checkRecentSignInChange` reports). Strong sign-in methods for high-risk decisions are a FIXED rule (`core/decisions/strong-methods.ts`), not a company setting; the live Merge button (`pressMergeAsPerson`) does not apply it, the unwired old merge press `pressMerge` did.
 //
 // Pure and browser-safe, so a page can show "Open in Rovara" from the same verdict the server enforces.
 import { z } from "zod";
@@ -24,7 +24,7 @@ import { z } from "zod";
 /** A sign-in time this far ahead of the clock is not believed (clock skew between machines). The same number as `APPROVAL_SIGN_IN_SKEW_SECONDS`; this file stands alone so a copy of it can sit beside code that has no other file of Code's (a test keeps the two equal). */
 export const RECENT_SIGN_IN_SKEW_SECONDS = 120;
 
-// ---- The recent sign-in window (a company setting) ----
+// ---- The recent sign-in window (a pure rule; no company store reads it today) ----
 
 export const RECENT_SIGN_IN_DEFAULT_SECONDS = 86_400;
 export const RECENT_SIGN_IN_MIN_SECONDS = 3_600;
@@ -95,7 +95,7 @@ export interface ApprovalPlaceInput {
     collaboratorApprovals: boolean;
   };
   /**
-   * A high-risk approval and every rejection also need the company's fresh sign-in step (decision 62). The caller decides it with its own rule and passes the result; true only when this person satisfied it for this
+   * A high-risk approval and every rejection also need the sign-in rule the caller applies (decision 62; an approvers plug-in may state one, none built in does). The caller decides it with its own rule and passes the result; true only when this person satisfied it for this
    * decision just now.
    */
   freshSignIn: boolean;

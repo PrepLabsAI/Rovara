@@ -17,7 +17,7 @@ export const DECISION_LABELS = {
   requestChanges: "Request changes",
   answer: "Answer",
   retry: "Retry",
-  /** Slice 3: a merge decides on the card (high after a recent sign-in), so the button says what it does. */
+  /** Slice 3: a merge decides on the card, so the button says what it does. */
   merge: "Merge",
   open: "Open",
   openInRovara: "Open in Rovara",

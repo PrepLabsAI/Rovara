@@ -45,7 +45,7 @@ export const CI_CONFIG_PATH_PATTERNS: readonly RegExp[] = [
 
 /**
  * Whether a path is a file a CI run executes: CI configuration (the high-risk patterns above) or test and coverage configuration, a Makefile or a conftest.py (`TEST_CONFIG_PATH_PATTERNS`). Used for the flag only: the
- * high-risk rule keeps `CI_CONFIG_PATH_PATTERNS` alone, so a test setup file or a coverage config is flagged and not made high (high needs the strong sign-in at merge).
+ * high-risk rule keeps `CI_CONFIG_PATH_PATTERNS` alone, so a test setup file or a coverage config is flagged and not made high (the live Merge button, `pressMergeAsPerson`, asks for no strong method or sign-in step: it is judged by who may merge).
  */
 export function isCiExecutedPath(path: string): boolean {
   const value = normalized(path);

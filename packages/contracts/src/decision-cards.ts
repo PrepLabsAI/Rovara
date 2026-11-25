@@ -4,7 +4,7 @@
 //
 // What the schema itself guarantees (so no projector or client can build a card that breaks the rules):
 //   - the risk tier is one of three words and decides the friction: low is one tap, medium keeps Approve disabled until the evidence was opened, high has NO approve action on the card at all
-//     ("Open" goes to the card on its task page, decided there with a recent sign-in, or to a confirmation page);
+//     ("Open" goes to the card on its task page, or to a confirmation page);
 //   - nothing can be bulk-approved: there is no bulk field, no bulk body and every shape is strict;
 //   - a high-risk card is never answered by a standing rule;
 //   - a company lock raises a tier and never lowers it (`raiseRisk`).
@@ -84,14 +84,14 @@ export const DECISION_KIND_FLOOR_RISK: Record<DecisionKind, DecisionRisk> = {
   approve_request: "high",
 };
 
-export const DecisionFrictionSchema = z.object({ expandEvidenceFirst: z.boolean(), freshSignIn: z.boolean(), secondPerson: z.boolean() }).strict();
+export const DecisionFrictionSchema = z.object({ expandEvidenceFirst: z.boolean(), secondPerson: z.boolean() }).strict();
 export type DecisionFriction = z.infer<typeof DecisionFrictionSchema>;
 
-/** The friction a tier carries. `secondPerson` is an extra a high card may add (a less-safe setting, a spend over the admin threshold); it is never set below high. */
+/** The friction a tier carries (no sign-in flag: the product claims no sign-in step it does not enforce, owner DEC 254zzz540). `secondPerson` is an extra a high card may add (a less-safe setting, a spend over the admin threshold); it is never set below high. */
 export function decisionFriction(risk: DecisionRisk, secondPerson = false): DecisionFriction {
-  if (risk === "low") return { expandEvidenceFirst: false, freshSignIn: false, secondPerson: false };
-  if (risk === "medium") return { expandEvidenceFirst: true, freshSignIn: false, secondPerson: false };
-  return { expandEvidenceFirst: true, freshSignIn: true, secondPerson };
+  if (risk === "low") return { expandEvidenceFirst: false, secondPerson: false };
+  if (risk === "medium") return { expandEvidenceFirst: true, secondPerson: false };
+  return { expandEvidenceFirst: true, secondPerson };
 }
 
 /**
@@ -196,7 +196,7 @@ export const DecisionCardSchema = z
     const problem = (path: (string | number)[], message: string) => context.addIssue({ code: "custom", path, message });
     if (!card.id.startsWith(`${card.kind}:`)) problem(["id"], "the id starts with the card's kind");
     const wanted = decisionFriction(card.risk, card.friction.secondPerson);
-    if (card.friction.expandEvidenceFirst !== wanted.expandEvidenceFirst || card.friction.freshSignIn !== wanted.freshSignIn || (card.friction.secondPerson && card.risk !== "high")) {
+    if (card.friction.expandEvidenceFirst !== wanted.expandEvidenceFirst || (card.friction.secondPerson && card.risk !== "high")) {
       problem(["friction"], "the friction is the one the risk tier carries");
     }
     if (RISK_ORDER[card.risk] < RISK_ORDER[DECISION_KIND_FLOOR_RISK[card.kind]]) problem(["risk"], "a card is at least as risky as its kind's floor");

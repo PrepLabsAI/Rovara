@@ -478,9 +478,8 @@ export function prVerdictOf(rawInput: PrVerdictInput): PrVerdict {
   })();
 
   const needsYou = ((): string => {
-    // High risk is never "nothing else": merging it needs a fresh sign-in.
-    const base = count === 0 ? (riskLevel === "high" ? "The normal code review." : "The normal code review. Nothing else.") : `The ${count === 1 ? "item" : `${count} items`} below, then the normal code review.`;
-    return riskLevel === "high" ? `${base} Merging needs a fresh sign-in (high risk).` : base;
+    // High risk is never "nothing else". The words claim no sign-in step: the Merge button does not ask for one (owner DEC 254zzz540).
+    return count === 0 ? (riskLevel === "high" ? "The normal code review." : "The normal code review. Nothing else.") : `The ${count === 1 ? "item" : `${count} items`} below, then the normal code review.`;
   })();
 
   // ---- the drawers' summaries: fixed words and counts only

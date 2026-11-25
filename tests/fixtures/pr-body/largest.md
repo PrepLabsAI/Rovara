@@ -12,7 +12,7 @@
   - Changes 51450 lines, more than 400.
   - 6 checks failed on the latest code.
   - The owner accepted a code review finding.
-**Needs you** The 11 items below, then the normal code review. Merging needs a fresh sign-in (high risk).
+**Needs you** The 11 items below, then the normal code review.
 
 ### Check these before you approve
 

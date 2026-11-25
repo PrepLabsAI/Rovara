@@ -196,7 +196,8 @@ describe("rules V5 and V6: risk", () => {
     expect(v.riskLevel).toBe("high");
     expect(v.riskJudged).toBe(false);
     expect(v.heading).toBe("Verified · Risk not judged yet (treated as high) · nothing extra to check");
-    expect(v.lines.needsYou).toContain("Merging needs a fresh sign-in (high risk)");
+    expect(v.lines.needsYou).toBe("The normal code review.");
+    expect(v.lines.needsYou).not.toContain("sign-in");
     expect(v.lines.needsYou).not.toContain("Nothing else");
   });
   it("a mock spec mismatch raises medium risk to high", () => {
