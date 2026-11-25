@@ -894,4 +894,6 @@ function regionPattern(): string {
 // statement became a read statement on the bucket and one s3:PutObject on that role's own output prefix, plus one Deny of s3:PutObject*, s3:DeleteObject* and s3:AbortMultipartUpload on everything but that prefix) and Pipeline (the twelve Cloud state
 // (the Allow is s3:PutObject and s3:AbortMultipartUpload on that prefix; first pin of this change 82b1f0fc1d625770784c47b04832a0a19fce66d901f751c362078d2d57236f82, before the abort was added; re-run against the rebased base 6336ff3b0, whose own template is the same 291ca547 pin)
 // artifacts renamed from Beta<Action>State and Production<Action>State to State<Beta|Prod><Action>, in the actions' input and output artifacts and in PIPELINE_STATE_ARTIFACT).
-const PRODUCTION_PIPELINE_TEMPLATE_SHA256 = "5d132f12052ae5d438250549e7edca670208048e96421b91b4688586219eb679";
+// PIPELINE-NAMESPACE-FIX (2026-11-25; pin before it: 5d132f12052ae5d438250549e7edca670208048e96421b91b4688586219eb679): CodePipeline refused the Cloud source action's namespace "CloudSource" (equal to its output artifact name). Changed, and only this: Pipeline, the Namespace of
+// the CloudGitHub action, "CloudSource" -> "CloudSourceVariables" (the artifact keeps its name; nothing reads a #{CloudSource.*} variable; the legacy-templates snapshot changes by that one line).
+const PRODUCTION_PIPELINE_TEMPLATE_SHA256 = "a1a1b3c352ec39a5cdb923036fb981ad32e749c770beb6d00119dfa968fbbecd";

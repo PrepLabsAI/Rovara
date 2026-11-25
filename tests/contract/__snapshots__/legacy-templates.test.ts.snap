@@ -17848,7 +17848,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                   "OutputArtifactFormat": "CODEBUILD_CLONE_REF",
                 },
                 "Name": "CloudGitHub",
-                "Namespace": "CloudSource",
+                "Namespace": "CloudSourceVariables",
                 "OutputArtifacts": [
                   {
                     "Name": "CloudSource",
