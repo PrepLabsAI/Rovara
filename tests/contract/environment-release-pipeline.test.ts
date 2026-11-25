@@ -889,4 +889,9 @@ function regionPattern(): string {
 // ssm:GetParameter and ssm:PutParameter statement each, on that stage's history parameter), BetaCodePreflight and ProductionCodePreflight (the buildspec: the rollback checks and the second guard range, one exported
 // CODE_CTX), their role default policies (a ReadCodeHistory ssm:GetParameter statement each; Beta's also ReadWaitingRun, codepipeline:GetPipelineState and GetPipelineExecution on this pipeline) and Pipeline (a fifth
 // variable CODE_ROLLBACK_TARGET, a namespace on the two CodePreflight actions, PIPELINE_MODE and CODE_ROLLBACK_TARGET on the Code release actions, and CODE_CTX on the two Cloud Preflight actions only).
-const PRODUCTION_PIPELINE_TEMPLATE_SHA256 = "291ca54736e9e0f05f06fcbed1c04e118baea14d90ab4e5867786548eb1cdc80";
+// PH-S3-PREFIXES (2026-11-25; pin before it, L9b: 291ca54736e9e0f05f06fcbed1c04e118baea14d90ab4e5867786548eb1cdc80): each Code release role writes only its own output artifact into the artifact bucket. Changed, and only these (nothing added or removed;
+// no parameter, output or bucket change; shown by a resource-by-resource comparison of the synthesized templates before and after): ReleaseBuildRoleDefaultPolicy and BetaReleaseBuildRoleDefaultPolicy (CDK's whole-bucket read-write
+// statement became a read statement on the bucket and one s3:PutObject on that role's own output prefix, plus one Deny of s3:PutObject*, s3:DeleteObject* and s3:AbortMultipartUpload on everything but that prefix) and Pipeline (the twelve Cloud state
+// (the Allow is s3:PutObject and s3:AbortMultipartUpload on that prefix; first pin of this change 82b1f0fc1d625770784c47b04832a0a19fce66d901f751c362078d2d57236f82, before the abort was added; re-run against the rebased base 6336ff3b0, whose own template is the same 291ca547 pin)
+// artifacts renamed from Beta<Action>State and Production<Action>State to State<Beta|Prod><Action>, in the actions' input and output artifacts and in PIPELINE_STATE_ARTIFACT).
+const PRODUCTION_PIPELINE_TEMPLATE_SHA256 = "5d132f12052ae5d438250549e7edca670208048e96421b91b4688586219eb679";

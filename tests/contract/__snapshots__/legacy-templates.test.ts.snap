@@ -17047,16 +17047,32 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
             },
             {
               "Action": [
+                "s3:PutObject*",
+                "s3:DeleteObject*",
+                "s3:AbortMultipartUpload",
+              ],
+              "Effect": "Deny",
+              "NotResource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    {
+                      "Fn::GetAtt": [
+                        "Artifacts82DD59A1",
+                        "Arn",
+                      ],
+                    },
+                    "/AgentXProductionRele*/BetaReleas*",
+                  ],
+                ],
+              },
+              "Sid": "DenyArtifactWritesOutsideOwnOutput",
+            },
+            {
+              "Action": [
                 "s3:GetObject*",
                 "s3:GetBucket*",
                 "s3:List*",
-                "s3:DeleteObject*",
-                "s3:PutObject",
-                "s3:PutObjectLegalHold",
-                "s3:PutObjectRetention",
-                "s3:PutObjectTagging",
-                "s3:PutObjectVersionTagging",
-                "s3:Abort*",
               ],
               "Effect": "Allow",
               "Resource": [
@@ -17081,6 +17097,27 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                   ],
                 },
               ],
+            },
+            {
+              "Action": [
+                "s3:PutObject",
+                "s3:AbortMultipartUpload",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    {
+                      "Fn::GetAtt": [
+                        "Artifacts82DD59A1",
+                        "Arn",
+                      ],
+                    },
+                    "/AgentXProductionRele*/BetaReleas*",
+                  ],
+                ],
+              },
             },
             {
               "Action": "codestar-connections:UseConnection",
@@ -17895,7 +17932,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                 "Namespace": "BetaPreflight",
                 "OutputArtifacts": [
                   {
-                    "Name": "BetaPreflightState",
+                    "Name": "StateBetaPreflight",
                   },
                 ],
                 "RoleArn": {
@@ -17918,7 +17955,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Fn::Join": [
                       "",
                       [
-                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"beta"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"image"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"BetaPreflightState"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
+                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"beta"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"image"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"StateBetaPreflight"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
                         {
                           "Ref": "BetaAccountId",
                         },
@@ -17939,13 +17976,13 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Name": "Source",
                   },
                   {
-                    "Name": "BetaPreflightState",
+                    "Name": "StateBetaPreflight",
                   },
                 ],
                 "Name": "CloudImage",
                 "OutputArtifacts": [
                   {
-                    "Name": "BetaCloudImageState",
+                    "Name": "StateBetaCloudImage",
                   },
                 ],
                 "RoleArn": {
@@ -17968,7 +18005,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Fn::Join": [
                       "",
                       [
-                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"beta"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"gateway"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"BetaCloudImageState"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
+                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"beta"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"gateway"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"StateBetaCloudImage"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
                         {
                           "Ref": "BetaAccountId",
                         },
@@ -17989,13 +18026,13 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Name": "Source",
                   },
                   {
-                    "Name": "BetaCloudImageState",
+                    "Name": "StateBetaCloudImage",
                   },
                 ],
                 "Name": "CloudGateway",
                 "OutputArtifacts": [
                   {
-                    "Name": "BetaCloudGatewayState",
+                    "Name": "StateBetaCloudGateway",
                   },
                 ],
                 "RoleArn": {
@@ -18018,7 +18055,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Fn::Join": [
                       "",
                       [
-                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"beta"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"gateway-check"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"BetaCloudGatewayState"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
+                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"beta"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"gateway-check"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"StateBetaCloudGateway"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
                         {
                           "Ref": "BetaAccountId",
                         },
@@ -18039,13 +18076,13 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Name": "Source",
                   },
                   {
-                    "Name": "BetaCloudGatewayState",
+                    "Name": "StateBetaCloudGateway",
                   },
                 ],
                 "Name": "GatewayCheck",
                 "OutputArtifacts": [
                   {
-                    "Name": "BetaGatewayCheckState",
+                    "Name": "StateBetaGatewayCheck",
                   },
                 ],
                 "RoleArn": {
@@ -18100,7 +18137,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Fn::Join": [
                       "",
                       [
-                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"beta"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"web-app"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"BetaGatewayCheckState"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
+                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"beta"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"web-app"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"StateBetaGatewayCheck"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
                         {
                           "Ref": "BetaAccountId",
                         },
@@ -18121,13 +18158,13 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Name": "Source",
                   },
                   {
-                    "Name": "BetaGatewayCheckState",
+                    "Name": "StateBetaGatewayCheck",
                   },
                 ],
                 "Name": "CloudWebApp",
                 "OutputArtifacts": [
                   {
-                    "Name": "BetaCloudWebAppState",
+                    "Name": "StateBetaCloudWebApp",
                   },
                 ],
                 "RoleArn": {
@@ -18150,7 +18187,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Fn::Join": [
                       "",
                       [
-                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"beta"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"proof"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"BetaCloudWebAppState"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
+                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"beta"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"proof"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"StateBetaCloudWebApp"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
                         {
                           "Ref": "BetaAccountId",
                         },
@@ -18171,13 +18208,13 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Name": "Source",
                   },
                   {
-                    "Name": "BetaCloudWebAppState",
+                    "Name": "StateBetaCloudWebApp",
                   },
                 ],
                 "Name": "CloudProof",
                 "OutputArtifacts": [
                   {
-                    "Name": "BetaCloudProofState",
+                    "Name": "StateBetaCloudProof",
                   },
                 ],
                 "RoleArn": {
@@ -18233,7 +18270,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Fn::Join": [
                       "",
                       [
-                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"production"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"preflight"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"BetaCloudProofState"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"CODE_CTX","type":"PLAINTEXT","value":"#{ProductionCodePreflight.CODE_CTX}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
+                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"production"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"preflight"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"StateBetaCloudProof"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"CODE_CTX","type":"PLAINTEXT","value":"#{ProductionCodePreflight.CODE_CTX}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
                         {
                           "Ref": "AWS::AccountId",
                         },
@@ -18254,14 +18291,14 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Name": "Source",
                   },
                   {
-                    "Name": "BetaCloudProofState",
+                    "Name": "StateBetaCloudProof",
                   },
                 ],
                 "Name": "Preflight",
                 "Namespace": "ProductionPreflight",
                 "OutputArtifacts": [
                   {
-                    "Name": "ProductionPreflightState",
+                    "Name": "StateProdPreflight",
                   },
                 ],
                 "RoleArn": {
@@ -18284,7 +18321,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Fn::Join": [
                       "",
                       [
-                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"production"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"image"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"ProductionPreflightState"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
+                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"production"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"image"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"StateProdPreflight"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
                         {
                           "Ref": "AWS::AccountId",
                         },
@@ -18305,13 +18342,13 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Name": "Source",
                   },
                   {
-                    "Name": "ProductionPreflightState",
+                    "Name": "StateProdPreflight",
                   },
                 ],
                 "Name": "CloudImage",
                 "OutputArtifacts": [
                   {
-                    "Name": "ProductionCloudImageState",
+                    "Name": "StateProdCloudImage",
                   },
                 ],
                 "RoleArn": {
@@ -18334,7 +18371,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Fn::Join": [
                       "",
                       [
-                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"production"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"gateway"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"ProductionCloudImageState"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
+                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"production"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"gateway"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"StateProdCloudImage"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
                         {
                           "Ref": "AWS::AccountId",
                         },
@@ -18355,13 +18392,13 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Name": "Source",
                   },
                   {
-                    "Name": "ProductionCloudImageState",
+                    "Name": "StateProdCloudImage",
                   },
                 ],
                 "Name": "CloudGateway",
                 "OutputArtifacts": [
                   {
-                    "Name": "ProductionCloudGatewayState",
+                    "Name": "StateProdCloudGateway",
                   },
                 ],
                 "RoleArn": {
@@ -18384,7 +18421,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Fn::Join": [
                       "",
                       [
-                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"production"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"gateway-check"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"ProductionCloudGatewayState"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
+                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"production"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"gateway-check"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"StateProdCloudGateway"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
                         {
                           "Ref": "AWS::AccountId",
                         },
@@ -18405,13 +18442,13 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Name": "Source",
                   },
                   {
-                    "Name": "ProductionCloudGatewayState",
+                    "Name": "StateProdCloudGateway",
                   },
                 ],
                 "Name": "GatewayCheck",
                 "OutputArtifacts": [
                   {
-                    "Name": "ProductionGatewayCheckState",
+                    "Name": "StateProdGatewayCheck",
                   },
                 ],
                 "RoleArn": {
@@ -18466,7 +18503,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Fn::Join": [
                       "",
                       [
-                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"production"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"web-app"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"ProductionGatewayCheckState"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
+                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"production"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"web-app"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"StateProdGatewayCheck"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
                         {
                           "Ref": "AWS::AccountId",
                         },
@@ -18487,13 +18524,13 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Name": "Source",
                   },
                   {
-                    "Name": "ProductionGatewayCheckState",
+                    "Name": "StateProdGatewayCheck",
                   },
                 ],
                 "Name": "CloudWebApp",
                 "OutputArtifacts": [
                   {
-                    "Name": "ProductionCloudWebAppState",
+                    "Name": "StateProdCloudWebApp",
                   },
                 ],
                 "RoleArn": {
@@ -18516,7 +18553,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Fn::Join": [
                       "",
                       [
-                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"production"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"proof"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"ProductionCloudWebAppState"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
+                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"production"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"proof"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"StateProdCloudWebApp"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
                         {
                           "Ref": "AWS::AccountId",
                         },
@@ -18537,13 +18574,13 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Name": "Source",
                   },
                   {
-                    "Name": "ProductionCloudWebAppState",
+                    "Name": "StateProdCloudWebApp",
                   },
                 ],
                 "Name": "CloudProof",
                 "OutputArtifacts": [
                   {
-                    "Name": "ProductionCloudProofState",
+                    "Name": "StateProdCloudProof",
                   },
                 ],
                 "RoleArn": {
@@ -20242,16 +20279,32 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
             },
             {
               "Action": [
+                "s3:PutObject*",
+                "s3:DeleteObject*",
+                "s3:AbortMultipartUpload",
+              ],
+              "Effect": "Deny",
+              "NotResource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    {
+                      "Fn::GetAtt": [
+                        "Artifacts82DD59A1",
+                        "Arn",
+                      ],
+                    },
+                    "/AgentXProductionRele*/ReleaseMan*",
+                  ],
+                ],
+              },
+              "Sid": "DenyArtifactWritesOutsideOwnOutput",
+            },
+            {
+              "Action": [
                 "s3:GetObject*",
                 "s3:GetBucket*",
                 "s3:List*",
-                "s3:DeleteObject*",
-                "s3:PutObject",
-                "s3:PutObjectLegalHold",
-                "s3:PutObjectRetention",
-                "s3:PutObjectTagging",
-                "s3:PutObjectVersionTagging",
-                "s3:Abort*",
               ],
               "Effect": "Allow",
               "Resource": [
@@ -20276,6 +20329,27 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                   ],
                 },
               ],
+            },
+            {
+              "Action": [
+                "s3:PutObject",
+                "s3:AbortMultipartUpload",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    {
+                      "Fn::GetAtt": [
+                        "Artifacts82DD59A1",
+                        "Arn",
+                      ],
+                    },
+                    "/AgentXProductionRele*/ReleaseMan*",
+                  ],
+                ],
+              },
             },
             {
               "Action": "codestar-connections:UseConnection",

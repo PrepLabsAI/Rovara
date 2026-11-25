@@ -211,6 +211,33 @@ on both connections. Redeploying an existing pipeline stack keeps the GitHub con
 it already has, so those two `--parameters` can be left out. The pipeline never deploys itself, so this is always by hand;
 review the change set first (`--no-execute --require-approval never --change-set-name <name>`).
 
+### What each build role may write into the artifact bucket
+
+The bucket is not versioned and holds every artifact of every run, including the `Source` and `CloudSource` artifacts the Production stage
+reads after the approval. So each build role writes only its own output (PH-S3-PREFIXES): `PutObject` and `AbortMultipartUpload` on its own
+output prefix, plus an explicit Deny (`NotResource` of that prefix) of `s3:PutObject*`, `s3:DeleteObject*` and the abort on everything else.
+The two Code roles' prefixes are `<pipeline>/ReleaseMan*` (ReleaseManifest) and `<pipeline>/BetaReleas*` (BetaReleaseManifest); the Cloud
+roles (private stack, same rule) hold `State<Beta|Prod>*`. The Cloud state artifacts are named `State<Beta|Prod><Action>` (for example
+`StateBetaPreflight`) so one short prefix tells an environment's states from every other artifact; nothing is allowed on a bare `Beta*`.
+
+- **First-run check.** The key layout used (`<pipeline name, first 20 characters>/<artifact name, first 10 characters>/<id>`) is the one CodePipeline is
+  believed to use; it has not been read from a real run. After the first beta run, list the keys once (`aws s3 ls s3://<ArtifactBucketName>/ --recursive`
+  from the release account) and check that every artifact sits under `AgentXProductionRele*/` and that the state artifacts sit under
+  folders starting `StateBeta` or `StateProd`. An `AccessDenied` on an artifact upload in the first run means the layout differs: fix the
+  pattern (here and in the private stack), do not widen it to the whole bucket.
+- **Shared folders are expected.** With the 10-character cut, artifacts whose names share their first ten characters share one folder: the four
+  beta states `StateBetaCloudImage`, `StateBetaCloudGateway`, `StateBetaCloudWebApp` and `StateBetaCloudProof` all live under `StateBetaC/` (and
+  likewise `StateProdC/`; the Preflight and GatewayCheck states have `StateBetaP/`, `StateBetaG/`). That is safe: every object id under a folder is unique
+  per artifact and run, a later stage reads an artifact by its exact key, and the grants are by the `StateBeta*` or `StateProd*` prefix, which this does not change.
+- **Deploy-order coupling.** This pipeline and the private Cloud actions stack share the pipeline name, the 20/10 numbers and the state
+  names (one digest of them is pinned in `tests/contract/release-pipeline-s3-prefixes.test.ts` and, as the same literal, in the Cloud
+  repository's `cloud-release-actions.test.ts`). The Cloud stack's new grants refuse the old names (`Beta<Action>State`). First deploy: Cloud actions stack
+  first (projects must exist), then this stack, as above. If an older pipeline with the old names is already running: update THIS stack first
+  (the Cloud stack's old whole-bucket grant works with either names), then the Cloud actions stack, and merge both changes together.
+- **Known, not a regression.** The beta Cloud role can still overwrite `StateBetaCloudProof`, the artifact the Production Preflight reads
+  (it writes its own state; before this change it could write anything). The pipeline's own role and the two source action roles also keep
+  CDK's whole-bucket read-write; scoping them and enabling bucket versioning are follow-ups.
+
 The beta account needs, once, before the pipeline's first beta release:
 
 1. CDK bootstrap (`npx cdk bootstrap aws://<beta-account-id>/us-east-1`).
