@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import { DERIVED_BROKER_VARIABLES, GITHUB_WEBHOOK_SECRET_VARIABLE, githubWebhookSecretName } from "@agentx/contracts";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { GITHUB_WEBHOOK_ROUTE } from "../../infra/lib/github-webhook.js";
+import { LINEAR_WEBHOOK_ROUTE } from "../../infra/lib/linear-webhook.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { unpackedBrokerVariables, type ResourcesTemplate } from "../support/broker-environment-template.js";
@@ -129,9 +130,11 @@ describe.each([["named (staging)", named, "staging"], ["legacy (production)", le
   it("throttles the webhook route at the stage, merged with the sign-in routes: nothing overwrites anything", () => {
     const stage = entries(template, "AWS::ApiGatewayV2::Stage")[0]![1];
     const settings = stage.Properties.RouteSettings as Record<string, Json>;
-    expect(Object.keys(settings).sort()).toEqual(["ANY /review/{proxy+}", "ANY /v1/app/{proxy+}", "ANY /v1/auth/{proxy+}", "ANY /v1/dev/{proxy+}", GITHUB_WEBHOOK_ROUTE].sort());
+    expect(Object.keys(settings).sort()).toEqual(["ANY /review/{proxy+}", "ANY /v1/app/{proxy+}", "ANY /v1/auth/{proxy+}", "ANY /v1/dev/{proxy+}", GITHUB_WEBHOOK_ROUTE, LINEAR_WEBHOOK_ROUTE].sort());
     expect(settings[GITHUB_WEBHOOK_ROUTE]).toEqual({ ThrottlingBurstLimit: 100, ThrottlingRateLimit: 20, DetailedMetricsEnabled: true });
-    for (const key of Object.keys(settings).filter((candidate) => candidate !== GITHUB_WEBHOOK_ROUTE)) expect(settings[key], key).toEqual({ ThrottlingBurstLimit: 50, ThrottlingRateLimit: 20 });
+    // The Linear webhook route shares the map with its own, equal setting (linear-webhook-route.test.ts).
+    expect(settings[LINEAR_WEBHOOK_ROUTE]).toEqual({ ThrottlingBurstLimit: 100, ThrottlingRateLimit: 20, DetailedMetricsEnabled: true });
+    for (const key of Object.keys(settings).filter((candidate) => candidate !== GITHUB_WEBHOOK_ROUTE && candidate !== LINEAR_WEBHOOK_ROUTE)) expect(settings[key], key).toEqual({ ThrottlingBurstLimit: 50, ThrottlingRateLimit: 20 });
     // A route setting names a route that must exist first.
     const routeId = entries(template, "AWS::ApiGatewayV2::Route").find(([, route]) => route.Properties.RouteKey === GITHUB_WEBHOOK_ROUTE)![0];
     expect([stage.DependsOn].flat()).toContain(routeId);

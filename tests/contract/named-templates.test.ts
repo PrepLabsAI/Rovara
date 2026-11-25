@@ -19,6 +19,7 @@ import { createHash } from "node:crypto";
 import { withoutBatchFAdditions } from "../support/batch-f-template.js";
 import { withoutBrokerMemberConditionCheck } from "../support/broker-member-condition-check-template.js";
 import { withoutWebhookSecretLane } from "../support/webhook-secret-template.js";
+import { withoutLinearWebhookGuard } from "../support/linear-webhook-route-template.js";
 import { withoutStuckStoppingAlarm } from "../support/stuck-stopping-alarm-template.js";
 import { withoutApiAccessLog } from "../support/api-access-log-template.js";
 import { withoutDispatcherLessonsPeople } from "../support/dispatcher-lessons-people-template.js";
@@ -303,7 +304,8 @@ describe("named environment templates", () => {
   for (const stack of stacks) {
     if (stack.stackName === "agentx-staging-control-plane") {
       it("removing only Batch F additions preserves code/next's agentx-staging-control-plane template", () => {
-        const beforeBatchF = withoutWebhookSecretLane(withoutBatchFAdditions(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(normalizedTemplate(stack), "named")), { named: true, sites: PUBLIC_API_SITES }), { env: "staging" }), STAGING))));
+        // Linear webhook guard: the Linear route's throttle and alarm are asserted and taken out too (outermost), so this recorded pin still holds.
+        const beforeBatchF = withoutLinearWebhookGuard(withoutWebhookSecretLane(withoutBatchFAdditions(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(normalizedTemplate(stack), "named")), { named: true, sites: PUBLIC_API_SITES }), { env: "staging" }), STAGING)))));
         expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("8edf09fff29983cc3c3338a6b2d24bb27d061db29960bfa2e77a52c068618972");
       }, 120_000);
     }
@@ -320,8 +322,12 @@ describe("named environment templates", () => {
         // CODE-PUBLIC-URL (2026-11-24): re-pinned for exactly the PublicApiUrl parameter and condition, each external URL base becoming Fn::If [HasPublicApiUrl, PublicApiUrl, the API's own host] (resolved equal while
         // the parameter is empty), the broker's packed public host and the new LinearWebhookUrl output. Rule D: with those taken out (withoutPublicApiUrl, tests/support/public-api-url-template.ts) lessons-port's and RETAIN's
         // pins below hold as recorded (checked on the lines after the next).
-        expect(createHash("sha256").update(JSON.stringify(template)).digest("hex")).toBe("74e8f0a3e94b69a322a78fb6c1c4e2952689f71f5af7c5bc6c0da4b4e9a38a69");
-        const beforePublicApi = withoutPublicApiUrl(structuredClone(template), { named: true, sites: PUBLIC_API_SITES });
+        // LINEAR-WEBHOOK-GUARD (2026-11-24, rebased onto the public-URL pin): re-pinned for exactly the Linear route's stage throttle (one RouteSettings entry), its stage dependency and one alarm. Rule D: with those
+        // taken out (withoutLinearWebhookGuard, asserted field by field in tests/support/linear-webhook-route-template.ts) the public-URL pin 74e8f0a3e94b69a322a78fb6c1c4e2952689f71f5af7c5bc6c0da4b4e9a38a69 holds (checked on the lines after the next).
+        expect(createHash("sha256").update(JSON.stringify(template)).digest("hex")).toBe("830e2fa7346af112695e09ceb5bab02848cc595c5598cad3347951b790898738");
+        const withoutGuard = withoutLinearWebhookGuard(structuredClone(template));
+        expect(createHash("sha256").update(JSON.stringify(withoutGuard)).digest("hex"), "minus only the Linear webhook guard").toBe("74e8f0a3e94b69a322a78fb6c1c4e2952689f71f5af7c5bc6c0da4b4e9a38a69");
+        const beforePublicApi = withoutPublicApiUrl(structuredClone(withoutGuard), { named: true, sites: PUBLIC_API_SITES });
         expect(createHash("sha256").update(JSON.stringify(beforePublicApi)).digest("hex"), "minus only the public API URL").toBe("32f5c0957135cc03888fb1c4233d7f632cd98bb877f9464583ee87126e3c1381");
         // RETAIN (arch ruling 2026-11-24): re-pinned for exactly DeletionPolicy RetainExceptOnCreate and UpdateReplacePolicy Retain on the control plane's five keys, channel state table and adapter secret.
         // Rule D: with those put back (withoutRetainPolicies) lessons-port's pin ff86d95eeb270fd7cba3301dc0022e0f08a51794c5c4cc22f873de0e4f000ace holds (checked on the next line).
