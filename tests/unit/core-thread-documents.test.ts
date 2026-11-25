@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { createWorkflowSnapshot, type ObjectStorage, type OrgId, type StoredDocument, type WorkflowSnapshot } from "@agentx/contracts";
+import { change, createWorkflowSnapshot, type ObjectStorage, type OrgId, type StoredDocument, type WorkflowSnapshot } from "@agentx/contracts";
 import { threadCanvasCloseout, threadDocumentLink, type ThreadDocumentDeps } from "../../packages/broker/src/core-host/thread-documents.js";
 import { hostedSlackThreads } from "../../packages/broker/src/aws/slack-thread-channel.js";
 import { createTaskPlanCanvas } from "../../packages/broker/src/aws/slack-web.js";
@@ -36,6 +36,22 @@ describe("core thread plan Canvas port", () => {
     w.create.mockImplementationOnce(async (_company, _tenant, _input, onCreated) => { await onCreated("F0123456789"); expect((await w.current()).canvasLineage?.[0]).toMatchObject({ state: "CREATED", canvasId: "F0123456789" }); return { canvasId: "F0123456789", permalink: "https://example.slack.com/docs/F0123456789" }; });
     expect((await w.link()).url).toContain("slack.com"); await w.link();
     expect(w.create).toHaveBeenCalledTimes(1);
+  });
+  it("keeps a flow write made between its read and its lineage write: only the lineage fields are written", async () => {
+    const w = await world();
+    const key = taskKey(w.taskId);
+    const update = w.fake.store.update.bind(w.fake.store);
+    let raced = false;
+    // Another writer records the flow (it keeps the revision) after the lineage read and before its write.
+    vi.spyOn(w.fake.store, "update").mockImplementation(async (input) => {
+      if (!raced && input.key.pk === key.pk) { raced = true; await update({ key, ops: [change.set(["workflow", "flow"], { skippedSteps: ["PLAN_CRITIQUE"] })] }); }
+      return update(input);
+    });
+    expect((await w.link()).url).toContain("slack.com");
+    expect(raced).toBe(true);
+    const workflow = await w.current();
+    expect(workflow.canvasLineage?.[0]).toMatchObject({ canvasId: "F0123456789" });
+    expect((workflow as WorkflowSnapshot & { flow?: unknown }).flow).toEqual({ skippedSteps: ["PLAN_CRITIQUE"] });
   });
   it("does not publish a document with a mismatched digest", async () => {
     const w = await world(); w.corrupt(); expect(await w.link()).toEqual({}); expect(w.create).not.toHaveBeenCalled();
