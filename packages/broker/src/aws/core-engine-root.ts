@@ -92,6 +92,7 @@ import {
   HOSTED_IDENTITY_PROVIDER, createHostedHoldSweep, createHostedLedger, createHostedMoneyStop, hostedSecurityModules, hostedTaskCapUsd, readHostedAdmissionSettings, runSpendState, runStopWiredFrom, taskCapOf, type HostedAdmissionSettings, type HostedIdentityOptions, type ProjectTaskCap,
 } from "../core-host/hosted-modules.js";
 import { USAGE_EVENT_TYPE, createUsageBooking } from "../core-host/usage-booking.js";
+import { wireHostedTierReview } from "../core-host/hosted-tier-review.js";
 import { createLessonsApi, type LessonsApi } from "../core-host/lessons-api.js";
 import { createLessonsSlackSwitchApi, type LessonsSlackSwitchApi } from "../core-host/lessons-slack-switch-api.js";
 import { createKnowledgeSwitchApi, type KnowledgeSwitchApi } from "../core-host/knowledge-switch-api.js";
@@ -957,6 +958,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           report.failed += idle.failed;
           return report;
         };
+        // TIER-GROWTH-MERGE: the code and security reviews a change that grew must pass on its current head, over the gateway's agent route as the task's own paid call (the meter is the task's cap and the admission).
+        wireHostedTierReview({ env, taskTokens: inputs.taskTokens, flow: flow.deps, companyId, now, booking: createUsageBooking({ store: registry.require("storage"), metering: registry.require("metering"), now }),
+          taskRoomUsd: (task) => reviewerRoomUsd({ store: registry.require("storage"), metering: registry.require("metering"), companyId, settings: admissionSettings, now, projectTaskCap }, task) });
         flow.deps.secondReview = createHostedReviewers({ flow: flow.deps, registry, companyId, offered: engineOffered, taskRoomUsd: (task) => reviewerRoomUsd({ store: registry.require("storage"), metering: registry.require("metering"), companyId, settings: admissionSettings, now, projectTaskCap }, task) }).secondReview;
         createHostedDesignReview({ flow: flow.deps, registry, companyId, offered: engineOffered,
           taskRoomUsd: (task) => reviewerRoomUsd({ store: registry.require("storage"), metering: registry.require("metering"), companyId, settings: admissionSettings, now, projectTaskCap }, task),

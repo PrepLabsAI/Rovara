@@ -36,7 +36,7 @@ const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, 
 type Json = Record<string, unknown>;
 export interface Reply { status: number; body: Json }
 
-export async function createJourneyWorld(options: { world?: FakeWorldOptions; linear?: boolean; page?: boolean; colleague?: { role: "member" | "admin"; grant: "developer" | "administrator" }; workerTimeouts?: { reviewMs?: number } } = {}) {
+export async function createJourneyWorld(options: { modelGateway?: { url: string; model: string }; world?: FakeWorldOptions; linear?: boolean; page?: boolean; colleague?: { role: "member" | "admin"; grant: "developer" | "administrator" }; workerTimeouts?: { reviewMs?: number } } = {}) {
   const proof = createCoreProof();
   // Linear (journeys 3 and 4): the company's connection over the broker's table, the fake Linear behind the fetch seam, and the webhook route on the broker's front.
   const linearLogs: Array<Record<string, unknown>> = [];
@@ -53,7 +53,7 @@ export async function createJourneyWorld(options: { world?: FakeWorldOptions; li
   // `companies`, broker.ts:15993). The shared fixture gives it only with Linear on, so a page journey asks for it, over the same table.
   const pageTable: { current?: { send(command: unknown, options?: unknown): Promise<unknown> } } = {};
   const lazyPageTable = { send: (command: unknown, sendOptions?: unknown) => pageTable.current!.send(command, sendOptions) };
-  const harness = await createCoreBrowserBroker({ wrapCore: (root) => proof.wrap(root), realJobServices: true, ...(options.world === undefined ? {} : { world: options.world }), ...(linearOption === undefined ? {} : { linear: linearOption }),
+  const harness = await createCoreBrowserBroker({ wrapCore: (root) => proof.wrap(root), realJobServices: true, ...(options.modelGateway === undefined ? {} : { modelGateway: options.modelGateway }), ...(options.world === undefined ? {} : { world: options.world }), ...(linearOption === undefined ? {} : { linear: linearOption }),
     ...(options.page !== true ? {} : { developerExtra: { companies: companyMembershipFromDynamo(lazyPageTable, "signin"), taskPeopleConfiguration: { peopleChangesEnabled: true } } }) });
   pageTable.current = harness.db;
   const handler = proof.track(harness.handler);
@@ -246,11 +246,11 @@ export async function createJourneyWorld(options: { world?: FakeWorldOptions; li
   }
 
   /** One run of a deployment's scheduled jobs for the company, as the schedules would run them (merge tracking reads the code host, the session sweep, notice delivery). */
-  async function runJobs(advanceSeconds = 0): Promise<Record<string, unknown>> {
+  async function runJobs(advanceSeconds = 0, budgetMs = 5_000): Promise<Record<string, unknown>> {
     harness.world.clock.advance(advanceSeconds);
     const runtime = await harness.core.app.runtimeFor(harness.runtime.flow.deps.companyId);
     const reports: Record<string, unknown> = {};
-    for (const name of ["session-sweep", "merge-tracking", "notify-deliver"] as const) reports[name] = await runtime.services[name]?.pass({ budgetMs: 5_000 });
+    for (const name of ["session-sweep", "merge-tracking", "notify-deliver"] as const) reports[name] = await runtime.services[name]?.pass({ budgetMs });
     return reports;
   }
 

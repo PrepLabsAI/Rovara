@@ -1,3 +1,4 @@
+import { signingWorld } from "./model-gateway.js";
 import type { CoreRuntime } from "../../packages/broker/src/core-host/core-runtime.js";
 // Native journeys share the State table and bucket across core and hosted routes.
 // Sign-in stays in a separate physical fake table; lifecycle verdicts always come from core.
@@ -7,7 +8,7 @@ import { cp, mkdir, mkdtemp, readFile, readdir, realpath, writeFile } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect } from "vitest";
-import { E2EPolicySchema, createCandidateManifest, isSafeE2ESourcePath, projectPk, WORKER_INVOKE_AUTHORIZATION_SCHEME, workerInvokeToken, workerInvokeTokenPayload, type E2ESourceSnapshot, type WorkerInvocation, type DeveloperTaskView, type E2EScenarioResults } from "@agentx/contracts";
+import { E2EPolicySchema, agentModelIdentity, createCandidateManifest, isSafeE2ESourcePath, projectPk, WORKER_INVOKE_AUTHORIZATION_SCHEME, workerInvokeToken, workerInvokeTokenPayload, type E2ESourceSnapshot, type WorkerInvocation, type DeveloperTaskView, type E2EScenarioResults } from "@agentx/contracts";
 import { locateWorkspace } from "../../packages/broker/src/core/task-flow/workspace-location.js";
 import { e2eRegisteredRuntimeKey } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
 import { createDockerApplicationHost, createProcessDockerCli } from "@agentx/verifier";
@@ -117,6 +118,8 @@ export interface CoreBrowserBrokerOptions {
   developerExtra?: Partial<DeveloperApiConfiguration>;
   /** The journeys' real-core proof (tests/journeys/harness/core-proof.ts): a wrapper the broker is given instead of the root, to record which requests the core answered. The returned harness keeps the real root. */
   wrapCore?: (root: BrokerCoreRoot) => BrokerCoreRoot;
+  /** The model gateway's address and the install's task-token key on the hosted root (as a deployment sets them): the root then wires the hosted model calls (the grown tier's reviews) over `fetch`, which a journey stands in front of. */
+  modelGateway?: { url: string; model: string };
   /** The deployed job services (merge tracking, session sweep, notice delivery: `createBrokerCoreServices`) instead of this fixture's stand-ins, so a journey can run the jobs a deployment's schedules run. */
   realJobServices?: boolean;
   /** Options of the fake world (its admission, machines, ...), for a journey that needs the deployment's admission to refuse. */
@@ -146,6 +149,7 @@ export interface CoreBrowserBrokerHarness extends DeveloperTaskBrokerHarness { c
 export async function createCoreBrowserBroker(options: CoreBrowserBrokerOptions = {}): Promise<CoreBrowserBrokerHarness> {
   let core: BrokerCoreRoot | undefined;
   let world: FakeWorld | undefined;
+  const gatewaySigner = options.modelGateway === undefined ? undefined : signingWorld().signer;
   const channel = new FakeChannelAdapter();
   // Linear's pieces need the table client and the core's store, which exist only inside the broker's own construction below: they are reached through these.
   let tableRef: { send(command: unknown, options?: unknown): Promise<unknown> } | undefined;
@@ -176,8 +180,9 @@ export async function createCoreBrowserBroker(options: CoreBrowserBrokerOptions 
       world = createFakeWorld({ store, objects, ...options.world });
       world.clock.now = Date.now();
       const identity = createHostedIdentity({ membershipOf: membershipWithRoleFromDynamo(db, "signin"), displayNameOf: hostedDisplayNameOf(db, "signin"), githubLinks: githubLinkReaderOver(store) });
-      adapters.modules = world.modules.map((module) => module.point === "identity" ? { ...module, create: () => identity } : module.point === "metering" ? { ...module, create: () => createPriceTableMetering({ currency: "USD", models: { [PLANNER_MODEL_KEY]: PRICE, [`${FAUX_MODEL.provider}/${FAUX_MODEL.modelId}`]: PRICE } }) } : module.point === "approvers" ? { ...module, create: () => createHostedApprovers({ store, identity, key: approvalProofKeyOf(callbackSigningKey), now: () => new Date(world!.clock.now) }) } : module);
-      core = createBrokerCoreRoot({ ...(linear === undefined ? {} : { linearIntake: { connections: linear.connections, fetch: linear.fetch } }), env: { AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID: typeof options.brokerExtra?.["e2eFeatureRuntimeCatalogId"] === "string" ? options.brokerExtra["e2eFeatureRuntimeCatalogId"] : "catalog" }, documentClient: db, stateTableName: "state", signInTableName: "signin", codeSettings: codeSettingsReader({ documentClient: db, tableName: "state" }), callbackSigningKey,
+      adapters.modules = world.modules.filter((module) => options.modelGateway === undefined || module.point !== "model-keys").map((module) => module.point === "identity" ? { ...module, create: () => identity } : module.point === "metering" ? { ...module, create: () => createPriceTableMetering({ currency: "USD", models: { [PLANNER_MODEL_KEY]: PRICE, [`${FAUX_MODEL.provider}/${FAUX_MODEL.modelId}`]: PRICE, ...(options.modelGateway === undefined ? {} : { [`${agentModelIdentity(options.modelGateway.model).provider}/${options.modelGateway.model}`]: PRICE }) } }) } : module.point === "approvers" ? { ...module, create: () => createHostedApprovers({ store, identity, key: approvalProofKeyOf(callbackSigningKey), now: () => new Date(world!.clock.now) }) } : module);
+      core = createBrokerCoreRoot({ ...(linear === undefined ? {} : { linearIntake: { connections: linear.connections, fetch: linear.fetch } }), env: { AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID: typeof options.brokerExtra?.["e2eFeatureRuntimeCatalogId"] === "string" ? options.brokerExtra["e2eFeatureRuntimeCatalogId"] : "catalog", ...(options.modelGateway === undefined ? {} : { ROVARA_CORE_MODEL_GATEWAY_URL: options.modelGateway.url, ROVARA_CORE_AGENT_MODEL: options.modelGateway.model }) },
+        ...(gatewaySigner === undefined ? {} : { taskTokens: () => ({ signer: gatewaySigner, issuer: "https://api.example/v1/auth" }) }), documentClient: db, stateTableName: "state", signInTableName: "signin", codeSettings: codeSettingsReader({ documentClient: db, tableName: "state" }), callbackSigningKey,
         ...(options.brokerExtra?.["projectSetupSource"] === undefined ? {} : { applicationSource: async (repositoryUrl, ref) => (options.brokerExtra!["projectSetupSource"] as { capture(input: { repositoryUrl: string; ref: string }): Promise<E2ESourceSnapshot> }).capture({ repositoryUrl, ref }) }),
         repositoryGrantKey: Buffer.alloc(32, 4), repositoryCredential: async () => ({ token: "synthetic-local-host-token" }),
         codeModules: () => ({}) as never, origin: () => "https://api.example.test", log: () => undefined, now: () => new Date(world!.clock.now),

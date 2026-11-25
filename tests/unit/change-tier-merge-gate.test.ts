@@ -8,7 +8,8 @@ import { tierGate } from "../../packages/broker/src/core/merge/merge.js";
 import { patchDigestOf, recordQuestionsAnswered, recordTierReview, type TierLevel } from "../../packages/broker/src/core/decisions/change-tier.js";
 import { readReviewInput } from "../../packages/broker/src/core/merge/change-tier-read.js";
 import { ORG, TASK_ID, mergeWorld, type MergeWorld } from "../support/merge-world.js";
-import { MERGE_NOT_READY_MESSAGES as M } from "../../packages/contracts/src/index.js";
+import { GROWTH_WORDS, MERGE_NOT_READY_MESSAGES as M } from "../../packages/contracts/src/index.js";
+import { growthOwedOf } from "../../packages/broker/src/core/merge/grown-owed.js";
 
 const AT = "2026-11-09T10:00:00.000Z";
 
@@ -85,13 +86,15 @@ describe("the merge recomputes the change tier from the host", () => {
     const oldHead = world.prs[0]!.head;
     await pushed(world, { "src/auth/session.ts": "export const session = 1;\n" });
     await rejects((await press(world)).run);
+    // The growth is on the record now: the merge is not ready (the view) and the press says the same words, until the review is on the record for this head.
+    const owed = async () => (await rejects(async () => (await press(world)).run())).message;
     await reviewed(world, "standard");
-    expect((await rejects((await press(world)).run)).message).toContain("needs risky checks");
+    expect(await owed()).toBe(GROWTH_WORDS.running("risky"));
     await reviewed(world, "risky", oldHead);
-    expect((await rejects((await press(world)).run)).message).toContain("needs risky checks");
+    expect(await owed()).toBe(GROWTH_WORDS.running("risky"));
     await reviewed(world, "risky");
     await pushed(world, { "src/auth/other.ts": "export const other = 1;\n" });
-    expect((await rejects((await press(world)).run)).message).toContain("needs risky checks");
+    expect(await owed()).toBe(GROWTH_WORDS.running("risky"));
     await reviewed(world, "risky");
     expect((await (await press(world)).run()).status).toBe("MERGED");
   });
@@ -139,7 +142,7 @@ describe("the merge recomputes the change tier from the host", () => {
     const first = await press(world);
     expect(first.prepared.tier).toBe("standard");
     expect((await rejects(first.run)).message).toBe("This change now touches more than 100 lines of code, so it needs standard checks.");
-    expect((await rejects((await press(world)).run)).message).toContain("needs standard checks");
+    expect((await rejects(async () => (await press(world)).run())).message).toBe(GROWTH_WORDS.running("standard"));
     // The standard checks ran on this head: nothing is owed, though the steps were skipped.
     await reviewed(world, "standard");
     expect((await (await press(world)).run()).status).toBe("MERGED");
@@ -200,5 +203,93 @@ describe("a head that cannot be bound", () => {
     const odd = Object.create(home.codeHost, { pathKind: { value: undefined }, changeRequestStatus: { value: async (...args: Parameters<CodeHost["changeRequestStatus"]>) => ({ ...(await home.codeHost.changeRequestStatus(...args)), headRevision: "not-a-commit" }) } }) as CodeHost;
     const task = await world.task();
     await expect(tierGate(world.deps, task as never, [{ host: odd, repositoryId: pr.repositoryId, repositoryUrl: home.url, number: pr.number, headSha: "not-a-commit" }], world.host.scope(ORG), "small")).rejects.toThrow("which version of the code this is");
+  });
+});
+
+// TIER-GROWTH-MERGE: a change that grew after its plan owes the higher level's reviews on the CURRENT head, whatever flow it ran (no skipped steps here), and is never ready while they are owed.
+describe("a grown change on the normal flow (no steps skipped)", () => {
+  const grownFlow = (to: TierLevel) => ({
+    rulesVersion: 1, tier: { level: to, kinds: ["code_config"], source: "diff", reasons: [{ code: "more_than_files" }], at: AT },
+    tierHistory: [{ level: "small", kinds: ["dependency"], source: "estimate", reasons: [], at: AT }], grewAfterBuild: { from: "small", to, at: AT },
+  });
+  const grownWorld = async (to: TierLevel) => {
+    const { world } = await worldAt("small");
+    await world.setWorkflow({ flow: grownFlow(to) });
+    return world;
+  };
+
+  it("BAR: it is not ready, and cannot merge, until both reviews of the higher level are on the record for the current head; an old head's review, a lower level's review and a stale one after a push do not count", async () => {
+    const world = await grownWorld("standard");
+    const oldHead = world.prs[0]!.head;
+    const words = GROWTH_WORDS.running("standard");
+    expect((await rejects(() => prepareMerge(world.deps, { taskId: TASK_ID, requestId: world.requestId() }))).message, "the view's reason, and the press's").toBe(words);
+    await reviewed(world, "standard", "9".repeat(40));
+    expect((await rejects(() => prepareMerge(world.deps, { taskId: TASK_ID, requestId: world.requestId() }))).message, "a review of another head").toBe(words);
+    await reviewed(world, "standard");
+    const first = await press(world);
+    expect((await first.run()).status).toBe("MERGED");
+    // A push after the review: the same task (a fresh world) owes it again for the new head.
+    const again = await grownWorld("standard");
+    await reviewed(again, "standard", oldHead);
+    await pushed(again, { "src/b.ts": "export const b = 1;\n" });
+    expect((await rejects(() => prepareMerge(again.deps, { taskId: TASK_ID, requestId: again.requestId() }))).message, "a push makes the review stale").toBe(words);
+    expect(again.prs[0]!.model.getChangeRequest(String(again.prs[0]!.number)).state).toBe("open");
+  });
+
+  it("grown to risky: a standard review is not enough; the risky one for the head is", async () => {
+    const world = await grownWorld("risky");
+    await reviewed(world, "standard");
+    expect((await rejects(() => prepareMerge(world.deps, { taskId: TASK_ID, requestId: world.requestId() }))).message).toBe(GROWTH_WORDS.running("risky"));
+    await reviewed(world, "risky");
+    expect((await (await press(world)).run()).status).toBe("MERGED");
+  });
+
+  it("the gate itself (reached with no readiness check) refuses a grown change whose diff is small now with the true words, never 'more than 3 files', and never merges it without the review", async () => {
+    const world = await grownWorld("standard");
+    const pr = world.prs[0]!;
+    const home = (await world.host.repository("web", 1, pr.repositoryId, ORG))!;
+    const target = { host: home.codeHost, repositoryId: pr.repositoryId, repositoryUrl: home.url, number: pr.number, headSha: pr.head };
+    const task = await world.task();
+    const refused = await rejects(() => tierGate(world.deps, task as never, [target], world.host.scope(ORG), "standard"));
+    expect(refused.message).toBe(GROWTH_WORDS.earlier("standard"));
+    expect(refused.message).not.toContain("files");
+    await reviewed(world, "standard");
+    await expect(tierGate(world.deps, (await world.task()) as never, [target], world.host.scope(ORG), "standard")).resolves.toBeUndefined();
+  });
+
+  it("the gate reads the same owed level as the view: a tier raised on this head after a lower review leaves the risky review owed", async () => {
+    const { world } = await worldAt("small");
+    await world.setWorkflow({ flow: { ...grownFlow("risky"), grewAfterBuild: { from: "small", to: "standard", at: AT } } });
+    await reviewed(world, "standard");
+    const pr = world.prs[0]!;
+    const home = (await world.host.repository("web", 1, pr.repositoryId, ORG))!;
+    const target = { host: home.codeHost, repositoryId: pr.repositoryId, repositoryUrl: home.url, number: pr.number, headSha: pr.head };
+    const refusal = await rejects(async () => tierGate(world.deps, (await world.task()) as never, [target], world.host.scope(ORG), "risky"));
+    expect(refusal.message).not.toBe("");
+    await reviewed(world, "risky");
+    await expect(tierGate(world.deps, (await world.task()) as never, [target], world.host.scope(ORG), "risky")).resolves.toBeUndefined();
+  });
+
+  it("growthOwedOf: nothing owed for a change that never grew; reviewing while no attempt is on the head; Needs you for found problems, the task's limit, and a review that cannot run; reviewing again for an outage until the runs are spent", async () => {
+    const head = "a".repeat(40);
+    const items = [{ repositoryId: "web", number: 1, headSha: head, state: "open" as const }];
+    const at = AT;
+    const withChecks = (details: string[], grew = true) => ({ flow: { rulesVersion: 1, tier: { level: "standard", kinds: [], source: "diff", reasons: [], at, headSha: head }, ...(grew ? { grewAfterBuild: { from: "small", to: "standard", at } } : {}), quickChecks: details.map((detail) => ({ kind: "code_config", outcome: "failed", detail, at })) } }) as never;
+    expect(growthOwedOf(withChecks([], false), items)).toBeUndefined();
+    expect(growthOwedOf(withChecks([]), items)).toMatchObject({ state: "reviewing", words: GROWTH_WORDS.running("standard") });
+    expect(growthOwedOf(withChecks([]), [])).toBeUndefined();
+    const attempt = (rest: string) => `check review level=standard head=${head} ${rest}`;
+    expect(growthOwedOf(withChecks([attempt("1 findings, 1 must be fixed")]), items)).toMatchObject({ state: "needs_you", words: GROWTH_WORDS.foundProblems("standard") });
+    expect(growthOwedOf(withChecks([attempt("0 findings, 0 must be fixed; did not run (cap); runs=1")]), items)).toMatchObject({ state: "needs_you", cap: true, words: GROWTH_WORDS.cap("standard"), next: GROWTH_WORDS.nextRaiseLimit });
+    // A limit stop that used no run, then an outage: still run again (the limit did not count).
+    expect(growthOwedOf(withChecks([attempt("0 findings, 0 must be fixed; did not run (unavailable); runs=1")]), items)).toMatchObject({ state: "reviewing" });
+    expect(growthOwedOf(withChecks([attempt("0 findings, 0 must be fixed; did not run (cap); runs=0")]), items)).toMatchObject({ state: "needs_you", cap: true });
+    expect(growthOwedOf(withChecks([attempt("0 findings, 0 must be fixed; did not run (no_reviewer); runs=1")]), items)).toMatchObject({ state: "needs_you", words: GROWTH_WORDS.noReviewer("standard"), next: GROWTH_WORDS.nextNoReviewer });
+    expect(growthOwedOf(withChecks([attempt("0 findings, 0 must be fixed; did not run (unavailable); runs=1")]), items)).toMatchObject({ state: "reviewing" });
+    expect(growthOwedOf(withChecks([attempt("0 findings, 0 must be fixed; did not run (unavailable); runs=3")]), items)).toMatchObject({ state: "needs_you", words: GROWTH_WORDS.couldNotRun("standard"), next: GROWTH_WORDS.nextRetry });
+    expect(growthOwedOf(withChecks([attempt("0 findings, 0 must be fixed; did not run (unsupported); runs=1")]), items)).toMatchObject({ state: "needs_you", words: GROWTH_WORDS.unsupported("standard"), next: GROWTH_WORDS.nextUnsupported });
+    expect(growthOwedOf(withChecks([attempt("0 findings, 0 must be fixed; did not run (malformed)")]), items)).toMatchObject({ state: "needs_you", words: GROWTH_WORDS.couldNotRun("standard") });
+    // An attempt on another head says nothing about this one.
+    expect(growthOwedOf(withChecks([`check review level=standard head=${"b".repeat(40)} 0 findings, 0 must be fixed; did not run (malformed)`]), items)).toMatchObject({ state: "reviewing" });
   });
 });
