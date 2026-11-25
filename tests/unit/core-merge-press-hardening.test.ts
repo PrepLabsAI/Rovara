@@ -31,7 +31,35 @@ function countingHost(model: FakeHostModel, mode: { value: "ok" | "refuse" | "un
   }) as CodeHost;
 }
 
+const LATE_WORDS = "A second review did not run. Acknowledge it first.";
+
+/** The merge's second-review wait: `prepareMerge` asks first (odd asks) and the press's own readiness asks again (even asks); `late.refuse` makes only the late ask refuse. */
+function lateAsk(): { late: { refuse: boolean }; mergeWait: () => string | undefined } {
+  const late = { refuse: true };
+  let asks = 0;
+  return { late, mergeWait: () => { asks += 1; return late.refuse && asks % 2 === 0 ? LATE_WORDS : undefined; } };
+}
+
 describe("the press under pressure", () => {
+  it("asks the second-review wait again right before the claim: a wait that began after the person confirmed stops the press, nothing is claimed, and the same press merges once the wait is over", async () => {
+    const world = await mergeWorld();
+    await world.seedTracking();
+    const waits = lateAsk();
+    const deps = { ...world.deps, mergeWait: waits.mergeWait };
+    // The person's own request is made without the wait; the press makes its request again (ask 1) and then its readiness check (ask 2: the late ask).
+    const prepared = await prepareMerge(world.deps, { taskId: TASK_ID, requestId: world.requestId() });
+    expect(await rejects(() => pressAsOwner(deps, prepared))).toMatchObject({ code: "MERGE_NOT_READY", message: LATE_WORDS });
+    // Nothing was claimed, merged or audited.
+    expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
+    expect((await world.trackingOf(world.prs[0]!))!["mergeClaim"]).toBeUndefined();
+    expect(await world.auditRows()).toHaveLength(0);
+    // The wait is over: the same request merges, once.
+    waits.late.refuse = false;
+    expect((await pressAsOwner(deps, prepared)).status).toBe("MERGED");
+    expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("merged");
+    expect(await world.auditRows()).toHaveLength(1);
+  });
+
   it("makes exactly one host merge call when two presses race", async () => {
     const mode = { value: "ok" as "ok" | "refuse" | "unknown", calls: 0 };
     const world = await mergeWorld({ codeHost: (model) => countingHost(model, mode) });
