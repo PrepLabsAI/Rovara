@@ -334,7 +334,7 @@ export interface SetupPageView {
   /** The project's own setup check. */
   check: { status: "unchecked" | "outdated" | "checking" | "failed" | "ready"; failedStep?: string };
   /** A proposal waiting: the commands, and where the check on them stands. */
-  apply?: { candidateRevision: number; setup: string[]; readiness: string[]; promptLocations?: string[]; check: { status: "unchecked" | "outdated" | "checking" | "failed" | "ready"; failedStep?: string }; approval?: ApprovalOffer };
+  apply?: { candidateRevision: number; setup: string[]; readiness: string[]; promptLocations?: string[]; /** DEC 254zzz495 (N3): the candidate has no test command ("Ready, no automated tests"); where the run looked, as fixed words. */ noAutomatedTests?: { looked: string[] }; check: { status: "unchecked" | "outdated" | "checking" | "failed" | "ready"; failedStep?: string }; approval?: ApprovalOffer };
   /**
    * DEC 253q: the eval the latest setup run drafted (its `eval_discovery` report) and where its approval stands. Absent: no eval was discovered. Every text in `suites` came from the repository or
    * the model and is shown as such. `cannotConfirm`: the install cannot confirm one (a laptop has no eval budget), with the fixed reason; no Confirm button is shown then.

@@ -38,6 +38,10 @@ export function setupDecisionSubjects(flow: TaskFlowDeps, sandboxDenied?: (proje
 import { createSessionControlHost } from "./host.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 
+/** DEC 254zzz495 (N3): what the page's waiting-setup view adds when the candidate has no test command: that fact and where the run looked (fixed words). Nothing otherwise. */
+const noTestsViewOf = (apply: { noAutomatedTests?: { looked: readonly string[] } | undefined }): { noAutomatedTests?: { looked: string[] } } =>
+  apply.noAutomatedTests === undefined ? {} : { noAutomatedTests: { looked: [...apply.noAutomatedTests.looked] } };
+
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
 const ROUTE = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9_.-]{0,127})\/(setup-agent|setup-check)(?:\/(stop|command|journal|confirm|discard|eval-confirm))?$/u;
 const bodyOf = (request: BrokerRequest): unknown => {
@@ -196,7 +200,7 @@ export function createLocalSetupAgent(options: LocalSetupAgentOptions): LocalSet
       hostAsks: asks.map((ask): SetupHostAskView => ({ host: ask.host, status: ask.state, international: isInternationalName(ask.host), ...(ask.from === undefined ? {} : { from: ask.from }), ...(ask.journalN === undefined ? {} : { journalN: ask.journalN }), ...(ask.state === "open" ? { approval: offerOfHost(ask) } : {}) })),
       check: { status: check.status, ...(check.failedStep === undefined ? {} : { failedStep: check.failedStep }) },
       ...(!waiting ? {} : { apply: {
-        candidateRevision: apply.candidateRevision, setup: apply.setup, readiness: apply.readiness, ...(apply.promptLocations.length === 0 ? {} : { promptLocations: apply.promptLocations }), check: { status: apply.checkState.status, ...(apply.checkState.failedStep === undefined ? {} : { failedStep: apply.checkState.failedStep }) },
+        candidateRevision: apply.candidateRevision, setup: apply.setup, readiness: apply.readiness, ...(apply.promptLocations.length === 0 ? {} : { promptLocations: apply.promptLocations }), ...noTestsViewOf(apply), check: { status: apply.checkState.status, ...(apply.checkState.failedStep === undefined ? {} : { failedStep: apply.checkState.failedStep }) },
         // The decision is offered only once the candidate check passed: before that there is nothing the owner could be asked to approve.
         ...(apply.checkState.status === "ready" ? { approval: { requestId: proposalRequestId(apply.digest, apply.candidateRevision), revision: apply.candidateRevision, artifactDigest: apply.digest, kind: "setup" as const, risk: "high" as const } } : {}),
       } }),

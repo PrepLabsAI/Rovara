@@ -184,6 +184,32 @@ describe("hosted setup approval: who may decide, by the candidate's risk", () =>
     expect(await latestOf(world, FAKE_COMPANY)).toBe(2);
   });
 
+  it("N3: a candidate with no test command is a LOW risk change a maintainer approves, shown as 'no automated tests' with where the run looked; only the approval makes it the project's, and the card is bound to the digest", async () => {
+    const { world, person, call } = await setupWorld();
+    const fact = { at: "2026-11-24T10:00:00.000Z", looked: ["tests_folder", "makefile"] };
+    const { digest } = await seedCandidate(world, FAKE_COMPANY, "payments", { readiness: [] });
+    await world.store.update({ key: projectRevisionKey(FAKE_COMPANY, "payments", 2), ops: [change.set("noAutomatedTests", fact)] });
+    const maintainer = person("p-maint", FAKE_COMPANY, "member", { payments: "administrator" });
+    const shown = (await call(get(RUN), maintainer)).body["apply"];
+    expect(shown).toMatchObject({ readiness: [], noAutomatedTests: true, testsLookedIn: ["tests_folder", "makefile"], risk: "low", changes: [{ area: "test_commands", risk: "low" }], approver: "maintainer", canApprove: true });
+    expect(await latestOf(world, FAKE_COMPANY)).toBe(1);
+    expect((await call(post(`${RUN}/decide`, decideBody(digest)), maintainer)).body).toMatchObject({ decision: "approved", risk: "low" });
+    expect(await latestOf(world, FAKE_COMPANY)).toBe(2);
+    // The fact is the revision ROW's (beside the definition: an older release parses only the definition), and still there once approved.
+    const stored = await world.store.get(projectRevisionKey(FAKE_COMPANY, "payments", 2));
+    expect(stored!["noAutomatedTests"]).toEqual(fact);
+    expect(stored!["definition"]).not.toHaveProperty("noAutomatedTests");
+  });
+
+  it("N3: a candidate that has test commands is not shown as 'no automated tests', whatever fact is stored on it", async () => {
+    const { world, person, call } = await setupWorld();
+    await seedCandidate(world, FAKE_COMPANY, "payments", {});
+    await world.store.update({ key: projectRevisionKey(FAKE_COMPANY, "payments", 2), ops: [change.set("noAutomatedTests", { at: "2026-11-24T10:00:00.000Z", looked: [] })] });
+    const shown = (await call(get(RUN), person("p-maint", FAKE_COMPANY, "member", { payments: "administrator" }))).body["apply"] as Record<string, unknown>;
+    expect(shown).not.toHaveProperty("noAutomatedTests");
+    expect(shown).not.toHaveProperty("testsLookedIn");
+  });
+
   it("refuses a project maintainer on a HIGH risk candidate (a new website) in fixed words, writing nothing; a company admin and the owner approve it", async () => {
     for (const role of ["admin", "owner"] as const) {
       const { world, person, call } = await setupWorld();

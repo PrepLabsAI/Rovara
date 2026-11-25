@@ -347,6 +347,39 @@ export const ProjectOriginsSchema = z.partialRecord(z.enum(PROJECT_ORIGIN_FIELDS
 export type ProjectOrigins = z.infer<typeof ProjectOriginsSchema>;
 
 /**
+ * DEC 254zzz495 / N3: where a setup run may say it looked for tests, as fixed words (never free text: the line is shown on the setup card and written to the log, and nothing from a repository can be added).
+ * `testPlacesLooked` (broker `setup-agent/end-summary.ts`) picks them from a run's commands.
+ */
+export const SETUP_TEST_PLACES = ["pytest_config", "tests_folder", "test_py_files", "conftest", "package_scripts", "js_test_files", "go_test_files", "java_src_test", "makefile", "ci_workflows", "readme"] as const;
+export type SetupTestPlace = (typeof SETUP_TEST_PLACES)[number];
+
+/**
+ * DEC 254zzz495 / N3: the project's setup was APPROVED with no test command ("Ready, no automated tests"): `at` is when the candidate that carried it was made, `looked` where the setup run looked for tests (fixed words).
+ * A fact of the project's own approved revision, kept as an attribute of the revision ROW beside `definition` (like `setupApproval` and `runtimeBinding`), NOT inside the strict `definition`: an older release parses only
+ * `definition` and ignores unknown row attributes, so a rollback stays safe. Written only by a setup candidate (`confirmSetupAgent` through `storeSetupCandidate`) that a person approves; no registration body can carry it
+ * (it is not a definition field). It means something only while the revision's `readiness` is empty (`noAutomatedTestsOf`): a revision that gains a test command ignores it, and a candidate with test commands drops it.
+ */
+export const NoAutomatedTestsSchema = z.object({
+  at: z.string().datetime(),
+  looked: z.array(z.enum(SETUP_TEST_PLACES)).max(SETUP_TEST_PLACES.length),
+}).strict();
+export type NoAutomatedTests = z.infer<typeof NoAutomatedTestsSchema>;
+
+/**
+ * The no-automated-tests fact of a project revision, or undefined. Fail-safe: a revision that has any test (readiness) command reads as having tests whatever the stored fact says, so a person who adds a test command turns
+ * the tests-before-a-PR rule back on without anyone clearing a flag. Pure.
+ */
+export function noAutomatedTestsOf(definition: { readiness?: readonly unknown[] | undefined; noAutomatedTests?: NoAutomatedTests | undefined }): NoAutomatedTests | undefined {
+  return definition.noAutomatedTests !== undefined && (definition.readiness?.length ?? 0) === 0 ? definition.noAutomatedTests : undefined;
+}
+
+/** The no-automated-tests fact as a revision ROW holds it (`row.noAutomatedTests`), read through its schema again; undefined when the row has none or it does not read. Pure. */
+export function noAutomatedTestsOfRow(row: unknown): NoAutomatedTests | undefined {
+  const value = typeof row === "object" && row !== null ? (row as { noAutomatedTests?: unknown }).noAutomatedTests : undefined;
+  return value === undefined ? undefined : NoAutomatedTestsSchema.safeParse(value).data;
+}
+
+/**
  * M7 slice 2: the project's `afterMergeWatch` setting (decision 160 item 5: its own setting, not an automation). OFF unless `enabled` is true. `windowMinutes` (default 30) is how long the project's alarms are watched after a
  * deploy of a merge Rovara made; `environments` names the environments that count (compared without case; empty: all); `revert` says whether a revert is only reported on or also offered (a person's press still starts it).
  * Control-plane only (`workerProjectDefinition`). The watcher checks the stored value again every time it reads it (a value that does not check is off).

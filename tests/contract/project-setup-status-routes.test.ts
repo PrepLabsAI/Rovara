@@ -278,6 +278,36 @@ describe("the checklist's rows, each from its own records", () => {
     expect(run.failedCommand?.lastLines.at(-1)).toContain("[REDACTED]");
   });
 
+  it("setup run: a search that matched nothing is never 'the command that failed' (DEC 254zzz495, N1); a real failure before it still is", async () => {
+    const h = companyA();
+    const task = setupRun(h, A, "alpha", { status: "failed", stop: "attempts_used", failure: SETUP_AGENT_FAILURES.attempts_used, summary: SUMMARY({ stop: "attempts_used", partial: true }) });
+    journal(h, A, "alpha", task, 1, { command: "npm ci", exitCode: 0 });
+    journal(h, A, "alpha", task, 2, { command: "grep -rn pytest .", exitCode: 1, tail: "" });
+    expect((await h.ok()).setupRun.failedCommand).toBeUndefined();
+    journal(h, A, "alpha", task, 3, { command: "pip install -r requirements.txt", exitCode: 1, tail: "ERROR: no matching distribution" });
+    journal(h, A, "alpha", task, 4, { command: "cd repo/x && find . -name '*test*' | grep -v node_modules", exitCode: 1, tail: "" });
+    expect((await h.ok()).setupRun.failedCommand).toMatchObject({ n: 3, exitCode: 1 });
+    journal(h, A, "alpha", task, 5, { command: "cd repo/x && source .venv/bin/activate && find . -name '*test*' | grep -v node_modules", exitCode: 1, tail: "" });
+    expect((await h.ok()).setupRun.failedCommand).toMatchObject({ n: 5, exitCode: 1 });
+  });
+
+  it("setup run: the approved setup has no test command (DEC 254zzz495, N3): ready_no_tests, done by the same rule, with where the run looked; a revision that has tests never reads so", async () => {
+    const h = companyA();
+    const fact = { at: "2026-11-24T10:00:00.000Z", looked: ["tests_folder", "pytest_config"] };
+    // The fact is an attribute of the revision ROW beside the definition (rollback safety), not a definition field.
+    h.db.set(companyProjectRow(A, "alpha", 1, { repositories: [{ name: "api", url: "https://github.com/acme/api", defaultBranch: "main" }] }, { noAutomatedTests: fact }));
+    setupRun(h, A, "alpha", READY({ proposal: PROPOSAL({ setup: ["npm ci"] }) }));
+    // Waiting for a decision: not the project's yet, so no end state.
+    setupApply(h, A, "alpha", { state: "checking", check: "ready" });
+    expect((await h.ok()).setupRun).not.toHaveProperty("endState");
+    setupApply(h, A, "alpha", { state: "approved", check: "ready" });
+    const approved = (await h.ok()).setupRun;
+    expect(approved).toMatchObject({ state: "done", approval: "approved", endState: "ready_no_tests", noAutomatedTests: fact });
+    // A revision with a test command ignores the stored fact (fail-safe).
+    h.db.set(companyProjectRow(A, "alpha", 1, { repositories: [{ name: "api", url: "https://github.com/acme/api", defaultBranch: "main" }], readiness: [{ cwd: "repo/api", executable: "npm", args: ["test"], timeoutSeconds: 600 }] }, { noAutomatedTests: fact }));
+    expect((await h.ok()).setupRun).not.toHaveProperty("endState");
+  });
+
   it("setup run: the last lines of a long (4 KB) output are its END, not the start", async () => {
     const h = companyA();
     const task = setupRun(h, A, "alpha", { status: "failed", stop: "attempts_used", failure: SETUP_AGENT_FAILURES.attempts_used });

@@ -11,7 +11,7 @@
 // Nothing here reads a command's output for meaning: the exit code, the time and the command's own words are all it looks at.
 import {
   SETUP_AGENT_LIMITS_DEFAULT, SETUP_BLOCKED_HOSTS_MAX, SETUP_JOURNAL_MAX_ENTRIES, SETUP_JOURNAL_TAIL_BYTES, SETUP_HOST_WAIT_MAX_HOURS, SetupAgentLimitsSchema, SetupHostSchema, SetupJournalEntrySchema, SetupRunSummarySchema,
-  oneLineText, type SetupAgentLimits, type SetupJournalEntry, type SetupProposal, type SetupRunEndWord, type SetupRunSummary,
+  oneLineText, setupResultOf, type SetupAgentLimits, type SetupJournalEntry, type SetupProposal, type SetupRunEndWord, type SetupRunSummary,
 } from "@agentx/contracts";
 import type { SetupAgentHooks, SetupCommandDecision, SetupCommandRecord, TrackedFilesVerdict } from "./setup-agent.js";
 import { readSetupProposalAnswer, type SetupDraftRepository } from "./setup-draft.js";
@@ -64,6 +64,16 @@ export function stepKeyOf(command: string): string {
   const rest = tokens.slice(1);
   const parts = takesSubcommand(program) ? [program, ...rest.filter((token) => !token.startsWith("-")).slice(0, 2)] : [program, ...rest.filter((token) => !token.startsWith("-")).slice(0, 1)];
   return parts.join(" ").toLowerCase().slice(0, 120);
+}
+
+/**
+ * A command on one line the way a shell reads it: each line break between commands is `;` (so a multi-line command is stored as `a ; b`, never as `a b`, which would read as one command with an extra argument). The journal's readers
+ * (the page, the carry-over, the checklist) classify the stored line, and a `;` keeps them from reading a chain whose last line fails silently as a pure search. A line that ends in an ODD number of backslashes continues on the next line, as in a shell; an even number (`\\`) is a literal backslash and the line ends there.
+ */
+export function shellOneLine(command: string): string {
+  const lines = command.replace(/(?<!\\)((?:\\\\)*)\\\r?\n/gu, "$1 ").split(/\r?\n/u).map((line) => line.trim()).filter((line) => line !== "");
+  // A line that ends with an operator (`&&`, `||`, `|`) goes on to the next line as it is; any other break is a `;`.
+  return lines.reduce((text, line) => (text === "" ? line : `${text}${/(?:&&|\|\||\|)$/u.test(text) ? " " : " ; "}${line}`), "");
 }
 
 /** True for a command that only looks at things. */
@@ -233,11 +243,13 @@ export class SetupAgentGovernor implements SetupAgentHooks {
     if (left > 0) this.inflightByStep.set(key, left); else this.inflightByStep.delete(key);
     this.agentFinished += 1;
     this.append("agent", record);
-    if (record.exitCode === 0 && !record.timedOut) {
+    const result = setupResultOf(record);
+    if (result === "worked") {
       this.failures.delete(key);
       // A command that changed something is progress: the other steps get their tries back. A command that only looked is not.
       if (!isProbeCommand(record.command)) this.failures.clear();
-    } else {
+    } else if (result !== "nothing_found") {
+      // N1 (DEC 254zzz495): a pure search that matched nothing is an answer, not a failed try of its step: it adds no try and takes none away.
       this.failures.set(key, (this.failures.get(key) ?? 0) + 1);
     }
     this.check();
@@ -325,7 +337,7 @@ export class SetupAgentGovernor implements SetupAgentHooks {
     const parsed = SetupJournalEntrySchema.safeParse({
       n: this.journal.length + 1,
       source,
-      command: oneLineText(record.command, COMMAND_CHARS) || "(empty command)",
+      command: oneLineText(shellOneLine(record.command), COMMAND_CHARS) || "(empty command)",
       exitCode: record.exitCode === null ? null : Math.max(-1, Math.min(255, Math.trunc(record.exitCode))),
       durationMs: Math.max(0, Math.min(7_200_000, Math.round(record.durationMs))),
       timedOut: record.timedOut,

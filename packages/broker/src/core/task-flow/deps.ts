@@ -1,5 +1,5 @@
 import type { CloseInspectionProvider } from "./close-inspection.js";
-import type { PreviewV2 } from "@agentx/contracts";
+import type { NoAutomatedTests, PreviewV2 } from "@agentx/contracts";
 import type { AgentXError, ScriptTokenPermission, WorkOrigin } from "@agentx/contracts";
 // Lane L6a, task flow core: what the flow is built on. Every dependency is a W0 port or a small seam named here; nothing names DynamoDB, SQS,
 // EC2, a chat tool or a code host (decision 51).
@@ -85,6 +85,8 @@ export interface ProjectRevision {
   definition: ProjectDefinition;
   /** The project is archived: it accepts no new work (Cloud's PROJECT_ARCHIVED). */
   archived?: boolean;
+  /** DEC 254zzz495 (N3): the revision ROW's no-automated-tests fact (not part of the definition: an older release must still parse the definition). Read it through `noAutomatedTestsOf`, which ignores it once the revision has a test command. */
+  noAutomatedTests?: NoAutomatedTests;
 }
 
 /** Where registered projects are read from. `createStoreProjectSource` reads them from the document store. */

@@ -32,6 +32,29 @@ describe("a run that proves nothing is never healthy (review fix 1)", () => {
 
 });
 
+describe("a project with no automated tests (DEC 254zzz495, N3): nothing collected is not a broken environment", () => {
+  const T = (over: Over) => ({ total: 0, passed: 0, failures: 0, errors: 0, skipped: 0, ...over });
+  const NONE = { noAutomatedTests: true };
+  it("reads an empty run as healthy once the setup steps put the code in place, and as incomplete otherwise; never as 'no tests collected'", () => {
+    const setupOnly = { steps: [{ step: "setup", status: "passed" }], checks: [], tests: T({}) };
+    expect(classifyNightlyHealth(setupOnly, NONE)).toEqual({ class: "passed" });
+    expect(classifyNightlyHealth({ steps: [{ step: "setup", status: "skipped" }], checks: [], tests: T({}) }, NONE)).toEqual({ class: "unclear", cause: "incomplete_run" });
+    expect(classifyNightlyHealth({ steps: [], checks: [{ ...okCheck, testsCollected: 0 }], tests: T({}) }, NONE)).toEqual({ class: "unclear", cause: "incomplete_run" });
+    // The same night for a project that has tests stays what it was.
+    expect(classifyNightlyHealth(setupOnly)).toEqual({ class: "environment", cause: "no_tests_collected" });
+    expect(classifyNightlyHealth(setupOnly, { noAutomatedTests: false })).toEqual({ class: "environment", cause: "no_tests_collected" });
+  });
+  it("still reads a failed setup step, a check that never started and a timeout as the environment", () => {
+    expect(classifyNightlyHealth({ steps: [{ step: "setup", status: "failed" }], checks: [], tests: T({}) }, NONE)).toEqual({ class: "environment", cause: "setup_failed" });
+    expect(classifyNightlyHealth(run({ checks: [{ ...okCheck, started: false }] }), NONE)).toEqual({ class: "environment", cause: "check_never_started" });
+    expect(classifyNightlyHealth(run({ checks: [{ ...okCheck, timedOut: true }] }), NONE)).toEqual({ class: "environment", cause: "check_timed_out" });
+  });
+  it("leaves a run with real tests exactly as it was", () => {
+    expect(classifyNightlyHealth(run(), NONE)).toEqual({ class: "passed" });
+    expect(classifyNightlyHealth(run({ tests: counts(60, 1, 39) }), NONE)).toEqual({ class: "tests", setupProved: false });
+  });
+});
+
 describe("row 2: a check that never gave the tests a chance is the environment", () => {
   it("covers never started, timed out as a whole, no tests collected, and no report where one is approved", () => {
     expect(classifyNightlyHealth(run({ checks: [{ ...okCheck, started: false }] }))).toEqual({ class: "environment", cause: "check_never_started" });

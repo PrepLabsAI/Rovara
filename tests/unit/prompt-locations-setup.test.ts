@@ -108,7 +108,12 @@ describe("what a confirm takes (chooseCandidateItems: the item ids a person may 
   const all: Record<string, SetupVerification> = { [setupId]: "verified", [locId]: "verified" };
   const refused = (verdicts: Record<string, SetupVerification>, itemIds: string[] | undefined, def: typeof definition = definition) => () => chooseCandidateItems(withSetup, verdicts, def, itemIds);
 
-  it("an empty choice is refused as nothing", () => { expect(refused(all, [])).toThrow(SETUP_CONFIRM_WORDS.nothing); });
+  // DEC 254zzz495 (N3): an empty setup can always be used, so the person's explicit empty choice is no longer refused; it takes nothing and changes no command.
+  it("an empty choice is the empty setup: nothing taken, nothing refused", () => {
+    const empty = chooseCandidateItems(withSetup, all, definition, []);
+    expect(empty.made).toEqual({ used: [], unchecked: [], left: [] });
+    expect(empty.locations.used).toEqual([]);
+  });
   it("an unknown id is refused, alone or beside a location id", () => {
     expect(refused(all, ["nope"])).toThrow(SETUP_CONFIRM_WORDS.unknownItem);
     expect(refused(all, [locId, "nope"])).toThrow(SETUP_CONFIRM_WORDS.unknownItem);
