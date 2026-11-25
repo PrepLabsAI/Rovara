@@ -16,7 +16,7 @@ import {
 import { stageAudit } from "./admission.js";
 import { taskNotFound } from "./access.js";
 import type { TaskCaller, TaskFlowDeps } from "./deps.js";
-import { dispatchRowItem } from "./dispatch-rows.js";
+import { pressedRowItem } from "./dispatch-rows.js";
 import { CLOSED_TASK } from "./owner-round.js";
 import { readTask } from "./reads.js";
 import type { TaskRecord } from "./records.js";
@@ -118,7 +118,7 @@ export async function answerTaskOnRequest(deps: TaskFlowDeps, caller: TaskCaller
     throw error;
   }
   const applied = await commitWorkflow(deps, task, next, [
-    dispatchRowItem(deps, task.taskId, next.revision, "UNDERSTAND", at),
+    pressedRowItem(deps, task.taskId, next.revision, "UNDERSTAND", at, caller.principal.personId),
     { kind: "put", item: { ...requestKey, entityType: "IDEMPOTENCY", action: "answers", payloadHash, taskId: task.taskId, requestId: request.requestId }, condition: when.absent() },
     // The owner's live access fence (a People revision) joins the move, so a change of who owns the task between the check and the commit refuses it.
     ...standing.fence,

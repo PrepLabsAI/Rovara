@@ -436,6 +436,66 @@ describe("finishing a stuck hand-over (DEC 254zzz101)", () => {
 
 });
 
+describe("the workspace slot moves to the successor with each task (TASK-TAKEOVER PR A)", () => {
+  const LEAVER_LIMIT = `DEVELOPER_LIMIT#${LEAVER}`, PEER_LIMIT = `DEVELOPER_LIMIT#${PEER}`;
+  const taskId = (n: number) => `${String(n).padStart(8, "0")}-aaaa-4aaa-8aaa-aaaaaaaaaaaa`;
+  const charge = (member: string) => ({ member: { pk: member, sk: "MEMBER" }, organization: { pk: `ORG_LIMIT#${A}`, sk: "ORGANIZATION" } });
+  /** An open task of the leaver's that holds a slot of their own counter (the marker row, and the task naming the counter). */
+  const slotted = (h: ReturnType<typeof world>, id: string) => {
+    h.task(id, { charge: charge(LEAVER_LIMIT) });
+    h.db.set({ pk: LEAVER_LIMIT, sk: `TASK#${id}`, entityType: "DEVELOPER_LIMIT_TASK", taskId: id, memberSk: "MEMBER", chargedAt: TIME });
+  };
+  const counters = (h: ReturnType<typeof world>, leaver: number, peer: number, org: number) => {
+    h.db.set({ pk: LEAVER_LIMIT, sk: "MEMBER", entityType: "DEVELOPER_LIMIT", count: leaver });
+    if (peer > 0) h.db.set({ pk: PEER_LIMIT, sk: "MEMBER", entityType: "DEVELOPER_LIMIT", count: peer });
+    h.db.set({ pk: `ORG_LIMIT#${A}`, sk: "ORGANIZATION", entityType: "ORG_LIMIT", count: org });
+  };
+
+  it("two tasks move to the successor: the leaver's counter goes down by two and the successor's up by two (once each), each marker and each task's own counter move, the company's count stays", async () => {
+    const h = world();
+    slotted(h, TASK1); slotted(h, TASK2);
+    counters(h, 3, 1, 9);
+    expect(await h.remove(LEAVER, { requestId: randomUUID(), expectedRole: "member", successorId: PEER })).toMatchObject({ status: 200, body: { moved: { tasks: 2, tasksLeft: 0 } } });
+    expect(h.db.get(LEAVER_LIMIT, "MEMBER")).toMatchObject({ count: 1 });
+    expect(h.db.get(PEER_LIMIT, "MEMBER")).toMatchObject({ count: 3 });
+    expect(h.db.get(`ORG_LIMIT#${A}`, "ORGANIZATION")).toMatchObject({ count: 9 });
+    for (const id of [TASK1, TASK2]) {
+      expect(h.db.get(LEAVER_LIMIT, `TASK#${id}`)).toBeUndefined();
+      expect(h.db.get(PEER_LIMIT, `TASK#${id}`)).toMatchObject({ taskId: id, memberSk: "MEMBER", chargedAt: TIME });
+      expect((h.db.get(`DEVTASK#${id}`, "META") as { charge: { member: { pk: string }; organization: { pk: string } } }).charge).toEqual(charge(PEER_LIMIT));
+    }
+  });
+
+  it("a task that holds no slot (no marker), or whose slot is another person's, moves none and is still handed over", async () => {
+    const h = world();
+    h.task(TASK1, { charge: charge(LEAVER_LIMIT) });
+    h.task(TASK2, { charge: charge(`DEVELOPER_LIMIT#${OTHER}`) });
+    h.db.set({ pk: `DEVELOPER_LIMIT#${OTHER}`, sk: `TASK#${TASK2}`, entityType: "DEVELOPER_LIMIT_TASK", taskId: TASK2, memberSk: "MEMBER", chargedAt: TIME });
+    counters(h, 2, 0, 4); h.db.set({ pk: `DEVELOPER_LIMIT#${OTHER}`, sk: "MEMBER", entityType: "DEVELOPER_LIMIT", count: 1 });
+    expect(await h.remove(LEAVER, { requestId: randomUUID(), expectedRole: "member", successorId: PEER })).toMatchObject({ status: 200, body: { moved: { tasks: 2, tasksLeft: 0 } } });
+    expect(h.db.get(LEAVER_LIMIT, "MEMBER")).toMatchObject({ count: 2 });
+    expect(h.db.get(PEER_LIMIT, "MEMBER")).toBeUndefined();
+    expect(h.db.get(`DEVELOPER_LIMIT#${OTHER}`, "MEMBER")).toMatchObject({ count: 1 });
+    expect(h.db.get(`DEVELOPER_LIMIT#${OTHER}`, `TASK#${TASK2}`)).toMatchObject({ taskId: TASK2 });
+  });
+
+  it("the preview counts the slot's steps as the commit writes them: 15 slotted tasks fit in the one transaction, 16 are refused BEFORE anyone is removed", async () => {
+    const fits = world();
+    for (let n = 1; n <= 15; n++) slotted(fits, taskId(n));
+    counters(fits, 15, 0, 15);
+    expect((await fits.preview(LEAVER, PEER)).body["handOver"]).toMatchObject({ tasks: 15, tasksLeft: 0 });
+    expect(await fits.remove(LEAVER, { requestId: randomUUID(), expectedRole: "member", successorId: PEER })).toMatchObject({ status: 200, body: { moved: { tasks: 15 } } });
+    expect(fits.db.get(PEER_LIMIT, "MEMBER")).toMatchObject({ count: 15 });
+    const over = world();
+    for (let n = 1; n <= 16; n++) slotted(over, taskId(n));
+    counters(over, 16, 0, 16);
+    expect(await over.preview(LEAVER, PEER)).toEqual(refusal(400, "CONFIG_INVALID", TOO_MUCH_WORK));
+    expect(await over.remove(LEAVER, { requestId: randomUUID(), expectedRole: "member", successorId: PEER })).toEqual(refusal(400, "CONFIG_INVALID", HANDOVER_TOO_BIG));
+    expect(over.revoked(LEAVER)).toBe(false);
+    expect(over.db.get(LEAVER_LIMIT, "MEMBER")).toMatchObject({ count: 16 });
+  });
+});
+
 describe("bounds", () => {
   it("closed tasks never count: 600 closed index rows and 250 closed co-owned tasks still preview and remove (review M3)", async () => {
     const h = world(); h.task(TASK1);

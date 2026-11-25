@@ -12,7 +12,7 @@ import { committedResponse, ownerMoveConflict } from "./committed-response.js";
 import { ContinueDeveloperTaskRequestSchema, WorkflowTransitionError, agentXError, returnWorkflowToImplementation, workflowSendBackOffered, type WorkflowSnapshot } from "@agentx/contracts";
 import { stageAudit } from "./admission.js";
 import type { TaskCaller, TaskFlowDeps } from "./deps.js";
-import { dispatchRowItem } from "./dispatch-rows.js";
+import { pressedRowItem } from "./dispatch-rows.js";
 import { ownerNoteItem, ownerRoundPlaceOf } from "./owner-note.js";
 import { CLOSED_TASK, NEVER_STARTED_TASK, WAITING_FOR_SPEND, admitRound, loadTaskAsOwner, ownerWords, parseBody, waitingForSpend, type TaskActionsOptions } from "./owner-round.js";
 import { readTask, taskViewOf, type TaskView } from "./reads.js";
@@ -55,7 +55,7 @@ export async function sendBackToCoding(deps: TaskFlowDeps, options: TaskActionsO
   // The money, access and admission checks come last, so a refusal for any other reason is the one the person reads first, and nothing has been written when one is refused.
   await admitRound(deps, options, { task, caller, requestId: request.requestId });
   const committed = await commitWorkflow(deps, task, returned, [
-    dispatchRowItem(deps, task.taskId, returned.revision, "IMPLEMENT", now),
+    pressedRowItem(deps, task.taskId, returned.revision, "IMPLEMENT", now, caller.principal.personId),
     ...(acting.items ?? []),
     ownerNoteItem({ taskId: task.taskId, requestId: request.requestId, text: words, now: deps.now?.() ?? new Date(), place: ownerRoundPlaceOf(returned) }),
     ...stageAudit(deps, { eventId: `task.sent_back:${task.taskId}:${request.requestId}`, actor: { type: "person", id: caller.principal.personId }, action: "task.sent_back", subject: { type: "task", id: task.taskId }, details: { project: task.project, revision: workflow.revision } }),

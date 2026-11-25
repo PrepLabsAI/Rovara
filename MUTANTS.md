@@ -1062,6 +1062,92 @@ Every mutant is a change to `cloudWordsReason` in scripts/port-guard.ts, run aga
 | M14 | `llmgateway`, `aigateway` leave the Cloud-only list alone | survived: equivalent (the gateway rule refuses `llmgateway` and `aigateway` itself, as M3 shows from the other side) |
 
 The restored tree passes (305 of 305).
+## TASK-TAKEOVER PR A: a step runs for the task's CURRENT owner, and the owner is charged (2026-11-25)
+
+Each mutant was applied to the source, the named suite run, and the change reverted. Rules suite: `tests/contract/task-takeover-a-rules.test.ts` (18 tests). Journeys: `tests/journeys/task-takeover-a.test.ts` (4).
+
+| Mutant | Change | Killed by | Result |
+| --- | --- | --- | --- |
+| M1, `hostedTaskAccess.checkStep` | a task with a People list takes the starter rule (the list is never read) | rules suite and the journeys | red (17 of 22) |
+| M2, `listStepVerdict` | no owner passes the access seam, and the step is allowed anyway | rules suite (owners the People proof passes but the seam refuses) | red (1 of 18) |
+| M3, `listStepVerdict` | an orphaned list is allowed | rules suite | red (3 of 18) |
+| M4, `listStepVerdict` | a list that does not read is allowed | rules suite | red (1 of 18) |
+| M5, `listStepVerdict` | a proof that throws is allowed | rules suite | red (1 of 18) |
+| M6, `resolveTaskListOwners` | an owner entry passes without the live People proof (the access seam still asks) | rules suite | green: the seam is the second layer, so M6c is the mutant that removes the stored-role check |
+| M6b, `listStepVerdict` | the access seam is not asked for each owner (the People proof still asks) | rules suite | red (1 of 18) |
+| M6c, both layers | a stale `owner` entry of a person who is gone passes (stored role alone) | rules suite (stale owner entry; seam; decision owner) | red (3 of 18) |
+| M7, `acceptStep` | the step's requester (the gateway's payer) stays the starter | the journeys (hand-over, take-over, session view) | red (3 of 4) |
+| M8, `chooseStepOwner` | the latest decision does not choose the payer | rules suite | red (1 of 18) |
+| M9, `chooseStepOwner` | the latest take-over does not choose the payer | rules suite | red (2 of 18) |
+| M10, `chooseStepOwner` | the last owner of the list, not the first, is the fallback | rules suite | red (1 of 18) |
+| M11, `listStepVerdict` | the payer is chosen among owners the access seam refused | rules suite | red (1 of 18) |
+| M12, `listStepVerdict` | the verdict carries no People revision fence | rules suite | red (1 of 18) |
+| M13, `takeTaskOwnership` | a take-over leaves the workspace slot on the previous owner | rules suite (slot) | red (2 of 18) |
+| M14, `planHandOver` | a hand-over moves the markers but not the two counters | `tests/contract/company-member-handover.test.ts` | red (2 of 29) |
+| M15, `planHandOver` | the preview does not count the slot's steps | same file (15 slotted tasks fit, 16 are refused before anyone is removed) | red (1 of 29) |
+| M16, `holdsOwnTask` | ignores the People list (a denied starter holds the task again with the grant back) | rules suite (re-admission) | red (1 of 18) |
+| M17, session `compute` | a session's starter keeps ownership once the list moved on | `tests/unit/session-people-owner.test.ts` | red (3 of 4) |
+| M18, `standingFactsOf` | a blocked no-owner task does not wait on a project admin | `tests/unit/task-standing.test.ts` | red (1 of 82) |
+| M19, `hostedDecisionService` | the chat gate knows only the task's starter | `tests/unit/hosted-slack-plan-buttons.test.ts` | red (1 of 28) |
+| M20, `hosted-authority` | the e2e creator proof is the starter's | `tests/unit/core-e2e-hosted-authority.test.ts` | red (1 of 36) |
+| M21, `retryActorOf` | the checks rerun is recorded under the starter | `tests/unit/task-takeover-a-actor.test.ts` | red (1 of 2) |
+| M22, `revisePlanWithLiveMessage` | the revision is recorded under the starter | `tests/unit/core-session-actions.test.ts` | red (1 of 4) |
+| M23, session view | the session says the starter pays | the journeys (c) | red (1 of 4) |
+| M24, session view | a task whose owner is a successor tells a company admin "the owner left" | the journeys (c) | red (1 of 4) |
+
+### TASK-TAKEOVER PR A, round 2 (the press is charged; reads that fail retry; the e2e proof is the admitted person's)
+
+All of M1 to M24 above were run again after the refactor (the same mutations, expressed against the moved code) and are killed. New:
+
+| Mutant | Change | Killed by | Result |
+| --- | --- | --- | --- |
+| M25, `acceptStep` | the dispatch row's press (`by`) is not read | `tests/unit/task-takeover-a-actor.test.ts` | red (1 of 4) |
+| M26, `listStepVerdict` | a presser the list still calls an owner who lost access is charged to another owner | rules suite and journey (e) | red (3 of 29) |
+| M27, `listStepVerdict` | the press is ignored (the order always applies) | rules suite | red (2 of 29) |
+| M28, `latestTakeoverOwner` | a history past 200 events is read from its oldest rows | rules suite (201 events) | red (1 of 23) |
+| M29, session view | the payer ignores the press now running | journey (f) | red (1 of 6) |
+| M30, `retryStep` | a Retry does not name the presser | journey (f) | red (1 of 6) |
+| M31, `hosted-authority` | the e2e round is asked under the current payer, not the person it was admitted under | `tests/unit/core-e2e-hosted-authority.test.ts` | red (1 of 36) |
+| M32, `listStepVerdict` | a read that fails refuses (and blocks the workflow) instead of throwing | rules suite | red (1 of 23) |
+
+
+### TASK-TAKEOVER PR A, round 3 (Opus pass: the failed read of a presser throws; the session and page presses name the presser)
+
+| Mutant | Change | Killed by | Result |
+| --- | --- | --- | --- |
+| M34, `listStepVerdict` | a presser whose own proof or membership could not be read is told "no owner" | rules suite | red (1 of 24) |
+| M35, session control host | the session Retry does not name the presser | `tests/unit/task-takeover-a-press-wiring.test.ts` | red (1 of 3) |
+| M36, `answerUnderstandQuestions` | the Answers do not name the presser | same file | red (1 of 3) |
+
+
+### TASK-TAKEOVER PR A, ruling (b) (DEC 254zzz523: a task owner needs an individual project grant; a channel-only person is a commenter or a viewer, never an owner)
+
+| Mutant | Change | Killed by | Result |
+| --- | --- | --- | --- |
+| M37, `reconcile` | a stored channel-only owner is kept as an owner by the read | rules suite | red (1 of 29) |
+| M38, `changeTaskPeople` | a role change makes a channel-only person an owner | rules suite | red (1 of 29) |
+| M39, `takeTaskOwnership` | a channel-only person takes a task over | rules suite | red (1 of 29) |
+| M40, `taskOwnershipHandOverSteps` | a hand-over picks a channel-only successor | rules suite | red (1 of 29) |
+| M41, `getTaskPeopleCapabilities` | the take-over is offered to a channel-only person | rules suite | red (1 of 29) |
+| M42, `qualifyCurrent` | the proof never says a person is channel-only | `tests/contract/task-person-identity.test.ts` | red (1 of 6) |
+| M43, `taskPersonMayOwn` | the Slack-native task exemption is dropped | rules suite | red (1 of 29) |
+| M44, `planRevokeProjectAccess` | the removal plan says nothing of the channel | `tests/contract/admin-change-plans-access.test.ts` | red (1 of 12) |
+| M45, `task-person-runtime` | the hosted runtime proof does not say how access was granted | `tests/contract/task-person-runtime.test.ts` | red (1 of 40) |
+| M46, `developer-routes` | the route's identity proof does not say how access was granted | `tests/contract/developer-routes.test.ts` | red (1 of 48) |
+| M47, `resolveTaskListOwners` | the list owners count a channel-only owner as live | rules suite | red (1 of 29) |
+| M48, `reconcile` | a read's demotion of an owner with no grant of their own writes no audit event | rules suite | red (1 of 29) |
+| M49, `reconcile` | that event carries no `needs_grant` reason (it reads as any role change) | rules suite | red (1 of 29) |
+| M50, `CHANNEL_ACCESS_AFTER_REVOKE_WORDS` | the removal sentence leaves out "start" (says "open or own") | `tests/contract/admin-change-plans-access.test.ts` | red (1 of 12) |
+| M51, `hostedTaskAccess.checkStart` | a member with no project grant may start | journey (g) | red (1 of 7) |
+| M52, task page history | a `needs_grant` demotion reads as a role change ("X made Y commenter") | `tests/contract/task-people-needs-grant-history.test.ts` | red (1 of 1) |
+| M53, `needsGrantEvent` | the demotion names the demoted person as its own actor | rules suite | red (1 of 29) |
+
+
+### GRANT-SIGNATURE-CANONICAL: a repository grant verifies only as the string it was issued as
+
+| Mutant | Change | Killed by | Result |
+| --- | --- | --- | --- |
+| G1, `RepositoryGrantService.verify` | the signature is compared as decoded bytes again (three other spellings of the same signature verify) | `tests/unit/core-e2e-publication-callback.test.ts` (the sibling-spellings test) | red (1 of 87) |
 
 ## CLI-LOGIN-GITHUB (agentx login accepts a GitHub-only install), 2026-11-25, on base a0bc104f9
 

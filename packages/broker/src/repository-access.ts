@@ -94,8 +94,10 @@ export class RepositoryGrantService {
   private verify(grant: string): RepositoryGrantClaims {
     const [payload, signature, extra] = grant.split(".");
     if (!payload || !signature || extra) throw agentXError("FORBIDDEN", "invalid repository grant");
-    const expected = Buffer.from(this.sign(payload), "base64url");
-    const received = Buffer.from(signature, "base64url");
+    // The signature as the STRING it was issued as. The last character of a 43-character base64url text carries 2 unused bits and a decoder ignores them, so comparing decoded bytes would also accept three other
+    // spellings of the same signature. The canonical text is compared (equal lengths, then constant time).
+    const expected = Buffer.from(this.sign(payload), "utf8");
+    const received = Buffer.from(signature, "utf8");
     if (expected.byteLength !== received.byteLength || !timingSafeEqual(expected, received)) {
       throw agentXError("FORBIDDEN", "invalid repository grant signature");
     }

@@ -102,7 +102,13 @@ export type StartVerdict = { allowed: true } | { allowed: false; code: AgentXErr
  * The answer to "may the system start this task's next step now". `items` are steps the adapter needs in the step's own transaction (Cloud's
  * People-revision fence), so a change of who may act between the check and the commit refuses the step.
  */
-export type StepVerdict = { allowed: true; items?: readonly TransactItem[] } | { allowed: false; message: string };
+export type StepVerdict = { allowed: true; items?: readonly TransactItem[]; owner?: StepOwner } | { allowed: false; message: string };
+
+/**
+ * The person the step runs for and is charged to: the task's CURRENT owner, proved live by the check (a task with no People list: its starter). Absent where the host's rule names none (the local owner, a system owner's
+ * run): the step then runs for the task's starter, as it always did. A step's `requester` (the model gateway's payer) is this person.
+ */
+export interface StepOwner { personId: string; /** The owner's own name as the task's People list keeps it, for a surface that says who is charged. */ name?: string }
 
 /**
  * Who may start work and who may act on a task. Code's default is the local owner (`createOwnerTaskAccess`); a hosted product fills it with
@@ -121,8 +127,12 @@ export interface TaskAccess {
    * every move, answer and decision still asks `canAct` or `ownerActing`. Absent: `canAct` (Code's own rule, where reading and driving are the same).
    */
   canRead?(principal: Principal, task: { taskId: string; developerId: string; project: string }): Promise<boolean>;
-  /** Asked before the system starts any step of a task with no one asking (a dispatch row, the first run): the person it runs for must still be allowed. */
-  checkStep(task: { taskId: string; developerId: string; project: string }): Promise<StepVerdict>;
+  /**
+   * Asked before the system starts any step of a task with no one asking (a dispatch row, the first run): the person it runs for must still be allowed. A hosted product answers for the task's CURRENT owner, not its starter
+   * (a task handed over or taken over runs for its new owner), and names the owner it rests on in `owner`. `by` is the person whose press made the step due: the step is charged to them, and
+   * refused (never charged to someone else) when they are no longer an owner with access; absent: nobody pressed, and the host's fixed choice applies.
+   */
+  checkStep(task: { taskId: string; developerId: string; project: string }, by?: string): Promise<StepVerdict>;
   /**
    * The owner moves that decide or start paid work on a task already running (send back, review findings, continue): who the engine records as acting when this principal is the task's owner or a co-owner.
    * `authority` is what the workflow engine checks the actor against (a hosted product's co-owners). `items` are steps for the move's own transaction (a hosted product's live access fence, as `checkStep`'s `items`): a change of who may act between the check and the commit refuses the move. Undefined: not an owner, so the move is refused as a task they cannot see. Absent: Code's own rule,

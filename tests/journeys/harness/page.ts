@@ -12,11 +12,11 @@ export const DAY_SECONDS = 86_400;
 export interface PageReply { status: number; headers: Record<string, string>; text: string; json(): Record<string, unknown> }
 
 /** A review session as the sign-in service writes it: starts now, the page's fixed 30 days (override to write an ended or a revoked one). */
-export function writeReviewSession(world: JourneyWorld, who: Developer, options: { reviewSeconds?: number; revokedAt?: string } = {}): string {
+export function writeReviewSession(world: JourneyWorld, who: Developer, options: { reviewSeconds?: number; revokedAt?: string; company?: string } = {}): string {
   const sessionId = randomUUID();
   const now = Math.floor(Date.now() / 1000);
   const ends = now + (options.reviewSeconds ?? 30 * DAY_SECONDS);
-  world.harness.db.set({ pk: `SESSION#${sessionId}`, sk: "META", sessionId, developerId: who.developerId, amr: who.provider === "oidc" ? "oidc" : "slack", startedAt: new Date().toISOString(),
+  world.harness.db.set({ pk: `SESSION#${sessionId}`, sk: "META", sessionId, developerId: who.developerId, amr: who.provider === "oidc" ? "oidc" : "slack", startedAt: new Date().toISOString(), ...(options.company === undefined ? {} : { companyId: options.company, installMethod: true }),
     endsAt: ends, reviewExpiresAt: ends, ...(options.revokedAt === undefined ? {} : { revokedAt: options.revokedAt, revokedReason: "admin" }) });
   return sessionId;
 }

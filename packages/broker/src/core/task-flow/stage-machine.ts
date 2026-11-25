@@ -104,6 +104,8 @@ export interface StepInput {
   /** The idempotency name of this step: the same request id answers with the operation it made the first time. */
   requestId: string;
   prompt: string;
+  /** The person whose press started this step in this request (a retry, a continue): it is charged to them. Absent: the dispatch row's `by` (the press that made it due), else nobody pressed. */
+  by?: string;
   /** The server-selected tool boundary of the step; absent for a plain task's. */
   workflowMode?: Operation["workflowMode"];
   /** The workflow after this step's transition, and the revision it was computed from (a plain task has neither). */
@@ -145,6 +147,13 @@ export interface StepInput {
   modelSourceId?: string;
 }
 
+/** The person whose press made this step due: the request's own, else the one on the step's dispatch row (read at the revision the step is due at). Undefined: nobody pressed. */
+async function pressedBy(deps: TaskFlowDeps, input: Pick<StepInput, "task" | "by" | "workflow">): Promise<string | undefined> {
+  if (input.by !== undefined || input.workflow === undefined) return input.by;
+  const row = await deps.store.get(dispatchRowKey(deps.companyId, input.task.taskId, input.workflow.current.revision));
+  return typeof row?.["by"] === "string" ? row["by"] : undefined;
+}
+
 /** Accepts the operation for one step. `STALE` and `WAITING` write nothing. */
 export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<{ result: StepStart; operation?: OperationRecord }> {
   assertPromptFits(input.prompt);
@@ -158,7 +167,7 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
   if (existing !== undefined) return { result: "DUPLICATE" };
   if (workspace.status !== "READY" || workspace.activeOperationId !== null) return { result: "WAITING" };
   // The person the step runs for must still be allowed to have it run, asked now and fenced into the step's own transaction.
-  const permitted = await deps.access.checkStep(task);
+  const permitted = await deps.access.checkStep(task, await pressedBy(deps, input));
   if (!permitted.allowed) {
     if (task.workflow !== undefined) await blockTaskWorkflow(deps, task.taskId, task.workflow.revision, permitted.message);
     return { result: "STALE" };
@@ -196,7 +205,8 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
       ...(input.requires === undefined && !withSources ? {} : { requires: [...(input.requires ?? []), ...(withSources ? ["task.contextSources.v1"] : [])] }),
       ...(input.extraActions === undefined && !withSources ? {} : { extraActions: [...(input.extraActions ?? []), ...(withSources ? ["context-tools"] : [])] }),
     },
-    requester: { personId: task.developerId, provider: task.provider },
+    // The step runs for, and is charged to, the task's CURRENT owner when the host's check names one (a task handed over or taken over); else its starter, as before.
+    requester: { personId: permitted.owner?.personId ?? task.developerId, provider: task.provider },
   });
   const workflowWrite = input.workflow === undefined ? undefined : workflowWriteOps(input.workflow.current, input.workflow.next, { ownsFlow: true });
   const items: TransactItem[] = combinedChecks([

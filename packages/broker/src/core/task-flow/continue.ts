@@ -52,7 +52,7 @@ export async function continueTask(deps: TaskFlowDeps, options: TaskActionsOptio
     { kind: "put", item: { ...continueRecordKey(task.taskId, request.requestId), entityType: "TASK_CONTINUE", taskId: task.taskId, requestId: request.requestId, payloadHash, operationId, at: now }, condition: when.absent() },
     ...stageAudit(deps, { eventId: `task.continued:${task.taskId}:${request.requestId}`, actor: { type: "person", id: caller.principal.personId }, action: "task.continued", subject: { type: "task", id: task.taskId }, details: { project: task.project } }),
   ];
-  const accepted = await acceptStep(deps, { task, workspace, requestId: request.requestId, prompt: request.instructions, operationId, extra });
+  const accepted = await acceptStep(deps, { task, workspace, requestId: request.requestId, prompt: request.instructions, operationId, extra, by: caller.principal.personId });
   if (accepted.result === "STARTED") return taskViewOf(deps, (await readTask(deps, task.taskId)) ?? task);
   if (accepted.result === "DUPLICATE") {
     // The same request committed first (a repeat at the same moment): answer it if it asked the same, refuse it if not.

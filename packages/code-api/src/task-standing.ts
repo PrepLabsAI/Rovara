@@ -20,7 +20,7 @@ export const STANDING_PILLS: Readonly<Record<(typeof STANDING_PILL_KEYS)[number]
   merged: { words: "Merged", tone: "ok", icon: "tick" },
   closed: { words: "Closed", tone: "idle", icon: "dash" },
 };
-export const STANDING_NEEDS_ROLE_WORDS: Readonly<Record<string, string>> = { task_owner: "Needs the task owner", company_admin: "Needs a company admin" };
+export const STANDING_NEEDS_ROLE_WORDS: Readonly<Record<string, string>> = { task_owner: "Needs the task owner", project_admin: "Needs a project admin", company_admin: "Needs a company admin" };
 export const STANDING_ROLE_WORDS: Readonly<Record<string, string>> = { task_owner: "task owner", co_owner: "co-owner", project_admin: "project admin", company_admin: "company admin" };
 /** The action ids Code offers today. An offer whose id is not in the reader's list is skipped, never a failure. */
 export const STANDING_ACTION_IDS: readonly string[] = [
