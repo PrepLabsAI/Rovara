@@ -340,6 +340,12 @@
       "decision": "DEC 254zzz459"
     },
     {
+      "path": "tests/journeys/session-people-key.test.ts",
+      "minimumTests": 7,
+      "reason": "SESSION-PEOPLE-KEY (briefs/arch-cleanup/SESSION-PEOPLE-KEY-DONE.md): a task's People entry decides a person's level in the task's session, found by the person's sign-in id (the id the list stores), not the session's hashed id. A project maintainer, a project contributor and the starter marked denied are refused every session read and act (read, log, steer, stop, retry, answer, revise the plan, follow) as a missing session; a commenter holds use, an owner edit, and a person with no entry keeps exactly their project level. The floor is the file's 7 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz522"
+    },
+    {
       "path": "tests/contract/task-owner-engine-channel.test.ts",
       "minimumTests": 7,
       "reason": "PROJECT-GRANT-RECHECK (briefs/arch-cleanup/PROJECT-GRANT-RECHECK-DONE.md, arch ruling a): channel access holds an OLD-engine task only. A new-engine (core) task's own person holds it by the project grant alone, as its start and steps do: a person removed from the project but still in the bound channel is not listed and reads no events or readers of it, with the removed person's own 404. The engine is the stored engine stamp (TASK_ENGINE#<id>); a stamp that is there but unreadable, or a failed read, is grant only; a stamp whose flow stays on the workflow is old-engine; the old-engine counterpart keeps its task. The floor is the file's 7 runnable declarations, and deleting or trimming one is a reviewed edit.",

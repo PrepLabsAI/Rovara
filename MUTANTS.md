@@ -725,3 +725,22 @@ Killed by tests/contract/task-owner-engine-channel.test.ts (7 tests).
 | same | the spend's in-code digest compare removed alone | survived: equivalent (the DynamoDB condition on the digest still refuses; the two layers are redundant by design) |
 | same | the in-code compare AND the condition's digest value both neutralised (condition compares the row with itself) | killed (all six) |
 | slack-company-install.ts, github-connect-routes.ts, linear-connect-routes.ts `sessionBindingOfCaller` | the empty/missing session-id guard removed | killed (2 each) |
+
+## SESSION-PEOPLE-KEY: a task's People entry is found by the person's sign-in id in the session levels (2026-11-25)
+
+| Mutant | Change | Killed by | Result |
+| --- | --- | --- | --- |
+| M1, `sessions/access.ts compute` | the entry is looked up by the session's hashed id again (`person.developerId`) | tests/journeys/session-people-key.test.ts and tests/unit/session-features-access.test.ts | red (4 of 5 journeys, 7 of 18 unit) |
+| M2, `peopleOfItem` | a person listed twice keeps the last entry (a later `viewer` undoes a `denied`) | tests/unit/session-features-access.test.ts | red (1 of 18) |
+| M3, `compute` | a person asked about with no principal reads as "no entry" (not unreadable) | same file | red (1 of 18) |
+| M4, `compute` | a `slack` entry grants with no live project role | same file | red (1 of 18) |
+| M5, `compute` | a denied starter keeps `owner` | same file | red (1 of 18) |
+| M6, `compute` | a denial applies only while the person still holds a grant | same file | red (1 of 18) |
+
+Review round 1 (Opus FAIL 0d9409cc3: F1 admin on a Slack entry, F2 demoted starter):
+
+| Mutant | Change | Killed by | Result |
+| --- | --- | --- | --- |
+| M7, `compute` | a starter demoted to viewer or commenter keeps `owner` (only a denial clears it) | tests/unit/session-features-access.test.ts and tests/journeys/session-people-key.test.ts (c3) | red (1 of 20 unit, 1 of 7 journeys) |
+| M5b, `compute` | a denied starter keeps `owner` (now seen in the journey: a company admin starter reads `owner: false`) | same unit file and the journey (c2) | red (1 of 20 unit, 1 of 7 journeys) |
+| M8, `peopleEntryOf` | an entry grants on any stored role, with no grant check (the Slack-entry and company-admin cases) | tests/unit/session-features-access.test.ts | red (2 of 20) |
