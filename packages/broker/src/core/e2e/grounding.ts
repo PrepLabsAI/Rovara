@@ -10,14 +10,14 @@
 //  - What it records is the broker's own verification of the evidence it accepted, never rows a caller supplies. It expires 30 days after it was last written.
 //
 // The key (`DEVTASK#<task>` / `E2E_GROUNDING#<plan digest>#<attempt>`) and every attribute are Cloud's: no stored-key difference. The pure parts are the ones in `aws/workflow-e2e-grounding.ts`.
-import { E2EDisplayBaselineSchema, INDEX_EXPIRY_ATTRIBUTE, PlanQualityFindingSchema, change, indexExpiresAt, when, type TransactItem } from "@agentx/contracts";
+import { E2EDisplayBaselineSchema, INDEX_EXPIRY_ATTRIBUTE, PlanQualityFindingSchema, change, indexExpiresAt, when } from "@agentx/contracts";
 import { z } from "zod";
 import type { DeveloperTaskRecord } from "../../developer/task-records.js";
 import {
   E2E_GROUNDING_PURPOSE, GROUNDING_UNAVAILABLE_REASONS, type GroundingRecord, type GroundingRef, type GroundingUnavailableReason, type VerifiedGrounding,
 } from "../../e2e/grounding-round.js";
 import { resultsWithStoredArtifacts, storeWorkflowE2EArtifacts, type WorkflowE2EArtifactStore } from "./artifacts.js";
-import { asDocument, isVerifiedBy, stampOf, type E2EStateStore } from "./state.js";
+import { isVerifiedBy, stampOf, type E2EStateStore } from "./state.js";
 
 export {
   E2E_GROUNDING_ATTEMPT, E2E_GROUNDING_PURPOSE, E2E_GROUNDING_RUN_GRACE_MS, GROUNDING_UNAVAILABLE_REASONS, groundingRoundLapsed, groundingStartFailureReason, verifyGroundingEvidence,
@@ -29,29 +29,6 @@ export type WorkflowE2EGroundingStore = E2EStateStore;
 const keyOf = (ref: GroundingRef) => ({ pk: `DEVTASK#${ref.taskId}`, sk: `E2E_GROUNDING#${ref.planArtifactSha256}#${ref.attempt}` });
 const expiryOf = (at: string) => indexExpiresAt(at);
 const SCENARIO_IDS = z.array(z.string().min(1).max(120)).min(1).max(32);
-
-/** Asks for the grounding round of a held plan, at most once per plan artifact and attempt: the REQUESTED record is written only if there is none. Never changes the task. */
-export async function requestWorkflowE2EGroundingRound(store: WorkflowE2EGroundingStore, ref: GroundingRef, input: { scenarioIds: readonly string[]; planArtifactId: string }): Promise<"REQUESTED" | "ALREADY"> {
-  const scenarioIds = SCENARIO_IDS.parse([...input.scenarioIds]);
-  const requestedAt = stampOf(store);
-  const written = await store.store.put({ condition: when.absent(),
-    item: asDocument({ ...keyOf(ref), entityType: "WORKFLOW_E2E_GROUNDING", schemaVersion: 1, taskId: ref.taskId, planArtifactSha256: ref.planArtifactSha256, purpose: E2E_GROUNDING_PURPOSE,
-      attempt: ref.attempt, state: "REQUESTED", requestedAt, scenarioIds, planArtifactId: input.planArtifactId, [INDEX_EXPIRY_ATTRIBUTE]: expiryOf(requestedAt) }) });
-  return written.applied ? "REQUESTED" : "ALREADY";
-}
-
-/**
- * The write that starts the round: REQUESTED to STARTED with the operation, the round, the base commit, the admission and the deadline, as one item of the transaction that accepts the
- * operation. A record that is not this plan's REQUESTED one (never asked for, already started) fails the condition and so does the transaction: at most one start.
- */
-export function groundingStartItem(ref: GroundingRef,
-  started: { baseCommitSha: string; operationId: string; roundId: string; admissionSha256: string; selectionDigest: string; startedAt: string; deadlineAt: string }): TransactItem {
-  return { kind: "update", key: keyOf(ref),
-    ops: [change.set("state", "STARTED"), change.set("baseCommitSha", started.baseCommitSha), change.set("operationId", started.operationId), change.set("roundId", started.roundId),
-      change.set("admissionSha256", started.admissionSha256), change.set("selectionDigest", started.selectionDigest), change.set("startedAt", started.startedAt),
-      change.set("deadlineAt", started.deadlineAt), change.set(INDEX_EXPIRY_ATTRIBUTE, expiryOf(started.startedAt))],
-    condition: when.and(when.present(), when.eq("state", "REQUESTED"), when.eq("attempt", ref.attempt), when.eq("planArtifactSha256", ref.planArtifactSha256), when.eq("entityType", "WORKFLOW_E2E_GROUNDING")) };
-}
 
 /**
  * Marks a grounding round as one that could not be run, only if the record is still in one of the states named (and, when an operation is named, still that operation's). A recorded

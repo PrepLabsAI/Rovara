@@ -11,7 +11,7 @@ import {
   listWorkflowE2EReplayRecords, markWorkflowE2EReplayUnavailable, readWorkflowE2EReplayRecord, recordWorkflowE2EReplay, replayStartItem, requestWorkflowE2EReplay,
 } from "../../packages/broker/src/core/e2e/replay.js";
 import {
-  groundingStartItem, markWorkflowE2EGroundingUnavailable, readWorkflowE2EGroundingRecord, recordWorkflowE2EGrounding, requestWorkflowE2EGroundingRound,
+  markWorkflowE2EGroundingUnavailable, readWorkflowE2EGroundingRecord, recordWorkflowE2EGrounding,
 } from "../../packages/broker/src/core/e2e/grounding.js";
 import { E2E_BASELINE_ATTEMPT } from "../../packages/broker/src/core/e2e/baseline.js";
 
@@ -208,21 +208,16 @@ describe("the grounding record", () => {
     const store = new MemoryDocumentStore();
     return { store, deps: { store, now: clock(AT), objects: createDocumentObjectStorage(store, { companyId: COMPANY }) } };
   };
+  // The stored shapes the deleted request and start writes made (kept as literals: nothing writes a grounding record any more, the rows are read as they were left).
+  const row = { pk: "DEVTASK#task-1", sk: `E2E_GROUNDING#${hex("a")}#1`, entityType: "WORKFLOW_E2E_GROUNDING", schemaVersion: 1, taskId: "task-1", planArtifactSha256: hex("a"), purpose: "grounding", attempt: 1,
+    requestedAt: AT, scenarioIds: ["s1"], planArtifactId: "art-1", [INDEX_EXPIRY_ATTRIBUTE]: indexExpiresAt(AT) };
+  const seedRequested = (store: MemoryDocumentStore) => store.put({ item: { ...row, state: "REQUESTED" } });
+  const seedStarted = (store: MemoryDocumentStore) => store.put({ item: { ...row, state: "STARTED", baseCommitSha: started.baseCommitSha, operationId: started.operationId, roundId: started.roundId,
+    admissionSha256: started.admissionSha256, selectionDigest: started.selectionDigest, startedAt: started.startedAt, deadlineAt: started.deadlineAt } });
 
-  it("is asked for once per plan artifact and attempt, at Cloud's key, and refuses scenario ids that are not a bounded list", async () => {
+  it("records only for the started round, and keeps a recorded result", async () => {
     const { store, deps } = setup();
-    expect(await requestWorkflowE2EGroundingRound(deps, ref, { scenarioIds: ["s1", "s2"], planArtifactId: "art-1" })).toBe("REQUESTED");
-    expect(await requestWorkflowE2EGroundingRound(deps, ref, { scenarioIds: ["s1"], planArtifactId: "art-1" })).toBe("ALREADY");
-    expect(await store.get({ pk: "DEVTASK#task-1", sk: `E2E_GROUNDING#${hex("a")}#1` })).toMatchObject({ entityType: "WORKFLOW_E2E_GROUNDING", purpose: "grounding", state: "REQUESTED",
-      scenarioIds: ["s1", "s2"], planArtifactId: "art-1", [INDEX_EXPIRY_ATTRIBUTE]: indexExpiresAt(AT) });
-    await expect(requestWorkflowE2EGroundingRound(deps, { ...ref, attempt: 2 }, { scenarioIds: [], planArtifactId: "art-1" })).rejects.toThrow();
-  });
-
-  it("starts once, records only for the started round, and keeps a recorded result", async () => {
-    const { store, deps } = setup();
-    await requestWorkflowE2EGroundingRound(deps, ref, { scenarioIds: ["s1"], planArtifactId: "art-1" });
-    expect(await run(store, [groundingStartItem(ref, started)])).toEqual({ applied: true });
-    expect(await run(store, [groundingStartItem(ref, { ...started, operationId: "op-2" })])).toMatchObject({ applied: false });
+    await seedStarted(store);
     for (const wrong of [{ operationId: "op-9" }, { baseCommitSha: "e".repeat(40) }]) {
       expect(await recordWorkflowE2EGrounding(deps, task, ref, { verified: verified(), expected: { ...expected, ...wrong } })).toBe(false);
     }
@@ -240,9 +235,9 @@ describe("the grounding record", () => {
 
   it("marks unavailable only with a fixed reason, from a state named, for the operation named", async () => {
     const { store, deps } = setup();
-    await requestWorkflowE2EGroundingRound(deps, ref, { scenarioIds: ["s1"], planArtifactId: "art-1" });
+    await seedRequested(store);
     await expect(markWorkflowE2EGroundingUnavailable(deps, ref, "a free sentence" as never, { from: ["REQUESTED"] })).rejects.toThrow(/fixed reason/);
-    await run(store, [groundingStartItem(ref, started)]);
+    await seedStarted(store);
     expect(await markWorkflowE2EGroundingUnavailable(deps, ref, "run-failed", { from: ["REQUESTED"] })).toBe(false);
     expect(await markWorkflowE2EGroundingUnavailable(deps, ref, "run-failed", { from: ["STARTED"], operationId: "op-9" })).toBe(false);
     expect(await markWorkflowE2EGroundingUnavailable(deps, { ...ref, attempt: 2 }, "run-failed", { from: ["STARTED"] })).toBe(false);
