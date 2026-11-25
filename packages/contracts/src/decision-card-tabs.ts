@@ -195,7 +195,7 @@ export const DecisionOutcomeReaderSchema = z.union([
 export type DecisionOutcome = z.infer<typeof DecisionOutcomeSchema>;
 
 /** The fixed reasons a performer refuses, and what each means to the person. */
-export const DECISION_REFUSAL_REASONS = ["forbidden", "stale", "second_person_required", "not_ready", "unsupported"] as const;
+export const DECISION_REFUSAL_REASONS = ["forbidden", "stale", "second_person_required", "not_ready", "unsupported", "spend_unreadable"] as const;
 export type DecisionRefusalReason = (typeof DECISION_REFUSAL_REASONS)[number];
 
 /** What `evidence-opened` answers. `recorded` is false for a card that needs no such record (a low-risk one). */
