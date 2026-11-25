@@ -244,9 +244,15 @@
       "decision": "DEC 254zzz459"
     },
     {
+      "path": "tests/journeys/tier-growth.test.ts",
+      "minimumTests": 10,
+      "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): tier growth on the normal flow (TIER-GROWTH-MERGE, fixed). A control (small plan, small diff, merges, no reviewer asked) and the cases of a small plan whose diff rates above it: the higher tier's code and security reviews run on the current head (In review while they run, merge view not ready, press refused in the same words, then merges), a second push to risky (the old head's review does not count), a send-back to one file (growth is sticky, true words), the task's spending limit stopping the review round (Needs you), reviews that find a problem, and the bar with no reviewer wired. A whole task on the real core and real worker, in every pull request run; the floor is the file's 10 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz459"
+    },
+    {
       "path": "tests/journeys/web-task.test.ts",
-      "minimumTests": 7,
-      "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): journeys 1, 5 (web) and 9 (a web task start to close, quick and full path, default and self-approval merge rules, stop, another company). A whole task on the real core and real worker, in every pull request run; the floor is the file's 7 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "minimumTests": 9,
+      "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): journeys 1, 5 (web) and 9 (a web task start to close, quick and full path, default and self-approval merge rules, stop, another company; after a stop the worker's repository grant buys no push or clone credential, grant G1). A whole task on the real core and real worker, in every pull request run; the floor is the file's 9 runnable declarations, and deleting or trimming one is a reviewed edit.",
       "decision": "DEC 254zzz459"
     },
     {
@@ -289,6 +295,30 @@
       "path": "tests/contract/review-window-link.test.ts",
       "minimumTests": 2,
       "reason": "A1-12 (DEC 254zzz459; DEC 254zzz511): the 30-day review window on the channel link page /review/link/{code} (29 days and 23 hours on it opens and links, at 30 days it is a signed-out page and a confirmation is refused, nothing linked; a revoked sign-in, a revoked person and a session with no review window are signed out at once). It is the proof of authenticateDeveloperSessionId's window that stays when D1-3 deletes Code's own task page and D1 deletes the PR-feedback page. The floor is the file's 2 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/journeys/removed-member-read.test.ts",
+      "minimumTests": 3,
+      "reason": "REMOVED-MEMBER-READ (briefs/arch-cleanup/REMOVED-MEMBER-READ-REPRO.md): a person who started a task (no People list) and is then removed from the project, or from the company, is shown nothing of it on any route (task read, events, plan, proof, comments, readers, lists, merge state, Code's task page). The floor is the file's 3 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/journeys/removed-member-acts.test.ts",
+      "minimumTests": 2,
+      "reason": "REMOVED-MEMBER-READ (briefs/arch-cleanup/REMOVED-MEMBER-READ-REPRO.md, acts): a person who started a task and is then removed cannot move it: every act (approve, reject, request changes, close, stop, send back, retry, Merge) on the web and from a chat account that resolves to them is refused as a missing task, and no task action registry entry's who rule lets them in. The floor is the file's 2 runnable declarations (the acts table is looped), and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/journeys/project-grant-recheck.test.ts",
+      "minimumTests": 6,
+      "reason": "PROJECT-GRANT-RECHECK (briefs/arch-cleanup/PROJECT-GRANT-RECHECK-DONE.md): the task's own person (a task with no People list) holds it only while a live company member WITH the project grant. A person removed from the project, or from the company, is refused every read, every act (web, CLI session, Code's page, sessions, every registry action pressed from a chat account) as a missing task, and nothing is started or spent; a current project administrator or company admin still stops and merges the task. The floor is the file's 6 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/contract/task-owner-channel-access.test.ts",
+      "minimumTests": 9,
+      "reason": "PROJECT-GRANT-RECHECK (briefs/arch-cleanup/PROJECT-GRANT-RECHECK-DONE.md, channel-access starters): the task's own person holds it by the SAME live test the start meets (checkProjectAccess): a grant, or fresh bound-channel membership while the project lets channel members use it and the person is Slack-linked. A channel-access starter lists and owns their task; one who left the channel, whose project turned channel use off, whose Slack is unreachable or who has no Slack link loses it; a grant removed while still in the channel keeps it; neither access gives nothing. The floor is the file's 9 runnable declarations, and deleting or trimming one is a reviewed edit.",
       "decision": "DEC 254zzz459"
     }
   ],

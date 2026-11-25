@@ -38,13 +38,14 @@ import { registryRepositoryResolver } from "../core/merge/resolver.js";
 import type { SummaryCheckSource } from "../core/merge/summary-check.js";
 import { createPullRequestVerdictSource } from "../core/build-step/pull-request-verdict.js";
 import type { CodeMilestones, CodeSettingsReader, HumanEditSink, MergeTask, SessionTimeline } from "../core/merge/seams.js";
-import { recoveryRowKey, workflowUpdateItem } from "../core/merge/store.js";
+import { readMergeTracking, recoveryRowKey, workflowUpdateItem } from "../core/merge/store.js";
 import { sessionBindingsOf } from "../core/sessions/bindings.js";
 import { sessionEventItem } from "../core/sessions/store.js";
 import { verifyPublishedChanges } from "../core/build-step/changed-files.js";
 import { runTierChecks } from "../core/build-step/tier-checks.js";
 import { scopeHoldOf } from "../core/build-step/scope-question.js";
 import { skippedPlanning } from "../core/decisions/change-tier.js";
+import { growthOwedOf, owedLevelOf } from "../core/merge/grown-owed.js";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
 import { readTask } from "../core/task-flow/reads.js";
 import { announceTaskEnd, completedByMerge } from "../core/task-flow/task-end.js";
@@ -507,6 +508,12 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
       console.error(JSON.stringify({ component: "merge_tracking", event: "tier_checks.not_running", level: "error", taskId, waitingMs: now() - Math.max(dueAt, lastRunAt), words: "No tier pass has run for this task: its pull request stays held. Call MergeTrackingService.tierChecks() on a schedule." }));
     }
   };
+  /** A task that ran its whole plan owes the tier pass only while the higher level's reviews are owed on its open pull requests' heads and can still run (not once they are on the record, nor after a verdict a new version alone changes). */
+  const growthReviewsDue = async (task: NonNullable<Awaited<ReturnType<typeof readTask>>>): Promise<boolean> => {
+    if (owedLevelOf(task.workflow) === undefined) return false;
+    const owed = growthOwedOf(task.workflow, await readMergeTracking(store, task.taskId, task.companyId).catch(() => []));
+    return owed !== undefined && (owed.state === "reviewing" || owed.cap === true);
+  };
   const stallLogged = new Map<string, number>();
   let tierRunning: Promise<number> | undefined;
   const runTierPass = async (): Promise<number> => {
@@ -587,9 +594,13 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
     const task = await readTask(flow, taskId);
     // The changed files are read from the code host once for the code the pull requests hold (review H3): until then the risk is high. A host that cannot answer now is asked again soon.
     const verifyBudget = rowBudget(taskBudget, Math.floor(requests / 2));
-    const unverified = task !== undefined && await inPhase(verifyBudget, rowEnd, VERIFY_SHARE, (budget) => verifyPublishedChanges(flow, task, budget.beforeRequest)) === "unavailable";
+    const verified = task === undefined ? undefined : await inPhase(verifyBudget, rowEnd, VERIFY_SHARE, (budget) => verifyPublishedChanges(flow, task, budget.beforeRequest));
+    const unverified = verified === "unavailable";
     // A task whose planning steps were skipped owes the lighter flow's checks on its current head. They take model calls, so they run in a pass of their own with an allowance of their own (`tierChecks`), never inside this sweep.
-    if (task?.workflow !== undefined && skippedPlanning(task.workflow.flow)) await markTierDue(taskId);
+    // A task that ran its whole plan owes the same pass once its change grew (the verify phase above is what records the growth, so the task is read again): the higher level's code and security reviews on the current head.
+    // Only when it is due: the task is read again only when the verify phase wrote (it is what records growth), and a grown task is scheduled only while the reviews are still owed or can run again.
+    const checked = task === undefined ? undefined : verified === "verified" ? await readTask(flow, taskId).catch(() => task) : task;
+    if (checked?.workflow !== undefined && (skippedPlanning(checked.workflow.flow) || await growthReviewsDue(checked))) await markTierDue(taskId);
     const unfinished = await inPhase(taskBudget, rowEnd, FEEDBACK_SHARE, (budget) => feedbackUnfinished(taskId, budget));
     const reconciled = verificationResult(unverified, await inPhase(taskBudget, rowEnd, 1, (budget) => reconcileTrackingTask(deps, taskId, budget)));
     // Feedback that did not finish asks for another look in one poll; it is not a failure of the pull request's tracking (no growing wait).

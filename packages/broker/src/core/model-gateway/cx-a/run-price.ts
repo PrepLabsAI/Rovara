@@ -19,7 +19,8 @@ function priceMatchesIdentity(runPrice: RunPrice | undefined, description: TaskT
 /** Only hosted roots supply the price authority. Never substitute an unpriced hosted token. */
 export async function taskRunPrice(deps: TaskTokenDeps, operation: TaskTokenOperation, description: TaskTokenDescription, deadline?: TaskTokenDeadline): Promise<RunPrice | undefined> {
   let runPrice: RunPrice | undefined;
-  if (operation.reviewerSlot === undefined && (deps.runPrice !== undefined || description.models.some(model => model.includes("/")))) {
+  // The grown tier's review grant carries the signed price like a task step does (the gateway refuses product AI without it); the second and design reviews are held by their ceiling alone.
+  if ((operation.reviewerSlot === undefined || description.reviewer?.kind === "tier_review") && (deps.runPrice !== undefined || description.models.some(model => model.includes("/")))) {
     runPrice = await readRunPrice(deps, description, deadline);
     if (!priceMatchesIdentity(runPrice, description)) runPrice = undefined;
     if (description.models.some(model => model.includes("/")) && (runPrice?.provider !== "openrouter" || runPrice.catalogModel !== description.models[0])) runPrice = undefined;

@@ -21,6 +21,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
+import { SESSION_BINDING_PATTERN, sameSessionBinding, sessionBindingOf } from "../developer/session-binding.js";
 import { agentXError, ON_THE_WEBSITE_MESSAGE, companyLog, OrgIdSchema, SlackTeamIdSchema, SlackUserIdSchema } from "@agentx/contracts";
 import { slackChannelBindingPkFor } from "./slack-company-layout.js";
 import { Membership, membershipKey } from "./company-check.js";
@@ -76,7 +77,7 @@ const CompleteBody = z.union([
 const DisconnectBody = z.object({}).strict();
 const StoredState = z.object({
   entityType: z.literal("SLACK_INSTALL_STATE"), provider: z.literal(STATE_PROVIDER), status: z.literal("live"),
-  companyId: OrgIdSchema, personId: PersonId, sessionId: z.string().min(1).max(256), redirectUri: RedirectUri,
+  companyId: OrgIdSchema, personId: PersonId, sessionBinding: z.string().regex(SESSION_BINDING_PATTERN), redirectUri: RedirectUri,
   createdAt: z.iso.datetime(), expiresAt: z.number().int().positive(),
 });
 const TeamName = z.string().min(1).max(200);
@@ -157,7 +158,13 @@ async function signedInWorkspace(ctx: SlackInstallContext, personId: string): Pr
   } catch { return undefined; }
 }
 
-async function mint(ctx: SlackInstallContext, who: { companyId: string; personId: string; sessionId: string }, redirectUri: string): Promise<{ secret: string; expiresAt: number }> {
+/** The state rows keep a digest of the caller's sign-in session, so a caller with none (a registered service's own token has no sign-in session) never mints or spends one. */
+const sessionBindingOfCaller = (caller: DeveloperCaller): string => {
+  if (typeof caller.sessionId !== "string" || caller.sessionId === "") throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  return sessionBindingOf(caller.sessionId);
+};
+
+async function mint(ctx: SlackInstallContext, who: { companyId: string; personId: string; sessionBinding: string }, redirectUri: string): Promise<{ secret: string; expiresAt: number }> {
   const bytes = ctx.wiring.random?.() ?? randomBytes(32);
   if (bytes.length !== 32) throw new Error("random");
   const secret = bytes.toString("base64url");
@@ -169,19 +176,19 @@ async function mint(ctx: SlackInstallContext, who: { companyId: string; personId
 }
 
 /** Spends a live state once, only for the same company, person, session and provider, before its expiry. Undefined for anything else. */
-async function spend(ctx: SlackInstallContext, secret: string, who: { companyId: string; personId: string; sessionId: string }): Promise<z.infer<typeof StoredState> | undefined> {
+async function spend(ctx: SlackInstallContext, secret: string, who: { companyId: string; personId: string; sessionBinding: string }): Promise<z.infer<typeof StoredState> | undefined> {
   try {
     const key = stateKey(secret);
     const nowSeconds = Math.floor(ctx.now() / 1000);
     const response = await ctx.documentClient.send(new GetCommand({ TableName: ctx.tableName, Key: key, ConsistentRead: true })) as { Item?: unknown };
     const row = StoredState.parse(response.Item);
-    if (row.companyId !== who.companyId || row.personId !== who.personId || row.sessionId !== who.sessionId || row.expiresAt <= nowSeconds) return undefined;
+    if (row.companyId !== who.companyId || row.personId !== who.personId || !sameSessionBinding(row.sessionBinding, who.sessionBinding) || row.expiresAt <= nowSeconds) return undefined;
     await ctx.documentClient.send(new UpdateCommand({ TableName: ctx.tableName, Key: key,
       UpdateExpression: "SET #status = :used, usedAt = :at",
-      ConditionExpression: "#status = :live AND #provider = :provider AND companyId = :company AND personId = :person AND sessionId = :session AND expiresAt > :now",
+      ConditionExpression: "#status = :live AND #provider = :provider AND companyId = :company AND personId = :person AND sessionBinding = :session AND expiresAt > :now",
       ExpressionAttributeNames: { "#status": "status", "#provider": "provider" },
       ExpressionAttributeValues: { ":used": "used", ":live": "live", ":at": new Date(ctx.now()).toISOString(), ":provider": STATE_PROVIDER,
-        ":company": who.companyId, ":person": who.personId, ":session": who.sessionId, ":now": nowSeconds } }));
+        ":company": who.companyId, ":person": who.personId, ":session": who.sessionBinding, ":now": nowSeconds } }));
     return row;
   } catch { return undefined; }
 }
@@ -270,7 +277,7 @@ function workspaceAnswer(grant: SlackInstallGrant, signedIn: { teamId: string; t
 async function complete(ctx: SlackInstallContext, member: z.infer<typeof Membership>, caller: DeveloperCaller, request: AdaptedHttpRequest): Promise<unknown> {
   const parsed = CompleteBody.safeParse(body(request));
   if (!parsed.success) throw startAgain();
-  const who = { companyId: member.companyId, personId: caller.developerId, sessionId: caller.sessionId };
+  const who = { companyId: member.companyId, personId: caller.developerId, sessionBinding: sessionBindingOfCaller(caller) };
   const state = await spend(ctx, parsed.data.state, who);
   if (state === undefined) throw startAgain();
   // Slack sends the person back with ?error=access_denied when they press Cancel: nothing was installed.
@@ -429,7 +436,8 @@ export async function routeSlackInstall(ctx: SlackInstallContext, caller: Develo
     try { clientId = await ctx.wiring.slack.clientId(); } catch { clientId = undefined; }
     if (clientId === undefined || !/^[0-9]{1,24}\.[0-9]{1,24}$/.test(clientId)) throw agentXError("RUNTIME_UNAVAILABLE", SLACK_NOT_SET_UP);
     let minted: { secret: string; expiresAt: number };
-    try { minted = await mint(ctx, { companyId: member.companyId, personId: caller.developerId, sessionId: caller.sessionId }, parsed.data.redirectUri); }
+    const startWho = { companyId: member.companyId, personId: caller.developerId, sessionBinding: sessionBindingOfCaller(caller) };
+    try { minted = await mint(ctx, startWho, parsed.data.redirectUri); }
     catch { throw agentXError("RUNTIME_UNAVAILABLE", SLACK_UNAVAILABLE); }
     const authorize = new URL("https://slack.com/oauth/v2/authorize");
     for (const [key, value] of Object.entries({ client_id: clientId, scope: SLACK_INSTALL_BOT_SCOPES.join(","), redirect_uri: parsed.data.redirectUri, state: minted.secret })) authorize.searchParams.set(key, value);

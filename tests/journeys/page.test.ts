@@ -192,10 +192,10 @@ describe("journey 15: the task page for a core task", () => {
     expect((await old.open()).status, "the owner reads the old task's page while a member").toBe(200);
     await old.read("state");
     removeFromCompany(w, MAYA);
-    // ACCEPTED TODAY (G1, D1-BRIEF-NOTES.md): her own old task's page still opens for the removed person until her review sign-in ends (task-access.ts:106, the owner branch asks for no company).
-    // The page's JSON API (state, comments) and a comment are refused 503 for her, as for a core task, because they read her live company first. D1 deletes the old path (`resolveTaskAccess`): the
-    // page then answers "no task" too, and the first expectation flips.
-    expect(await old.open().then((reply) => [reply.status, words(reply.text).includes("You're the task owner.")]), "G1: the removed owner reads her own old task's page").toEqual([200, true]);
+    // CLOSED by PROJECT-GRANT-RECHECK (was G1, D1-BRIEF-NOTES.md: her own old task's page still opened for the removed person until her review sign-in ended, because the owner branch of task-access.ts asked for
+    // no company and no project grant). The stored person now needs a live company membership and the project grant there (`holdsOwnTask`), so the page answers "no task", as for a core task. The page's JSON API
+    // (state, comments) and a comment are refused 503 for her, because they read her live company first.
+    expect(await old.open().then((reply) => [reply.status, words(reply.text).includes("You're the task owner.")]), "the removed owner no longer reads her own old task's page").toEqual([404, false]);
     expect((await old.read("state")).status, "the old task's page API").toBe(503);
     expect((await old.post("comments", commentBody("Still here."))).status, "a comment on the old task").toBe(503);
     // A core task answers the same person nothing (see "who sees what"): the page is "no access" and the comment is refused and stored nowhere.

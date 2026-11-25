@@ -65,6 +65,12 @@ export interface ScriptTokenAuthDependencies extends ScriptTokenDependencies {
   /** The install's company: a token of another company is refused as an unknown one. */
   companyId: OrgId;
   identity: Pick<IdentityProvider, "getPrincipal">;
+  /**
+   * Whether the token's creator may use a project NOW (a live grant on it, or a company owner or admin's role), read at every use of the token: the project list a token was made with is what it MAY name, never
+   * proof the creator still holds the project. A project the creator lost is refused for that project only; the token stays valid for the rest. A read that throws is "no". Absent: the install keeps no project
+   * grants apart from the creator's role (a Code install: one owner who reaches every project).
+   */
+  projectGrant?: (personId: string, project: string, role: OrgRole) => Promise<boolean>;
   /** The install switch (`ROVARA_SCRIPT_TOKENS=0`). Default: `scriptTokensEnabled()`. */
   enabled?: () => boolean;
 }
@@ -144,11 +150,15 @@ export async function authenticateScriptToken(deps: ScriptTokenAuthDependencies,
   if (route === undefined || !record.permissions.includes(route.permission)) throw notAllowed();
   const body = route.project === "body" ? bodyObject(request) : undefined;
   const named = route.project === "body" ? (typeof body?.["project"] === "string" ? body["project"] : undefined) : route.project === "query" ? url.searchParams.get("project") ?? undefined : route.project === "path" ? route.name : undefined;
-  if (route.project !== "task" && (named === undefined || !record.projects.includes(named))) throw notAllowed();
+  const creatorMayUse = async (project: string): Promise<boolean> => {
+    if (deps.projectGrant === undefined || record.personId === undefined) return deps.projectGrant === undefined;
+    try { return await deps.projectGrant(record.personId, project, held.principal === undefined ? record.createdRole : roleOf(held.principal.roles)); } catch { return false; }
+  };
+  if (route.project !== "task" && (named === undefined || !record.projects.includes(named) || !await creatorMayUse(named))) throw notAllowed();
   if (route.project === "task") {
-    // A task outside the token's projects (or company) answers as a missing task does, so a token learns nothing about it.
+    // A task outside the token's projects (or company), or of a project its creator no longer holds, answers as a missing task does, so a token learns nothing about it.
     const task = await deps.store.get(taskKey(route.taskId));
-    if (task === undefined || (task["companyId"] ?? task["orgId"]) !== record.orgId || typeof task["project"] !== "string" || !record.projects.includes(task["project"])) throw agentXError("NOT_FOUND", "task not found");
+    if (task === undefined || (task["companyId"] ?? task["orgId"]) !== record.orgId || typeof task["project"] !== "string" || !record.projects.includes(task["project"]) || !await creatorMayUse(task["project"])) throw agentXError("NOT_FOUND", "task not found");
   }
   let served = request;
   if (route.permission === "start") {

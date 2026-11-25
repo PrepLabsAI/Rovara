@@ -4,6 +4,7 @@
 import { DECISION_MOVES, WORKFLOW_BLOCK_REASONS, openReviewFindings, type DocumentStore, type OrgId, type WorkflowSnapshot } from "@agentx/contracts";
 import { planRevisionsUsed } from "../../developer/plan-self-check.js";
 import { DEFAULT_CI_MODE, readyToMerge } from "../merge/merge-tracking.js";
+import { growthOwedOf, owedLevelOf, type GrowthOwed } from "../merge/grown-owed.js";
 import { readMergeTracking } from "../merge/store.js";
 import { dispatchRowKey } from "../task-flow/keys.js";
 import { STOPPED_CHECKS_REASON, STOPPED_STEP_REASON } from "../task-flow/cancel.js";
@@ -79,6 +80,13 @@ export async function pullRequestReadyOf(store: Pick<DocumentStore, "query">, or
   return workflow.state === "WAITING" && items.length > 0 && items.length === workflow.pullRequests.length && items.every((item) => readyToMerge(item, DEFAULT_CI_MODE));
 }
 
+/** What a change that grew still owes before it can merge (TIER-GROWTH-MERGE): the one reader the merge view, the press and the sessions read too. Undefined where nothing is owed or nothing waits. */
+export async function growthOwedFor(store: Pick<DocumentStore, "query">, orgId: OrgId, task: TaskRecord): Promise<GrowthOwed | undefined> {
+  const workflow = task.workflow;
+  if (workflow === undefined || workflow.stage !== "WAIT_FOR_MERGE" || task.closedAt !== undefined || owedLevelOf(workflow) === undefined) return undefined;
+  return growthOwedOf(workflow, await trackedOf(store, orgId, task));
+}
+
 /** The review round whose problems are being fixed, from the custom sequence's own count: a review step that sent findings back (`programRounds`) and the coding that follows it, until its re-review. Absent for the built-in path (it has no counted rounds). */
 export function reviewRoundOf(workflow: WorkflowSnapshot | undefined): { round: number; max: number } | undefined {
   const program = workflow?.program;
@@ -120,13 +128,13 @@ async function stoppedByPersonOf(deps: Pick<TaskFlowDeps, "store" | "companyId">
 export async function standingFactsOf(deps: Pick<TaskFlowDeps, "store" | "companyId">, task: TaskRecord, extra: ExtraFacts = {}): Promise<StandingFacts> {
   const workflow = task.workflow;
   const planUsed = workflow === undefined || workflow.stage !== "PLAN" ? 0 : planRevisionsUsed(task.planSelfCheck, planDocumentKindOf(workflow), workflow.artifacts.filter((entry) => entry.type === planDocumentKindOf(workflow)).length + 1);
-  const [needsPerson, failedChecks, preparing, stopped, pullRequestReady, startRetry] = await Promise.all([needsPersonOf(task), failedChecksOf(deps.store, deps.companyId, task), failedPrepareOf(deps, task), stoppedByPersonOf(deps, task), pullRequestReadyOf(deps.store, deps.companyId, task), startRetryOf(deps, task)]);
+  const [needsPerson, failedChecks, preparing, stopped, pullRequestReady, startRetry, growthOwed] = await Promise.all([needsPersonOf(task), failedChecksOf(deps.store, deps.companyId, task), failedPrepareOf(deps, task), stoppedByPersonOf(deps, task), pullRequestReadyOf(deps.store, deps.companyId, task), startRetryOf(deps, task), growthOwedFor(deps.store, deps.companyId, task)]);
   const reviewRound = extra.reviewRound ?? reviewRoundOf(workflow);
   const reviewBlock = reviewBlockOf(workflow);
   const wait = extra.wait ?? startRetry;
   return {
-    workflow, closed: task.closedAt !== undefined, budgetPaused: extra.budgetPaused === true, failedPrepare: extra.failedPrepare === true || (preparing && !stopped), needsPerson, planRevisionsUsed: planUsed, failedChecks,
-    ...(pullRequestReady === undefined ? {} : { pullRequestReady }), ...(reviewBlock === undefined ? {} : { reviewBlock }),
+    workflow, closed: task.closedAt !== undefined, budgetPaused: extra.budgetPaused === true, failedPrepare: extra.failedPrepare === true || (preparing && !stopped), needsPerson: needsPerson || growthOwed?.state === "needs_you", planRevisionsUsed: planUsed, failedChecks,
+    ...(pullRequestReady === undefined ? {} : { pullRequestReady }), ...(growthOwed === undefined ? {} : { growthOwed }), ...(reviewBlock === undefined ? {} : { reviewBlock }),
     ...(reviewRound === undefined ? {} : { reviewRound }), ...(wait === undefined ? {} : { wait }), ...(extra.stoppedByPerson === true || stopped ? { stoppedByPerson: true } : {}),
   };
 }

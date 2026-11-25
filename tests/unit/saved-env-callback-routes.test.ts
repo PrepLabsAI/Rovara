@@ -6,6 +6,7 @@ import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-docu
 import { operationKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { checkRebuild, leaseForDispatch } from "../../packages/broker/src/core/test-env/saved-env.js";
 import { savedEnvWorld, dig, imageOf } from "../support/saved-env-world.js";
+import { queuedJobId } from "../support/saved-env-job.js";
 
 const WS = "11111111-1111-4111-8111-111111111111";
 const OP = "22222222-2222-4222-8222-222222222222";
@@ -15,8 +16,8 @@ const KEY = "k".repeat(32);
 const ACTIONS = ["saved-env-push-login", "saved-env-result", "saved-env-fallback", "saved-env-login"] as const;
 async function world(enabled = true) {
   const w = savedEnvWorld({ ids: { orgId: COMPANY, projectId: "app" } });
-  await checkRebuild(w.deps, w.ids, "poll");
-  const leased = await leaseForDispatch(w.deps, w.ids);
+  const checked = await checkRebuild(w.deps, w.ids, "poll");
+  const leased = await leaseForDispatch(w.deps, w.ids, OP, queuedJobId(checked));
   if (!leased.ok) throw new Error("not leased");
   w.seed({ ...w.row(), images: [imageOf(dig(1))] });
   const store = new MemoryDocumentStore();

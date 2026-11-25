@@ -8,6 +8,7 @@ import type { ProjectRegistriesInstall } from "../project-registries/prepare.js"
 import type { MoneyStop } from "./money-stop.js";
 import type { TierReviewCall, TierReviewMeter } from "../build-step/tier-review-calls.js";
 import type { TaskTestEnvironment } from "../test-env/seam.js";
+import type { SavedEnvDispatchLease } from "../test-env/saved-env-dispatch-lease.js";
 import type {
   Admission,
   AgentXErrorCode,
@@ -248,6 +249,11 @@ export interface TaskFlowDeps {
   moneyStop?: MoneyStop;
   admission: Admission;
   audit: AuditSink;
+  /**
+   * Saved project images: the dispatcher's one way to the lease token of a rebuild job (core/test-env/saved-env-dispatch-lease.ts). Asked once per delivery of a rebuild's preparation, for exactly the job the
+   * broker stored with the operation, and the token goes into that invocation only. Absent (a laptop, or an install with saved images off): a rebuild's preparation is not delivered.
+   */
+  savedEnvLease?: SavedEnvDispatchLease;
   projects: ProjectSource;
   /**
    * What this install can do for a project's private package registries (A1): where a stored credential is read from, and the CodeArtifact rules. The prepare carries the project's `registries` and the worker

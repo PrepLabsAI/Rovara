@@ -327,6 +327,36 @@ describe("the vertex row (L4-EVV)", () => {
 
 
 
+describe("the bedrock row (RF-5)", () => {
+  const argAfter = (args: readonly string[], flag: string): string | undefined => { const at = args.indexOf(flag); return at < 0 ? undefined : args[at + 1]; };
+  const lines = (text: string): Record<string, string> => Object.fromEntries(text.split("\n").filter(Boolean).map((line) => [line.slice(0, line.indexOf("=")), line.slice(line.indexOf("=") + 1)] as [string, string]));
+  it("a bedrock row's run serves a bedrock helper row (no metadata port, no project) and writes the AWS client's variables, with the exec's bridge token in the endpoint and dummy keys, into the env file", async () => {
+    let rows = "";
+    const daemon = fakeDaemon({ eval: async (dir) => { rows = await readFile(join(w.bridgeDir, "rows.json"), "utf8"); await writeFile(join(dir, REPORT.argument), REPORT_BYTES); return 0; } });
+    const w = await world(daemon, { rowId: "bedrock" });
+    await w.sandbox.run(w.input());
+    const helper = runArgsOf(daemon.calls, "-models")!;
+    expect(argAfter(helper, "--meta-port")).toBeUndefined();
+    expect(argAfter(helper, "--project-id")).toBeUndefined();
+    expect(JSON.parse(rows)).toEqual([{ id: "bedrock", family: "bedrock", routesTo: "local_aws_front" }]);
+    const env = lines(daemon.envSeen[0]!);
+    expect(env).toMatchObject({
+      AWS_ENDPOINT_URL_BEDROCK_RUNTIME: `http://rovara-models:8080/p/bedrock/x/${TOKEN}`, AWS_ACCESS_KEY_ID: "rovara-test-key", AWS_SECRET_ACCESS_KEY: "rovara-test-key",
+      AWS_REGION: "us-east-1", AWS_DEFAULT_REGION: "us-east-1", AWS_EC2_METADATA_DISABLED: "true", ROVARA_EVAL_IDS: "q1,q2",
+    });
+    // No session token, no profile and none of the other products' client variables.
+    for (const name of ["AWS_SESSION_TOKEN", "AWS_PROFILE", "GOOGLE_API_KEY", "GEMINI_API_KEY", "GOOGLE_GEMINI_BASE_URL", "GOOGLE_VERTEX_BASE_URL", "GCE_METADATA_HOST"]) expect(env, name).not.toHaveProperty(name);
+    expect(JSON.stringify(daemon.calls)).not.toContain(TOKEN);
+    expect(daemon.containers).toEqual([]);
+  });
+  it("the env text: the AWS names in a fixed order, a token that is not a plain word refused, and a gemini row's text exactly as before", () => {
+    const text = freshEvalEnvironment({ rowId: "bedrock", token: TOKEN, side: "new", runs: 1, ids: ["q"] });
+    expect(text.split("\n").filter(Boolean).map((line) => line.split("=")[0])).toEqual(["AWS_ENDPOINT_URL_BEDROCK_RUNTIME", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_EC2_METADATA_DISABLED", "HOME", "ROVARA_EVAL_SIDE", "ROVARA_EVAL_RUNS", "ROVARA_EVAL_IDS"]);
+    for (const token of ["", "a/b", "../x", "a b"]) expect(() => freshEvalEnvironment({ rowId: "bedrock", token, side: "new", runs: 1, ids: ["q"] }), token).toThrow();
+    expect(freshEvalEnvironment({ rowId: "gemini", token: TOKEN, side: "new", runs: 1, ids: ["q"] })).toContain(`GOOGLE_GEMINI_BASE_URL=http://rovara-models:8080/p/gemini/x/${TOKEN}`);
+  });
+});
+
 it("never starts a preparation command whose checkout no longer satisfies its seed lock", async () => {
   const daemon = fakeDaemon();
   const w = await world(daemon, { reportStandInDatabases: true, sealedDns: false, services: {

@@ -13,7 +13,7 @@ import { EVAL_QUESTION_LIMIT } from "./eval-check.js";
 import { EvalCommandSchema, EvalPlanQuestionSchema, EvalReportPathSchema, evalCommandFingerprintOf } from "./eval-plan-record.js";
 import { EvalOutputShapeSchema } from "./eval-wrapper.js";
 import { sha256HexOf } from "./service-catalog-verify.js";
-import { modelBelongsToFamily, type VendorFamily } from "./vendor-family.js";
+import { VENDOR_FAMILIES, modelBelongsToFamily, type VendorFamily } from "./vendor-family.js";
 
 /** The most suites one report offers, the most distinct question files one suite names (the broker reads each on confirm), and the per-question bounds a report may ask for. */
 export const EVAL_DISCOVERY_SUITES_MAX = 4;
@@ -36,17 +36,29 @@ export function evalImageDigestOf(image: unknown): string | undefined {
 }
 
 /**
- * DEC 253q: the catalog rows the eval's product route serves (`eval-gateway-access.ts`: the Gemini API row, and the Vertex AI row since L4-EVV), with the vendor family each serves. The product model and a model judge both go
+ * DEC 253q: the catalog rows the eval's product route serves (`eval-gateway-access.ts`: the Gemini API row, and the Vertex AI row since L4-EVV; RF-5 adds the Bedrock row, which does not go through that file), with the vendor family each serves. The product model and a model judge both go
  * through it. The row names which API shape the project's client speaks; the setup draft may name `vertex`, a person confirms it, and the row is part of the judge pin and the spend inputs, so an approval names it.
  */
 export const EVAL_PRODUCT_ROW = "gemini";
 export const EVAL_VERTEX_ROW = "vertex";
-export const EVAL_PRODUCT_ROWS: Readonly<Record<string, VendorFamily>> = Object.freeze({ [EVAL_PRODUCT_ROW]: "google", [EVAL_VERTEX_ROW]: "google" });
+/**
+ * RF-5 (route A): the Bedrock row. The call goes worker, then the Cloud gateway's product route, then the company's OWN AWS role (the gateway signs; nothing in the worker or the sandbox holds a key). A Bedrock row serves
+ * models of every vendor, so it names no vendor family: its pin family is the API shape's own word, and `modelBelongsToRow` accepts any model name some vendor family owns.
+ */
+export const EVAL_BEDROCK_ROW = "bedrock";
+export const EVAL_PRODUCT_ROWS: Readonly<Record<string, VendorFamily | typeof EVAL_BEDROCK_ROW>> = Object.freeze({ [EVAL_PRODUCT_ROW]: "google", [EVAL_VERTEX_ROW]: "google", [EVAL_BEDROCK_ROW]: EVAL_BEDROCK_ROW });
+/**
+ * RF-5, money: a Bedrock call is billed by AWS to the company's own account and counted by the gateway's per-call hold under the company cap. It is not on the eval's own cost line (that line reads 0 for Bedrock calls; the stage still
+ * counts the calls). These are the words a person is told wherever that line is shown for a Bedrock eval. The owner's question on this line is open (DEFERRED RF-5-BEDROCK-COST-LINE); the words do not claim more than that.
+ */
+export const EVAL_BEDROCK_COST_WORDS = "Bedrock calls are billed to your own AWS account and counted by the company's gateway cap.";
+/** Whether a model name is one this row's API serves: one vendor family's for a Google row, any vendor family's for the Bedrock row. */
+const modelBelongsToRow = (model: unknown, family: VendorFamily | typeof EVAL_BEDROCK_ROW): boolean => (family === EVAL_BEDROCK_ROW ? VENDOR_FAMILIES.some(vendor => modelBelongsToFamily(model, vendor)) : modelBelongsToFamily(model, family));
 /** L4-T3: the words a person knows each row by. A row this install cannot run has no label (the card then says nothing about a provider). */
-const EVAL_PRODUCT_ROW_LABELS: Readonly<Record<string, string>> = Object.freeze({ [EVAL_PRODUCT_ROW]: "Google Gemini", [EVAL_VERTEX_ROW]: "Vertex AI" });
+const EVAL_PRODUCT_ROW_LABELS: Readonly<Record<string, string>> = Object.freeze({ [EVAL_PRODUCT_ROW]: "Google Gemini", [EVAL_VERTEX_ROW]: "Vertex AI", [EVAL_BEDROCK_ROW]: "Amazon Bedrock" });
 export const evalProductRowLabel = (row: unknown): string | undefined => (typeof row === "string" && Object.hasOwn(EVAL_PRODUCT_ROW_LABELS, row) ? EVAL_PRODUCT_ROW_LABELS[row] : undefined);
 /** The rows a setup draft may name for its eval's provider. Absent is `gemini`. */
-export const EVAL_DRAFT_PROVIDERS = ["gemini", "vertex"] as const;
+export const EVAL_DRAFT_PROVIDERS = ["gemini", "vertex", "bedrock"] as const;
 export type EvalDraftProvider = (typeof EVAL_DRAFT_PROVIDERS)[number];
 /**
  * The project and location a sandbox client of a `vertex` eval row is told (`GOOGLE_CLOUD_PROJECT`, `GOOGLE_CLOUD_LOCATION`). They are Rovara's, never the customer's: the worker does not know the connected ones, and the
@@ -56,7 +68,7 @@ export type EvalDraftProvider = (typeof EVAL_DRAFT_PROVIDERS)[number];
 export const EVAL_VERTEX_PLACEHOLDER = Object.freeze({ projectId: "rovara-eval-project", location: "rovara-eval1" });
 /** The route every eval model call takes: the gateway's product route, on the customer's own connected key (DEC 240b, 253k). */
 export const EVAL_PRODUCT_ROUTE = "gateway";
-const familyOfRow = (row: string): VendorFamily | undefined => (Object.hasOwn(EVAL_PRODUCT_ROWS, row) ? EVAL_PRODUCT_ROWS[row] : undefined);
+const familyOfRow = (row: string): VendorFamily | typeof EVAL_BEDROCK_ROW | undefined => (Object.hasOwn(EVAL_PRODUCT_ROWS, row) ? EVAL_PRODUCT_ROWS[row] : undefined);
 
 /** DEC 253q: the eval's judge as the setup run names it: a rule (exact match and the like: no model) or a model and its exact version, each with the file that holds its scoring rule or prompt. */
 export const EvalJudgeSchema = z.discriminatedUnion("kind", [
@@ -74,7 +86,7 @@ export function evalJudgePinOf(input: { catalogRowId: string; judge: EvalJudge; 
   const judge = EvalJudgeSchema.parse(input.judge);
   const family = familyOfRow(input.catalogRowId);
   if (family === undefined || !/^[a-f0-9]{64}$/u.test(input.scoringHash)) throw new RangeError("the judge pin needs an eval product row and a scoring file hash");
-  if (judge.kind === "model" && !modelBelongsToFamily(judge.model, family)) throw new RangeError("a model judge goes through the eval's product row");
+  if (judge.kind === "model" && !modelBelongsToRow(judge.model, family)) throw new RangeError("a model judge goes through the eval's product row");
   const body = { provider: "customer", catalogRowId: input.catalogRowId, family, kind: judge.kind, ...(judge.kind === "model" ? { model: judge.model, version: judge.version } : {}), scoring: { path: judge.scoringPath, hash: input.scoringHash } };
   return sha256HexOf(new TextEncoder().encode(`rovara-eval-judge/v1\n${canonicalJson(body)}`));
 }
@@ -112,7 +124,7 @@ export const EvalDiscoverySuiteSchema = z.object({
   .refine(suite => new Set(suite.questions.map(q => q.path)).size <= EVAL_DISCOVERY_FILES_MAX, "too many question files")
   .refine(suite => { try { return evalCommandFingerprintOf(suite.command, suite.report) === suite.commandFingerprint; } catch { return false; } }, "the command fingerprint does not match the command")
   // The product model and a model judge are both reached through the row, so both belong to its family; the scoring file is not a question.
-  .refine(suite => { const family = familyOfRow(suite.catalogRowId); return family !== undefined && modelBelongsToFamily(suite.model, family) && (suite.judge.kind !== "model" || modelBelongsToFamily(suite.judge.model, family)); }, "the models go through the eval's product row")
+  .refine(suite => { const family = familyOfRow(suite.catalogRowId); return family !== undefined && modelBelongsToRow(suite.model, family) && (suite.judge.kind !== "model" || modelBelongsToRow(suite.judge.model, family)); }, "the models go through the eval's product row")
   .refine(suite => !suite.questions.some(q => q.path === suite.judge.scoringPath), "the scoring file is not a question file");
 export type EvalDiscoverySuite = z.infer<typeof EvalDiscoverySuiteSchema>;
 

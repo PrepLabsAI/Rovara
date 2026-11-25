@@ -206,7 +206,7 @@ export async function readEvalSpendItem(deps: Table, project: string): Promise<E
     const { estimate, budget, dollars } = row.plan;
     const state = row.state === "approved" && await approvedRole(deps, row) === undefined ? "approval needs renewing" as const : row.state;
     const card: EvalSpendCardView | undefined = dollars === undefined ? undefined : {
-      sentence: evalApprovalSentence(dollars), perPr: dollarRangeOf(dollars.perCheckLowMicros, dollars.perCheckHighMicros), monthly: dollarsUpOf(dollars.monthlyCapMicros),
+      sentence: evalApprovalSentence(dollars, row.plan.inputs.catalogRowId), perPr: dollarRangeOf(dollars.perCheckLowMicros, dollars.perCheckHighMicros), monthly: dollarsUpOf(dollars.monthlyCapMicros),
       healthRun: { label: evalHealthButtonLabel(row.plan), cost: dollarsOf(estimate.costMicros) },
       ...(row.state === "waiting" && row.asksAgain !== undefined ? { needsApproval: evalAsksAgainWords(row.asksAgain) } : {}),
       ...(row.state === "approved" && row.carriedFrom !== undefined ? { carried: true } : {}),
