@@ -180,7 +180,7 @@ import { loadWorkflowDocument, shortenMarkdown, type LoadedDocument } from "../d
 import type { DeveloperTaskActions, TransactItems } from "./developer-task-actions.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import { requireWebPageForSecurityAccept } from "./security-accept.js";
-import { type TaskReaderPerson } from "./task-readers.js";
+import { listsAsOwn, type TaskReaderPerson } from "./task-readers.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { operationKey } from "./cancellation.js";
 import { resumeTaskDispatch } from "./task-dispatch-access.js";
@@ -267,7 +267,7 @@ export interface DeveloperTaskRouteDependencies extends Pick<TaskPeopleEffectsDe
   /** `companyId`: the caller's company as the check resolved it (absent: no company mode); the start checks the project row it loads against it (DEC 254zzz98). */
   checkAccess(project: string): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel"; channelIds: string[]; companyId?: string }>;
   /** Spec 067: a registered, not removed person and whether they are a member of `project` (for task readers); without it, tasks can't be shared. */
-  taskReaderPerson?(developerId: string, project: string, taskCompany?: string): Promise<TaskReaderPerson | undefined>;
+  taskReaderPerson?(developerId: string, project: string, taskCompany?: string, options?: { ownTask?: true }): Promise<TaskReaderPerson | undefined>;
   /** C3: bound channels' names and privacy, best effort (R10). */
   workspaceForTask?(task: DeveloperTaskRecord): Promise<SlackWorkspaceScope | undefined>;
   workspaceForProject?(project: string): Promise<SlackWorkspaceScope | undefined>;
@@ -1038,6 +1038,7 @@ async function listTasks(deps: DeveloperTaskRouteDependencies, caller: Developer
   const tasks: Array<DeveloperTaskListItem & DeveloperTaskListDetail> = [];
   let start: Record<string, unknown> | undefined = after === undefined ? undefined : { pk, sk: after };
   let scanned = 0;
+  const onProjectNow = new Map<string, boolean>();
   const scanMax = deps.companyId === undefined ? LIST_SCAN_MAX : limit;
   let completed = after;
   try {
@@ -1059,7 +1060,8 @@ async function listTasks(deps: DeveloperTaskRouteDependencies, caller: Developer
         // With membership enabled, even closed index rows need the canonical task's company.
         // At most the requested page size is loaded; a filtered page retains its continuation.
         const task = row.status !== "CLOSED" || deps.companyId !== undefined ? await get<DeveloperTaskRecord>(deps, taskKey(row.taskId)) : undefined;
-        const visible = deps.companyId === undefined || (task !== undefined && task.developerId === caller.developerId && recordInCompany(task, deps.companyId));
+        // In a company a person lists their own task only while they still hold the project grant there (read now, once per project for this page).
+        const visible = await listsAsOwn(deps, task, caller.developerId, onProjectNow);
         let viewWorkflow: DeveloperTaskView["workflow"] | undefined;
         let startup: Pick<DeveloperTaskView, "startupReason"> = {};
         let engine: "core" | "workflow" | undefined;

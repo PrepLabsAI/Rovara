@@ -57,6 +57,7 @@ it("membership adapters sanitize read failures before exposing them to a caller"
 
 it("paginates an ordinary fifty-task list with forty operations each", async () => {
   const h = companyRouteHarness();
+  h.project(); // the person holds a grant on the tasks' project: their own list shows a task only while they do
   const ids = Array.from({ length: 50 }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`);
   for (const id of ids) h.db.set({ ...h.task(id), workspaceId: `ws-${id}` });
   h.deps.companies = { companyOf: async () => IMPLICIT_COMPANY_ID };
@@ -75,7 +76,7 @@ it("paginates an ordinary fifty-task list with forty operations each", async () 
 
 it("refuses an individually oversized task and hard byte failures with fixed words", async () => {
   for (const mode of ["single", "bytes", "unrelated"] as const) {
-    const h = companyRouteHarness(); h.task();
+    const h = companyRouteHarness(); h.project(); h.task(); // the person holds a grant on the tasks' project (their list shows a task only while they do)
     const newer = h.task("22222222-2222-4222-8222-222222222222"); h.db.set({ ...newer, workspaceId: "newer" });
     h.deps.companies = { companyOf: async () => IMPLICIT_COMPANY_ID };
     h.deps.tasks!.operations = async (workspaceId) => {

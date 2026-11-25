@@ -109,8 +109,8 @@ it("the worker grant exchange refuses a foreign installation before minting", as
   const grant = grants.issue({ ownerKey: "owner".repeat(8), projectName: "demo", workspaceId, operationId, repositories: [repository] });
   const { handler } = createBroker({ extra: { documentClient: db, githubBindings: bindings, repositoryGrants: grants, githubPullRequests: { installationIdFor: async () => 77 } } });
   db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "META", deploymentMode: "ec2-ebs", id: workspaceId, ownerKey: "owner".repeat(8), projectName: "demo", projectRevision: 1,
-    environmentDigest: `example.test/agentx@sha256:${"a".repeat(64)}`, rootPath: "/mnt/workspace", status: "READY", fence: 1, createdAt: NOW, updatedAt: NOW });
-  db.set({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}`, id: operationId, workspaceId, kind: "prepare" });
+    environmentDigest: `example.test/agentx@sha256:${"a".repeat(64)}`, rootPath: "/mnt/workspace", status: "READY", fence: 1, activeOperationId: operationId, createdAt: NOW, updatedAt: NOW });
+  db.set({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}`, id: operationId, workspaceId, kind: "prepare", status: "RUNNING", fence: 1 });
   seedLinkedProject(db, "org_bbbbbbbbbbbbbbbbbbbb");
   const invoke = () => handler({ rawPath: `/v1/internal/workspaces/${workspaceId}/operations/${operationId}/repository-credentials`, body: JSON.stringify(repository),
     headers: { "x-agentx-repository-grant": grant }, requestContext: { requestId: "mint", http: { method: "POST" } } });

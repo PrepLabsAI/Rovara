@@ -18,6 +18,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { providerOf } from "../../plugins/routing.js";
 import {
   withoutOwnRovaraCheck,
+  GROWTH_WORDS,
   MERGE_CLAIM_SECONDS,
   MERGE_NOT_READY_MESSAGES as M,
   MERGE_VIEW_MESSAGE_MAX,
@@ -67,6 +68,7 @@ import { ownCheckSourceOf } from "./summary-check.js";
 import { approvalStandingOf, humanApprovalOf, latestReviewers, requesterHostIds, type HumanApproval, type ApprovalRefusal, type RepositoryPermission, type RequesterAccounts } from "./approval.js";
 import { codeOwnerVerdict, type CodeOwnerVerdict } from "./code-owners.js";
 import { boundCommits, readTierInput, type TierReadTarget } from "./change-tier-read.js";
+import { growthOwedOf, owedLevelOfFlow } from "./grown-owed.js";
 import { approvalReviewsOf, changeRequestRef, changedPathsOf, isHostRateLimit, type ConsumerRepository, type RepositoryResolver } from "./host-port.js";
 import { DEFAULT_CI_MODE, PERMISSION_LOOKUPS_MAX, ciAllowsMerge, ciCountsAsPassing, readBranch, readCi, tracksMerge, unreadableSinceOf, type ProjectCiMode } from "./merge-tracking.js";
 import type { MergePeople } from "./people.js";
@@ -340,10 +342,13 @@ async function readinessFromItems(
     if (base !== undefined) bases.set(key, base);
   }
   const wait = deps.mergeWait?.(task);
-  const readiness = mergeReadiness({
+  const owed = growthOwedOf(task.workflow, items);
+  const base = mergeReadiness({
     pullRequests: facts, approvals, workflow: task.workflow, recordedBases: bases, presser, requirePresserAccount: deps.requirePresserAccount ?? true,
     allowSelfApproval: settings.allowSelfApproval, requesterName: requesterNameOf(task), ...(wait === undefined ? {} : { secondReviewWait: wait }), ...(deps.requirePassingCi === true ? { requirePassingCi: true } : {}),
   });
+  // A change that grew owes the code and security reviews of the higher level on its current head: never ready while they are owed (the press refuses it in the same words).
+  const readiness: Readiness = base.ready && owed !== undefined ? notReady(owed.words) : base;
   return { readiness, items: [...items], settings, entries };
 }
 
@@ -753,7 +758,9 @@ export async function tierGate(
     // The checks of the higher tier have run on this very head: nothing is owed.
     const covered = tierReviewRecorded(flow, raised.level, bound.headSha);
     const grew = !covered && (tierGrew(approvedAt, raised) || (planned !== undefined && tierGrew(planned, raised)));
-    const owed = !covered && !grew && flow?.grewAfterBuild !== undefined && !tierReviewRecorded(flow, flow.grewAfterBuild.to, bound.headSha);
+    // The level the view and the tier pass read too (`owedLevelOfFlow`): the highest the change reached, so a tier raised on this head after a lower review is owed again.
+    const owedLevel = owedLevelOfFlow(flow);
+    const owed = !covered && !grew && owedLevel !== undefined && !tierReviewRecorded(flow, owedLevel, bound.headSha);
     const floor = !grew && !owed && skippedPlanning(flow) && needsReviewerFloor(raised) && !reviewerFloorRecorded(flow, bound.headSha, patchDigest);
     verdict = grew ? "grew" : owed ? "owed" : floor ? "floor" : "ok";
     const recorded = recordTier(flow, { ...fresh, source: "merge" });
@@ -771,9 +778,13 @@ export async function tierGate(
     if (again?.workflow === undefined) break;
     current = again.workflow;
   }
-  if (verdict === "grew" || verdict === "owed") throw agentXError("MERGE_NOT_READY", tierGrowthSentence(raised, (path) => inertLine(path, 80)));
+  if (verdict === "grew" || verdict === "owed") throw agentXError("MERGE_NOT_READY", growthRefusal(raised, fresh));
   if (verdict === "floor") throw agentXError("MERGE_NOT_READY", FLOOR_OWED);
 }
+
+/** The words a refusal for growth is given in: this head's own reasons while its diff is still at the level, and "grew earlier" once a send-back brought the change back down (the level never goes down, so the old reasons are not about this head). */
+const growthRefusal = (raised: { level: TierLevel; reasons: Parameters<typeof tierGrowthSentence>[0]["reasons"] }, fresh: { level: TierLevel }): string =>
+  tierRank(fresh.level) >= tierRank(raised.level) ? tierGrowthSentence(raised, (path) => inertLine(path, 80)) : GROWTH_WORDS.earlier(raised.level);
 
 /** How many times a growth is written before the refusal is given without it. */
 const GROWTH_WRITE_ATTEMPTS = 5;

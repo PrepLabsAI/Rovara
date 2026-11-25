@@ -21,7 +21,7 @@
     "packages/broker/src/aws/attention-email-sender.ts": 4,
     "packages/broker/src/aws/attention-email.ts": 1,
     "packages/broker/src/aws/broker-environment.ts": 3,
-    "packages/broker/src/aws/broker.ts": 2211,
+    "packages/broker/src/aws/broker.ts": 2213,
     "packages/broker/src/aws/cancellation.ts": 3,
     "packages/broker/src/aws/channel-conversation-state.ts": 11,
     "packages/broker/src/aws/channel-events.ts": 16,
