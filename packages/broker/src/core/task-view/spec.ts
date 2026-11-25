@@ -104,11 +104,11 @@ function openQuestionsOf(workflow: WorkflowSnapshot): Decision[] {
  * a code citation keeps only its own note and says it is withheld; the plan's own words (claims, work items, risks, decisions) stay as written.
  */
 function claimsWithoutPaths(claims: readonly PlanClaim[]): PlanClaim[] {
-  return claims.map((claim) => ({
-    ...claim,
-    ...(claim.evidence === undefined ? {} : { evidence: claim.evidence.map((item) => (item.kind === "code" ? { kind: "code" as const, withheld: true, ...(item.note === undefined ? {} : { note: item.note }) } : item)) as PlanClaim["evidence"] }),
-    ...(claim.children === undefined ? {} : { children: claimsWithoutPaths(claim.children) }),
-  }));
+  return claims.map((claim): PlanClaim => {
+    const { evidence, children, ...rest } = claim;
+    const shown = evidence?.map((item) => (item.kind === "code" ? { kind: "code" as const, withheld: true, ...(item.note === undefined ? {} : { note: item.note }) } : item));
+    return { ...rest, ...(shown === undefined ? {} : { evidence: shown as unknown as NonNullable<PlanClaim["evidence"]> }), ...(children === undefined ? {} : { children: claimsWithoutPaths(children) }) };
+  });
 }
 const planWithoutPaths = (plan: PlanDocument): PlanDocument => ({ ...plan, claims: claimsWithoutPaths(plan.claims) });
 

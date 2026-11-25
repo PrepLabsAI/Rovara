@@ -218,7 +218,7 @@ const ADMIT: Readonly<Record<Basis, (ask: Ask) => Promise<Admission>>> = {
 };
 
 /** The old page rule's own "no" (the task is not shown to this person); any other failure of it stays a failure. */
-const isPageRefusal = (error: unknown): boolean => error instanceof AgentXError && (error.code === "TASK_NOT_FOUND" || error.code === "TASK_ACCESS_DENIED");
+const isPageRefusal = (error: unknown): error is AgentXError => error instanceof AgentXError && (error.code === "TASK_NOT_FOUND" || error.code === "TASK_ACCESS_DENIED");
 
 /**
  * The decision for one read: who the person is to the task and what they may see, or a refusal. Throws TASK_NOT_FOUND for anyone no way admits (the same as for a task that does not exist),
@@ -247,28 +247,35 @@ async function scriptDecision(ask: Ask): Promise<TaskReadDecision | undefined> {
  * after it (the stored share) may still admit the person, that refusal is kept and the next way is asked; if none admits, the page rule's own refusal is thrown, in its own words, as before.
  */
 async function firstAdmission(ask: Ask): Promise<TaskReadDecision | undefined> {
-  const { input } = ask;
-  const ways = ADMITTED_BY[input.read];
-  let pageRefusal: unknown;
+  const ways = ADMITTED_BY[ask.input.read];
+  let pageRefusal: AgentXError | undefined;
   for (const [index, basis] of ways.entries()) {
-    let admitted: Admission;
-    try {
-      admitted = await ADMIT[basis](ask);
-    } catch (error) {
-      if (basis === "page" && index < ways.length - 1 && isPageRefusal(error)) { pageRefusal = error; continue; }
-      throw error;
-    }
-    if (admitted === undefined) continue;
-    // EVERY way in but the stored share (which proves its own project membership) re-reads the person's live company membership and current project grant now: no path assumes the grant was proved,
-    // the task's stored person with no People list included.
-    const grant = admitted.grantProved === true ? "yes" : admitted.channelShare === true ? "exempt" : await grantFor(ask, basis);
-    if (grant === "no") continue;
-    // A share admits a person to the task; each part is then shown or not by the share's role.
-    if (admitted.sharedRole !== undefined && SHARED_PARTS[admitted.sharedRole][input.read] === "withheld") throw agentXError("TASK_PART_NOT_SHOWN", sharedWords(input.read));
-    return decisionOf(ask, admitted, grant === "yes" || grant === "exempt");
+    const tried = await tryWay(ask, basis, index < ways.length - 1);
+    if (tried.refusal !== undefined) { pageRefusal = tried.refusal; continue; }
+    if (tried.admitted === undefined) continue;
+    const decision = await admitBy(ask, basis, tried.admitted);
+    if (decision !== undefined) return decision;
   }
   if (pageRefusal !== undefined) throw pageRefusal;
   return undefined;
+}
+
+/** One way in: who it admits, or (for the page rule, where a later way may still admit) its own refusal, kept. Any other failure stays a failure. */
+async function tryWay(ask: Ask, basis: Basis, laterWays: boolean): Promise<{ admitted?: Admission; refusal?: AgentXError }> {
+  try {
+    return { admitted: await ADMIT[basis](ask) };
+  } catch (error) {
+    if (basis === "page" && laterWays && isPageRefusal(error)) return { refusal: error };
+    throw error;
+  }
+}
+
+/** A person admitted by one way: the live grant is re-read for EVERY way in but the stored share (which proves its own project membership) and the channel share (no grant, by design): no path assumes the grant was proved, the task's stored person with no People list included. A share is then shown each part or not by its role. */
+async function admitBy(ask: Ask, basis: Basis, admitted: NonNullable<Admission>): Promise<TaskReadDecision | undefined> {
+  const grant = admitted.grantProved === true ? "yes" : admitted.channelShare === true ? "exempt" : await grantFor(ask, basis);
+  if (grant === "no") return undefined;
+  if (admitted.sharedRole !== undefined && SHARED_PARTS[admitted.sharedRole][ask.input.read] === "withheld") throw agentXError("TASK_PART_NOT_SHOWN", sharedWords(ask.input.read));
+  return decisionOf(ask, admitted, grant === "yes" || grant === "exempt");
 }
 
 /** The decision for a person admitted this way: the task, how, and what they may be shown (money, source code and the checks' code details are decided here, for this reader and this task, on every request). */

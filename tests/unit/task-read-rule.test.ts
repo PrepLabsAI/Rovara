@@ -107,8 +107,9 @@ describe("the one read rule: the evidence file route asks it (RD-2d)", () => {
       const answer = await w.routes.route(request(w.taskIdOf(persona)), w.caller(persona));
       // Past the rule: the file is not in the pack, so the route answers its own refusal, the same as for the owner, never the share's.
       const owner = await w.routes.route(request(w.taskIdOf(personaOf("owner"))), w.caller(personaOf("owner")));
-      expect([answer?.statusCode, JSON.parse(answer!.body).error.code], name).toEqual([owner?.statusCode, JSON.parse(owner!.body).error.code]);
-      expect(JSON.parse(answer!.body).error.code, name).not.toBe("TASK_PART_NOT_SHOWN");
+      const codeOf = (body: string): string => (JSON.parse(body) as { error: { code: string } }).error.code;
+      expect([answer?.statusCode, codeOf(answer!.body)], name).toEqual([owner?.statusCode, codeOf(owner!.body)]);
+      expect(codeOf(answer!.body), name).not.toBe("TASK_PART_NOT_SHOWN");
     }
     for (const name of ["owner", "co-owner", "commenter", "viewer", "stranger", "company admin", "other company", "left the project"] as const) {
       const persona = personaOf(name);

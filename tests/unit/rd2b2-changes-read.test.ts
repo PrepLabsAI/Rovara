@@ -522,7 +522,7 @@ describe("the changes route on the core host", () => {
     // The cache holds the page; a person whose diff read says no is not handed it, and the code host is not asked either.
     for (const diff of ["refuse", "fail"] as const) {
       const closed = await readTaskChangesWith(contextOf(diff), { cache });
-      expect(JSON.parse(closed.body).changes.files, diff).toEqual([]);
+      expect((JSON.parse(closed.body) as { changes: { files: unknown[] } }).changes.files, diff).toEqual([]);
       expect(closed.body, diff).not.toContain("leak.ts");
     }
     expect(route).toHaveBeenCalledTimes(1);
