@@ -141,7 +141,7 @@
  },
  "admin | GET /": {
   "status": 200,
-  "sha": "7789967958a50dfd"
+  "sha": "1049c3a714110ece"
  },
  "admin | GET /answers": {
   "status": 404,
@@ -761,7 +761,7 @@
  },
  "admin | start": {
   "status": 200,
-  "sha": "ee702337c4f2e7d2"
+  "sha": "fbca6c256e30f1c4"
  },
  "colleague | DELETE /": {
   "status": 404,
@@ -905,7 +905,7 @@
  },
  "colleague | GET /": {
   "status": 200,
-  "sha": "a27537c209e39140"
+  "sha": "1c6a9c503d28db33"
  },
  "colleague | GET /answers": {
   "status": 404,
@@ -1525,7 +1525,7 @@
  },
  "colleague | start": {
   "status": 200,
-  "sha": "ee702337c4f2e7d2"
+  "sha": "fbca6c256e30f1c4"
  },
  "colleague, moves unwired | DELETE /": {
   "status": 404,
@@ -5345,7 +5345,7 @@
  },
  "old task owner | start": {
   "status": 200,
-  "sha": "4d1d8035e030209f"
+  "sha": "71322b069b129a2e"
  },
  "owner | DELETE /": {
   "status": 404,
@@ -5489,7 +5489,7 @@
  },
  "owner | GET /": {
   "status": 200,
-  "sha": "7789967958a50dfd"
+  "sha": "0f4ca396989b1ecb"
  },
  "owner | GET /answers": {
   "status": 404,
@@ -6109,7 +6109,7 @@
  },
  "owner | start": {
   "status": 200,
-  "sha": "4d1d8035e030209f"
+  "sha": "71322b069b129a2e"
  },
  "owner, moves unwired | DELETE /": {
   "status": 404,
@@ -7017,7 +7017,7 @@
  },
  "script token | GET /": {
   "status": 200,
-  "sha": "a27537c209e39140"
+  "sha": "51573543022d76e1"
  },
  "script token | GET /answers": {
   "status": 404,
@@ -9165,7 +9165,7 @@
  },
  "stranger | start": {
   "status": 200,
-  "sha": "4d1d8035e030209f"
+  "sha": "71322b069b129a2e"
  },
  "stranger, moves unwired | DELETE /": {
   "status": 404,
