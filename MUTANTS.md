@@ -910,3 +910,27 @@ Measured on the lane's working tree over tests/unit/task-ended-notice.test.ts (2
 | M6, task-end.ts `announceTaskEnd` | waits for the host without the time bound | 1 of 25 | green |
 | M7, task-end.ts `reconcileTaskEnds` | the `notifiedAt` filter is dropped | SURVIVES, on purpose not killed: a delivered marker has already left the due-time index, so the filter is a second guard on a row the index no longer lists. |
 | M8, task-end.ts `reconcileTaskEnds` | no age limit | 1 of 25 | green |
+
+## PORT-GUARD-GATEWAY-NARROW: only the model gateway's names pass the gateway words in a deployment path and the AWS-import check (2026-11-25)
+
+Every mutant is a change to `cloudWordsReason` in scripts/port-guard.ts, run against tests/unit/port-guard-boundary.test.ts (305 tests, all green on the real tree).
+
+| Mutant | Change | Result |
+| --- | --- | --- |
+| M1 | the whole gateway block off (every gateway name passes, as after #1483) | red (27 of 305) |
+| M2 | only a word that STARTS with "gateway" counts (glued `sharedgateway`, `mygateway` pass) | red (3) |
+| M3b | `llm`, `llms`, `ai` join the model words AND `llmgateway`/`aigateway` leave the Cloud-only list (`llm-gateway`, `ai-gateway` pass) | red (7) |
+| M3 | `llm`, `llms`, `ai` join the model words alone | survived: equivalent (`llmgateway` and `aigateway` in the Cloud-only list still refuse the same names; M3b removes both) |
+| M4 | the AWS exemption ignores an earlier model/llm/ai word (`model-api-gateway`, `llm-api-gateway` pass) | red (3) |
+| M5 | `llmproxy`, `aiproxy` leave the Cloud-only list (`llm-proxy`, `ai-proxy` pass) | red (5) |
+| M6 | the two-word form `gate-way` is not read | red (4) |
+| M7 | the words before "gateway" are read across slashes (`api/gateway.ts`, `model/gateway.ts` pass) | red (3) |
+| M8 | any earlier model word makes it the model gateway (`model-api-gateway` passes) | red (2) |
+| M9 | `awsImportReason` stops reading the path words for a deployment file (the AWS-import check) | red (20) |
+| M10 | a glued lead (`modelgateway`) is not read as the word before the gateway | red (6) |
+| M11 | `models` leaves the model words (`models-gateway` refused) | red (3) |
+| M12 | "model" before the gateway no longer excuses it (the model gateway refused) | red (18) |
+| M13 | an AWS gateway name (`nat-gateway`, `api-gateway-stack`) is refused too | red (13) |
+| M14 | `llmgateway`, `aigateway` leave the Cloud-only list alone | survived: equivalent (the gateway rule refuses `llmgateway` and `aigateway` itself, as M3 shows from the other side) |
+
+The restored tree passes (305 of 305).
