@@ -14,6 +14,8 @@ export interface AnswerTasks {
   /** Uses this asker's task-page authority. Undefined means no context, including a denied/missing task. */
   read(personId: string, taskId: string): Promise<TaskRecord | undefined>;
   artifacts?: ArtifactReader | undefined;
+  /** The task's plan, design and requirements are not shown to this asker (the read rule's share: the owner shared the task's summary only), so the frame carries none of their text. */
+  documentsWithheld?(taskId: string): boolean;
 }
 
 function taskStatus(task: TaskRecord, workflow: TaskRecord["workflow"], snapshot: ReturnType<typeof sessionSnapshot> | undefined): string {
@@ -55,7 +57,7 @@ export async function answerTaskContext(store: DocumentStore, companyId: OrgId, 
     status: taskStatus(task, workflow, snapshot),
     step: task.closedAt === undefined ? workflow?.stage ?? snapshot?.step : undefined,
     nextStep: snapshot?.next ?? "See the task page for the current plan and next step.",
-    document: latest === undefined ? undefined : loaded === undefined ? "unreadable" : { label: `${latest.type} summary`, version: latest.version, markdown: storedWords(loaded.markdown, 1_500) },
+    document: tasks.documentsWithheld?.(task.taskId) === true ? "withheld" : latest === undefined ? undefined : loaded === undefined ? "unreadable" : { label: `${latest.type} summary`, version: latest.version, markdown: storedWords(loaded.markdown, 1_500) },
     // The builder retains ordering; both lists arrive newest first.
     timeline: { statusLines: events, decisions },
   }, randomBytes(8).toString("hex"));

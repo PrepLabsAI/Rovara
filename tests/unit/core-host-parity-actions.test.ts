@@ -98,7 +98,7 @@ describe("the ported core developer actions", () => {
     let observed: unknown;
     const flow = { ...h.flow, close: async (_who: typeof caller, _id: string, input?: unknown): ReturnType<typeof h.flow.close> => { observed = input; throw agentXError("CHANGE_STALE", "the close preview has changed; review it again"); } };
     const before = await stateOf(h);
-    await expect(routeParityTask({ flow, blobs: {} as never, wiring: { origin: () => "https://api.example" }, caller, decisionCaller: { principal: caller.principal, orgId: h.deps.companyId, developerId: "local-owner" }, view: async () => ({}) }, { taskId: TASK_ID, action: "close" }, { method: "POST", path: `/v1/dev/tasks/${TASK_ID}/close`, headers: {}, body: JSON.stringify(request) })).rejects.toMatchObject({ code: "CHANGE_STALE" });
+    await expect(routeParityTask({ flow, blobs: {} as never, wiring: { origin: () => "https://api.example" }, caller, decisionCaller: { principal: caller.principal, orgId: h.deps.companyId, developerId: "local-owner" }, view: async () => ({}), decide: async () => { throw new Error("not a read"); } }, { taskId: TASK_ID, action: "close" }, { method: "POST", path: `/v1/dev/tasks/${TASK_ID}/close`, headers: {}, body: JSON.stringify(request) })).rejects.toMatchObject({ code: "CHANGE_STALE" });
     expect(observed).toEqual(request);
     expect(await stateOf(h)).toEqual(before);
   });
@@ -107,7 +107,7 @@ describe("the ported core developer actions", () => {
     const { h, caller } = await seed();
     h.deps.access.ownerActing = async () => ({ actorId: (await taskOf(h)).ownerKey });
     const flow = { ...h.flow, close: async () => h.flow.get(caller, TASK_ID) };
-    const reply = await routeParityTask({ flow, blobs: {} as never, wiring: { origin: () => "https://api.example" }, caller, decisionCaller: { principal: caller.principal, orgId: h.deps.companyId, developerId: "local-owner" }, view: async (task) => ({ taskId: task.taskId }) }, { taskId: TASK_ID, action: "close" }, { method: "POST", path: `/v1/dev/tasks/${TASK_ID}/close`, headers: {}, body: JSON.stringify({ requestId: randomUUID() }) });
+    const reply = await routeParityTask({ flow, blobs: {} as never, wiring: { origin: () => "https://api.example" }, caller, decisionCaller: { principal: caller.principal, orgId: h.deps.companyId, developerId: "local-owner" }, view: async (task) => ({ taskId: task.taskId }), decide: async () => { throw new Error("not a read"); } }, { taskId: TASK_ID, action: "close" }, { method: "POST", path: `/v1/dev/tasks/${TASK_ID}/close`, headers: {}, body: JSON.stringify({ requestId: randomUUID() }) });
     expect(JSON.parse(reply!.body)).toMatchObject({ closed: false, task: { taskId: TASK_ID }, message: "Rovara is closing this task. Read it again in a moment." });
     expect((await taskOf(h)).closedAt).toBeUndefined();
   });

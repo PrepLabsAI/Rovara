@@ -7,7 +7,6 @@ import { PullRequestResultSchema } from "@agentx/contracts";
 import type { OperationRecord } from "../core/task-flow/records.js";
 import { startManualPublication } from "../core/task-flow/manual-publication.js";
 import { shareTask } from "../core/task-flow/share.js";
-import { taskOwnerView } from "../developer/task-owner-view.js";
 import { parsePreviewRequestV2, restrictPreviewV2 } from "@agentx/contracts";
 import { startEstimates, type PreviewContext } from "../core/cost/start-estimates.js";
 import { readTaskMoney } from "../core/cost/task-money.js";
@@ -52,7 +51,8 @@ import type { TaskMoneyV1 } from "@agentx/contracts";
 import { AgentXError, ON_THE_WEBSITE_MESSAGE, type TaskPeopleView, OrgRoleSchema, type DeveloperSignInMethod, SavedEnvPanelSchema, agentXError, orgProjectCatalogKey, type AnswerResponse, type AuditSink, type DocumentStore, type ObjectStorage, type OrgId, type OrgRole, type Principal } from "@agentx/contracts";
 import type { TaskCaller } from "../core/task-flow/deps.js";
 import type { TaskRecord } from "../core/task-flow/records.js";
-import { loadOwnedTask, loadReadableTask, readTask, taskViewOf } from "../core/task-flow/reads.js";
+import { loadOwnedTask, readTask, taskViewOf } from "../core/task-flow/reads.js";
+import { decideTaskRead, maySeeTaskMoney as roleMaySeeTaskMoney, type TaskRead, type TaskReadDecision, type TaskReadSeams } from "../core/task-flow/read-rule.js";
 import { coreTaskRuleOf } from "./task-rule-paths.js";
 import { routeTaskScreen, taskScreenRoute } from "./task-screen-routes.js";
 import { involvedListOptions, listInvolvedTasks, wantsInvolved } from "../core/task-flow/involved.js";
@@ -207,7 +207,7 @@ export interface CoreDevWiring {
   /** How we work, read through the company's code host. Served only with `canReadProject`. */
   playbook?: PlaybookService;
   /** Whether this person may read this project (their project grant from the company's own records). A project they may not read answers exactly like a missing one. */
-  canReadProject?: (personId: string, project: string) => Promise<boolean>;
+  canReadProject?: (personId: string, project: string, companyId?: string) => Promise<boolean>;
   /**
    * DEC 254z-amend3: the project's test environment, read only. `env` is the install's switches (the function's environment, with the host's test services marker); `serviceCatalog` is the catalog the install would
    * pin dependencies from (hosted: the owner starter list, `hostedServiceCatalog`), `catalogName` how the answer names it. Served only with `canReadProject`.
@@ -260,14 +260,16 @@ export interface CoreDevWiring {
    * someone who may read the task, and gives anyone else the missing task's answer).
    */
   taskRules?: {
-    route(input: { request: BrokerRequest; path: string; person: { developerId: string; name: string }; companyId: OrgId; task: Record<string, unknown>; store: Pick<DocumentStore, "query"> }): Promise<BrokerResponse>;
+    route(input: { request: BrokerRequest; path: string; person: { developerId: string; name: string }; companyId: OrgId; task: Record<string, unknown>; store: Pick<DocumentStore, "query">; authorize(read: TaskRead, seams?: TaskReadSeams): Promise<TaskReadDecision> }): Promise<BrokerResponse>;
     /** S1: the People moves the registry's first cut offers, in process (the same People functions the routes above call): the view, and taking over a task nobody owns (propose, then confirm, each re-read). */
     people?: {
       view(input: { person: { developerId: string; name: string }; companyId: OrgId; task: Record<string, unknown> }): Promise<TaskPeopleView>;
       takeOwnership(input: { person: { developerId: string; name: string }; companyId: OrgId; task: Record<string, unknown>; requestId: string; expectedPeopleRevision: number }): Promise<void>;
     };
-    /** DEC 254zzz44 (a): whether this person is a reader the task's owner shared it with (spec 067) who is still a member of its project, read live. A read that fails is "no". */
-    readsAsReader(input: { person: { developerId: string; name: string }; companyId: OrgId; task: Record<string, unknown> }): Promise<boolean>;
+    /** The task's own person's live hold on their task (the hotfix's one test: the grant, or the access that let them start it): the read rule's live-grant seam asks it for the task's own person. Absent: the grant reader answers for them. */
+    holdsOwnTask?(input: { person: { developerId: string; name: string }; companyId: OrgId; task: Record<string, unknown> }): Promise<boolean>;
+    /** DEC 254zzz44 (a): the person's stored share (spec 067) on this task: its role as stored, while they are still a member of its project, read live. The read rule (core/task-flow/read-rule.ts) decides what it shows. */
+    sharedReader(input: { person: { developerId: string; name: string }; companyId: OrgId; task: Record<string, unknown> }): Promise<{ role: string } | undefined>;
   };
   /** L4-U5b: what the inbox's project notices (`GET /v1/app/inbox/project-notices`) are checked against, live: whether the person still administers the project, and the project's open repair card. Absent: that route lists nothing. */
   projectNotices?: { administers(orgId: string, developerId: string, project: string): Promise<boolean>; setupRead?(orgId: string, project: string): Promise<{ key: string; failedStep: string; fixReady: boolean } | undefined> } | undefined;
@@ -376,14 +378,57 @@ async function sessionAnswer(target: Mounted, request: BrokerRequest, caller: Ta
 }
 
 
-/** DEC 254zzz44 (a): the task, when the caller is a reader its owner shared it with (the old rule, through the deployment's wiring) and it is a task of the caller's own company; otherwise undefined. */
-async function sharedReaderTask(target: Mounted, companyId: string, caller: DeployedCaller, taskId: string): Promise<TaskRecord | undefined> {
+/**
+ * What the answers read may know of a task, for this asker: the task the one read rule shows them, and (option B, pending the owner's Q1) none of its plan, design or requirements text when the person was only shared the
+ * task's summary. The set lives for one request.
+ */
+function answerTasks(target: Mounted, caller: DeployedCaller, role: OrgRole): NonNullable<Parameters<typeof routeHostedAnswers>[0]["tasks"]> {
+  const withheld = new Set<string>();
+  return {
+    artifacts: target.runtime.flow.deps.artifacts,
+    read: async (_personId, taskId) => {
+      const decision = await decideRead(target, caller, role, { read: "answers", taskId });
+      if (decision.sharedRole !== undefined) withheld.add(decision.task.taskId);
+      return decision.task;
+    },
+    documentsWithheld: (taskId) => withheld.has(taskId),
+  };
+}
+
+/**
+ * The person's live standing, one implementation each: the task's OWN person holds their task by the hotfix's test (the grant, or the access that let them start it, `holdsOwnTask`), read where the task's rules
+ * are wired; everyone else by the project grant in the task's company (a People entry, a reader). A way that is not wired answers "no".
+ */
+export function liveGrantSeamOf(input: { companyId: OrgId; holdsOwnTask?: ((input: { person: { developerId: string; name: string }; companyId: OrgId; task: Record<string, unknown> }) => Promise<boolean>) | undefined; grant?: ((personId: string, project: string, companyId?: string) => Promise<boolean>) | undefined }): TaskReadSeams["liveGrant"] | undefined {
+  const { holdsOwnTask, grant, companyId } = input;
+  if (holdsOwnTask === undefined && grant === undefined) return undefined;
+  return async (person, task) => {
+    if (task.developerId === person.personId && holdsOwnTask !== undefined) return holdsOwnTask({ person: { developerId: person.personId, name: "" }, companyId, task });
+    return grant === undefined ? false : grant(person.personId, task.project, companyId);
+  };
+}
+
+function liveGrantOf(target: Mounted): TaskReadSeams["liveGrant"] | undefined {
   const rules = target.wiring.taskRules;
-  if (rules === undefined) return undefined;
-  const record = await readTask(target.runtime.flow.deps, taskId);
-  if (record === undefined || record.companyId !== companyId) return undefined;
-  const reads = await rules.readsAsReader({ person: { developerId: caller.principal.personId, name: caller.principal.displayName }, companyId: target.runtime.companyId, task: record }).catch(() => false);
-  return reads === true ? record : undefined;
+  return liveGrantSeamOf({ companyId: target.runtime.companyId, holdsOwnTask: rules?.holdsOwnTask === undefined ? undefined : (input) => rules.holdsOwnTask!(input), grant: target.wiring.canReadProject });
+}
+
+const liveGrantSeam = (target: Mounted): Pick<TaskReadSeams, "liveGrant"> => { const liveGrant = liveGrantOf(target); return liveGrant === undefined ? {} : { liveGrant }; };
+
+/**
+ * The one read rule (core/task-flow/read-rule.ts) for one request: the company's flow, this caller and the caller's live company role, with the stored share bound as its seam (DEC 254zzz44 (a): only where the deployment wires the
+ * old rules, and only for a task of the caller's own company: the rule checks the company first). Nothing else in this host decides who may read a task.
+ */
+function decideRead(target: Mounted, caller: DeployedCaller, role: OrgRole | undefined, input: { read: TaskRead; seams?: TaskReadSeams } & ({ taskId: string } | { task: TaskRecord })): Promise<TaskReadDecision> {
+  const rules = target.wiring.taskRules;
+  const seams: TaskReadSeams = {
+    ...(rules === undefined ? {} : { sharedReader: (person, task) => rules.sharedReader({ person, companyId: target.runtime.companyId, task }) }),
+    // The person's current project grant IN THE TASK'S COMPANY (the company the mount checked their live membership of), re-read for every way in: a person moved to another company between two reads never has that
+    // company's same-named grant counted.
+    ...liveGrantSeam(target),
+    ...input.seams,
+  };
+  return decideTaskRead(target.runtime.flow.deps, { ...input, caller: taskCallerOf(caller), role, scriptToken: caller.scriptToken !== undefined, seams });
 }
 
 const nowOf = (target: Mounted): number => (target.runtime.flow.deps.now?.() ?? new Date()).getTime();
@@ -449,8 +494,7 @@ function auditOf(target: Mounted, caller: DeployedCaller): AuditSink {
 /** Figures belong to the stored task owner or a live company admin. A co-owner's
  * right to act does not disclose another person's money (a live co-owner of THIS task reads that task's own `money` alone: `isLiveCoOwner`, `taskViewFor`; ruling (a) of 2026-11-23, DEC 254zzz398). Scope budgets stay private. */
 function maySeeTaskMoney(target: Mounted, task: TaskRecord, caller: DeployedCaller, membership: CompanyMembership): boolean {
-  return caller.scriptToken === undefined && caller.principal.companyId === target.runtime.companyId && membership.companyId === target.runtime.companyId && task.companyId === target.runtime.companyId
-    && (membership.role === "owner" || membership.role === "admin" || membership.role === "member" && taskOwnerView(task)?.developerId === caller.principal.personId);
+  return roleMaySeeTaskMoney({ companyId: target.runtime.companyId, membershipCompanyId: membership.companyId, principal: caller.principal, scriptToken: caller.scriptToken !== undefined, role: membership.role, task });
 }
 /** The company's live owner rule for THIS task and this person (the owner moves' own rule: the person it runs for, or a People co-owner read now): their own owner key, or none. A throw (People unreadable) is none. */
 async function liveOwnerKey(target: Mounted, task: TaskRecord, caller: DeployedCaller, membership: CompanyMembership): Promise<string | undefined> {
@@ -574,13 +618,14 @@ function taskSurfaceAnswer(target: Mounted, request: BrokerRequest, taskCaller: 
   if (isPrFeedbackPath(path, request.method)) return feedbackAnswer(target, request, taskCaller, caller, membership);
   // RD-2.0: the task page's new reads (spec, checks, changes, timeline), one mount; each answers ROUTE_NOT_SERVED until its lane fills its handler (task-screen-routes.ts).
   const screen = taskScreenRoute(path, request.method);
-  if (screen !== undefined) return routeTaskScreen({ flow: target.runtime.flow, blobs: target.blobs, caller: taskCaller, request }, screen);
+  if (screen !== undefined) return routeTaskScreen({ flow: target.runtime.flow, blobs: target.blobs, caller: taskCaller, request, decide: (read) => decideRead(target, caller, membership.role, { read, taskId: screen.taskId }) }, screen);
   const parity = parityTaskRoute(path, request.method);
   if (parity === undefined) return undefined;
   return routeParityTask({
     flow: target.runtime.flow, blobs: target.blobs, wiring: target.wiring, caller: taskCaller,
     decisionCaller: decisionCallerOf(caller, membership.companyId),
     view: mutationView(target, caller, membership),
+    decide: (read) => decideRead(target, caller, membership.role, { read, taskId: parity.taskId }),
   }, parity, request);
 }
 
@@ -657,9 +702,8 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
         const membership = await options.companyOf(caller);
         if (membership === undefined || membership === null || typeof membership.companyId !== "string" || !ORG_ID.test(membership.companyId) || caller.scriptToken !== undefined) return false;
         const target = await mount(membership.companyId);
-        const taskCaller = taskCallerOf(caller);
-        // The task read's own rule (the company, then the company's read access): the same refusal as a missing task for anyone it does not show the task to.
-        await loadReadableTask(target.runtime.flow.deps, taskCaller, taskId);
+        // The one read rule's "readable" read (the company, then the company's read access): the same refusal as a missing task for anyone it does not show the task to.
+        await decideRead(target, caller, membership.role, { read: "readable", taskId });
         return true;
       } catch {
         return false;
@@ -715,17 +759,9 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
         const task = TASK_READ.exec(path);
         if (task !== null) {
           if (request.method !== "GET") return undefined;
-          // Another company's task, or none, answers the same "not found" (the flow's read checks the company). A person's own read also lets the People list's commenters and viewers read it (C6, the same
-          // live rule); a script token reads exactly as before (its own closed list), never through People.
-          const record = caller.scriptToken === undefined
-            ? await loadReadableTask(target.runtime.flow.deps, taskCaller, task[1]!).catch(async (error: unknown) => {
-              // DEC 254zzz44 (a): the old task read's reader rule too (spec 067): someone the owner shared the task with, still a member of its project, reads it. Only after the core's own rule said no,
-              // only for a task of the caller's OWN company, and only where the deployment wires the old rules; anyone else keeps the missing task's answer.
-              const shared = error instanceof AgentXError && error.code === "TASK_NOT_FOUND" ? await sharedReaderTask(target, companyId, caller, task[1]!) : undefined;
-              if (shared === undefined) throw error;
-              return shared;
-            })
-            : await loadOwnedTask(target.runtime.flow.deps, taskCaller, task[1]!);
+          // Another company's task, or none, answers the same "not found" (the rule checks the company first). A person's own read also lets the People list's commenters and viewers read it (C6, the same
+          // live rule) and someone the owner shared the task with (spec 067); a script token reads exactly as before (its own closed list), never through People.
+          const { task: record } = await decideRead(target, caller, membership.role, { read: "task", taskId: task[1]! });
           await observeHostedBlockedTask(target.runtime.flow.deps, record, target.wiring.testEnvironment?.env);
           const testing = await hostedTestingView(target.runtime.flow.deps, target.blobs, record, target.wiring.testEnvironment?.env);
           const view = await taskViewFor(target, record, caller, membership);
@@ -737,7 +773,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
         if (evidence !== null) {
           // Exactly the task read's rule (the flow's owned read: the company, then the company's access rule; another company's task, or none, answers the same "not found"), then the pack kept for
           // exactly the task's current code, as the proof page reads it. A pack that is missing or cannot be read leaves only what Rovara recorded itself.
-          const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, evidence[1]!);
+          const { task: record } = await decideRead(target, caller, membership.role, { read: "evidence", taskId: evidence[1]! });
           // Only now: someone who may not read the task has been told it is missing; the task's own owner's script token is told what a script token cannot do.
           if (caller.scriptToken !== undefined && scriptTokenRoute(request.method, path)?.permission !== "wiki") throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
           // The pack is read through the company-bound store (the key must name a workspace of this company and its owner), not the shared bucket as it is.
@@ -779,6 +815,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           return await target.wiring.taskRules.route({
             request, path, person: { developerId: caller.principal.personId, name: caller.principal.displayName }, companyId: target.runtime.companyId,
             task: record, store: target.runtime.flow.deps.store,
+            authorize: (read, seams) => decideRead(target, caller, membership.role, { read, task: record, ...(seams === undefined ? {} : { seams }) }),
           });
         }
         const pageFindings = TASK_PAGE_FINDINGS.exec(path);
@@ -948,10 +985,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           // Lead 4 J1: the member company's own store and code; the caller's live standing on the project is read inside (any project role asks).
           if (target.wiring.answers === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
           return await routeHostedAnswers({ request, path, personId: caller.principal.personId, companyId: target.runtime.companyId, store: target.runtime.flow.deps.store, wiring: target.wiring.answers, now: () => nowOf(target), log: options.log,
-            tasks: { artifacts: target.runtime.flow.deps.artifacts, read: async (_personId, taskId) => loadReadableTask(target.runtime.flow.deps, taskCaller, taskId).catch(async (error: unknown) => {
-              if (!(error instanceof AgentXError) || error.code !== "TASK_NOT_FOUND") throw error;
-              return sharedReaderTask(target, companyId, caller, taskId);
-            }) },
+            tasks: answerTasks(target, caller, membership.role),
           });
         }
         if (isAgentDirectoryPath(path, request.method)) {

@@ -1,0 +1,868 @@
+{
+ "admin and shared | answers": {
+  "status": 200,
+  "shape": "outcome:answered"
+ },
+ "admin and shared | changes": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "admin and shared | checks": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "admin and shared | comments": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no task here that you can see"
+ },
+ "admin and shared | diff": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no task here that you can see"
+ },
+ "admin and shared | events": {
+  "status": 200,
+  "shape": "events"
+ },
+ "admin and shared | evidence": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "admin and shared | merge": {
+  "status": 404,
+  "code": "NOT_FOUND",
+  "message": "Merging from Rovara is not set up on this install yet; merge the pull request on GitHub."
+ },
+ "admin and shared | plan": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "admin and shared | readable": {
+  "status": 404,
+  "shape": "not readable"
+ },
+ "admin and shared | spec": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "admin and shared | task": {
+  "status": 200,
+  "shape": "task | task:money"
+ },
+ "admin and shared | timeline": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "co-owner | answers": {
+  "status": 200,
+  "shape": "outcome:answered"
+ },
+ "co-owner | changes": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "co-owner | checks": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "co-owner | comments": {
+  "status": 200,
+  "shape": "comments"
+ },
+ "co-owner | diff": {
+  "status": 404,
+  "code": "NOT_FOUND",
+  "message": "no such pull request on this task"
+ },
+ "co-owner | events": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no task <task> of yours"
+ },
+ "co-owner | evidence": {
+  "status": 200,
+  "shape": "items,taskId"
+ },
+ "co-owner | merge": {
+  "status": 404,
+  "code": "NOT_FOUND",
+  "message": "Merging from Rovara is not set up on this install yet; merge the pull request on GitHub."
+ },
+ "co-owner | plan": {
+  "status": 404,
+  "code": "NOT_FOUND",
+  "message": "this task has no plan document yet"
+ },
+ "co-owner | readable": {
+  "status": 200,
+  "shape": "readable"
+ },
+ "co-owner | spec": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "co-owner | task": {
+  "status": 200,
+  "shape": "task | task:money"
+ },
+ "co-owner | timeline": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "commenter | answers": {
+  "status": 200,
+  "shape": "outcome:answered"
+ },
+ "commenter | changes": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "commenter | checks": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "commenter | comments": {
+  "status": 200,
+  "shape": "comments"
+ },
+ "commenter | diff": {
+  "status": 404,
+  "code": "NOT_FOUND",
+  "message": "no such pull request on this task"
+ },
+ "commenter | events": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no task <task> of yours"
+ },
+ "commenter | evidence": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "commenter | merge": {
+  "status": 200,
+  "shape": "mayMerge,pullRequests,ready"
+ },
+ "commenter | plan": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "commenter | readable": {
+  "status": 200,
+  "shape": "readable"
+ },
+ "commenter | spec": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "commenter | task": {
+  "status": 200,
+  "shape": "task | task:no-money"
+ },
+ "commenter | timeline": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "company admin | answers": {
+  "status": 200,
+  "shape": "outcome:not_found"
+ },
+ "company admin | changes": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "company admin | checks": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "company admin | comments": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no task here that you can see"
+ },
+ "company admin | diff": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no task here that you can see"
+ },
+ "company admin | events": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no task <task> of yours"
+ },
+ "company admin | evidence": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "company admin | merge": {
+  "status": 404,
+  "code": "NOT_FOUND",
+  "message": "Merging from Rovara is not set up on this install yet; merge the pull request on GitHub."
+ },
+ "company admin | plan": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "company admin | readable": {
+  "status": 404,
+  "shape": "not readable"
+ },
+ "company admin | spec": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "company admin | task": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "company admin | timeline": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "left the project | answers": {
+  "status": 200,
+  "shape": "outcome:not_found"
+ },
+ "left the project | changes": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "left the project | checks": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "left the project | comments": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no task here that you can see"
+ },
+ "left the project | diff": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no task here that you can see"
+ },
+ "left the project | events": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no task <task> of yours"
+ },
+ "left the project | evidence": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "left the project | merge": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "left the project | plan": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "left the project | readable": {
+  "status": 404,
+  "shape": "not readable"
+ },
+ "left the project | spec": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "left the project | task": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "left the project | timeline": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "other company | answers": {
+  "status": 200,
+  "shape": "outcome:not_found"
+ },
+ "other company | changes": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "other company | checks": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "other company | comments": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no task <task> of yours"
+ },
+ "other company | diff": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no task <task> of yours"
+ },
+ "other company | events": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no task <task> of yours"
+ },
+ "other company | evidence": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "other company | merge": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "other company | plan": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "other company | readable": {
+  "status": 404,
+  "shape": "not readable"
+ },
+ "other company | spec": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "other company | task": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "other company | timeline": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "owner | answers": {
+  "status": 200,
+  "shape": "outcome:answered"
+ },
+ "owner | changes": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "owner | checks": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "owner | comments": {
+  "status": 200,
+  "shape": "comments"
+ },
+ "owner | diff": {
+  "status": 404,
+  "code": "NOT_FOUND",
+  "message": "no such pull request on this task"
+ },
+ "owner | events": {
+  "status": 200,
+  "shape": "events"
+ },
+ "owner | evidence": {
+  "status": 200,
+  "shape": "items,taskId"
+ },
+ "owner | merge": {
+  "status": 404,
+  "code": "NOT_FOUND",
+  "message": "Merging from Rovara is not set up on this install yet; merge the pull request on GitHub."
+ },
+ "owner | plan": {
+  "status": 404,
+  "code": "NOT_FOUND",
+  "message": "this task has no plan document yet"
+ },
+ "owner | readable": {
+  "status": 200,
+  "shape": "readable"
+ },
+ "owner | spec": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "owner | task": {
+  "status": 200,
+  "shape": "task | task:money"
+ },
+ "owner | timeline": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "project member | answers": {
+  "status": 200,
+  "shape": "outcome:not_found"
+ },
+ "project member | changes": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "project member | checks": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "project member | comments": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no task here that you can see"
+ },
+ "project member | diff": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no task here that you can see"
+ },
+ "project member | events": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no task <task> of yours"
+ },
+ "project member | evidence": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "project member | merge": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "project member | plan": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "project member | readable": {
+  "status": 404,
+  "shape": "not readable"
+ },
+ "project member | spec": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "project member | task": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "project member | timeline": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "removed member | answers": {
+  "status": 401,
+  "code": "UNAUTHENTICATED",
+  "message": "Sign in again."
+ },
+ "removed member | changes": {
+  "status": 401,
+  "code": "UNAUTHENTICATED",
+  "message": "Sign in again."
+ },
+ "removed member | checks": {
+  "status": 401,
+  "code": "UNAUTHENTICATED",
+  "message": "Sign in again."
+ },
+ "removed member | comments": {
+  "status": 401,
+  "code": "UNAUTHENTICATED",
+  "message": "Sign in again."
+ },
+ "removed member | diff": {
+  "status": 401,
+  "code": "UNAUTHENTICATED",
+  "message": "Sign in again."
+ },
+ "removed member | events": {
+  "status": 401,
+  "code": "UNAUTHENTICATED",
+  "message": "Sign in again."
+ },
+ "removed member | evidence": {
+  "status": 401,
+  "code": "UNAUTHENTICATED",
+  "message": "Sign in again."
+ },
+ "removed member | merge": {
+  "status": 401,
+  "code": "UNAUTHENTICATED",
+  "message": "Sign in again."
+ },
+ "removed member | plan": {
+  "status": 401,
+  "code": "UNAUTHENTICATED",
+  "message": "Sign in again."
+ },
+ "removed member | readable": {
+  "status": 404,
+  "shape": "not readable"
+ },
+ "removed member | spec": {
+  "status": 401,
+  "code": "UNAUTHENTICATED",
+  "message": "Sign in again."
+ },
+ "removed member | task": {
+  "status": 401,
+  "code": "UNAUTHENTICATED",
+  "message": "Sign in again."
+ },
+ "removed member | timeline": {
+  "status": 401,
+  "code": "UNAUTHENTICATED",
+  "message": "Sign in again."
+ },
+ "script token | answers": {
+  "status": 403,
+  "code": "FORBIDDEN",
+  "message": "A script token cannot do that."
+ },
+ "script token | changes": {
+  "status": 403,
+  "code": "FORBIDDEN",
+  "message": "A script token cannot do that."
+ },
+ "script token | checks": {
+  "status": 403,
+  "code": "FORBIDDEN",
+  "message": "A script token cannot do that."
+ },
+ "script token | comments": {
+  "status": 404,
+  "code": "NOT_FOUND",
+  "message": "route not found"
+ },
+ "script token | diff": {
+  "status": 404,
+  "code": "NOT_FOUND",
+  "message": "route not found"
+ },
+ "script token | events": {
+  "status": 404,
+  "code": "NOT_FOUND",
+  "message": "route not found"
+ },
+ "script token | evidence": {
+  "status": 403,
+  "code": "FORBIDDEN",
+  "message": "A script token cannot do that."
+ },
+ "script token | merge": {
+  "status": 404,
+  "code": "NOT_FOUND",
+  "message": "route not found"
+ },
+ "script token | plan": {
+  "status": 404,
+  "code": "NOT_FOUND",
+  "message": "route not found"
+ },
+ "script token | readable": {
+  "status": 404,
+  "shape": "not readable"
+ },
+ "script token | spec": {
+  "status": 403,
+  "code": "FORBIDDEN",
+  "message": "A script token cannot do that."
+ },
+ "script token | task": {
+  "status": 200,
+  "shape": "task | task:no-money"
+ },
+ "script token | timeline": {
+  "status": 403,
+  "code": "FORBIDDEN",
+  "message": "A script token cannot do that."
+ },
+ "shared reader | answers": {
+  "status": 200,
+  "shape": "outcome:answered"
+ },
+ "shared reader | changes": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "shared reader | checks": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "shared reader | comments": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no task here that you can see"
+ },
+ "shared reader | diff": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no task here that you can see"
+ },
+ "shared reader | events": {
+  "status": 200,
+  "shape": "events"
+ },
+ "shared reader | evidence": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "shared reader | merge": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "shared reader | plan": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "shared reader | readable": {
+  "status": 404,
+  "shape": "not readable"
+ },
+ "shared reader | spec": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "shared reader | task": {
+  "status": 200,
+  "shape": "task | task:no-money"
+ },
+ "shared reader | timeline": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "stranger | answers": {
+  "status": 200,
+  "shape": "outcome:not_found"
+ },
+ "stranger | changes": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "stranger | checks": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "stranger | comments": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no task here that you can see"
+ },
+ "stranger | diff": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no task here that you can see"
+ },
+ "stranger | events": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no task <task> of yours"
+ },
+ "stranger | evidence": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "stranger | merge": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "stranger | plan": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "stranger | readable": {
+  "status": 404,
+  "shape": "not readable"
+ },
+ "stranger | spec": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "stranger | task": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "stranger | timeline": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "unknown role | answers": {
+  "status": 200,
+  "shape": "outcome:not_found"
+ },
+ "unknown role | changes": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "unknown role | checks": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "unknown role | comments": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no task here that you can see"
+ },
+ "unknown role | diff": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no task here that you can see"
+ },
+ "unknown role | events": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no task <task> of yours"
+ },
+ "unknown role | evidence": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "unknown role | merge": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "unknown role | plan": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "unknown role | readable": {
+  "status": 404,
+  "shape": "not readable"
+ },
+ "unknown role | spec": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "unknown role | task": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "unknown role | timeline": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "viewer | answers": {
+  "status": 200,
+  "shape": "outcome:answered"
+ },
+ "viewer | changes": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "viewer | checks": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "viewer | comments": {
+  "status": 200,
+  "shape": "comments"
+ },
+ "viewer | diff": {
+  "status": 404,
+  "code": "NOT_FOUND",
+  "message": "no such pull request on this task"
+ },
+ "viewer | events": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no task <task> of yours"
+ },
+ "viewer | evidence": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "viewer | merge": {
+  "status": 200,
+  "shape": "mayMerge,pullRequests,ready"
+ },
+ "viewer | plan": {
+  "status": 404,
+  "code": "TASK_NOT_FOUND",
+  "message": "no such task"
+ },
+ "viewer | readable": {
+  "status": 200,
+  "shape": "readable"
+ },
+ "viewer | spec": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ },
+ "viewer | task": {
+  "status": 200,
+  "shape": "task | task:no-money"
+ },
+ "viewer | timeline": {
+  "status": 404,
+  "code": "ROUTE_NOT_SERVED",
+  "message": "This information is not available yet."
+ }
+}

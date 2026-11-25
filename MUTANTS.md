@@ -25,6 +25,63 @@ d06ffc50cb2850f327d3eb47e274e7a258732dc4513be9889567636bba2a3421  tests/support/
 
 Evidence applies to this uncommitted tests-only delta on the head above. L6/9d owns the commit, final-head lane gate, lead 4 Opus delta review and staging proof. No current gate stamp or review verdict is claimed.
 
+## RD-2.0 - contract rows for the task page reads (commit 567630b57 plus the S2/S3 follow-up)
+
+Production guards this lane adds: the `owns()` clause and the mount hunk in `core-host/dev-routes.ts`, GET-only and the anchored path regex in `core-host/task-screen-routes.ts`, the stub's fixed `ROUTE_NOT_SERVED` refusal (`task-spec-routes.ts`, the other three stubs are the same line), the code's 404 status (`packages/code-api/src/errors.ts`), and the existing script-token line that keeps a token off the four paths. Each mutant was applied singly to the working tree, one targeted run, then the file was restored with `git checkout -- <file>`.
+
+| Mutant / location | Mutation | Failing test (all in tests/unit/core-host-dev-routes.test.ts, "the task page's new reads (RD-2.0)", unless noted) |
+|---|---|---|
+| M1 dev-routes.ts `owns()` | drop `\|\| taskScreenRoute(path, method) !== undefined` | both tests: no answer (undefined) instead of 404 / 403 |
+| M2 task-screen-routes.ts `taskScreenRoute` | GET-only check removed | "serves GET only": POST/PUT answered instead of left to the old broker |
+| M3 task-screen-routes.ts `PATH` | drop the `$` anchor | "serves GET only": `/specs` and `/spec/x` answered |
+| M4 task-spec-routes.ts | stub resolves 200 `{}` instead of refusing | "answers ROUTE_NOT_SERVED ...": 200 instead of 404 |
+| M5 code-api errors.ts | remove `ROUTE_NOT_SERVED` from the 404 group | code-api-errors "lists every code in its order", code-api-version digest, and the dev-routes test (409 instead of 404) |
+| M6 dev-routes.ts script-token line | let the four paths past the token refusal | "serves GET only ... keeps a script token out": 404 instead of 403 |
+| M7 dev-routes.ts `taskSurfaceAnswer` | remove the `routeTaskScreen` line | "answers ROUTE_NOT_SERVED ...": undefined instead of 404 |
+| M8 task-spec-routes.ts | code `NOT_FOUND` instead of `ROUTE_NOT_SERVED` | "answers ROUTE_NOT_SERVED ...": body differs from the row's example refusal |
+
+All 8 killed; the restored tree passes (17 files, 539 tests, `tsc -b` clean). Evidence applies to this lane's commits; the final-head gate and review belong to 9d.
+
+## RD-2.0-READ-RULE - the one read rule (commit 1 9f1dbfedc, commit 2 1c14abfdc; all 14 mutants re-applied on 3c53c33eb, the head after the gate fixes)
+
+Production guards this lane adds: the company check first and every basis in `core/task-flow/read-rule.ts` (`ADMITTED_BY`, `SHARED_PARTS`, `SHARED_ROLES`, `maySeeTaskMoney`, `mayReadSourceCode`, `mayReadCodeDetails`), the stored share's live project check (`aws/task-readers.ts` `readerShare`), and the events route's call of the rule (`aws/core-task-rule-routes.ts`). Each mutant was applied singly to the working tree, one targeted run (`tests/unit/task-read-rule.test.ts`, `tests/contract/rd-2-0-read-rule-golden.test.ts`, `tests/unit/core-host-task-web-routes.test.ts`), then the file was restored with `git checkout -- <file>`.
+
+| Mutant / location | Mutation | Killed by |
+|---|---|---|
+| M1 read-rule.ts company check | dropped (a task of another company is judged by the seams) | core-host-task-web-routes (5 tests: taskReadable, task read, merge standing...), the table |
+| M2 task-readers.ts `readerShare` | a share is admitted without the live project membership | the real-routes table and the golden ("left the project") |
+| M3 read-rule.ts `storedShare` | an unknown stored role is treated as viewer | the table ("unknown role"), the real routes, the golden |
+| M4 read-rule.ts `maySeeTaskMoney` | money for every member (the stored-owner test dropped) | the decision's money table and the golden (task view shapes) |
+| M5 read-rule.ts | a withheld part answers the missing task's 404 instead of TASK_PART_NOT_SHOWN | the table ("shared reader", "admin and shared") and the golden |
+| M6 core-task-rule-routes.ts | the events route skips the read rule | the real-routes table and the golden (a stranger reads the events) |
+| M7 read-rule.ts `ADMITTED_BY.task` | the stored share is asked before the core's own rule | core-host-task-web-routes ("never asks for the owner...") and the table |
+| M8 read-rule.ts `reads` | any canRead failure becomes "no" (so the share is asked) | core-host-task-web-routes ("a core read that fails for another reason stays a failure") and the table |
+| M9 read-rule.ts `mayReadSourceCode` | the old page rule carries source code | the decision's source-code flags |
+| M10 read-rule.ts `ADMITTED_BY.diff` | the diff admits a share (survived the first run: the page seam throws its refusal first; killed by the new test that binds no page seam) | "the diff and the plan and proof never admit a stored share" |
+| M11 read-rule.ts `ADMITTED_BY.share` | the readers routes admit the core read rule (a co-owner told "only the owner can share") | the table ("share" column) |
+| M12 read-rule.ts `ADMITTED_BY.events` | the events drop the core read rule | the table and the golden's named widening cells |
+| M13 read-rule.ts `mayReadCodeDetails` | code details for every reader | the decision's flags (`codeDetails` equals `sourceCode`) |
+| M14 read-rule.ts `ADMITTED_BY.plan` | the plan admits a share | the table ("shared reader", "admin and shared") |
+
+All 14 killed on 3c53c33eb (M10 survived on the first run, before its test existed); the restored tree passes. Evidence applies to this lane's commits; the final-head gate and review belong to 9d.
+
+## RD-2.0-READ-RULE pre-review fixes (head cdd50103e: the plan GET, the live grant re-read, the answers frame, plan comments, the actions standing)
+
+New production guards: the plan GET's call of the rule (`core-host/parity-task-routes.ts`), the live company membership and project grant re-read for every way in (`core/task-flow/read-rule.ts` `liveGrantOf`), the answers frame's withheld documents (`core/answers/task-context.ts`), the plan comments' gate (`aws/core-task-rule-routes.ts`), the actions standing's reader check (`core/task-actions/standing.ts`), the merge standing's grant re-read for the task's owner (`core-host/hosted-merge-routes.ts`), the stored person's mode and the share-lookup log. Each mutant applied singly on cdd50103e, one targeted run (the table, the golden, core-host-task-web-routes), restored with `git checkout -- <file>`. M9 (source code without the grant proof) was re-expressed for the new `grantProved` flag and killed again.
+
+| Mutant / location | Mutation | Killed by |
+|---|---|---|
+| M15 parity-task-routes.ts | the plan GET reads the task and asks no rule | the real-routes table (a stranger, a share and the starters read the plan route) |
+| M16 read-rule.ts `grant === "no"` | no live grant re-read for any way in | the table's two starters on every read (function and routes), the starters test |
+| M17 task-context.ts | the answers frame hands a share the plan text | the table's answers cell for a share, the golden's named cells, the answers test |
+| M18 core-task-rule-routes.ts | the plan comments skip the rule | the real-routes table (comments for a stranger and a share) |
+| M19 standing.ts | a refusal of the rule counts as a reader | the actions standing test |
+| M20 hosted-merge-routes.ts | the task's owner is not re-checked for the grant at the merge standing | the starters on the real merge route |
+| M21 read-rule.ts | the task's own person reads as "reader" | the table (every "o" cell) |
+| M22 read-rule.ts | a failing share lookup is not logged | the log test |
+| M9 read-rule.ts `mayReadSourceCode` | source code without the grant proof | the decision's source-code flags |
+
+All killed; the restored tree passes.
 ## MERGE-APPROVAL-NOT-SPENT-ON-REFUSAL (lane commit 0ba8a3b9c, round 2 on top of it)
 
 Tests: `tests/unit/core-merge-approval-not-spent.test.ts` and `tests/unit/core-merge-press-hardening.test.ts`, run together (22 tests) after each mutant of `packages/broker/src/core/merge/merge.ts` (each restored from a copy; `tsc -b` not re-run per mutant).
@@ -259,6 +316,30 @@ Also checked: the lease test's worker clock is passed to the gateway model (`now
 | M6, `developer-tasks.ts listTasks` | the own list ignores the grant | same file as M1 (task list) | red (1 of 6) |
 | M7, `script-tokens/authenticate.ts` | the token's project is not re-checked live | tests/unit/script-token-project-grant.test.ts | red (3 of 3) |
 
+## RD-2.0-READ-RULE rebased onto PROJECT-GRANT-RECHECK (merge of 84d7b51fe)
+
+The hotfix's live grant re-check (`hostedTaskAccess.resolve`: the stored person holds a task only while the project grant is held, as a People entry does) is the base truth for the company's own rule. The read rule takes the grant as proved for `reads` and `acts` where the rule says so (`TaskAccess.provesProjectGrant`, set by `hostedTaskAccess`) and asks its live-grant seam once for every other way in (the old page rule, the stored person on the events and the readers routes), so no person's grant is read twice. The hotfix's `holdsOwnTask` call on the events route is replaced by the same seam (one implementation); its page-rule and session-rule re-checks stay for the old page routes and sessions. Each mutant applied singly on the merge, one targeted run, restored with `git checkout -- <file>`.
+
+| Mutant / location | Mutation | Killed by |
+|---|---|---|
+| M23 read-rule.ts `grantFor` | every way in counts as grant-proved | the two starters on every read (8 tests) |
+| M24 core-engine-root.ts | the hosted rule no longer says it proves the grant | the "one grant check, not two" test |
+
+Both killed; the restored tree passes.
+
+## RD-2.0-READ-RULE round 3 pre-review fixes (head f034f9123: the live grant in the task's company, fail closed without a seam, the table in the production configuration)
+
+The hotfix's own mutant (the stored person on the events and the readers routes trusted) at its new place, the host not binding the live-grant seam, and the guards added in this round. Each mutant applied singly on f034f9123, one targeted run (the table in both configurations, the golden, core-host-task-web-routes), restored with `git checkout -- <file>`.
+
+| Mutant / location | Mutation | Killed by |
+|---|---|---|
+| M25 read-rule.ts `grantFor` | the stored person (`developer` basis: events, readers routes) counted as grant-proved (the hotfix's M3 at its new place) | 11 tests: the table on both configurations, the starters, the journeys' source-code and re-read tests |
+| M26 dev-routes.ts `decideRead` | the host no longer binds the live-grant seam | the real-routes table (starters on events, diff, comments), the diff route test |
+| M27 read-rule.ts `grantFor` | the old page rule (`page` basis: the diff, the comments) counted as grant-proved | 10 tests: the table, the starters, the diff route test |
+| M28 dev-routes.ts | the seam does not pass the task's company | "the live grant is read in the TASK'S company" (a person moved to another company between two reads) |
+| M29 read-rule.ts `liveGrantOf` | a missing seam on a rule that proves the grant admits | "a host that proves the grant but binds no live-grant seam admits nobody ..." |
+
+All killed; the restored tree passes.
 ## PROJECT-GRANT-RECHECK, channel-access starters (2026-11-25)
 
 All killed by tests/contract/task-owner-channel-access.test.ts (9 tests).
@@ -269,6 +350,21 @@ All killed by tests/contract/task-owner-channel-access.test.ts (9 tests).
 | C2, `taskReaderPerson` own-task answer | a failed or refused start check answers `mayStart: true` (fail open) | red (6 of 9) |
 | C3, `taskReaderPerson` own-task answer | the start check is asked as a fixed Slack user, not the person's own link | red (1 of 9: no Slack link) |
 | C4, `holdsOwnTask` | reads `projectMember` only (the first hotfix) | red (3 of 9: the red commit) |
+
+## RD-2.0-READ-RULE merged with the FINAL project-grant hotfix (d8c5b04a1): the channel branch routed once
+
+The hotfix's own-task test (`holdsOwnTask`: the grant, or the access that let the person start the task, a bound-channel member where the project lets channel members use it) is the ONE test for the task's own person. The read rule's live-grant seam asks it for the stored person (`taskRules.holdsOwnTask`) and asks the project grant, in the task's company, for everyone else; the page rule's own re-check of the stored person (a task with no People list) is reported by the page seam and not read a second time. Each mutant applied singly on b3f6ce1c5, one targeted run, restored with `git checkout -- <file>`.
+
+| Mutant / location | Mutation | Killed by |
+|---|---|---|
+| M30 dev-routes.ts `liveGrantOf` | the channel branch is undone: the stored person is asked by the grant alone | "the hotfix's channel branch is kept, and read once" (a channel starter is refused on events, diff, comments) |
+| M31 read-rule.ts `firstAdmission` | the page rule's own re-check of the stored person is not trusted, so the hold is read twice | the same test (the hold on their task must be read once per way in) |
+
+Both killed; the restored tree passes.
+
+### Correction (RD-2.0-READ-RULE, after the combined Opus review of 152cbb7db): M28 above
+
+The row for M28 said the "moved to another company" test killed it. On 152cbb7db it did NOT: since round 5 the task's own person goes to the hotfix's own-task test (which passes the task's company itself), and that test moved only the owner, so it never reached the line M28 changes (`dev-routes.ts liveGrantOf`: `grant(person.personId, task.project, target.runtime.companyId)` for everyone who is not the task's own person). Fix: a second test moves a People COMMENTER (let in by the page rule and the read rule, asked for the grant by that line) to the other company, which holds a same-named grant, and expects TASK_NOT_FOUND on the diff, the comments, the task and the events. Run on the head after the fix: with `grant(person.personId, task.project)` (the company dropped) exactly that test goes red and the owner test stays green; restored, both pass. The M28 row stands corrected: killed by "the same for a person the grant is asked of by the PROJECT GRANT".
 ## RD-2.0 - contract rows for the task page reads (commit 567630b57 plus the S2/S3 follow-up)
 
 Production guards this lane adds: the `owns()` clause and the mount hunk in `core-host/dev-routes.ts`, GET-only and the anchored path regex in `core-host/task-screen-routes.ts`, the stub's fixed `ROUTE_NOT_SERVED` refusal (`task-spec-routes.ts`, the other three stubs are the same line), the code's 404 status (`packages/code-api/src/errors.ts`), and the existing script-token line that keeps a token off the four paths. Each mutant was applied singly to the working tree, one targeted run, then the file was restored with `git checkout -- <file>`.
@@ -720,6 +816,20 @@ Killed by tests/contract/task-owner-engine-channel.test.ts (7 tests).
 | E2, same | a stamp read that fails or cannot be read counts as an old-engine task (fail open) | red (2 of 7) |
 | E3, `listsAsOwn` | a channel hold is kept for the whole project (the `held` map) | red (1 of 7: one page with an old-engine and a core task of one project) |
 | E4, same check | the engine is not asked at all, channel branch always on | red (4 of 7) |
+
+## RD-2.0-READ-RULE merged with the new hotfix (d32a69fbc) and THE SLACK SHARE decided in the read rule (head 7643579f5)
+
+What a Slack share grants (a person with no grant, not on the People list, in the channel the task is shared into: the old page rule's implicit commenter) is decided ONLY in `read-rule.ts` `CHANNEL_SHARE_PARTS`, each read its own cell (today: the plan comments and the diff, as before the rule). The page rule says who it admitted (`viaChannelShare`), the rule exempts that person from the grant seam and never gives them source code. The old page rule's cached channel-membership branch is unreachable for those reads: the page rule seam strips the Slack identity (`core-task-rule-routes.ts pageRule`); the branch itself stays for the workflow engine's tasks and the hotfix's pinned test. Each mutant applied singly on 7643579f5, one targeted run, restored with `git checkout -- <file>`.
+
+| Mutant / location | Mutation | Killed by |
+|---|---|---|
+| M32 read-rule.ts `CHANNEL_SHARE_PARTS` | the diff cell withheld | the table row "channel share member" on the function and the real routes, both configurations |
+| M33 read-rule.ts `CHANNEL_SHARE_PARTS` | the comments cell withheld | the same row |
+| M34 read-rule.ts `firstAdmission` | a person admitted by the Slack share counted as grant-proved (source code) | "THE SLACK SHARE ..." (no source code, no code details) |
+| M35 core-task-rule-routes.ts `pageRule` | the Slack identity kept (the cached channel branch reachable) | "the old page rule's cached channel-membership branch cannot be reached ..." |
+| M36 read-rule.ts `firstAdmission` | the Slack share asked for the grant (narrowed from today) | the table row, function and routes |
+
+All killed; the restored tree passes.
 | session-binding.ts (session-id-at-rest) | `sameSessionBinding` always true; `sessionBindingOf` returns the raw id | killed (2) |
 | the six state-row families (slack-company-install, github-connect-routes, github-account-link-routes, linear-connections + linear-connect/account-link-routes, sign-in-links) | the row keeps the raw `caller.sessionId` in place of the digest | killed (all six) |
 | same | the spend's in-code digest compare removed alone | survived: equivalent (the DynamoDB condition on the digest still refuses; the two layers are redundant by design) |

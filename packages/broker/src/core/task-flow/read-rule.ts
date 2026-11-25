@@ -1,0 +1,288 @@
+// RD-2.0-READ-RULE: the ONE "may this person read this task" function. Five rules answered this question before, each its own way (the task read's own reader check, the stored share's
+// fallback, the events' own owner-or-share test, the diff's People page rule, the plan and proof's owner rule); every caller now asks `decideTaskRead` with the read it is
+// serving, and the table below says which kinds of person that read admits. A handler of a read never decides who may see the task: it is given the decision.
+//
+//   - The company is checked FIRST, before any seam is asked: another company's task, or none, is "not found" whatever else is true of the person.
+//   - A read lists the ways it admits a person, in order (`ADMITTED_BY`). The core's own rule (`reads`, `acts`) is asked through the access port; the stored share (spec 067) and the old
+//     People page rule come through `TaskReadSeams`, which the host binds once (their one implementation stays in aws/).
+//   - The stored share is asked only after the core's own rule said "not found" (never after any other failure), and only for a task of the caller's own company. A share row with a role
+//     this code does not know is NOT a share: fail closed, logged once per read, whatever the role might have meant (rule 8: an older reader cannot know if it is wider or narrower).
+//   - A share admits a person to the task, and then `SHARED_PARTS` says per read whether that part is shown to that role; a part that is not shown answers TASK_PART_NOT_SHOWN with the
+//     words below (never the missing task's answer for a person the page shows the task to).
+//   - `money` and `sourceCode` are part of the decision, so a handler cannot show either by accident.
+import { AgentXError, agentXError, type OrgRole, type Principal } from "@agentx/contracts";
+import { taskOwnerView } from "../../developer/task-owner-view.js";
+import { taskNotFound } from "./access.js";
+import type { TaskCaller, TaskFlowDeps } from "./deps.js";
+import { readTask } from "./reads.js";
+import type { TaskRecord } from "./records.js";
+
+/** Every read that asks "may this person read this task". */
+export type TaskRead =
+  /** `GET /v1/dev/tasks/{id}` */ | "task"
+  /** the answers read of a project (a question about a task) */ | "answers"
+  /** the task list's round (`taskReadable`) */ | "readable"
+  /** the merge standing's "a reader is told so" */ | "merge"
+  /** `GET .../events` */ | "events"
+  /** `.../readers`: the owner shares, a reader is told only the owner may */ | "share"
+  /** `GET .../diff`: the code of a pull request */ | "diff"
+  /** `GET .../plan` */ | "plan"
+  /** `GET .../evidence` */ | "evidence"
+  /** `GET .../comments`: the plan comments (the old People page rule, as the diff) */ | "comments"
+  /** the task page's new reads (RD-2.0) */ | "spec" | "checks" | "changes" | "timeline";
+
+/**
+ * How the person was admitted (NOT who they are: a handler that wants "the owner" asks `mode === "owner"` and gets the task's own person on every read, and a co-owner only where the owner rule is the way in).
+ * `owner`: the task's own person, or the company's owner rule. `reader`: the company's read rule (a co-owner, or a commenter or viewer of the People list; they are not told apart because that costs a second live proof). `page`: the old People page rule (the diff). `shared`: the stored share. `script`: a script token's own closed list.
+ */
+export type TaskReadMode = "owner" | "reader" | "page" | "shared" | "script";
+
+/** The roles a stored share can hold today. A role that is not here is not a share. */
+export const SHARED_ROLES = ["viewer"] as const;
+export type SharedRole = (typeof SHARED_ROLES)[number];
+
+/** What the stored share's seam answers: the row's role as stored (any text), for a person who is still a member of the task's project; undefined for anyone else. */
+export interface StoredShare { role: string }
+
+/** The host's two old rules, bound once. A seam that is absent admits nobody by that way. */
+export interface TaskReadSeams {
+  /** The stored share (spec 067) of this person on this task of the caller's own company, with the live project membership proved. A throw is "no" (or a failure: see `ADMITTED_BY`). */
+  sharedReader?(person: { developerId: string; name: string }, task: TaskRecord): Promise<StoredShare | undefined>;
+  /**
+   * The old People page rule (the diff, the comments): resolves when it admits, throws its own refusal when it does not. It resolves `{ holdsOwnTask: true }` when it admitted the task's own person by their stored id (a task
+   * with no People list) and so ALREADY re-read their hold on their task (the hotfix's `requireOwnTask`): the live-grant seam is not asked a second time for that admission. A People entry is admitted without any grant read:
+   * the seam asks for it. It resolves `{ viaChannelShare: true }` when it admitted a person the People list does not name, who reads only because the task is shared into a Slack channel they are in (live membership, the
+   * project's channel-use switch): that person holds no grant by design, and `CHANNEL_SHARE_PARTS` says what it shows.
+   */
+  peoplePage?(task: TaskRecord): Promise<void | { holdsOwnTask: true } | { viaChannelShare: true }>;
+  /**
+   * The person's standing NOW: a current grant on the task's project IN THE TASK'S COMPANY (the repository's own access). The host passes the task's company, so the seam reads only that company's grant row (a person moved to another
+   * company never has its same-named grant counted); the live company membership itself is checked once, at the start of the request. Asked after EVERY way of being admitted but the stored share (which proves its own project
+   * membership), for the task's stored person with no People list exactly as for People entries: no path assumes the grant was proved. A person it refuses is not admitted by that way. A throw is "no".
+   * Bound by the hosted host; absent on a laptop, where nothing is proved and so no source code is shown.
+   */
+  liveGrant?(person: { personId: string }, task: TaskRecord): Promise<boolean>;
+}
+
+export type Basis = "developer" | "acts" | "reads" | "page" | "shared";
+
+/**
+ * The ways each read admits a person, in order: the one table of who may read what. `shared` is asked only after `reads` said not found, and a lookup that fails is "no". `developer` is the task's stored person. (Today's answers: the golden of tests/contract/rd-2-0-read-rule-golden.test.ts.)
+ */
+const ADMITTED_BY: Readonly<Record<TaskRead, readonly Basis[]>> = {
+  task: ["reads", "shared"], answers: ["reads", "shared"], readable: ["reads"], merge: ["reads"],
+  // The events are for everyone the task is shown to (a co-owner, the People list's commenters and viewers, a share); the readers routes stay the task's person and a share (told only the owner may share).
+  events: ["developer", "reads", "shared"], share: ["developer", "shared"],
+  diff: ["page"], comments: ["page"], plan: ["acts"], evidence: ["acts"],
+  spec: ["reads", "shared"], checks: ["reads", "shared"], changes: ["reads", "shared"], timeline: ["reads", "shared"],
+};
+
+/** What each shared role is shown, per read. Exhaustive over `SHARED_ROLES` and every read: a role or read with no cell does not compile. Only a read that `ADMITTED_BY` lets a share into is ever asked. The viewer is shown the summary (the task, its events, its timeline); the plan, the checks and the code changes wait for the owner's answer (Q1). */
+const SHARED_PARTS: Readonly<Record<SharedRole, Readonly<Record<TaskRead, "shown" | "withheld">>>> = {
+  viewer: {
+    task: "shown", answers: "shown", readable: "shown", merge: "shown", events: "shown", share: "shown", diff: "shown", comments: "shown", plan: "shown", evidence: "shown",
+    spec: "withheld", checks: "withheld", changes: "withheld", timeline: "shown",
+  },
+};
+
+/** The words of a part a share is not shown (TASK_PART_NOT_SHOWN, 403): the one table. */
+const SHARED_WORDS = {
+  lead: "The owner shared this task's summary with you.",
+  fallback: "This part is not shown.",
+  parts: { spec: "The plan is not shown.", checks: "The checks are not shown.", changes: "The code changes are not shown." } as Partial<Record<TaskRead, string>>,
+};
+const sharedWords = (read: TaskRead): string => `${SHARED_WORDS.lead} ${SHARED_WORDS.parts[read] ?? SHARED_WORDS.fallback}`;
+
+/**
+ * WHAT A SLACK SHARE GRANTS (the owner's open question, RD-2-0-READ-RULE-PLAN.md): a person with NO project grant who reads a task only because it is shared into a bound Slack channel they are in (the old page rule's
+ * implicit commenter: a stored People list, the person registered on it, the project letting channel members use it, live membership of the share's channel) is shown, per read, what this table says. Today: the plan
+ * comments and the diff. Each read is its OWN cell, so the owner's answer is one line: `"withheld"` makes that read refuse such a person as a missing task. The grant is not asked of them (they have none, by design);
+ * a decision for them never carries source code or code details (no grant was proved), whatever the diff cell says.
+ */
+const CHANNEL_SHARE_PARTS: Readonly<Partial<Record<TaskRead, "shown" | "withheld">>> = {
+  comments: "shown",
+  diff: "shown",
+};
+
+/** The refusal of a read for a person who is not shown the task. The words differ by read as they did before the rules were one (a client that matched them still reads them). */
+function refusal(read: TaskRead, taskId: string): AgentXError {
+  return read === "events" || read === "share" ? agentXError("TASK_NOT_FOUND", `no task ${taskId} of yours`) : taskNotFound();
+}
+
+/** Figures belong to the stored task owner or a live company admin: a co-owner's right to act does not disclose another person's money (DEC 254zzz398). Scope budgets stay private. */
+export function maySeeTaskMoney(input: { companyId: string; membershipCompanyId: string; principal: Pick<Principal, "companyId" | "personId">; scriptToken: boolean; role: OrgRole | undefined; task: Pick<TaskRecord, "companyId" | "developerId"> & { developerName?: unknown } }): boolean {
+  return !input.scriptToken && input.principal.companyId === input.companyId && input.membershipCompanyId === input.companyId && input.task.companyId === input.companyId
+    && (input.role === "owner" || input.role === "admin" || input.role === "member" && taskOwnerView(input.task)?.developerId === input.principal.personId);
+}
+
+/**
+ * Whether THIS reader may read THIS task's source code: the patches AND the file paths of its changes (a path can reveal the structure of code; counts stay shown). The repository's own access in this codebase is the
+ * person's live project grant (there is no per-person repository check), and it is true ONLY where that grant was re-read THIS request: by the live-grant seam for every way of being admitted (the stored person of a task with
+ * no People list included), or by the stored share's own live project membership. No seam (a laptop), no proof, no source code. A task of another company never has it.
+ *
+ * It is decided per reader and per task INSIDE `decideTaskRead`, so it runs on every request BEFORE any answer cache is consulted: a cache (the changes read's) must be keyed by the task and its pull request heads only,
+ * hold the full answer, and be filtered through the CURRENT request's `decision.sourceCode` on every hit, so a reader who may not read source is never handed a cached diff or path list.
+ */
+export function mayReadSourceCode(reader: { grantProved: boolean; principal: Pick<Principal, "companyId"> }, task: Pick<TaskRecord, "companyId">): boolean {
+  return reader.grantProved && task.companyId === reader.principal.companyId;
+}
+
+/**
+ * Whether THIS reader may read the code-derived details of THIS task's checks: security scan items, review findings, failing-test names and output links (they quote or name code). The same rule as source code (`mayReadSourceCode`),
+ * decided in the same place and so before any cache; the check states and counts stay visible to every reader the task is shown to.
+ */
+export function mayReadCodeDetails(reader: Parameters<typeof mayReadSourceCode>[0], task: Parameters<typeof mayReadSourceCode>[1]): boolean {
+  return mayReadSourceCode(reader, task);
+}
+
+export interface TaskReadDecision {
+  task: TaskRecord;
+  mode: TaskReadMode;
+  sharedRole?: SharedRole;
+  /** The task's figures may be shown to this person (the company role rule, `maySeeTaskMoney`). */
+  money: boolean;
+  /** Source code may be shown to this person: the patches AND the file paths of the changes (`mayReadSourceCode`, decided for this reader and this task on every request). */
+  sourceCode: boolean;
+  /** Code-derived details of the checks may be shown to this person (`mayReadCodeDetails`); the states and counts always may. */
+  codeDetails: boolean;
+  /** Only `decideTaskRead` makes a decision: a function that takes one cannot be called without having asked the rule. */
+  readonly decidedByReadRule: true;
+}
+
+export interface TaskReadInput {
+  caller: TaskCaller;
+  read: TaskRead;
+  /** The caller's live company role from membership (for `money`); absent: no figures. */
+  role?: OrgRole | undefined;
+  /** The request is a script token's: it reads the task read alone, through its own closed list. */
+  scriptToken?: boolean | undefined;
+  seams?: TaskReadSeams | undefined;
+}
+
+interface Ask { deps: TaskFlowDeps; input: TaskReadInput; task: TaskRecord }
+type Admission = { mode: TaskReadMode; sharedRole?: SharedRole; grantProved?: true; channelShare?: true } | undefined;
+
+/** The core's own read rule: whoever may read (or, where the host has no separate read rule, act). A People denial reads as "no"; any other failure stays a failure. */
+async function coreReads({ deps, input, task }: Ask): Promise<boolean> {
+  const principal = input.caller.principal;
+  try {
+    return deps.access.canRead === undefined ? await deps.access.canAct(principal, task) : await deps.access.canRead(principal, task);
+  } catch (error) {
+    // A person the task's People list refuses reads exactly as for a task that does not exist (the People proof's own denial says the task has a list). Any other failure stays a failure.
+    if (error instanceof AgentXError && error.code === "TASK_ACCESS_DENIED") return false;
+    throw error;
+  }
+}
+
+/** One function per way of being admitted. Each answers who the person is for that way, or undefined. */
+const ADMIT: Readonly<Record<Basis, (ask: Ask) => Promise<Admission>>> = {
+  developer: async ({ input, task }) => (task.developerId === input.caller.principal.personId ? { mode: "owner" } : undefined),
+  // The owner rule: whoever may act. A failure of the rule is a failure of the read.
+  acts: async ({ deps, input, task }) => (await deps.access.canAct(input.caller.principal, task) ? { mode: "owner" } : undefined),
+  // The task's own person reads as "owner" on every read, a co-owner or a People reader as "reader".
+  reads: async (ask) => (await coreReads(ask) ? { mode: ask.task.developerId === ask.input.caller.principal.personId ? "owner" : "reader" } : undefined),
+  page: async ({ input, task }) => {
+    const proof = await input.seams?.peoplePage?.(task);
+    if (input.seams?.peoplePage === undefined) return undefined;
+    if (proof === undefined) return { mode: "page" };
+    if ("viaChannelShare" in proof) return CHANNEL_SHARE_PARTS[input.read] === "shown" ? { mode: "page", channelShare: true } : undefined;
+    return { mode: "page", grantProved: true };
+  },
+  shared: async ({ deps, input, task }) => {
+    const sharedRole = await storedShare(deps, input, task);
+    return sharedRole === undefined ? undefined : { mode: "shared", sharedRole };
+  },
+};
+
+/**
+ * The decision for one read: who the person is to the task and what they may see, or a refusal. Throws TASK_NOT_FOUND for anyone no way admits (the same as for a task that does not exist),
+ * TASK_PART_NOT_SHOWN for a person who is shown the task but not this part, and whatever the core's own rule fails with.
+ */
+export async function decideTaskRead(deps: TaskFlowDeps, input: TaskReadInput & ({ taskId: string } | { task: TaskRecord })): Promise<TaskReadDecision> {
+  const { caller, read } = input;
+  const task = "task" in input ? input.task : await readTask(deps, input.taskId);
+  const taskId = "task" in input ? input.task.taskId : input.taskId;
+  if (caller.principal.companyId !== deps.companyId || task === undefined || task.companyId !== deps.companyId) throw refusal(read, taskId);
+  const ask: Ask = { deps, input, task };
+  const decision = input.scriptToken === true ? await scriptDecision(ask) : await firstAdmission(ask);
+  if (decision === undefined) throw refusal(read, taskId);
+  return decision;
+}
+
+/** A script token reads the task read and (as far as the host then refuses it its own words) the proof index, through the owner rule's own closed list (the mount refuses it on every other path before it gets here), and is never shown source code. */
+async function scriptDecision(ask: Ask): Promise<TaskReadDecision | undefined> {
+  const { deps, input, task } = ask;
+  if ((input.read !== "task" && input.read !== "evidence") || !(await deps.access.canAct(input.caller.principal, task))) return undefined;
+  return await grantFor(ask, "acts") === "no" ? undefined : decisionOf(ask, { mode: "script" }, false);
+}
+
+/** The first way of being admitted that holds, in the read's order, as a decision; a share that is admitted but not shown this part is told so. */
+async function firstAdmission(ask: Ask): Promise<TaskReadDecision | undefined> {
+  const { input } = ask;
+  for (const basis of ADMITTED_BY[input.read]) {
+    const admitted = await ADMIT[basis](ask);
+    if (admitted === undefined) continue;
+    // EVERY way in but the stored share (which proves its own project membership) re-reads the person's live company membership and current project grant now: no path assumes the grant was proved,
+    // the task's stored person with no People list included.
+    const grant = admitted.grantProved === true ? "yes" : admitted.channelShare === true ? "exempt" : await grantFor(ask, basis);
+    if (grant === "no") continue;
+    // A share admits a person to the task; each part is then shown or not by the share's role.
+    if (admitted.sharedRole !== undefined && SHARED_PARTS[admitted.sharedRole][input.read] === "withheld") throw agentXError("TASK_PART_NOT_SHOWN", sharedWords(input.read));
+    return decisionOf(ask, admitted, grant === "yes");
+  }
+  return undefined;
+}
+
+/** The decision for a person admitted this way: the task, how, and what they may be shown (money, source code and the checks' code details are decided here, for this reader and this task, on every request). */
+function decisionOf({ deps, input, task }: Ask, admitted: NonNullable<Admission>, grantProved: boolean): TaskReadDecision {
+  const principal = input.caller.principal;
+  const reader = { grantProved, principal };
+  return {
+    task, mode: admitted.mode, ...(admitted.sharedRole === undefined ? {} : { sharedRole: admitted.sharedRole }),
+    money: input.role !== undefined && maySeeTaskMoney({ companyId: deps.companyId, membershipCompanyId: deps.companyId, principal, scriptToken: input.scriptToken === true, role: input.role, task }),
+    sourceCode: mayReadSourceCode(reader, task),
+    codeDetails: mayReadCodeDetails(reader, task),
+    decidedByReadRule: true,
+  };
+}
+
+/** Whether the way in already proves the live grant: the stored share (its own project membership) and the company's own rule where it says it re-reads the grant (`provesProjectGrant`); otherwise the host's live-grant seam is asked, once. */
+async function grantFor(ask: Ask, basis: Basis): Promise<"yes" | "no" | "unbound"> {
+  const own = basis === "shared" || ((basis === "acts" || basis === "reads") && ask.deps.access.provesProjectGrant === true);
+  return own ? "yes" : liveGrantOf(ask);
+}
+
+/**
+ * The live company membership and current project grant of the person, now: "yes", "no" (the way in is refused), or "unbound" (no seam: a laptop, where nothing is proved). A seam that throws is "no". With no seam on an
+ * access that says it proves the grant (the hosted host) the answer is "no", never "unbound": a host that forgets to bind the seam admits nobody by the ways that need it (fail closed, as the hotfix's own check does).
+ */
+async function liveGrantOf({ deps, input, task }: Ask): Promise<"yes" | "no" | "unbound"> {
+  const seam = input.seams;
+  if (seam?.liveGrant === undefined) return deps.access.provesProjectGrant === true ? "no" : "unbound";
+  try {
+    return await seam.liveGrant({ personId: input.caller.principal.personId }, task) ? "yes" : "no";
+  } catch {
+    return "no";
+  }
+}
+
+/** The stored share's role when it is one this code knows, a live project member's, else undefined. An unknown role is logged and is no share. */
+async function storedShare(deps: TaskFlowDeps, input: TaskReadInput, task: TaskRecord): Promise<SharedRole | undefined> {
+  const seams = input.seams;
+  if (seams?.sharedReader === undefined) return undefined;
+  let found: StoredShare | undefined;
+  try {
+    found = await seams.sharedReader({ developerId: input.caller.principal.personId, name: input.caller.principal.displayName }, task);
+  } catch (error) {
+    // A lookup that fails is "no", on every read, and is said once in the log (fixed words: no person, no task, only the kind of failure).
+    deps.log?.({ event: "developer.task_reader_lookup_failed", errorName: error instanceof Error ? error.name.slice(0, 40) : "unknown" });
+    return undefined;
+  }
+  if (found === undefined) return undefined;
+  const role = SHARED_ROLES.find((known) => known === found.role);
+  if (role === undefined) {
+    deps.log?.({ event: "developer.task_reader_unknown_role", taskId: task.taskId, role: String(found.role).slice(0, 40) });
+    return undefined;
+  }
+  return role;
+}

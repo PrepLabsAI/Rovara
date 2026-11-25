@@ -12,6 +12,7 @@ import { HOSTED_IDENTITY_PROVIDER } from "../../packages/broker/src/core-host/ho
 import { resolveCoreTaskAccess } from "../../packages/broker/src/developer/task-access.js";
 import type { TaskPeopleDependencies } from "../../packages/broker/src/developer/task-people.js";
 import { createFakeWorld, FAKE_COMPANY } from "../support/core-host-fakes.js";
+import { authorizeFor } from "../support/read-rule-authorize.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { companyRouteHarness, PERSON, TASK, TIME } from "../support/company-route-harness.js";
 
@@ -86,7 +87,7 @@ describe("a channel-only person on the NEW engine: the old routes that still ask
     const routes = createCoreTaskRuleRoutes((_person, companyId) => ({ ...developerTaskRouteDependencies(h.deps, caller), companyId }));
     for (const rest of ["events", "readers"]) {
       const path = `/v1/dev/tasks/${TASK}/${rest}`;
-      await expect(routes.route({ request: { method: "GET", path, headers: {} }, path, person: { developerId: PERSON, name: "Test Person" }, companyId: IMPLICIT_COMPANY_ID, task: row(h), store: { query: async () => ({ items: [] }) } })).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+      await expect(routes.route({ request: { method: "GET", path, headers: {} }, path, person: { developerId: PERSON, name: "Test Person" }, companyId: IMPLICIT_COMPANY_ID, task: row(h), store: { query: async () => ({ items: [] }) }, authorize: authorizeFor(routes, { companyId: IMPLICIT_COMPANY_ID, principal: { companyId: IMPLICIT_COMPANY_ID, personId: PERSON, displayName: "Test Person", roles: ["member"], provider: "rovara-sign-in" }, task: row(h) }) })).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
     }
   });
 });

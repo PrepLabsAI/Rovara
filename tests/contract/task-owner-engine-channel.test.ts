@@ -10,9 +10,11 @@ import { holdsOwnTask } from "../../packages/broker/src/aws/task-readers.js";
 import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
 import { resolveCoreTaskAccess } from "../../packages/broker/src/developer/task-access.js";
 import { companyRouteHarness, PERSON, TASK, TIME } from "../support/company-route-harness.js";
+import { authorizeFor } from "../support/read-rule-authorize.js";
 
 type Harness = ReturnType<typeof companyRouteHarness>;
 const caller: DeveloperCaller = { developerId: PERSON, sessionId: "session", amr: "slack", name: "Test Person", slackUserId: "U0SHARED" };
+const principalOf = (personId: string) => ({ companyId: IMPLICIT_COMPANY_ID, personId, displayName: "Test Person", roles: ["member"], provider: "rovara-sign-in" });
 const STAMP = { engine: "core", areas: { merge: "core", build: "core", flow: "core" }, flags: "test", stampedAt: TIME };
 
 /** The engine stamp the core's start writes with a task. `areas`/`raw` change it to a mixed or a damaged one. */
@@ -27,7 +29,7 @@ const ownerRead = async (h: Harness) => {
 const rule = async (h: Harness, rest: "events" | "readers") => {
   const routes = createCoreTaskRuleRoutes((_person, companyId) => ({ ...developerTaskRouteDependencies(h.deps, caller), companyId }));
   const path = `/v1/dev/tasks/${TASK}/${rest}`;
-  try { return (await routes.route({ request: { method: "GET", path, headers: {} }, path, person: { developerId: PERSON, name: "Test Person" }, companyId: IMPLICIT_COMPANY_ID, task: taskRow(h), store: { query: async () => ({ items: [] }) } })).statusCode; }
+  try { return (await routes.route({ request: { method: "GET", path, headers: {} }, path, person: { developerId: PERSON, name: "Test Person" }, companyId: IMPLICIT_COMPANY_ID, task: taskRow(h), store: { query: async () => ({ items: [] }) }, authorize: authorizeFor(routes, { companyId: IMPLICIT_COMPANY_ID, principal: principalOf(PERSON), task: taskRow(h) }) })).statusCode; }
   catch (error) { return (error as { statusCode?: number }).statusCode ?? 500; }
 };
 const leave = (h: Harness) => { h.deps.developer.channelMembers = async () => ({ ok: true, memberOf: [] }); };

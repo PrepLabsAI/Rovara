@@ -8,7 +8,9 @@ import { z } from "zod";
 import { COMMENT_RATE, WORKFLOW_THREAD_NOTES_MAX } from "@agentx/contracts";
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import { readsAsRow } from "../support/code-api-row-read.js";
-import { createPlanComment, DIFF_PATCH_MAX_CHARS, DIFF_PATCH_TOO_LONG, listPlanComments, listTaskMessages, MESSAGES_PAGE_MAX, readCoreTaskDiff, readTaskDiff, sendTaskMessage } from "../../packages/broker/src/developer/task-code-routes.js";
+import type { TaskReadDecision } from "../../packages/broker/src/core/task-flow/read-rule.js";
+import { resolveCoreTaskAccess } from "../../packages/broker/src/developer/task-access.js";
+import { createPlanComment, DIFF_PATCH_MAX_CHARS, DIFF_PATCH_TOO_LONG, listPlanComments, listTaskMessages, MESSAGES_PAGE_MAX, readCoreTaskDiffPage, readTaskDiff, sendTaskMessage } from "../../packages/broker/src/developer/task-code-routes.js";
 import { expectLinearScalingAsync } from "../support/scaling.js";
 import { OMAR, PRIYA, SAM, START, pagePlan, pageTask, type PageTaskFixture } from "../support/page-tasks.js";
 
@@ -367,6 +369,15 @@ describe("the company rule", () => {
 
 });
 
+
+/**
+ * The page of a core task's diff after the People page rule (the read rule's seam for this read, aws/core-task-rule-routes.ts). This wraps the pieces for the page's own cases; the production wiring (the rule in front of the
+ * page, no read of the pull request for anyone it refuses) is proved on the real route by tests/unit/task-read-rule.test.ts "the diff route".
+ */
+async function readCoreTaskDiff(deps: Parameters<typeof readCoreTaskDiffPage>[0], caller: Parameters<typeof resolveCoreTaskAccess>[1], task: Parameters<typeof resolveCoreTaskAccess>[2], url: URL) {
+  await resolveCoreTaskAccess(deps, caller, task, "read");
+  return readCoreTaskDiffPage(deps, { task } as unknown as TaskReadDecision, url);
+}
 
 describe("core task diff parity", () => {
   it("refuses same-company non-readers before reading a diff, while owner and shared reader can read", async () => {

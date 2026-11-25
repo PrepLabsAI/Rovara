@@ -2,10 +2,14 @@
 // task-changes.ts, task-timeline.ts); this file owns the path, the method and the table of handlers, and each lane fills its own handler in its own file (task-spec-routes.ts: RD-2a, task-checks-routes.ts: RD-2b1,
 // task-changes-routes.ts: RD-2b2, task-timeline-routes.ts: RD-2c), so lanes never share a file.
 //
-// FAIL CLOSED until a lane fills its handler: every stub answers the fixed `ROUTE_NOT_SERVED` refusal (the same words for every task, nothing read, nothing about the task shown). A lane that fills one MUST read the task with the
-// task read's own rule first (`loadReadableTask`, as `GET /v1/dev/tasks/{taskId}` does) so a reader who may not see the task gets the missing task's answer, and the reads stay out of F2-E's reduced admin view.
+// WHO MAY READ is decided HERE, once per request, by the one read rule (core/task-flow/read-rule.ts `decideTaskRead`, asked through `context.decide`); a handler is given the decision (`context.decision`: the task, how the
+// person is admitted, and whether money and source code may be shown) and never decides access itself, so a handler cannot forget it, and the reads stay out of F2-E's reduced admin view.
+//
+// FAIL CLOSED until a lane fills its handler: a person the rule admits is answered by the stub with the fixed `ROUTE_NOT_SERVED` refusal (nothing about the task shown); a person the rule refuses gets the missing task's answer,
+// and a person the task is shown to but not this part (a share) gets TASK_PART_NOT_SHOWN.
 import type { ObjectStorage } from "@agentx/contracts";
 import type { TaskCaller } from "../core/task-flow/deps.js";
+import type { TaskReadDecision } from "../core/task-flow/read-rule.js";
 import type { TaskFlow } from "../core/task-flow/flow.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { readTaskChanges } from "./task-changes-routes.js";
@@ -22,6 +26,8 @@ export interface TaskScreenContext {
   caller: TaskCaller;
   taskId: string;
   request: BrokerRequest;
+  /** The one read rule's decision for this person and this read, made once by the mount. */
+  decision: TaskReadDecision;
 }
 export type TaskScreenHandler = (context: TaskScreenContext) => Promise<BrokerResponse>;
 
@@ -38,6 +44,8 @@ export const TASK_SCREEN_HANDLERS: Readonly<Record<TaskScreenRead, TaskScreenHan
   spec: readTaskSpec, checks: readTaskChecks, changes: readTaskChanges, timeline: readTaskTimeline,
 };
 
-export function routeTaskScreen(context: Omit<TaskScreenContext, "taskId">, route: { taskId: string; read: TaskScreenRead }): Promise<BrokerResponse> {
-  return TASK_SCREEN_HANDLERS[route.read]({ ...context, taskId: route.taskId });
+export async function routeTaskScreen(context: Omit<TaskScreenContext, "taskId" | "decision"> & { decide(read: TaskScreenRead): Promise<TaskReadDecision> }, route: { taskId: string; read: TaskScreenRead }): Promise<BrokerResponse> {
+  const { flow, blobs, caller, request } = context;
+  const decision = await context.decide(route.read);
+  return TASK_SCREEN_HANDLERS[route.read]({ flow, blobs, caller, request, taskId: route.taskId, decision });
 }
