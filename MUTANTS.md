@@ -436,3 +436,22 @@ The earlier SI-2 table above was run on 138b4422f, before the starter and rebuil
 | check.ts `closeSetupCheck` | purpose guard removed; slots not released on close (S2) | killed (2) |
 | usage.ts | the two-hour cap for every kind | killed |
 | saved-env-rebuild.ts `readRebuildFacts` | commit count; approved check; "not handed to a worker" check removed | killed (3) |
+## RF-5-BEDROCK-ROUTE-A (lane commit 848b016b1, stacked on OE-c1 ee74af1b8)
+
+Tests: `tests/unit/worker-eval-bedrock-route.test.ts`, `tests/unit/worker-eval-fresh-sandbox.test.ts` and `tests/unit/product-bedrock-bridge.test.ts`, run together (90 tests) after each mutant of the named source file. M8 was run after rebuilding `packages/contracts` (the tests read its `dist`).
+
+| Mutant | Result |
+| --- | --- |
+| M1 `eval-gateway-access.ts`: a Bedrock path is no longer routed to the Bedrock lane (it falls to the Gemini route) | killed (17 tests) |
+| M2 `eval-gateway-access.ts`: Bedrock calls are no longer taken one at a time | killed (1 test) |
+| M3 `eval-gateway-access.ts`: the Bedrock lane skips the released / stopped / held-count-used guard | killed (2 tests) |
+| M4 `eval-gateway-access.ts`: a Bedrock call stopped before its settle no longer leaves the cost unknown | killed (1 test) |
+| M5 `eval-wiring.ts`: the Bedrock model pin does not accept the SDK's `%3A` | killed (3 tests) |
+| M6 `eval-wiring.ts`: the Bedrock model pin loses its end anchor (a longer path matches) | killed (1 test) |
+| M7 `eval-cost.ts`: the approval sentence ignores the Bedrock row (no "counted by the company's gateway cap") | killed (1 test) |
+| M8 `eval-discovery-report.ts`: the Bedrock row accepts any model name | killed (2 tests) |
+| M9 `model-sandbox-env.ts`: the bridge token segment and row id are not checked | killed (2 tests) |
+| M10 `eval-bridged-exec.ts`: the bridge reads a Bedrock row as a Gemini row (wrong error shape) | killed (1 test) |
+| M11 `eval-bridged-exec.ts`: the helper's row for Bedrock loses `routesTo` | killed (1 test) |
+| M12 `eval-bridged-exec.ts`: the sandbox environment has no Bedrock branch | killed (2 tests) |
+| M13 `eval-gateway-access.ts`: a Bedrock frame under a foreign scope is taken by the Bedrock lane | killed (1 test) |

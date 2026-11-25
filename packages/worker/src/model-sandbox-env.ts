@@ -8,7 +8,7 @@
 //
 // Rules, each with a test: the names are F0a's allow-list (`MODEL_REDIRECT_ENV_NAMES`; a loader, proxy or AWS variable can never be written by a row); a row id is a plain id (it goes into a URL); the helper's address is .9 of a run
 // network; the metadata variables belong to a Vertex row only; two rows may not set one variable to two values (the readiness run chooses which client to point); a value is a printable word (no line break can add a variable).
-// A row's FIRST `env_var` redirect is used; the others (a client that needs a per-client choice) are the readiness run's. The per-exec real-call token segment (`/x/<token>`) is F1-c's, not here.
+// A row's FIRST `env_var` redirect is used; the others (a client that needs a per-client choice) are the readiness run's. The per-exec real-call token segment (`/x/<token>`) is F1-c's, not here, except for a Bedrock product row (RF-5), whose endpoint is built with the exec's token passed in (`bedrockSandboxVariables`).
 import { MODEL_REDIRECT_ENV_NAMES, type CompanyGatewayRow, type ModelCatalogRow } from "@agentx/contracts";
 import { MODEL_HELPER_ALIAS } from "./run-network.js";
 import { isModelHelperAddress } from "./model-helper-block.js";
@@ -20,6 +20,13 @@ export const MODEL_METADATA_PORT = 8081;
 export const MODEL_HELPER_BASE_URL = `http://${MODEL_HELPER_ALIAS}:${String(MODEL_HELPER_PORT)}`;
 /** One fixed, non-secret string: it matches no real key shape, so push protection and the redactor ignore it. Built at runtime, never a literal key. */
 export const MODEL_DUMMY_KEY = ["rovara", "test", "key"].join("-");
+
+/**
+ * RF-5 (route A): the Region a sandbox's AWS client signs for. The gateway never reads it: the real host comes only from the Region the company stored with its connection. It exists because an AWS client refuses to start without one.
+ * Not a real choice of the customer's; a client that sets its own Region in code is not affected.
+ */
+export const MODEL_BEDROCK_PLACEHOLDER_REGION = "us-east-1";
+const BRIDGE_TOKEN_SEGMENT = /^[A-Za-z0-9_-]{1,128}$/u;
 
 /** The one error of this module; its message is a fixed sentence and never carries a value. */
 export class ModelSandboxEnvError extends Error {
@@ -54,10 +61,27 @@ export interface ModelSandboxEnvInput {
   rows: readonly (ModelCatalogRow | CompanyGatewayRow)[];
   /** The model helper's address (.9 of the helper network): the metadata variables name it. */
   helperIp: string;
-  /** Enable the Bedrock product endpoint for the selected Bedrock row. Absent/false leaves AWS variables untouched. */
-  productBedrock?: boolean;
+  /**
+   * Enable the Bedrock product endpoint for the selected Bedrock row, with the exec's own bridge token for the `/x/<token>` segment the helper needs in real mode (F1-c's per-exec token: a worker-made random word that opens
+   * ONE bridge exec, never the gateway's task token). Absent leaves AWS variables untouched.
+   */
+  productBedrock?: { readonly token: string };
   /** The connected Vertex project and location: required when a Vertex row is among the rows. */
   vertex?: { projectId: string; location: string };
+}
+
+/**
+ * The variables of a Bedrock product row in the sandbox: the AWS client's endpoint for Bedrock Runtime (the helper's address, the row and the exec's bridge token), a dummy key pair, a placeholder Region and the instance-metadata
+ * lookup off (a credential chain that finds the dummy keys first never asks, and the round network has nothing at that address). No session token, no profile: the sandbox holds no credential that opens anything. Pure.
+ */
+export function bedrockSandboxVariables(rowId: string, bridgeToken: string): ReadonlyArray<readonly [name: string, value: string]> {
+  if (!ROW_ID.test(rowId) || !BRIDGE_TOKEN_SEGMENT.test(bridgeToken)) refuse();
+  return [
+    ["AWS_ENDPOINT_URL_BEDROCK_RUNTIME", `${MODEL_HELPER_BASE_URL}/p/${rowId}/x/${bridgeToken}`],
+    ["AWS_ACCESS_KEY_ID", MODEL_DUMMY_KEY], ["AWS_SECRET_ACCESS_KEY", MODEL_DUMMY_KEY],
+    ["AWS_REGION", MODEL_BEDROCK_PLACEHOLDER_REGION], ["AWS_DEFAULT_REGION", MODEL_BEDROCK_PLACEHOLDER_REGION],
+    ["AWS_EC2_METADATA_DISABLED", "true"],
+  ];
 }
 
 function baseUrl(rowId: string, variable: string, pathPrefix: string | undefined): string {
@@ -77,12 +101,9 @@ export function buildModelSandboxEnvironment(input: ModelSandboxEnvInput): Servi
   for (const row of input.rows) {
     if (typeof row.id !== "string" || !ROW_ID.test(row.id)) refuse();
     if (row.family === "bedrock") {
-      if (input.productBedrock === true) {
+      if (input.productBedrock !== undefined) {
         // Fixed worker-owned names only: catalog redirects still cannot write arbitrary AWS variables.
-        for (const [name, value] of [
-          ["AWS_ENDPOINT_URL_BEDROCK_RUNTIME", `${MODEL_HELPER_BASE_URL}/p/${row.id}`],
-          ["AWS_ACCESS_KEY_ID", MODEL_DUMMY_KEY], ["AWS_SECRET_ACCESS_KEY", MODEL_DUMMY_KEY],
-        ] as const) {
+        for (const [name, value] of bedrockSandboxVariables(row.id, input.productBedrock.token)) {
           const existing = values.get(name);
           if (existing !== undefined && existing !== value) refuse();
           values.set(name, value);
