@@ -17,6 +17,7 @@ import { EnvironmentRolePath } from "./role-path.js";
 import { SlackOrchestratorStack } from "./slack-orchestrator.js";
 import { SwebenchEvalStack, swebenchNames } from "./swebench-eval.js";
 import { CiRunnerStack } from "./ci-runner.js";
+import { maybeApiAddressStack } from "./api-address.js";
 import { BetaDomainStack } from "./beta-domain.js";
 import { BetaReleaseAccessStack } from "./beta-release-access.js";
 import { WorkerSettingsStack } from "./worker-settings.js";
@@ -225,5 +226,7 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
       applyPermissionsBoundaryParameter(stack, naming.env);
     }
   }
+  // The permanent public address (-c agentxApiAddress=<domain>), only when asked for, by hand; created after the boundary loop on purpose (it declares no role, so it takes no boundary parameter). No release deploys it.
+  maybeApiAddressStack(app, naming, deploymentRegion);
   return app;
 }
