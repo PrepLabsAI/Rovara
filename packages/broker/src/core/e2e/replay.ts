@@ -9,10 +9,10 @@
 //  - What it records is the broker's own verification of the evidence it accepted, never rows a caller supplies. The record expires 30 days after it was last written.
 //
 // The key (`DEVTASK#<task>` / `E2E_REPLAY#<source round>#<attempt>`) and every attribute are Cloud's: no stored-key difference. The pure parts are the ones in `aws/workflow-e2e-replay.ts`.
-import { E2EReplayResultSchema, INDEX_EXPIRY_ATTRIBUTE, change, indexExpiresAt, queryAll, when, type TransactItem } from "@agentx/contracts";
+import { E2EReplayResultSchema, INDEX_EXPIRY_ATTRIBUTE, change, indexExpiresAt, when } from "@agentx/contracts";
 import type { DeveloperTaskRecord } from "../../developer/task-records.js";
 import { E2E_REPLAY_PURPOSE, type ReplayRecord, type ReplayUnavailableReason, type VerifiedReplay } from "../../e2e/replay-round.js";
-import { asDocument, isVerifiedBy, stampOf, type E2EStateStore } from "./state.js";
+import { isVerifiedBy, stampOf, type E2EStateStore } from "./state.js";
 
 export {
   E2E_REPLAY_PURPOSE, E2E_REPLAY_RUN_GRACE_MS, replayResultOf, replaySourceCasesOf, verifyReplayEvidence,
@@ -23,29 +23,6 @@ export type WorkflowE2EReplayStore = E2EStateStore;
 
 const keyOf = (taskId: string, sourceRoundId: string, attempt: number) => ({ pk: `DEVTASK#${taskId}`, sk: `E2E_REPLAY#${sourceRoundId}#${attempt}` });
 const expiryOf = (at: string) => indexExpiresAt(at);
-
-/** Asks for the replay: the REQUESTED record is written only if there is none for this round and attempt. */
-export async function requestWorkflowE2EReplay(store: WorkflowE2EReplayStore, task: Pick<DeveloperTaskRecord, "taskId">,
-  input: { sourceRoundId: string; attempt: number; requestedBy?: string }): Promise<"REQUESTED" | "ALREADY"> {
-  const requestedAt = stampOf(store);
-  const written = await store.store.put({ condition: when.absent(),
-    item: asDocument({ ...keyOf(task.taskId, input.sourceRoundId, input.attempt), entityType: "WORKFLOW_E2E_REPLAY", schemaVersion: 1, taskId: task.taskId, sourceRoundId: input.sourceRoundId,
-      purpose: E2E_REPLAY_PURPOSE, attempt: input.attempt, state: "REQUESTED", requestedAt, ...(input.requestedBy === undefined ? {} : { requestedBy: input.requestedBy }),
-      [INDEX_EXPIRY_ATTRIBUTE]: expiryOf(requestedAt) }) });
-  return written.applied ? "REQUESTED" : "ALREADY";
-}
-
-/**
- * The write that starts the round: REQUESTED to STARTED with the operation, the round, the admission and the deadline, as one item of the transaction that accepts the operation. A record
- * that is not this round's and attempt's REQUESTED one (never asked for, already started) fails the condition and so does the transaction: at most one start.
- */
-export function replayStartItem(task: Pick<DeveloperTaskRecord, "taskId">,
-  started: { sourceRoundId: string; attempt: number; operationId: string; roundId: string; admissionSha256: string; startedAt: string; deadlineAt: string }): TransactItem {
-  return { kind: "update", key: keyOf(task.taskId, started.sourceRoundId, started.attempt),
-    ops: [change.set("state", "STARTED"), change.set("operationId", started.operationId), change.set("roundId", started.roundId), change.set("admissionSha256", started.admissionSha256),
-      change.set("startedAt", started.startedAt), change.set("deadlineAt", started.deadlineAt), change.set(INDEX_EXPIRY_ATTRIBUTE, expiryOf(started.startedAt))],
-    condition: when.and(when.present(), when.eq("state", "REQUESTED"), when.eq("attempt", started.attempt), when.eq("sourceRoundId", started.sourceRoundId)) };
-}
 
 /**
  * Marks the replay as one that could not be run, only if the record is still in one of the states named (and, when an operation is named, still that operation's). A recorded result
@@ -95,10 +72,4 @@ function recordOf(item: Record<string, unknown> | undefined, taskId: string): Re
 /** The record of one attempt, or undefined when there is none (or what is stored is not what it should be). */
 export async function readWorkflowE2EReplayRecord(store: WorkflowE2EReplayStore, taskId: string, round: { sourceRoundId: string; attempt: number }): Promise<ReplayRecord | undefined> {
   return recordOf(await store.store.get(keyOf(taskId, round.sourceRoundId, round.attempt)), taskId);
-}
-
-/** The records of every attempt for one source round, oldest attempt first. */
-export async function listWorkflowE2EReplayRecords(store: WorkflowE2EReplayStore, taskId: string, sourceRoundId: string): Promise<ReplayRecord[]> {
-  const items = await queryAll(store.store, { pk: `DEVTASK#${taskId}`, sk: { op: "beginsWith", prefix: `E2E_REPLAY#${sourceRoundId}#` } });
-  return items.flatMap((item) => recordOf(item, taskId) ?? []).sort((left, right) => left.attempt - right.attempt);
 }

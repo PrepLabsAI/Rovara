@@ -7,9 +7,7 @@ import { createDocumentObjectStorage } from "../../packages/broker/src/core/proo
 import {
   baselineStartItem, markWorkflowE2EBaselineUnavailable, readWorkflowE2EBaseline, readWorkflowE2EBaselineRecord, recordWorkflowE2EBaseline, requestWorkflowE2EBaselineRound,
 } from "../../packages/broker/src/core/e2e/baseline.js";
-import {
-  listWorkflowE2EReplayRecords, markWorkflowE2EReplayUnavailable, readWorkflowE2EReplayRecord, recordWorkflowE2EReplay, replayStartItem, requestWorkflowE2EReplay,
-} from "../../packages/broker/src/core/e2e/replay.js";
+import { markWorkflowE2EReplayUnavailable, readWorkflowE2EReplayRecord, recordWorkflowE2EReplay } from "../../packages/broker/src/core/e2e/replay.js";
 import {
   markWorkflowE2EGroundingUnavailable, readWorkflowE2EGroundingRecord, recordWorkflowE2EGrounding,
 } from "../../packages/broker/src/core/e2e/grounding.js";
@@ -140,20 +138,14 @@ describe("the replay record", () => {
   const verified = (overrides: Record<string, unknown> = {}) => ({ [Symbol("verified-replay")]: true, roundId: "round-1", admissionSha256: hex("c"),
     replay: { status: "PASS", reproduced: true, downloadSha256Match: true }, ...overrides }) as never;
   const setup = () => { const store = new MemoryDocumentStore(); return { store, deps: { store, now: clock(AT) } }; };
+  // The stored shape the deleted request and start writes made (a literal: nothing writes a replay record any more, the rows are read as they were left).
+  const seedStarted = (store: MemoryDocumentStore) => store.put({ item: { pk: "DEVTASK#task-1", sk: "E2E_REPLAY#src-1#1", entityType: "WORKFLOW_E2E_REPLAY", schemaVersion: 1, taskId: "task-1", sourceRoundId: "src-1",
+    purpose: "replay", attempt: 1, state: "STARTED", requestedAt: AT, operationId: started.operationId, roundId: started.roundId, admissionSha256: started.admissionSha256, startedAt: started.startedAt,
+    deadlineAt: started.deadlineAt, [INDEX_EXPIRY_ATTRIBUTE]: indexExpiresAt(started.startedAt) } });
 
-  it("is asked for once per source round and attempt, at Cloud's key", async () => {
+  it("records only for the round that was started, and keeps a recorded result", async () => {
     const { store, deps } = setup();
-    expect(await requestWorkflowE2EReplay(deps, task, { ...round, requestedBy: "developer:ops" })).toBe("REQUESTED");
-    expect(await requestWorkflowE2EReplay(deps, task, round)).toBe("ALREADY");
-    expect(await store.get({ pk: "DEVTASK#task-1", sk: "E2E_REPLAY#src-1#1" })).toMatchObject({ entityType: "WORKFLOW_E2E_REPLAY", schemaVersion: 1, purpose: "replay", state: "REQUESTED",
-      requestedBy: "developer:ops", [INDEX_EXPIRY_ATTRIBUTE]: indexExpiresAt(AT) });
-  });
-
-  it("starts once, records only for the round that was started, and keeps a recorded result", async () => {
-    const { store, deps } = setup();
-    await requestWorkflowE2EReplay(deps, task, round);
-    expect(await run(store, [replayStartItem(task, started)])).toEqual({ applied: true });
-    expect(await run(store, [replayStartItem(task, { ...started, operationId: "op-2" })])).toMatchObject({ applied: false });
+    await seedStarted(store);
     for (const wrong of [{ operationId: "op-9" }, { roundId: "round-9" }, { admissionSha256: hex("d") }, { attempt: 2 }, { sourceRoundId: "src-2" }]) {
       if ("roundId" in wrong || "admissionSha256" in wrong) await expect(recordWorkflowE2EReplay(deps, task, { verified: verified(), expected: { ...expected, ...wrong } })).rejects.toThrow();
       else expect(await recordWorkflowE2EReplay(deps, task, { verified: verified(), expected: { ...expected, ...wrong } })).toBe(false);
@@ -173,20 +165,11 @@ describe("the replay record", () => {
     const { store, deps } = setup();
     expect(await markWorkflowE2EReplayUnavailable(deps, task, round, "stopped", { from: ["REQUESTED"] })).toBe(false);
     expect(store.size).toBe(0);
-    await requestWorkflowE2EReplay(deps, task, round);
-    await run(store, [replayStartItem(task, started)]);
+    await seedStarted(store);
     expect(await markWorkflowE2EReplayUnavailable(deps, task, round, "timed-out", { from: ["STARTED"], operationId: "op-9" })).toBe(false);
     expect(await markWorkflowE2EReplayUnavailable(deps, task, round, "timed-out", { from: ["REQUESTED"] })).toBe(false);
     expect(await markWorkflowE2EReplayUnavailable(deps, task, round, "timed-out", { from: ["STARTED"], operationId: "op-1" })).toBe(true);
     expect(await readWorkflowE2EReplayRecord(deps, "task-1", round)).toMatchObject({ state: "UNAVAILABLE", reason: "timed-out" });
-  });
-
-  it("lists the attempts of one source round, oldest first, and no other round's", async () => {
-    const { deps } = setup();
-    for (const attempt of [3, 1, 2]) await requestWorkflowE2EReplay(deps, task, { sourceRoundId: "src-1", attempt });
-    await requestWorkflowE2EReplay(deps, task, { sourceRoundId: "src-10", attempt: 1 });
-    await requestWorkflowE2EReplay(deps, { taskId: "task-2" }, { sourceRoundId: "src-1", attempt: 1 });
-    expect((await listWorkflowE2EReplayRecords(deps, "task-1", "src-1")).map((record) => record.attempt)).toEqual([1, 2, 3]);
   });
 
   it("reads no record whose result is not a result of the contract", async () => {
