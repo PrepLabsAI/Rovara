@@ -267,7 +267,7 @@ export interface DeveloperTaskRouteDependencies extends Pick<TaskPeopleEffectsDe
   /** `companyId`: the caller's company as the check resolved it (absent: no company mode); the start checks the project row it loads against it (DEC 254zzz98). */
   checkAccess(project: string): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel"; channelIds: string[]; companyId?: string }>;
   /** Spec 067: a registered, not removed person and whether they are a member of `project` (for task readers); without it, tasks can't be shared. */
-  taskReaderPerson?(developerId: string, project: string, taskCompany?: string, options?: { ownTask?: true }): Promise<TaskReaderPerson | undefined>;
+  taskReaderPerson?(developerId: string, project: string, taskCompany?: string, options?: { ownTask?: true; taskId?: string }): Promise<TaskReaderPerson | undefined>;
   /** C3: bound channels' names and privacy, best effort (R10). */
   workspaceForTask?(task: DeveloperTaskRecord): Promise<SlackWorkspaceScope | undefined>;
   workspaceForProject?(project: string): Promise<SlackWorkspaceScope | undefined>;

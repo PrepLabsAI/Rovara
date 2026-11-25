@@ -24,8 +24,8 @@ export interface TaskReaderPerson {
   /** Whether they hold a grant on the project (a developer or an administrator of it). */
   projectMember: boolean;
   /**
-   * Only when asked with `ownTask`: whether they may use the project as a task START does now (`checkProjectAccess`): a grant, or fresh bound-channel membership while the project lets channel
-   * members use it. Never given to a reader (a reader needs the grant, `projectMember`).
+   * Only when asked with `ownTask` (and the task's id): whether they may use the project as a task START does now (`checkProjectAccess`): a grant, or, for an OLD-engine task (no engine stamp), fresh
+   * bound-channel membership while the project lets channel members use it. Never given to a reader (a reader needs the grant, `projectMember`).
    */
   mayStart?: boolean;
 }
@@ -39,7 +39,7 @@ export interface TaskReaderDependencies {
    * A registered, not removed person and whether they are a member of `project` in the task's company (`taskCompany`, DEC 254zzz98 review L2: a live member of that company, with
    * its grant); undefined for anyone else. Without it, tasks can't be shared.
    */
-  taskReaderPerson?(developerId: string, project: string, taskCompany?: string, options?: { ownTask?: true }): Promise<TaskReaderPerson | undefined>;
+  taskReaderPerson?(developerId: string, project: string, taskCompany?: string, options?: { ownTask?: true; taskId?: string }): Promise<TaskReaderPerson | undefined>;
 }
 
 interface ReaderRecord {
@@ -117,10 +117,18 @@ export async function readsAsReader(deps: TaskReaderDependencies, task: Develope
  * channel use off keeps no hold on their old task through the stored id alone. A read that fails, or no way to ask, is "no".
  */
 export async function holdsOwnTask(deps: Pick<TaskReaderDependencies, "taskReaderPerson">, task: DeveloperTaskRecord, developerId: string): Promise<boolean> {
+  return await ownTaskHold(deps, task, developerId) !== false;
+}
+
+/**
+ * How the task's own person holds it now: "grant" (the project grant, the only way a NEW-engine task is held: its start and every step need it), "channel" (an OLD-engine task, no engine stamp, by the start's
+ * own test, which also admits bound-channel membership), or false. The engine is read from the task's stamp inside `taskReaderPerson` (a stamp that is there, or cannot be read, is grant only).
+ */
+async function ownTaskHold(deps: Pick<TaskReaderDependencies, "taskReaderPerson">, task: DeveloperTaskRecord, developerId: string): Promise<"grant" | "channel" | false> {
   if (task.developerId !== developerId || deps.taskReaderPerson === undefined) return false;
   try {
-    const now = await deps.taskReaderPerson(developerId, task.project, taskCompanyId(task), { ownTask: true });
-    return now?.projectMember === true || now?.mayStart === true;
+    const now = await deps.taskReaderPerson(developerId, task.project, taskCompanyId(task), { ownTask: true, taskId: task.taskId });
+    return now?.projectMember === true ? "grant" : now?.mayStart === true ? "channel" : false;
   } catch { return false; }
 }
 
@@ -130,14 +138,17 @@ export async function requireOwnTask(deps: Pick<TaskReaderDependencies, "taskRea
 }
 
 /**
- * Whether a task of the person's own task INDEX lists as theirs: in a company, a task of the caller's, in that company, whose project they still hold as a start would (read now, once per project for one page, in `held`).
+ * Whether a task of the person's own task INDEX lists as theirs: in a company, a task of the caller's, in that company, whose project they still hold as a start would (read now; a grant once per project for one page, in `held`).
  * With no company layer, as it always was (everything the index names).
  */
 export async function listsAsOwn(deps: Pick<TaskReaderDependencies, "taskReaderPerson"> & { companyId?: string | undefined }, task: DeveloperTaskRecord | undefined, developerId: string, held: Map<string, boolean>): Promise<boolean> {
   if (deps.companyId === undefined) return true;
   if (task === undefined || task.developerId !== developerId || !recordInCompany(task, deps.companyId)) return false;
-  if (!held.has(task.project)) held.set(task.project, await holdsOwnTask(deps, task, developerId));
-  return held.get(task.project) === true;
+  // A project the person holds by a grant holds for every task of it (read once per page); a hold by the channel is per task (it depends on the task's engine), so it is never kept.
+  if (held.get(task.project) === true) return true;
+  const hold = await ownTaskHold(deps, task, developerId);
+  if (hold === "grant") held.set(task.project, true);
+  return hold !== false;
 }
 
 /** `GET …/readers`: the owner's list. The caller is the owner. */
