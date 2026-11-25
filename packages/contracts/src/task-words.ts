@@ -118,6 +118,21 @@ export const STATUS_LINES = {
 /** "<sentence> (round 2 of 3)". */
 export const roundWords = (sentence: string, round: number, max: number): string => `${sentence} (round ${String(round)} of ${String(max)})`;
 
+// ---- a step the platform gave up starting (fixed sentences with a stable code; never the text of an error)
+
+/**
+ * The codes of a worker dispatch that was tried until it gave up (`aws/dispatcher.ts`), with the words a person reads for each. The text of the error behind it (an SDK message, a worker's HTTP body) goes to the
+ * dispatcher's log only. `WORKER_REFUSED` carries the broker's own refusal words with it (a worker too old for the step) when it has them; the words here are the fallback.
+ */
+export const DISPATCH_GAVE_UP_CODES = ["WORKER_REFUSED", "WORKER_ANSWERED_ERROR", "WORKER_NOT_REACHED", "WORKER_START_FAILED"] as const;
+export type DispatchGaveUpCode = (typeof DISPATCH_GAVE_UP_CODES)[number];
+export const DISPATCH_GAVE_UP_WORDS: Readonly<Record<DispatchGaveUpCode, string>> = {
+  WORKER_REFUSED: "Rovara's checks of the worker machine refused this step.",
+  WORKER_ANSWERED_ERROR: "The worker machine answered with an error.",
+  WORKER_NOT_REACHED: "Rovara could not ask the worker machine what it can do.",
+  WORKER_START_FAILED: "Rovara could not start this step on a worker machine.",
+};
+
 // ---- the decision moves
 
 /** The action ids that make the pill "Needs you" for a person who is offered one. NOT `task.merge` (a pull request that waits is "In review"), `task.stop`, `task.close`, `task.continue`, `people.*` or `pull-request.keep`. */
