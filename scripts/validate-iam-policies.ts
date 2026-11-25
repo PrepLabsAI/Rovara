@@ -16,6 +16,8 @@
 //   tsx scripts/validate-iam-policies.ts --local-only
 //   tsx scripts/validate-iam-policies.ts --aws "<command>" [--region <region>]          e.g. --aws "~/.local/share/rovara-tools/staging-aws.sh aws" --region us-west-2
 //   tsx scripts/validate-iam-policies.ts --aws "<command>" --file <document.json> [--type IDENTITY_POLICY|RESOURCE_POLICY]   (one document, e.g. an old one)
+//   add --cloud-templates <cdk.out directory> (repeatable, one per Cloud app) to ALSO check the synthesized Cloud stacks (the same documents checks, plus: every IAM role carries a permissions
+//   boundary); add --cloud-only to check just those and skip Code's own synth. The input contract is documented in scripts/iam-cloud-templates.ts.
 //   add --dump <directory> to write every extracted document there as JSON.
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
@@ -23,6 +25,7 @@ import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { buildAgentXApp } from "../infra/lib/app.js";
+import { boundaryProblems, loadCloudStacks, type CloudStack } from "./iam-cloud-templates.js";
 
 /** The analyzer's policy types this gate uses; a role trust document is a RESOURCE_POLICY of resource type AWS::IAM::AssumeRolePolicyDocument. */
 export type PolicyKind = "IDENTITY_POLICY" | "RESOURCE_POLICY";
@@ -283,22 +286,31 @@ export function uniqueDocuments(documents: readonly PolicyDocument[]): Array<Pol
   return [...byHash.values()];
 }
 
-interface Options { awsCommand?: string[]; region?: string; localOnly: boolean; dump?: string; file?: string; type?: PolicyKind; allowlist: string }
+interface Options { awsCommand?: string[]; region?: string; localOnly: boolean; cloudTemplates: string[]; cloudOnly: boolean; dump?: string; file?: string; type?: PolicyKind; allowlist: string }
 
 function parseArgs(argv: string[]): Options {
-  const options: Options = { localOnly: false, allowlist: join(import.meta.dirname, "iam-policy-findings-allowlist.json") };
+  const options: Options = { localOnly: false, cloudTemplates: [], cloudOnly: false, allowlist: join(import.meta.dirname, "iam-policy-findings-allowlist.json") };
   for (let index = 0; index < argv.length; index += 1) {
     const flag = argv[index];
     const next = () => { index += 1; const value = argv[index]; if (value === undefined) throw new Error(`${flag} needs a value`); return value; };
     if (flag === "--local-only") options.localOnly = true;
     else if (flag === "--aws") options.awsCommand = next().replace(/^~/u, homedir()).split(/\s+/u).filter((part) => part !== "");
     else if (flag === "--region") options.region = next();
+    else if (flag === "--cloud-templates") options.cloudTemplates.push(next());
+    else if (flag === "--cloud-only") options.cloudOnly = true;
     else if (flag === "--dump") options.dump = next();
     else if (flag === "--file") options.file = next();
     else if (flag === "--type") options.type = next() as PolicyKind;
     else if (flag === "--allowlist") options.allowlist = next();
     else throw new Error(`unknown argument ${flag}`);
   }
+  return checkedOptions(options);
+}
+
+/** The combinations of flags that would silently skip a check are refused. */
+function checkedOptions(options: Options): Options {
+  if (options.file !== undefined && (options.cloudOnly || options.cloudTemplates.length > 0)) throw new Error("--file checks one document and cannot be combined with --cloud-templates or --cloud-only");
+  if (options.cloudOnly && options.cloudTemplates.length === 0) throw new Error("--cloud-only needs at least one --cloud-templates <directory>");
   return options;
 }
 
@@ -329,12 +341,27 @@ function validateOne(entry: PolicyDocument & { labels: string[] }, analyzer: Ana
   }
 }
 
-/** The documents to check: the one `--file`, or every document the synthesized apps produce (announced on stdout). */
-function loadDocuments(options: Options): PolicyDocument[] {
-  if (options.file !== undefined) return [{ label: options.file, kind: options.type ?? "IDENTITY_POLICY", document: JSON.parse(readFileSync(options.file, "utf8")) as Json }];
-  const synthesized = synthesizePolicyDocuments();
-  console.log(`${synthesized.documents.length} policy documents from ${SCAN_CONTEXTS.length} synthesized apps${synthesized.unresolved.length > 0 ? `; unresolved intrinsics: ${synthesized.unresolved.join(", ")}` : ""}`);
-  return synthesized.documents;
+/** The documents of the Cloud stacks, labelled `cloud:<stack>/...` (the stacks come from a Cloud build step: scripts/iam-cloud-templates.ts). */
+function cloudDocuments(stacks: readonly CloudStack[]): PolicyDocument[] {
+  return stacks.flatMap(({ stackName, template }) => extractPolicyDocuments(`cloud:${stackName}`, template).documents);
+}
+
+/** The boundary problems of one --cloud-templates directory (each directory must hold a role on its own, so a wrong second directory cannot hide behind a good one). */
+function setBoundaryProblems(stacks: readonly CloudStack[], index: number): string[] {
+  const named = (problem: string): boolean => stacks.some(({ stackName }) => problem.startsWith(`${stackName}/`));
+  return boundaryProblems(stacks).map((problem) => (named(problem) ? problem : `${problem} (--cloud-templates #${index + 1})`));
+}
+
+/** The documents to check, with the Cloud stacks that were read: the one `--file`, or every document the synthesized apps produce (announced on stdout) and the Cloud templates' documents. */
+function loadDocuments(options: Options): { documents: PolicyDocument[]; cloudSets: CloudStack[][] } {
+  if (options.file !== undefined) return { documents: [{ label: options.file, kind: options.type ?? "IDENTITY_POLICY", document: JSON.parse(readFileSync(options.file, "utf8")) as Json }], cloudSets: [] };
+  const synthesized = options.cloudOnly ? { documents: [], unresolved: [] } : synthesizePolicyDocuments();
+  const cloudSets = options.cloudTemplates.map(loadCloudStacks);
+  const cloudStacks = cloudSets.flat();
+  const documents = [...synthesized.documents, ...cloudDocuments(cloudStacks)];
+  const sources = `${options.cloudOnly ? 0 : SCAN_CONTEXTS.length} synthesized apps${cloudStacks.length > 0 ? ` and ${cloudStacks.length} Cloud stacks` : ""}`;
+  console.log(`${documents.length} policy documents from ${sources}${synthesized.unresolved.length > 0 ? `; unresolved intrinsics: ${synthesized.unresolved.join(", ")}` : ""}`);
+  return { documents, cloudSets };
 }
 
 /** The analyzer pass over every unique document; the number of blocking problems. */
@@ -347,11 +374,13 @@ function validateAll(documents: readonly PolicyDocument[], options: Options, all
 function main(): void {
   const options = parseArgs(process.argv.slice(2));
   const allowed = readAllowlist(options.allowlist);
-  const documents = loadDocuments(options);
+  const { documents, cloudSets } = loadDocuments(options);
   if (options.dump !== undefined) dumpDocuments(options.dump, documents);
   const local = serviceFieldProblems(documents);
   for (const problem of local) console.log(`FAIL local ${problem}`);
-  const failures = local.length + (options.localOnly ? 0 : validateAll(documents, options, allowed));
+  const boundary = cloudSets.flatMap(setBoundaryProblems);
+  for (const problem of boundary) console.log(`FAIL boundary ${problem}`);
+  const failures = local.length + boundary.length + (options.localOnly ? 0 : validateAll(documents, options, allowed));
   console.log(failures === 0 ? "IAM policy validation passed" : `IAM policy validation FAILED: ${failures} blocking problem(s)`);
   process.exitCode = failures === 0 ? 0 : 1;
 }
