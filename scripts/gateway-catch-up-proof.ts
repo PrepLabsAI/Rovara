@@ -73,6 +73,19 @@ function expectedBlob(manifest: Manifest, path: string, cloudBlob: string): { wa
   return diverged === undefined ? { want: cloudBlob, diverged: false } : { want: diverged.blob, diverged: true };
 }
 
+/**
+ * A divergence record that no longer differs from Cloud (its blob is Cloud's pinned blob, because the pin moved up to the change, or
+ * the change was undone) would hide the next change Cloud makes to that file: it must be removed. A record for a file the manifest
+ * does not carry means nothing and fails too.
+ */
+function checkStaleDivergences(manifest: Manifest, report: Report): void {
+  for (const [path, record] of Object.entries(manifest.divergedFromCloud)) {
+    const cloudBlob = manifest.exact[path] ?? manifest.adapted[path]?.cloudBlob;
+    if (cloudBlob === undefined) report.failures.push(`divergedFromCloud: ${path} is not a file the manifest carries`);
+    else if (record.blob === cloudBlob) report.failures.push(`divergedFromCloud: ${path} records Cloud's own pinned blob (a stale divergence: remove the entry)`);
+  }
+}
+
 function checkExact(manifest: Manifest, root: string, report: Report): void {
   let equal = 0;
   for (const [path, cloudBlob] of Object.entries(manifest.exact)) {
@@ -232,6 +245,7 @@ export async function runProof(options: { root: string; cloudClone?: string; man
   const manifest = options.manifest ?? readManifest();
   const report: Report = { failures: [], summary: [`pinned Cloud commit ${manifest.cloudCommit}`] };
   checkExact(manifest, options.root, report);
+  checkStaleDivergences(manifest, report);
   checkAdapted(manifest, options.root, report);
   checkLinePins(manifest, options.root, report);
   await checkSwitches(manifest, options.root, report);

@@ -15,7 +15,7 @@ import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { COMPANY, record } from "./model-gateway-token.js";
 import type { BedrockCheck, VertexCheck } from "./product-keys.js";
-import { BEDROCK_EXTERNAL_ID, BEDROCK_MODEL_CHECKS, parseBedrockConnect, type BedrockConnection, type BedrockModelCheck } from "./bedrock-byo.js";
+import { BEDROCK_EXTERNAL_ID, BEDROCK_MODEL_CHECKS, bedrockConnectionIds, parseBedrockConnect, type BedrockConnection, type BedrockModelCheck } from "./bedrock-byo.js";
 import type { BedrockProbe } from "./bedrock-byo-sessions.js";
 import { parseVertexConnect, type VertexCredential } from "./product-vertex-credential.js";
 import type { ProbeResult } from "./product-vertex-token.js";
@@ -36,6 +36,13 @@ export const SERVICE_CALL_TIMEOUT_MS = 25_000;
  */
 export const SERVICE_CALL_OPEN = 2;
 export const SERVICE_CALL_PER_MINUTE = 30;
+/**
+ * Per company, inside the Bedrock check (after the signature names the company): one probe at a time and at most
+ * BEDROCK_CHECK_COMPANY_PER_MINUTE started per minute, whatever Cloud's own limits are, so one company's connects, re-checks or a script
+ * can't use up the task-wide SERVICE_CALL_* room or the customer's AWS account for other companies. Over either: 429 and nothing is probed
+ * (Cloud reads it as "unavailable: nothing was saved, try again" for that company only). Connect, rotate and Check again all pass through here.
+ */
+export const BEDROCK_CHECK_COMPANY_PER_MINUTE = 6;
 const RESULTS: readonly ProbeResult[] = ["ok", "too_open", "refused", "unavailable"];
 
 export interface MacSigner { generateMac(input: { KeyId: string; Message: Uint8Array }): Promise<{ Mac?: Uint8Array }> }
@@ -198,6 +205,19 @@ export async function answerBedrockSetup(options: BedrockServiceOptions, request
   if (!BEDROCK_EXTERNAL_ID.test(externalId)) return ANSWERS.unavailable;
   return { status: 200, body: { externalId, brokerRoleArn: options.brokerRoleArn } };
 }
+const companyChecks = new WeakMap<object, Map<string, { open: boolean; started: number[] }>>();
+/** Takes this company's place in the check (false: over its limit); `release` frees it. */
+function takeCompanyCheck(options: BedrockServiceOptions, cid: string): (() => void) | undefined {
+  const now = (options.now ?? Date.now)();
+  const all = companyChecks.get(options) ?? new Map<string, { open: boolean; started: number[] }>(); companyChecks.set(options, all);
+  const mine = all.get(cid) ?? { open: false, started: [] }; all.set(cid, mine);
+  mine.started = mine.started.filter((at) => now - at < 60_000);
+  if (mine.open || mine.started.length >= BEDROCK_CHECK_COMPANY_PER_MINUTE) return undefined;
+  mine.open = true; mine.started.push(now);
+  // A company with nothing running and nothing started this minute holds no row.
+  return () => { mine.open = false; if (all.size > MAX_COMPANY_ROWS) for (const [id, row] of all) if (!row.open && row.started.every((at) => (options.now ?? Date.now)() - at >= 60_000)) all.delete(id); };
+}
+const MAX_COMPANY_ROWS = 1_000;
 export async function answerBedrockCheck(options: BedrockServiceOptions, request: ServiceRequest, signal?: AbortSignal): Promise<ServiceAnswer> {
   const call = await signedCall(options, BEDROCK_CHECK_PATH, request);
   if ("status" in call) return call;
@@ -205,7 +225,9 @@ export async function answerBedrockCheck(options: BedrockServiceOptions, request
   const fields = record(call.input.connection);
   const connection = fields === undefined ? undefined : parseBedrockConnect(JSON.stringify(fields));
   if (connection === undefined) return ANSWERS.invalid;
-  const probe = await options.bedrock.probe(call.cid, connection, signal).catch((): BedrockProbe => ({ result: "unavailable" }));
+  const release = takeCompanyCheck(options, call.cid);
+  if (release === undefined) return ANSWERS.busy;
+  const probe = await options.bedrock.probe(call.cid, connection, signal).catch((): BedrockProbe => ({ result: "unavailable" })).finally(release);
   const result = PROBE_RESULTS.find((r) => r === probe.result) ?? "unavailable";
   return { status: 200, body: { result, ...(result === "ok" && probe.models !== undefined ? { models: probe.models } : {}) } };
 }
@@ -249,12 +271,13 @@ export function gatewayBedrockCheck(options: GatewayVertexCheckOptions): Bedrock
   return async (cid, connection) => {
     if (!COMPANY.test(cid)) return { result: "unavailable" };
     try {
-      const answer = record(await signedPost(options, BEDROCK_CHECK_PATH, { iss: options.issuer, cid, connection: { scheme: "assume_role", roleArn: connection.roleArn, region: connection.region, models: connection.models, allowGlobal: connection.allowGlobal } }));
+      const answer = record(await signedPost(options, BEDROCK_CHECK_PATH, { iss: options.issuer, cid, connection: { scheme: "assume_role", roleArn: connection.roleArn, region: connection.region, models: connection.models, allowGlobal: connection.allowGlobal, ...(connection.productModels === undefined ? {} : { productModels: connection.productModels }) } }));
       const result = PROBE_RESULTS.find((r) => r === answer?.result) ?? "unavailable";
       if (result !== "ok") return { result };
       const models = record(answer?.models);
       const out: Record<string, BedrockModelCheck> = {};
-      for (const id of new Set(Object.values(connection.models))) { const state = models?.[id]; out[id] = BEDROCK_MODEL_CHECKS.find((c) => c === state) ?? "unavailable"; }
+      // The agents' picks and the product models: every id the connection names, so the store reads each one's own answer.
+      for (const id of bedrockConnectionIds(connection)) { const state = models?.[id]; out[id] = BEDROCK_MODEL_CHECKS.find((c) => c === state) ?? "unavailable"; }
       return { result, models: out };
     } catch { return { result: "unavailable" }; }
   };
