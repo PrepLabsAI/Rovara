@@ -197,9 +197,9 @@ describe("private branch names and the private repository name", () => {
     expect(hits).toEqual(expect.arrayContaining([`private-name:docs/${INTEG}/0513.md`, "private-name:docs/ok.md", "private-name:(commit message or author)"]));
   });
 
-  it("keeps the salted-hash list for the private repository name and the other protected words (no word is written in the guard)", () => {
+  it("keeps the salted-hash list for the protected words (no word is written in the guard); the Cloud repository's name is off it (#1478)", () => {
     const labels = DEFAULT_NAMES.entries.map((entry) => entry.label);
-    expect(labels).toContain("the private repository name");
+    expect(labels).not.toContain("the private repository name");
     for (const entry of DEFAULT_NAMES.entries) expect(entry.sha).toMatch(/^[0-9a-f]{64}$/);
     const source = readFileSync("scripts/port-guard.ts", "utf8");
     expect(source).not.toMatch(new RegExp(`${INTEG}/0|${CC}/[a-z]`, "i"));
@@ -248,7 +248,9 @@ describe("the AWS line: four generic adapters are public, everything else AWS st
     expect(addedFileRule(`a/${AWS}/b.ts`)).toBeNull();
     expect(addedFileRule(`${INFRA}/bin/x.ts`)).toBeNull();
     expect(addedFileRule(`a/${AWS}/billing.ts`)?.rule).toBe("cloud-path");
-    expect(addedFileRule(`${INFRA}/lib/model-proxy.ts`)?.rule).toBe("cloud-path");
+    expect(addedFileRule(`${INFRA}/lib/invoicing.ts`)?.rule).toBe("cloud-path");
+    // The model gateway moved into Code and is public (#1478).
+    expect(addedFileRule(`${INFRA}/lib/model-proxy.ts`)).toBeNull();
     expect(addedFileRule("packages/aws-adapters/src/s3/store.ts")).toBeNull();
     expect(addedFileRule(`packages/${AWS}-notes/billing.ts`)).toBeNull();
     expect(addedFileRule("docs/aws-setup.md")).toBeNull();
@@ -654,8 +656,6 @@ describe("plan v3.2: Code's own AWS deployment is public, Cloud-only work in it 
   });
 
   it.each([
-    `${INFRA}/lib/model-gateway.ts`,
-    `${INFRA}/lib/modelProxy.ts`,
     `${INFRA}/lib/${CLD}-identity.ts`,
     `${INFRA}/lib/${CLD}Gateway/stack.ts`,
     `packages/broker/src/${AWS}/billing/invoices.ts`,
@@ -667,8 +667,6 @@ describe("plan v3.2: Code's own AWS deployment is public, Cloud-only work in it 
     `${INFRA}/lib/web-app.ts`,
     `${INFRA}/lib/embedder-function.ts`,
     `${INFRA.toUpperCase()}/LIB/BILLING.ts`,
-    `${INFRA}/lib/gateway.ts`,
-    `${INFRA}/lib/gateways-stack.ts`,
     `packages/broker/src/${AWS}/invoicing.ts`,
     `packages/broker/src/${AWS}/team-records.ts`,
     `packages/broker/src/${AWS}/org-routes.ts`,
@@ -677,32 +675,21 @@ describe("plan v3.2: Code's own AWS deployment is public, Cloud-only work in it 
     `${INFRA}/lib/devices-stack.ts`,
     `${INFRA}/lib/audit-ledgers.ts`,
     `${INFRA}/lib/web-apps.ts`,
-    `${INFRA}/lib/models-gateway.ts`,
     `${INFRA}/lib/my${CLD}.ts`,
     `${INFRA}/lib/b\u0456lling.ts`,
     `packages/broker/src/${AWS}/tool-budget.ts`,
-    `${INFRA}/lib/llmgateway.ts`,
-    `${INFRA}/lib/aigateway.ts`,
     `packages/broker/src/${AWS}/orgadmin/index.ts`,
     `packages/broker/src/${AWS}/metering.ts`,
     `packages/broker/src/${AWS}/tenantBilling.ts`,
     `packages/broker/src/${AWS}/mybilling.ts`,
     `packages/broker/src/${AWS}/2billing.ts`,
-    `${INFRA}/lib/LlmGateway.ts`,
     `packages/broker/src/${AWS}/tenantBudgets.ts`,
     `packages/broker/src/${AWS}/teamDevices.ts`,
-    `${INFRA}/lib/sharedGateway.ts`,
     `packages/broker/src/${AWS}/${CLD}/map.ts`,
     `${INFRA}/${CLD}/search/index.ts`,
     `${INFRA}/lib/${CLD}-watch-x.ts`,
     `${INFRA}/lib/${CLD}.watch.ts`,
     `${INFRA}/lib/${CLD}-9.ts`,
-    `${INFRA}/lib/api/gateway.ts`,
-    `${INFRA}/lib/model-api-gateway.ts`,
-    `${INFRA}/lib/llm-proxy.ts`,
-    `${INFRA}/lib/ai-proxy.ts`,
-    `${INFRA}/lib/gate-way.ts`,
-    `${INFRA}/lib/GateWay.ts`,
     `packages/broker/src/${AWS}/payments.ts`,
     `packages/broker/src/${AWS}/usage-quota.ts`,
     `packages/broker/src/${AWS}/quotas/check.ts`,
@@ -737,6 +724,22 @@ describe("plan v3.2: Code's own AWS deployment is public, Cloud-only work in it 
     `${INFRA}/lib/${CLD[0]!.toUpperCase()}${CLD.slice(1)}9Stack.ts`,
     `docs/billing.md`,
     `packages/broker/src/billing-notes.ts`,
+    // The model gateway, under any of its names: Code's and public since #1478.
+    `${INFRA}/lib/model-gateway.ts`,
+    `${INFRA}/lib/modelProxy.ts`,
+    `${INFRA}/lib/gateway.ts`,
+    `${INFRA}/lib/gateways-stack.ts`,
+    `${INFRA}/lib/models-gateway.ts`,
+    `${INFRA}/lib/llmgateway.ts`,
+    `${INFRA}/lib/aigateway.ts`,
+    `${INFRA}/lib/LlmGateway.ts`,
+    `${INFRA}/lib/sharedGateway.ts`,
+    `${INFRA}/lib/api/gateway.ts`,
+    `${INFRA}/lib/model-api-gateway.ts`,
+    `${INFRA}/lib/llm-proxy.ts`,
+    `${INFRA}/lib/ai-proxy.ts`,
+    `${INFRA}/lib/gate-way.ts`,
+    `${INFRA}/lib/GateWay.ts`,
   ])("lets an ordinary Code path through: %s", (path) => {
     expect(cloudDeploymentPathRule(path)).toBeNull();
     expect(addedFileRule(path)).toBeNull();
@@ -744,12 +747,12 @@ describe("plan v3.2: Code's own AWS deployment is public, Cloud-only work in it 
 
   it("fails a lane that adds a Cloud-only deployment file, and the accepted list cannot excuse it (cloud-path is not acceptable)", () => {
     const lane = new Lane();
-    lane.write(`${INFRA}/lib/model-gateway.ts`, "export const g = 1;\n");
-    lane.commit("gateway");
-    const blob = git(lane.dir, "rev-parse", `lane:${INFRA}/lib/model-gateway.ts`).trim();
-    const accepted = [{ path: `${INFRA}/lib/model-gateway.ts`, rule: "cloud-aws" as const, blob, reason: "a test that tries to excuse it" }];
+    lane.write(`${INFRA}/lib/billing.ts`, "export const g = 1;\n");
+    lane.commit("billing");
+    const blob = git(lane.dir, "rev-parse", `lane:${INFRA}/lib/billing.ts`).trim();
+    const accepted = [{ path: `${INFRA}/lib/billing.ts`, rule: "cloud-aws" as const, blob, reason: "a test that tries to excuse it" }];
     const findings = runGuard({ cwd: lane.dir, range: "base..lane", gitleaks: "off", names: DEFAULT_NAMES, accepted }).findings;
-    expect(findings.map((f) => `${f.rule}:${f.file}`)).toEqual([`cloud-path:${INFRA}/lib/model-gateway.ts`]);
+    expect(findings.map((f) => `${f.rule}:${f.file}`)).toEqual([`cloud-path:${INFRA}/lib/billing.ts`]);
   });
 
   it("still refuses an off-list AWS client or the CDK in a NEW file outside the deployment and tests", () => {
@@ -864,7 +867,7 @@ describe("plan v3.2: a test may import the AWS SDK and the CDK only as Code's de
     ["a test under tests/ whose name is Cloud-only work", "tests/unit/billing-meter.test.ts", METERING],
     ["a .mts test file in a package", "packages/x/src/h.test.mts", COGNITO],
     ["a camel-cased Cloud-only test name under tests/", "tests/unit/tenantBudgets.test.ts", METERING],
-    ["a Cloud-only test name under aws/", `packages/broker/src/${AWS}/model-gateway.test.ts`, BEDROCK_RUNTIME],
+    ["a Cloud-only test name under aws/", `packages/broker/src/${AWS}/billing.test.ts`, BEDROCK_RUNTIME],
   ])("refuses %s (%s)", (_name, path, specifier) => {
     expect(awsImportReason(path, specifier, true)).not.toBeNull();
   });
