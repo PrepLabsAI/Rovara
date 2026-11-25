@@ -184,6 +184,14 @@ describe("MEMBERSHIP-READ-FAILS-SAFE: the company reads when the membership read
     }
   });
 
+  it("the caller's own membership read (a person who is not an install administrator) that FAILED is the retryable 503 too", async () => {
+    await broker({ companyReads: { store, companyOf, membershipOf: async () => { throw membershipReadFailed(); } } });
+    const answer = await call("GET", "/v1/dev/client/company/audit/records", await token({ sub: CY, sid: "s-cy" }));
+    expect([answer.status, (answer.body["error"] as { code?: string } | undefined)?.code]).toEqual([503, "RUNTIME_UNAVAILABLE"]);
+    await broker({ companyReads: { store, companyOf, membershipOf: async () => { throw new Error("not a membership read"); } } });
+    expect((await call("GET", "/v1/dev/client/company/audit/records", await token({ sub: CY, sid: "s-cy" }))).status).toBe(401);
+  });
+
   it("any other failure of the reader is still the refusal", async () => {
     await broker({ companyReads: { store, companyOf: async () => { throw new Error("not a membership read"); } } });
     expect((await call("GET", "/v1/dev/client/company/audit/records", await token())).status).toBe(401);

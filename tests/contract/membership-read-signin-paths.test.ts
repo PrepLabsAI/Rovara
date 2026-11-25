@@ -89,6 +89,22 @@ describe("the refresh of a merged or connected sign-in (stillSeated) and the com
     expect(sessions(h)).toEqual(["sign_in_unlinked"]);
   });
 
+  it("each read of the company's sign-in settings at a refresh (the shared-method check, then the issuer selection) that FAILS is the retryable 503 and the session is kept, never an ended sign-in", async () => {
+    let failures = 0;
+    for (let nth = 1; nth <= 4; nth += 1) {
+      const h = signinCompanyWorld(); await h.create(COMPANY_A.orgId);
+      const signed = await h.signInCompany(COMPANY_A.orgId, SHARED_RAW_IDS.user);
+      const token = await h.exchange(new URL(signed.headers.location!).searchParams.get("code")!);
+      const read = h.company.read.bind(h.company);
+      let seen = 0;
+      h.company.read = async (key) => { if (key.pk.endsWith("SIGNIN_ISSUER")) { seen += 1; if (seen === nth) throw new Error("the store failed"); } return read(key); };
+      const answer = await h.refresh(token.body.refresh_token as string);
+      expect([nth, [200, 503].includes(answer.status), sessions({ db: h.db } as never)]).toEqual([nth, true, [undefined]]);
+      if (answer.status === 503) { failures += 1; expect(answer.body.error).toBe("temporarily_unavailable"); }
+    }
+    expect(failures, "the issuer row is read more than once on a refresh, and each read was failed in turn").toBeGreaterThanOrEqual(2);
+  });
+
   it("the company's sign-in settings (issuer row) that cannot be READ at a refresh are the retryable 503 and the session is kept", async () => {
     const h = signinCompanyWorld(); await h.create(COMPANY_A.orgId);
     const signed = await h.signInCompany(COMPANY_A.orgId, SHARED_RAW_IDS.user);
