@@ -11,9 +11,10 @@ const digest = (rows: readonly string[]) => createHash("sha256").update(rows.joi
 
 describe("the one route table", () => {
   it("holds the rows it held in dev-route-scopes.ts, in the same order", () => {
-    expect([DEV_ROUTES.length, APP_ROUTES.length]).toEqual([179, 108]);
-    expect(digest(DEV_ROUTES.map(keyOf))).toBe("35d7796eb4934166a2e6be86190c0609865b3c9f5d66adfad9e58b97c823968a");
-    expect(digest(APP_ROUTES.map(keyOf))).toBe("6c92cc6017ce24bbf0bad3b9ef5df0e0d4f27e0cd5f138019fd9eb6b6fdab2ce");
+    // R1 + L1 6.2b (Code API 1.3): the three waiting-ticket rows moved from /v1/dev/projects/{project}/intake* to /v1/app/projects/{project}/intake* (179/108 became 176/111).
+    expect([DEV_ROUTES.length, APP_ROUTES.length]).toEqual([176, 111]);
+    expect(digest(DEV_ROUTES.map(keyOf))).toBe("4e4ff97a005dc0a7008418110e266a2d1ed022dd00c0c08f83101615b3ebe616");
+    expect(digest(APP_ROUTES.map(keyOf))).toBe("421490346858df2db699d93b15c2508795e4a4c561a2daf6fc4d1f25cc392aca");
   });
 
   it("is the developer rows then the app rows, each row once, and no row carries more than method, path and scope yet", () => {

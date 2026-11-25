@@ -191,8 +191,10 @@ import { digestPilotOf, switchCovers } from "../core-host/flags.js";
 import { handleCoreContextTools } from "../core-host/context-tools.js";
 import { createTaskLogHooks } from "../core/task-log/hooks.js";
 import { hostedPlanSummaryOf } from "../core-host/plan-summary.js";
+import { companyMilestones, withMilestoneSweep } from "./milestone-home.js";
+import type { DocumentMilestones } from "../core/milestones/milestones.js";
 import { createHostedIntake, hostedTicketUpdates, hostedTrackerFor, intakeFenceKeyOf, ticketSessionStartExtras, type HostedIntake } from "./hosted-intake.js";
-import { hostedLinearResolver } from "./linear-account-links.js";
+import { linearCommentAuthorResolver } from "./linear-account-links.js";
 import type { LinearConnections } from "./linear-connections.js";
 import { createWikiOnEvents, readWikiTaskUse } from "../core/wiki/agent-context.js";
 
@@ -829,6 +831,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   // L4-SR1: the gateway's cap read for one company (an injected reader wins; else the environment's, only where the gateway's origin and the task-token signer exist). One reader per company: it never reads another's.
   const upkeepCapFor = (companyId: OrgId): UpkeepCapReader | undefined => inputs.upkeepCap !== undefined ? inputs.upkeepCap(companyId) : upkeepCapReaderFromEnvironment(env, inputs.taskTokens, companyId);
   const lessonsByCompany = new Map<string, CoreLessons>();
+  // R1 + L1 6.2: each company's milestones host, built outside lessons (`aws/milestone-home.ts`).
+  const milestonesByCompany = new Map<string, DocumentMilestones>();
   // L4-EVW4 (DEC 254zzz43, folded in from #1025): the project's repositories as the eval wrapper card reads and (on a person's click) writes them. One per company, over that company's own flow, registry view and scope:
   // the pinned address, the host that serves it and `{ orgId: company }`. The setup run's callback gets NO wrapper wiring: nothing but a person's POST opens a pull request.
   const wrapperTargetsByCompany = new Map<string, ReturnType<typeof createEvalWrapperTargets>>();
@@ -966,6 +970,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             return await outbox.relay(options);
           } };
         }
+        // R1 + L1 6.2: the company's milestones host, for every company that has a handler to register (Linear write-back, chat threads, lessons), whether or not lessons are on.
+        const milestones = companyMilestones({ flow, companyId, now: () => now().getTime(), log, anyHandler: (inputs.lessonsPeople !== undefined && switchCovers(lessonsSwitch.value, companyId)) || inputs.linearIntake !== undefined || inputs.chatThreads !== undefined });
         let lessons: CoreLessons | undefined;
         if (inputs.lessonsPeople === undefined) {
           if (lessonsSwitch.value.mode !== "off") log({ event: "core_engine.lessons_not_wired", companyId });
@@ -973,7 +979,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           lessons = createCoreLessons({
             // B6: the weekly summary's chats are the company's own chat seam (the same view and `companyOf` the thread notices read), not the raw core registry, which has no `channel` point here.
             ...(inputs.chatThreads === undefined ? {} : { digestChannels: { registry: hostedChannelView(inputs.chatThreads, registry, companyId), companyOf: inputs.chatThreads.companyOf } }),
-            flow, registry, companyId, lessonsSwitch: lessonsSwitch.value, digestPilot: lessonsDigestPilot, people: inputs.lessonsPeople(companyId, { store: async () => registry.require("storage") }), now: () => now().getTime(), log,
+            flow, registry, companyId, milestones, lessonsSwitch: lessonsSwitch.value, digestPilot: lessonsDigestPilot, people: inputs.lessonsPeople(companyId, { store: async () => registry.require("storage") }), now: () => now().getTime(), log,
             // Lead 4 L4-AK2b: the knowledge briefing's measured facts on a deployed install: the base's known-flaky tests from THIS company's own nightly baseline rows (the same read the laptop makes).
             knowledge: { facts: flakyFactsPort((flakyTask) => baseFlakyTests({ store: registry.require("storage"), now: () => now().getTime() }, flakyTask)) },
             ...((learning) => (learning === undefined ? {} : { learning }))(learningOf(companyId, { get: async (key) => await registry.require("storage").get(key) })),
@@ -981,7 +987,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
             ...(inputs.linearIntake === undefined ? {} : {
               tickets: {
                 trackerFor: hostedTrackerFor(companyId, inputs.linearIntake.connections, inputs.linearIntake.fetch),
-                resolveAccount: hostedLinearResolver({ store: registry.require("storage"), connections: inputs.linearIntake.connections, principalOf: (org, personId) => registry.require("identity").getPrincipal(org, personId) }),
+                resolveAccount: linearCommentAuthorResolver({ store: registry.require("storage"), connections: inputs.linearIntake.connections, principalOf: (org, personId) => registry.require("identity").getPrincipal(org, personId) }),
               },
             }),
             ...((slack) => (slack === undefined ? {} : { channelCompanyOf: slack.companyOf, slackThreadCommand: slack.command }))(inputs.lessonsSlack?.(companyId)),
@@ -991,36 +997,41 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
               return lessonsByCompany.get(other)?.host;
             },
           });
-          if (lessons !== undefined) {
-            // L2-4: the ticket write-back rides on the company's milestones, through the company's own Linear connection only.
-            // The task log rides with it: the flow tells the hook once an answer, a question or a decision is committed (the entries are written in that change's own transaction), and the plan's summary is read
-            // through the company's own decision gate. A company with no Linear write-back gets neither (the hook is never set, so the flow is byte-identical to before).
-            if (inputs.linearIntake !== undefined) {
-              const taskLog = createTaskLogHooks((event, fields) => { log({ component: "task_log", companyId, event, ...fields }); });
-              flow.deps.taskLog = taskLog;
-              for (const handler of hostedTicketUpdates({
-                companyId, store: registry.require("storage"), connections: inputs.linearIntake.connections, fetch: inputs.linearIntake.fetch, now: () => now().getTime(), log,
-                planSummaryOf: hostedPlanSummaryOf({ flow: flow.deps, registry, companyId, now }), taskLog,
-                members: deployedSessionMembers(companyId, { membershipOf, projectGrantRole }),
-              })) lessons.milestones.register(handler);
-            }
-            // L4-U5b: the chat thread a task was started from is told its milestones, through this company's own chat adapter only. The person who started the task must still be this company's member.
-            if (inputs.chatThreads !== undefined) {
-              const threads = inputs.chatThreads;
-              lessons.milestones.register(hostedThreadHandler({
-                threads, registry, companyId, deps: flow.deps, now: () => now().getTime(), clock: now, origin: originOf,
-                isMember: async (orgId, personId) => (await membershipOf(personId))?.companyId === orgId,
-                taskActions: taskActionCapabilities,
-                log: (event, fields) => log({ component: "channel_thread", event, companyId, ...fields }),
-              }));
-            }
-            lessons.attach();
-            lessonsByCompany.set(companyId, lessons);
-            // The Team record rides on the company's lessons (LM7): a merged or closed task of the company adds its people's decisions and review feedback. Its search is for the
-            // context sources' `teamSearch`; only this company's eligible stages advertise it.
-            teamRecords.set(companyId, attachCoreTeamRecord(lessons, { store: registry.require("storage"), now: () => now().getTime(), log }));
-            flow.deps.contextSources = { stageHasSources: async (_task, mode) => isContextSourceStage(mode) && teamRecords.has(companyId) };
+        }
+        if (milestones !== undefined) {
+          // L2-4: the ticket write-back rides on the company's milestones, through the company's own Linear connection only. R1 + L1 6.2: on the company's milestones host, whether or not lessons are on.
+          // The task log rides with it: the flow tells the hook once an answer, a question or a decision is committed (the entries are written in that change's own transaction), and the plan's summary is read
+          // through the company's own decision gate. A company with no Linear write-back gets neither (the hook is never set, so the flow is byte-identical to before).
+          if (inputs.linearIntake !== undefined) {
+            const taskLog = createTaskLogHooks((event, fields) => { log({ component: "task_log", companyId, event, ...fields }); });
+            flow.deps.taskLog = taskLog;
+            for (const handler of hostedTicketUpdates({
+              companyId, store: registry.require("storage"), connections: inputs.linearIntake.connections, fetch: inputs.linearIntake.fetch, now: () => now().getTime(), log,
+              planSummaryOf: hostedPlanSummaryOf({ flow: flow.deps, registry, companyId, now }), taskLog,
+              members: deployedSessionMembers(companyId, { membershipOf, projectGrantRole }),
+            })) milestones.register(handler);
           }
+          // L4-U5b: the chat thread a task was started from is told its milestones, through this company's own chat adapter only. The person who started the task must still be this company's member.
+          if (inputs.chatThreads !== undefined) {
+            const threads = inputs.chatThreads;
+            milestones.register(hostedThreadHandler({
+              threads, registry, companyId, deps: flow.deps, now: () => now().getTime(), clock: now, origin: originOf,
+              isMember: async (orgId, personId) => (await membershipOf(personId))?.companyId === orgId,
+              taskActions: taskActionCapabilities,
+              log: (event, fields) => log({ component: "channel_thread", event, companyId, ...fields }),
+            }));
+          }
+          // The flow's milestone slot, filled once every handler is registered (a milestone written with no handler is marked told).
+          flow.deps.milestones = milestones;
+          milestonesByCompany.set(companyId, milestones);
+        }
+        if (lessons !== undefined) {
+          lessons.attach();
+          lessonsByCompany.set(companyId, lessons);
+          // The Team record rides on the company's lessons (LM7): a merged or closed task of the company adds its people's decisions and review feedback. Its search is for the
+          // context sources' `teamSearch`; only this company's eligible stages advertise it.
+          teamRecords.set(companyId, attachCoreTeamRecord(lessons, { store: registry.require("storage"), now: () => now().getTime(), log }));
+          flow.deps.contextSources = { stageHasSources: async (_task, mode) => isContextSourceStage(mode) && teamRecords.has(companyId) };
         }
         // L4-P1: the company's SystemRuns flag, on the flow itself (the free re-check at task start stands behind it), and the system starter and the upkeep night where the flag covers the company (nothing is built otherwise).
         hostedSystemRunsFor(flow.deps, companyId, systemRunsFlag.value);
@@ -1054,22 +1065,27 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           refresh: createHostedWikiRefresh({ flow: flow.deps, companyId, now: () => now().getTime(), gate: upkeep.gate, admission: flow.deps.admission, modelAccessConfigured: modelConfigured(), map: wikiMapForNight, cap: upkeepCapFor(companyId), log }),
         });
         const afterMerge = createLocalAfterMerge({ flow: flow.deps, registry, companyId, now: () => now().getTime(), log });
-        // The admission's own hold sweep (lane L8) is always this one: a deployment's services never replace the sweep of the holds this admission takes.
-        return {
-          ...(inputs.services?.(companyId, flow, registry, { ...wiring,
+        const provided = inputs.services?.(companyId, flow, registry, { ...wiring,
             ...(attention === undefined && inputs.chatThreads === undefined ? {} : { notification: {
               // HW5: the chat thread's notices (the company's chats, the thread, the task link, the already-told reads), and the attention email's seams beside them.
-              ...(inputs.chatThreads === undefined ? {} : hostedThreadNotification({ threads: inputs.chatThreads, registry, companyId, store: registry.require("storage"), now: () => now().getTime(), origin: originOf, threadsTold: lessons !== undefined })),
+              ...(inputs.chatThreads === undefined ? {} : hostedThreadNotification({ threads: inputs.chatThreads, registry, companyId, store: registry.require("storage"), now: () => now().getTime(), origin: originOf, threadsTold: milestones !== undefined })),
               ...(attention === undefined ? {} : { address: attention.addressFor(flow.deps.store), emailLinks: attention.links, remember: attention.rememberFor(flow.deps.store) }),
             } }),
-            ...(inputs.chatThreads === undefined ? {} : { threadMoments: lessons !== undefined, threadRefresh: hostedWorkflowThreadRefresh({ threads: inputs.chatThreads, registry, companyId, deps: flow.deps, now: () => now().getTime(), clock: now, origin: originOf,
+            ...(inputs.chatThreads === undefined ? {} : { threadMoments: milestones !== undefined, threadRefresh: hostedWorkflowThreadRefresh({ threads: inputs.chatThreads, registry, companyId, deps: flow.deps, now: () => now().getTime(), clock: now, origin: originOf,
               isMember: async (orgId, personId) => (await membershipOf(personId))?.companyId === orgId, taskActions: taskActionCapabilities, log: (event, fields) => log({ component: "channel_thread", event, companyId, ...fields }) }) }),
-            ...(lessons === undefined ? {} : { humanEdit: lessons.host.noteHumanEdit }), upkeep: { administers: upkeep.administers, setupRead: (orgId, project) => (orgId === companyId ? readSetupBrokenNotice({ flow: flow.deps, store: flow.deps.store, companyId, now: () => now().getTime() }, project) : Promise.resolve(undefined)), setupLink: (project) => projectPageUrl(originOf(), project) } }) ?? {}), ...(lessons === undefined ? {} : { lessons: lessons.service }),
+            // R1 + L1 6.2: a ticket's own plan-ready and closed moments are written only where the ticket write-back is wired (the company has the Linear connection).
+            ticketMoments: inputs.linearIntake !== undefined && milestones !== undefined,
+            ...(lessons === undefined ? {} : { humanEdit: lessons.host.noteHumanEdit }), upkeep: { administers: upkeep.administers, setupRead: (orgId, project) => (orgId === companyId ? readSetupBrokenNotice({ flow: flow.deps, store: flow.deps.store, companyId, now: () => now().getTime() }, project) : Promise.resolve(undefined)), setupLink: (project) => projectPageUrl(originOf(), project) } }) ?? {};
+        // R1 + L1 6.2: the milestone sweep (and, with Linear, the one-time flip of the seeded status default) runs from the always-wired `notify-deliver` pass, not from lessons' (`aws/milestone-home.ts`).
+        const withSweep = withMilestoneSweep(provided, { milestones, companyId, linear: inputs.linearIntake !== undefined, store: registry.require("storage"), now: () => now().getTime(), audit: registry.require("audit-sink"), log });
+        return {
+          ...withSweep, ...(lessons === undefined ? {} : { lessons: lessons.service }),
           // L6a: the project setting is off by default; the service is bound to this runtime's company.
           "after-merge": afterMerge,
           // L4-P2: where the ceiling covers the company: the night, and the sweep that settles an unattended run's reservation and stops one that outlived its minutes.
           ...(systemRuns === undefined ? {} : { upkeep: systemRuns.service, "automation-stop": createHostedAutomationStop({ flow: flow.deps, companyId, admission: flow.deps.admission, now: () => now().getTime(), log, repairs: repair }) }),
           "person-erase-resume": { pass: async ({ budgetMs }) => await resumeErases(companyId, budgetMs) },
+          // The admission's own hold sweep (lane L8) is always this one: a deployment's services never replace the sweep of the holds this admission takes.
           "admission-hold-sweep": coreMoneyWiring(registry, companyId, now).holdSweep,
         };
       },
@@ -1218,6 +1234,8 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
           },
           // Audit gap 11b: the project's ticket-sharing settings. The same live standing; the trackers a hosted company's tickets are written back to (Linear, over its own connection: hosted-intake.ts).
           ticketUpdates: { standing: setupRunStanding, trackers: HOSTED_TICKET_TRACKERS },
+          // R1 + L1 6.2b: the waiting tickets at the one /v1/app address; the intake itself is built below (read when a request comes).
+          intake: { standing: setupRunStanding, intake: () => intake },
           // PRIVATE-PACKAGES P1b: the company's package tokens (write only: the status line is read, no route answers a value). Through the company-tagged session of the CompanySecrets role; an install
           // without that role has no wiring and the path says "not on the core yet". Nothing here hands a token to a run: the exchange's company store is a later step (P2).
           ...(companySecrets === undefined ? {} : { packageRegistries: { env: companySecrets.env, secrets: companySecrets.secrets } }),
@@ -1363,7 +1381,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       if (app.engineForNewTask(companyId) !== "core") return undefined;
       const runtime = await app.runtimeFor(companyId);
       const registry = await app.registry();
-      const milestones = lessonsByCompany.get(companyId)?.milestones;
+      const milestones = milestonesByCompany.get(companyId);
       return {
         store: registry.require("storage"), access: runtime.flow.deps.access, flow: runtime.flow, identity: registry.require("identity"), audit: registry.require("audit-sink"),
         ...(milestones === undefined ? {} : { milestones }),

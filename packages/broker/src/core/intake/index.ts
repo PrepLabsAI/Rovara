@@ -9,3 +9,4 @@ export * from "./ticket-text.js";
 export * from "./tracker-events.js";
 export * from "./tracker-search.js";
 export * from "./wiring.js";
+export * from "./trigger.js";

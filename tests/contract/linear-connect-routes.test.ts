@@ -10,7 +10,7 @@ import {
   LinearConnections, linearConnectionKey, linearStateKey, linearTeamKey, linearWorkspaceKey, LINEAR_NEEDS_RECONNECT, LINEAR_NOT_CONNECTED, REFRESH_LEASE_MS, REFRESH_MARGIN_MS, type LinearAppSettings,
 } from "../../packages/broker/src/aws/linear-connections.js";
 import {
-  routeLinearConnect, CONNECT_ADMIN_ONLY, CONNECT_NOT_SET_UP, DISCONNECT_OWNER_ONLY, LINEAR_OTHER_WORKSPACE, LINEAR_TAKEN, PROJECT_NOT_FOUND, START_AGAIN, TEAM_ADMIN_ONLY, TEAM_NOT_FOUND,
+  routeLinearConnect, CONNECT_ADMIN_ONLY, CONNECT_NOT_SET_UP, DISCONNECT_OWNER_ONLY, LINEAR_OTHER_WORKSPACE, LINEAR_TAKEN, PROJECT_NOT_FOUND, START_AGAIN, TEAM_ADMIN_ONLY, TEAM_NOT_FOUND, TEAM_TAKEN,
 } from "../../packages/broker/src/aws/linear-connect-routes.js";
 import { handleLinearAppWebhook, LINEAR_WEBHOOK_WINDOW_MS, WEBHOOK_REFUSED, type LinearProjectEvent } from "../../packages/broker/src/aws/linear-app-webhook.js";
 import { linearCompanyApiAccess } from "../../packages/broker/src/aws/linear-wiring.js";
@@ -248,6 +248,17 @@ describe("two companies", () => {
     w.db.set({ ...bRow, sealedAccess: aRow.sealedAccess });
     await expect(w.connections.accessToken(B)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
     void aGrant;
+  });
+  // R1 + L1 6.2b (plan 0.1 #13): a team starts work in ONE project, or a ticket would start (and be paid for) twice.
+  it("refuses a team another project of the company already has (the same project may pick its own again, and another company may use the same team id)", async () => {
+    const w = world(); w.as(PERSON, A); await w.connect(WORKSPACE_A);
+    w.projectOf("alpha", A); w.projectOf("gamma", A);
+    expect((await w.call("PUT", `${BASE}/projects/alpha`, { teamId: "team-a-eng" })).status).toBe(200);
+    const taken = refused(await w.call("PUT", `${BASE}/projects/gamma`, { teamId: "team-a-eng" }));
+    expect(taken).toEqual({ status: 409, error: { code: "LINEAR_TEAM_TAKEN", message: TEAM_TAKEN } });
+    expect(w.db.get(linearTeamKey(A, "gamma").pk, "PROJECT#gamma")).toBeUndefined();
+    expect((await w.call("PUT", `${BASE}/projects/alpha`, { teamId: "team-a-eng" })).status).toBe(200);
+    expect((await w.call("PUT", `${BASE}/projects/gamma`, { teamId: "team-a-ops" })).status).toBe(200);
   });
   it("A cannot pick a team with B's connection: only A's own workspace's teams are offered or accepted", async () => {
     const w = world(); w.as(PERSON, A); await w.connect(WORKSPACE_A);
@@ -501,8 +512,11 @@ describe("app webhooks", () => {
     const { delivered, deliver } = await setup();
     expect(await deliver(issue(WORKSPACE_A.id, "team-a-eng"))).toEqual({ status: 200, body: { ok: true } });
     expect(delivered.map((e) => [e.companyId, e.project, e.type])).toEqual([[A, "alpha", "Issue"]]);
+    // An update rings it too (a label or an assignment added later); a Comment is not routed at all (R1 + L1 6.2b: it cost a read and started nothing).
+    await deliver({ type: "Issue", action: "update", organizationId: WORKSPACE_B.id, data: { id: "issue-2", teamId: "team-b-web" } });
     await deliver({ type: "Comment", action: "create", organizationId: WORKSPACE_B.id, data: { id: "c1", issue: { id: "i2", teamId: "team-b-web" } } });
-    expect(delivered.map((e) => [e.companyId, e.project, e.type])).toEqual([[A, "alpha", "Issue"], [B, "bravo", "Comment"]]);
+    await deliver(issue(WORKSPACE_B.id, "team-b-web", { action: "remove" }));
+    expect(delivered.map((e) => [e.companyId, e.project, e.type, e.action])).toEqual([[A, "alpha", "Issue", "create"], [B, "bravo", "Issue", "update"]]);
   });
   it("B's workspace's events never reach A's projects, even naming A's team", async () => {
     const { delivered, deliver } = await setup();

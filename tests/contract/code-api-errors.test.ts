@@ -38,6 +38,7 @@ const CODES_IN_ORDER: ReadonlyArray<readonly [string, number]> = [
   ["GITHUB_ACCOUNT_LINK_EXISTS", 409], ["LINK_START_AGAIN", 403], ["EXTERNAL_ACCOUNT_TAKEN", 409], ["EXTERNAL_ACCOUNT_OTHER_WORKSPACE", 409],
   ["EXTERNAL_ACCOUNT_LINK_EXISTS", 409], ["COMMITTED_REFRESH_NEEDED", 409],
   ["TASK_ACTION_NOT_OFFERED", 409], ["TASK_ACTION_STALE", 409], ["TASK_ACTION_NEEDS_INPUT", 400], ["TASK_ACTION_NEEDS_WEB", 403],
+  ["LINEAR_TEAM_TAKEN", 409],
 ];
 
 describe("the Code API's refusal codes (moved from contracts, no change)", () => {

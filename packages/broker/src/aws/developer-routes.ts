@@ -28,7 +28,6 @@ import { isGithubConnectPath, routeGithubConnect, type GithubConnectWiring } fro
 import { isGithubLinkPath, routeGithubLink, type GithubLinkWiring } from "./github-account-link-routes.js";
 import { isLinearAccountLinkPath, routeLinearAccountLink, type LinearLinkWiring } from "./linear-account-link-routes.js";
 import { isLinearConnectPath, routeLinearConnect, type LinearConnectWiring } from "./linear-connect-routes.js";
-import { routeHostedIntake } from "./hosted-intake-routes.js";
 import type { HostedIntake } from "./hosted-intake.js";
 import { LESSONS_OFF, type LessonsApi } from "../core-host/lessons-api.js"; import { knowledgeSwitchedOff, type KnowledgeApi } from "../core-host/knowledge-api.js"; import { isScriptTokenHeader } from "../core/script-tokens/token-format.js";
 import type { LessonsRepeatsApi } from "../core-host/lessons-repeats-api.js";
@@ -216,7 +215,7 @@ export interface DeveloperApiConfiguration {
   linearConnect?: LinearConnectWiring;
   /** R1 + L1: a member links their own Linear account, and the company's admin lists and removes links (linear-account-link-routes.ts). Absent (or no company layer): those routes are unknown. */
   linearLink?: LinearLinkWiring;
-  /** L2-4: a project's waiting tickets on the core (hosted-intake-routes.ts), set only while the core switch serves and Linear is wired. Absent (or no company layer): those routes are unknown. */
+  /** L2-4: the company's hosted intake (the first team pick seeds the ticket updates); its waiting-ticket routes are the core's (core-host/intake-routes.ts). Set only while the core switch serves and Linear is wired. */
   coreIntake?: HostedIntake;
   /** Guided onboarding PR 14 (DEC 254n item 1): the company engine model route (company-engine-model-routes.ts). Absent (no model gateway, or no company layer): the route is unknown. */
   companyEngineModel?: CompanyEngineModelWiring; companyLearningModel?: CompanyLearningModelWiring; companyEgress?: CompanyEgressWiring; // L4-EGR (company-egress-routes.ts): Rovara's outbound addresses; absent (or no company layer): the route is unknown. Kept on this line so the forwarding sites below do not move.
@@ -2450,25 +2449,6 @@ async function linearAccountLinkRoute(deps: DeveloperRouteDependencies, request:
   return routeLinearAccountLink({ documentClient: deps.documentClient, signInTableName: deps.developer.signInTableName, now: deps.now, wiring }, caller, companyId, request, url);
 }
 
-/** L2-4: a project's waiting tickets (hosted-intake-routes.ts parses what this matched). */
-export const HOSTED_INTAKE_ROUTES = /^\/v1\/dev\/projects\/([^/]+)\/intake(?:\/([^/]+)\/(start|dismiss))?$/u;
-
-/** L2-4: the waiting-ticket routes. Unknown, before anyone is authenticated, without the company layer or the core's intake. */
-async function hostedIntakeRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL, match: RegExpExecArray): Promise<unknown> {
-  const intake = deps.developer.coreIntake;
-  if (deps.companies === undefined || intake === undefined) throw agentXError("NOT_FOUND", "route not found");
-  const route = devRouteOf(request.method, url.pathname);
-  if (route === undefined) throw agentXError("NOT_FOUND", "not found");
-  const caller = await authenticateCaller(deps, request.headers.authorization, route);
-  const companyId = await resolveCompany(deps.companies, caller.developerId);
-  if (companyId === undefined) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
-  return routeHostedIntake({
-    documentClient: deps.documentClient, signInTableName: deps.developer.signInTableName, intake,
-    projectInCompany: async (project, company) => (await projectsWithPolicy(deps, [project], company)).has(project),
-    projectRole: async (project, personId, company) => (await projectGrant(memberActions(deps), project, personId, company))?.role,
-  }, caller, companyId, request, { project: match[1]!, itemId: match[2], act: match[3] });
-}
-
 /** Guided onboarding PR 14: the company engine model route. Unknown, before anyone is authenticated, without the company layer or the wiring. */
 async function companyEngineModelRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   const wiring = deps.developer.companyEngineModel;
@@ -2566,8 +2546,6 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   if (isSlackChannelLinkPath(url.pathname)) return slackChannelLinkRoute(deps, request, url);
   if (isSlackInstallPath(url.pathname)) return slackInstallRoute(deps, request, url);
   if (isLinearConnectPath(url.pathname)) return linearConnectRoute(deps, request, url);
-  const intakeMatch = HOSTED_INTAKE_ROUTES.exec(url.pathname);
-  if (intakeMatch !== null) return hostedIntakeRoute(deps, request, url, intakeMatch);
   if (isCompanyEngineModelPath(url.pathname)) return companyEngineModelRoute(deps, request, url); if (isCompanyLearningModelPath(url.pathname)) return companyLearningModelRoute(deps, request, url);
   if (isCompanyEgressPath(url.pathname)) return companyEgressRoute(deps, request, url);
   if (url.pathname === "/v1/dev/company/preapprovals" || url.pathname.startsWith("/v1/dev/company/preapprovals/")) return companyPreapprovalRoute(deps, request, url);

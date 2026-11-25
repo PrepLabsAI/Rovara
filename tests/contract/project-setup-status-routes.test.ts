@@ -1311,6 +1311,10 @@ describe("what did not change", () => {
     const withPreview = rows.filter((row) => !added.some((path) => row === `${path} full`) && row !== inviteResend && !serverReads.includes(row) && !linearLinks.includes(row));
     const existing = withPreview.filter((row) => row !== preview && row !== closePreview);
     expect(existing).toHaveLength(DEV_ROUTES.length - 15);
+    // R1 + L1 6.2b (rule D): the three hosted-only `/v1/dev/projects/{project}/intake*` rows moved to the one `/v1/app` address (the MCP and CLI's own). They are put back where they stood, so this pin proves exactly those three rows are gone and every other row is unchanged.
+    const movedIntake = ["GET /v1/dev/projects/{project}/intake full", "POST /v1/dev/projects/{project}/intake/{itemId}/start full", "POST /v1/dev/projects/{project}/intake/{itemId}/dismiss full"];
+    expect(rows.filter((row) => movedIntake.includes(row))).toEqual([]);
+    existing.splice(existing.indexOf("GET /v1/dev/company/egress-addresses full") + 1, 0, ...movedIntake);
     // A digest of every other row, in order: any change to an existing route fails here and must be reviewed.
     expect(createHash("sha256").update(existing.join("\n")).digest("hex")).toBe(EXISTING_ROUTES_DIGEST);
     // L4-JA7 (rule D): the pin above moved only by the four hosted knowledge-switch rows; with exactly those removed the digest is the one the table had before.

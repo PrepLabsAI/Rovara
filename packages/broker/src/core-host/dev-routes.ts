@@ -106,6 +106,7 @@ import { isPackageRegistriesPath, routeHostedPackageRegistries, type HostedPacka
 import { isHostedMergePath, routeHostedMerge, type HostedMergeWiring } from "./hosted-merge-routes.js";
 import { createTaskActionRoutes, type TaskActionChat } from "./task-action-routes.js";
 import { isTicketUpdatesPath, routeHostedTicketUpdates, type HostedTicketUpdatesWiring } from "./ticket-updates-routes.js";
+import { isIntakePath, routeHostedIntake, type HostedIntakeAppWiring } from "./intake-routes.js";
 
 async function applicationReadProjection(runtime: CoreRuntime, record: TaskRecord, personId: string) {
   if (record.workflow === undefined) return {};
@@ -276,6 +277,8 @@ export interface CoreDevWiring {
   merge?: HostedMergeWiring;
   /** Audit gap 11b: a project's ticket-sharing settings (`/v1/app/projects/<p>/intake/updates`, ticket-updates-routes.ts). Absent: that path says "not on the core yet". */
   ticketUpdates?: HostedTicketUpdatesWiring;
+  /** R1 + L1 6.2b: a project's waiting tickets at the one `/v1/app/projects/{project}/intake` address (core-host/intake-routes.ts). Absent: those paths are not on the core. */
+  intake?: HostedIntakeAppWiring;
   /** PRIVATE-PACKAGES P1b: the company's package tokens (`/v1/app/company/package-registries`, package-registries-routes.ts). Absent: that path says "not on the core yet". */
   packageRegistries?: HostedPackageRegistriesWiring;
 }
@@ -332,7 +335,7 @@ function owns(path: string, method: string, query: string): boolean {
   if (INBOX_PATH.test(path)) return inboxOwns(path, method);
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
   if (isSetupRunPath(path, method) || isSetupCheckPath(path, method) || isWikiMapPath(path, method) || isReportPath(path, method)) return true;
-  if (isKnownFailingPath(path, method) || isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method) || isAnswersPath(path, method) || isStartSuggestPath(path, method) || isUpkeepPath(path, method) || isEvalCheckPath(path, method) || isBrowserTestingPath(path, method) || isAgentDirectoryPath(path, method) || isSystemRunsPath(path, method) || isPackageRegistriesPath(path, method) || isTicketUpdatesPath(path, method)) return true;
+  if (isKnownFailingPath(path, method) || isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method) || isAnswersPath(path, method) || isStartSuggestPath(path, method) || isUpkeepPath(path, method) || isEvalCheckPath(path, method) || isBrowserTestingPath(path, method) || isAgentDirectoryPath(path, method) || isSystemRunsPath(path, method) || isPackageRegistriesPath(path, method) || isTicketUpdatesPath(path, method) || isIntakePath(path, method)) return true;
   return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path) || parityTaskRoute(path, method) !== undefined || isPrFeedbackPath(path, method);
 }
 /** Neither decisions surface relies on sign-in time or methods (DEC 254zzz73). */
@@ -864,6 +867,12 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           });
         }
         if (isKnownFailingPath(path, request.method)) return await routeKnownFailing({ flow: target.runtime.flow.deps, principal: caller.principal, companyId: target.runtime.companyId, members: target.wiring.members, webApp: caller.webApp === true, path, request, ...(target.wiring.testEnvironment === undefined ? {} : { env: target.wiring.testEnvironment.env }) });
+        if (isIntakePath(path, request.method)) {
+          // R1 + L1 6.2b: the company's own runtime, the caller's live standing on the project (read inside); the company's intake is built by the root, so an install without it is "not on the core".
+          const intake = target.wiring.intake?.intake();
+          if (target.wiring.intake === undefined || intake === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+          return await routeHostedIntake({ request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.intake, intake });
+        }
         if (isTicketUpdatesPath(path, request.method)) {
           // Audit gap 11b: the company's own runtime and store, the caller's live standing on the project (read inside), the request's audit sink naming the caller.
           if (target.wiring.ticketUpdates === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);

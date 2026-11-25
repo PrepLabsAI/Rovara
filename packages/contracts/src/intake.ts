@@ -152,7 +152,7 @@ export const INTAKE_WAIT_REASON_WORDS: Readonly<Record<IntakeWaitReason, string>
   no_authority: "The person who asked can't start tasks in this project.",
   start_refused: "Rovara tried to start it and the start was refused.",
   unverified: "Rovara couldn't confirm who asked for it.",
-  unlinked: "Nobody in your company is linked to the tracker account that asked. A company admin can link them in Tracker people.",
+  unlinked: "Nobody in your company is linked to the tracker account that asked. They can link it on their Rovara profile, or a project admin can press Start.",
 };
 
 /** One item that waits for a member to say "Start". The title is the ticket's own words (untrusted, shown as text only). */
@@ -168,6 +168,12 @@ export const IntakeWaitingItemSchema = z.object({
   /** With `start_refused`: the refusal's code (never its words). */
   lastRefusal: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/).optional(),
   waitingSince: z.string().datetime(),
+  /** R1 + L1 6.2b (hosted): why it waits in Code's own words (`INTAKE_WAIT_REASON_WORDS`), so a screen holds no table of them. Absent on a laptop. */
+  reasonWords: z.string().max(300).optional(),
+  /** Hosted: whether the person asking may press Start now (a project's admin or a company owner or admin who may themselves start work on it), computed for them. Absent on a laptop. */
+  canStart: z.boolean().optional(),
+  /** Hosted: whether the person asking may press "Not this one". Absent on a laptop. */
+  canDismiss: z.boolean().optional(),
 }).strict();
 export type IntakeWaitingItem = z.infer<typeof IntakeWaitingItemSchema>;
 

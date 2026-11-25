@@ -12,7 +12,7 @@ import {
 } from "../../packages/broker/src/aws/linear-account-link-routes.js";
 import { DISCONNECT_UNAVAILABLE } from "../../packages/broker/src/aws/linear-connect-routes.js";
 import { LINEAR_NOT_CONNECTED } from "../../packages/broker/src/aws/linear-connections.js";
-import { hostedLinearResolver, linearAccountResolver } from "../../packages/broker/src/aws/linear-account-links.js";
+import { linearAccountResolver, linearCommentAuthorResolver, linearLinkResolver } from "../../packages/broker/src/aws/linear-account-links.js";
 import { accountLinkAuditPk, accountLinkOf, linkAccount, personAccountLink } from "../../packages/broker/src/core/people/account-links.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { COMPANY_A_ID as A, COMPANY_B_ID as B } from "../../packages/testing/src/isolation/two-company.js";
@@ -357,7 +357,7 @@ describe("a company's disconnect", () => {
     expect(await personAccountLink(w.links, A, ADA, "linear")).toBeUndefined();
     expect((await w.connect(WORKSPACE_A)).status).toBe(200);
     const principalOf = async (company: string, personId: string) => ({ companyId: company, personId, displayName: "x", roles: ["member"], provider: "hosted" }) as never;
-    const resolve = hostedLinearResolver({ store: w.links, connections: w.connections, principalOf });
+    const resolve = linearCommentAuthorResolver({ store: w.links, connections: w.connections, principalOf });
     expect(await resolve(A, { provider: "linear", tenant: "", accountId: MAYA.id })).toBeUndefined();
     expect(await resolve(A, { provider: "linear", tenant: WORKSPACE_A.id, accountId: NICO.id })).toBeUndefined();
     // Another company's links are not touched by A's disconnect.
@@ -398,13 +398,13 @@ describe("a company's disconnect", () => {
 });
 
 describe("the resolver (change 10)", () => {
-  it("refuses an empty or other workspace, another provider, a company that is not connected, and a person who is gone; the hosted wrapper stamps an empty one with the connected workspace", async () => {
+  it("refuses an empty or other workspace, another provider, a company that is not connected, and a person who is gone; the comment source's resolver stamps an empty one with the connected workspace, and the link resolver says when the link was made", async () => {
     const w = await connectedWorld();
     expect((await w.link(WORKSPACE_A, MAYA)).status).toBe(200);
     let live = true;
     const principalOf = async (company: string, personId: string) => (live && company === A ? ({ companyId: company, personId, displayName: "x", roles: ["member"], provider: "hosted" }) as never : undefined);
     const strict = linearAccountResolver({ store: w.links, connections: w.connections, principalOf });
-    const hosted = hostedLinearResolver({ store: w.links, connections: w.connections, principalOf });
+    const hosted = linearCommentAuthorResolver({ store: w.links, connections: w.connections, principalOf });
     const mine = { provider: "linear", tenant: WORKSPACE_A.id, accountId: MAYA.id };
     expect((await strict(A, mine))?.personId).toBe(ADA);
     expect(await strict(A, { ...mine, tenant: "" })).toBeUndefined();
@@ -415,6 +415,10 @@ describe("the resolver (change 10)", () => {
     expect((await hosted(A, { ...mine, tenant: "" }))?.personId).toBe(ADA);
     expect(await hosted(A, { ...mine, tenant: WORKSPACE_B.id })).toBeUndefined();
     expect(await hosted(B, { ...mine, tenant: "" })).toBeUndefined();
+    // The link resolver names the person AND when they linked (an act older than that is not their consent).
+    const linked = linearLinkResolver({ store: w.links, connections: w.connections, principalOf });
+    expect(await linked(A, mine)).toMatchObject({ principal: { personId: ADA }, linkedAt: expect.any(String) as string });
+    expect(await linked(A, { ...mine, tenant: "" })).toBeUndefined();
     live = false; expect(await strict(A, mine)).toBeUndefined();
     live = true;
     // A link made in workspace B (a stale or foreign row) is never read for a company connected to workspace A.

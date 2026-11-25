@@ -108,6 +108,8 @@ export interface BrokerCoreServicesOptions {
   notification?: Pick<AttentionDeliveryDependencies, "companyOf" | "access" | "address" | "link" | "thread" | "emailLinks" | "upkeep" | "adminNotice" | "planCarded" | "setupPausedTold" | "doneToldInThread"> & Pick<NoticeServiceOptions, "remember"> & { registry?: AttentionDeliveryDependencies["registry"] | undefined };
   /** HW5: write the chat thread's moments (the plan waits for review, the task was closed) when a session that follows a thread changes, on the company's milestones. Needs `flow.deps.milestones` (lessons built); else none. */
   threadMoments?: boolean;
+  /** R1 + L1 6.2: write a ticket's own moments (the plan waits for review, the task was closed) for a session bound to a tracker ticket, on the company's milestones, so the ticket write-back hears them. Needs `flow.deps.milestones`. */
+  ticketMoments?: boolean;
   threadRefresh?: (orgId: OrgId, sessionId: string, store: DocumentStore) => Promise<void>;
   now?: () => Date;
   log?: (entry: Record<string, unknown>) => void;
@@ -115,6 +117,16 @@ export interface BrokerCoreServicesOptions {
 
 /** The merge requesters are read from the task People list; without that source nothing is built (never a guess). */
 function failNoTaskPeople(): never { throw new Error("the core jobs need the task People source for the merge requesters"); }
+
+/**
+ * The session-change hooks that write the plan-ready and closed moments of a session, in this pass's store, on the company's milestones: a chat thread's (`threadMoments`) and a tracker ticket's (`ticketMoments`, which
+ * is only where the ticket write-back is wired, so a company without Linear writes none). None without the company's milestones.
+ */
+function sessionMomentHooks(input: { threadMoments: boolean; ticketMoments: boolean; milestones: TaskFlow["deps"]["milestones"]; store: TaskFlow["deps"]["store"]; now: () => number; companyId: OrgId; log: () => void }): readonly SessionChangeHook[] {
+  if ((!input.threadMoments && !input.ticketMoments) || input.milestones === undefined) return [];
+  const { store, now, companyId, log } = input;
+  return [ticketMomentsOnChange({ store, milestones: input.milestones, now, ...(input.threadMoments ? { follows: threadFollows({ store }) } : {}), ticketBindings: input.ticketMoments, companyId, log })];
+}
 
 type JobServices = Record<"merge-tracking" | "session-sweep" | "notify-deliver", CoreService>;
 
@@ -186,9 +198,8 @@ export function createBrokerCoreServices(options: BrokerCoreServicesOptions): Jo
         return value;
       } } };
       // HW5: a session that follows a chat thread gets its `plan_ready` and `closed` moments (the thread's plan card and end line). Written in THIS pass's store; the items and the delivery are the company's milestones (handlers
-      // registered). A company with no milestones (no lessons) writes none. A ticket's own moments are not written here (`ticketBindings: false`): only a thread's.
-      const moments: readonly SessionChangeHook[] = options.threadMoments === true && deps.milestones !== undefined
-        ? [ticketMomentsOnChange({ store, milestones: deps.milestones, now, follows: threadFollows({ store }), ticketBindings: false, companyId, log: () => log() })] : [];
+      // registered). A company with no milestones (no lessons) writes none. A ticket's own moments are written here only where the ticket write-back is wired (`ticketMoments`, R1 + L1 6.2): `ticketBindings` follows it.
+      const moments = sessionMomentHooks({ threadMoments: options.threadMoments === true, ticketMoments: options.ticketMoments === true, milestones: deps.milestones, store, now, companyId, log });
       const afterRefresh: SummaryDependencies["afterRefresh"] = async (orgId, sessionId) => {
         await settleSteerDeliveriesFor({ store, now: clock, log }, orgId, sessionId);
         await options.threadRefresh?.(orgId, sessionId, store);

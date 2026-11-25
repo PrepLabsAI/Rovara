@@ -80,6 +80,21 @@ describe("the hosted root's merge tracking writes on the company's milestone ser
     expect(row["deliveredAt"]).toBeDefined();
   });
 
+  // R1 + L1 6.2 (plan 0.1 #3): the host is the company's, not lessons': with the lessons switch OFF the chat thread is still told what a task did, and nothing of lessons is on the host.
+  it("with the lessons switch off the company still has the milestone host with the chat thread's handler on it, and lessons' handlers are not", async () => {
+    const { root, world, flows } = await setup();
+    await root.app.runtimeFor(A);
+    const milestones = flows.get(A)!.deps.milestones;
+    expect(milestones).toBeDefined();
+    const taskId = "88888888-8888-4888-8888-888888888888";
+    expect((await world.store.transact(codeMilestoneItems(milestoneOf(A, taskId), 1, { definitionVersion: "1.1.0" }))).applied).toBe(true);
+    await milestones!.deliver(taskId);
+    const row = (await world.store.get(codeMilestoneKey(taskId, "merged", 1)))!;
+    expect(row["done_channel_thread"]).toBe(true);
+    for (const name of ["lessons", "team_record"]) expect(row[`done_${name}`], name).toBeUndefined();
+    expect(row["deliveredAt"]).toBeDefined();
+  });
+
   it("the merge-tracking job of that company is built over that same flow (the service reads the company's milestones at pass time)", async () => {
     const { root, jobs } = await setup({ lessons: "on" });
     await root.app.runtimeFor(A);
