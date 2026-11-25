@@ -28,6 +28,7 @@ import type { ScopeKey } from "../lessons/store.js";
 import { knowledgeReadStores } from "../local/app/lessons-routes.js";
 import { switchCovers, type CoreSwitch } from "./flags.js";
 import type { LessonsApiCompany } from "./lessons-api.js";
+import { rethrowMembershipReadFailure } from "../core/membership-read.js";
 
 const SIGN_IN_AGAIN = "Sign in again.";
 const UNAVAILABLE = "Rovara can't read lessons right now. Try again.";
@@ -116,7 +117,7 @@ export function scriptTokenAuthenticator(options: {
     const parsed = parseScriptTokenHeader(request.authorization);
     if (parsed === undefined || options.lessonsSwitch.mode === "off" || !switchCovers(options.lessonsSwitch, parsed.orgId)) throw refused();
     let company: Awaited<ReturnType<typeof options.companyOf>>;
-    try { company = await options.companyOf(parsed.orgId); } catch { throw refused(); }
+    try { company = await options.companyOf(parsed.orgId); } catch (error) { rethrowMembershipReadFailure(error); throw refused(); }
     const authenticated = await authenticateScriptToken(
       { store: company.store, audit: company.audit, now: options.now, companyId: parsed.orgId, identity: company.identity, ...(company.projectGrant === undefined ? {} : { projectGrant: company.projectGrant }), ...(options.enabled === undefined ? {} : { enabled: options.enabled }) },
       { method: request.method, path: request.path, headers: { authorization: request.authorization }, ...(request.body === undefined ? {} : { body: request.body }) },
@@ -134,7 +135,7 @@ export function createKnowledgeApi(options: KnowledgeApiOptions): KnowledgeApi {
 
   async function membershipOf(personId: string): Promise<{ companyId: OrgId; role: OrgRole }> {
     let found: unknown;
-    try { found = await options.companyOf({ personId }); } catch { found = undefined; }
+    try { found = await options.companyOf({ personId }); } catch (error) { rethrowMembershipReadFailure(error); found = undefined; }
     const record = found as { companyId?: unknown; role?: unknown } | undefined | null;
     const companyId = OrgIdSchema.safeParse(record?.companyId);
     const role = OrgRoleSchema.safeParse(record?.role);

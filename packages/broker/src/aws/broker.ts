@@ -200,6 +200,7 @@ export { type SlackStopTaskEvent, type SlackWorkflowStartEvent, type SlackWorkfl
 export { channelLinkRouteDependencies } from "./broker-primitives.js";
 export { loadWorkflowE2EArtifact };
 import { answerSlackCorePress, isSlackCorePressEvent } from "./slack-core-decision.js";
+import { rethrowMembershipReadFailure } from "../core/membership-read.js";
 export const NAMED_COMPANY_SETUP_APPROVAL_REFUSED = "a company's browser testing is set up on the project's Browser testing page, and the rest of its setup goes through the project's setup flow, not through a setup approval sent with registration";
 
 /** The broker actions developer task routes call (spec 025); tests and the route wiring use this factory. */
@@ -13081,7 +13082,7 @@ async function administratorOfTaskCompany(dependencies: AwsBrokerDependencies, i
   const companies = dependencies.developer?.companies ?? dependencies.companies;
   if (companies === undefined) return true;
   let companyId: string | undefined;
-  try { companyId = await companies.companyOf(identity.ownerKey); } catch { return false; }
+  try { companyId = await companies.companyOf(identity.ownerKey); } catch (error) { rethrowMembershipReadFailure(error); return false; }
   return companyId !== undefined && recordInCompany(task, companyId);
 }
 
