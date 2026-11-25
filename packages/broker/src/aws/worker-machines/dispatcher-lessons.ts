@@ -13,6 +13,7 @@ import { documentLearningSettings } from "../../lessons/document-settings.js";
 import { documentLessonVectors } from "../../lessons/document-vectors.js";
 import { createHostedLessonParts, type HostedLessonPeople } from "../../lessons/hosted-people.js";
 import { LESSON_LOAD_DEADLINE_MS } from "../../lessons/host-glue.js";
+import { recordLessonLoad } from "../../lessons/load-record.js";
 import { hasStaleCitation, LOAD_MAX_BYTES, LOAD_MAX_LESSONS, selectLessons } from "../../lessons/load.js";
 import { buildKnowledgeContext, deliveryRecordOf, pullable } from "../../lessons/knowledge-brief.js";
 import { agreedDefaultBranch, flakyFactsPort } from "../../lessons/knowledge-facts.js";
@@ -64,7 +65,7 @@ export interface DispatcherLessonsOptions {
   now?: () => number;
 }
 
-/** No host attachment, manifests, usage records, audits, learning calls or background jobs. */
+/** No host attachment, audits, learning calls or background jobs. It reads through a guarded store and writes only ids and counts, under this company's own keys: the load record (manifest, operation reference, use rows) and the ids-only delivery record. */
 export function createDispatcherLearned(options: DispatcherLessonsOptions): Learned {
   const signalsKept = new Map<string, ProjectSignals>();
   return async (input) => {
@@ -220,8 +221,15 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
       });
       check();
       if (!selected.ok || !selected.complete) refuse();
+      // THE LOAD RECORD (R4-0): what the broker's host writes when it loads lessons for a step (`lessons/host-glue.ts` `learnedLessonsFor`), written HERE because this process is the one that chooses: the chosen entries (with their
+      // versions) never travel back to the broker, they go straight into the worker's job. Without the manifest the worker's load report finds nothing to apply (no used count, no "Lessons used" in the pull request); without
+      // the operation's reference the report cannot be tied to the manifest; without the use rows the lessons page counts no task. The broker's `onEvents` then applies the report exactly as for any other load.
+      // Idempotent for a retried dispatch (the manifest is written only when absent, the reference and the use rows are the same keys). Company-scoped (every key is under `company`). Only for lessons that are really sent.
+      // The manifest and the reference are not optional: a load that cannot be recorded is refused like a read that fails (the step goes without lessons), as on the broker's road. A use row is best effort, as there.
+      await recordLessonLoad(options.store, { companyId: company, operationId: request.data.operationId, task: { taskId: task.taskId, project: task.project, title: task.title, round: task.workflow.revision }, stage, setVersion: set.data.setVersion, chosen: selected.chosen, entries: selected.entries, bytes: selected.bytes, now: now(), check, over: () => stopped || failed })
+        .catch(() => { failed = true; refuse(); });
       // The knowledge briefing (lead 4 L4-AK2, L4-AK2b) for a worker that lists it: the look-up's lessons and the measured facts, each on the look-up's own read share and one short clock, and no skill names (this reader has no
-      // source for them). Anything that goes wrong here is no part of the briefing, never a refused load. The one write this reader makes is the ids-only delivery record below, after the briefing is built.
+      // source for them). Anything that goes wrong here is no part of the briefing, never a refused load. Its other write is the ids-only delivery record below, after the briefing is built.
       const stageParts = KNOWLEDGE_STAGE_PARTS[stage];
       let knowledgeContext: ReturnType<typeof buildKnowledgeContext>;
       pullDeadline = Math.min(deadline - DISPATCHER_PULL_MARGIN_MS, Date.now() + DISPATCHER_PULL_MS);
