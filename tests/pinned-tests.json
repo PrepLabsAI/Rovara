@@ -209,8 +209,8 @@
     },
     {
       "path": "tests/journeys/merge-recovery.test.ts",
-      "minimumTests": 3,
-      "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): journey 12, merge recovery (merged without a webhook, merged at an unchecked head, a refused press). A whole task on the real core and real worker, in every pull request run; the floor is the file's 3 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "minimumTests": 4,
+      "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): journey 12, merge recovery (merged without a webhook, merged at an unchecked head, a refused press, a host refusal after the claim then the same press). A whole task on the real core and real worker, in every pull request run; the floor is the file's 4 runnable declarations, and deleting or trimming one is a reviewed edit.",
       "decision": "DEC 254zzz459"
     },
     {

@@ -57,6 +57,11 @@ export interface FakeApproversOptions {
 
 type PartState = { state: "claimed"; claimId: string; until: number } | { state: "spent" };
 
+/** Remembers an accepted proof, unless the caller records the use itself (`useRecordedByCaller`, the merge press): a refusal before its act leaves the proof usable, as the local owner's approvers do. */
+function rememberUse(used: Set<string>, request: ApprovalRequest, proof: ApprovalProof): void {
+  if (request.useRecordedByCaller !== true) used.add(approvalProofKey(proof));
+}
+
 export function createFakeApprovers(options: FakeApproversOptions): Approvers {
   const now = options.now ?? (() => Date.now());
   const claimMs = (options.claimSeconds ?? 300) * 1000;
@@ -137,7 +142,7 @@ export function createFakeApprovers(options: FakeApproversOptions): Approvers {
         claims.set(claimId, secret.secret);
       }
 
-      used.add(approvalProofKey(proof));
+      rememberUse(used, request, proof);
       const asked = request.requestedBy;
       const sole = options.soleApproverAllowed === true && person.soleApprover === true && asked !== undefined && asked.provider === person.principal.provider && asked.personId === person.principal.personId;
       return {

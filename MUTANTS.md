@@ -24,3 +24,16 @@ d06ffc50cb2850f327d3eb47e274e7a258732dc4513be9889567636bba2a3421  tests/support/
 ```
 
 Evidence applies to this uncommitted tests-only delta on the head above. L6/9d owns the commit, final-head lane gate, lead 4 Opus delta review and staging proof. No current gate stamp or review verdict is claimed.
+
+## MERGE-APPROVAL-NOT-SPENT-ON-REFUSAL (lane commit 0ba8a3b9c, round 2 on top of it)
+
+Tests: `tests/unit/core-merge-approval-not-spent.test.ts` and `tests/unit/core-merge-press-hardening.test.ts`, run together (22 tests) after each mutant of `packages/broker/src/core/merge/merge.ts` (each restored from a copy; `tsc -b` not re-run per mutant).
+
+| Mutant | Result |
+| --- | --- |
+| M1 `proofUseKeys` leaves out the `MERGE_PROOF_TOKEN` row (a comment used for request A is read as unused for request B) | killed (2 tests) |
+| M2 a host refusal never gives the approval back | killed (2 tests) |
+| M3 the approval is given back by any claim, not only the one that wrote its use | killed (2 tests, the half merge) |
+| M4 `pressMerge` does not set `useRecordedByCaller` | killed (3 tests) |
+| M5 `refuseUsedProof` is not called | killed (8 tests) |
+| M6 the use rows are deleted without the `usedAt` condition | SURVIVES, on purpose not killed: the same transaction also requires this run's own claim (`by`, `at`), so rows of another run's claim cannot be reached; the condition is a second guard. |
