@@ -128,7 +128,7 @@ export async function handleWorkerRequest(request: Request, state: WorkerServerS
     const verified = state.invokeAuthentication
       ? verifyInvokeAuthorization(request.headers.get("authorization"), state.invokeAuthentication)
       : undefined;
-    if (verified && !verified.ok) return unauthorized(verified.reason);
+    if (verified && !verified.ok) return unauthorized(verified.reason, state.invokeAuthentication);
     try {
       const text = await request.text();
       if (Buffer.byteLength(text, "utf8") > MAX_INVOCATION_BYTES) {
@@ -289,9 +289,12 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function unauthorized(reason: InvokeRejection): Response {
+function unauthorized(reason: InvokeRejection, own?: { workspaceId: string; generation: number }): Response {
+  // A signed token that names another workspace or generation was sent to the wrong machine (its address was reused): the answer says whose machine this is, so the dispatcher's log holds both sides. The ids are
+  // not secret, and are given only after the signature checked (a caller that cannot sign is told the reason alone).
+  const whose = own !== undefined && (reason === "wrong_workspace" || reason === "wrong_generation") ? { workspaceId: own.workspaceId, generation: own.generation } : {};
   return Response.json(
-    { error: "invocation is not authorized", reason },
+    { error: "invocation is not authorized", reason, ...whose },
     { status: 401, headers: { "cache-control": "no-store", "www-authenticate": "AgentX-Invoke" } },
   );
 }

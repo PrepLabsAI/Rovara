@@ -11,7 +11,7 @@
 //
 // NOT here (deferred to the staging real-run checks, listed in the lane report): starting service mocks and probing pre-prod from a worker (they need the verifier's mock host, which needs Docker), the saved image
 // (`update`, `ranFrom: saved_image`), and a coverage map for anything but coverage.py contexts.
-import { NIGHTLY_CALLBACK_BODY_MAX_BYTES, NIGHTLY_RUN_WALL_CLOCK_MS, NightlyResultSchema, agentXError, type NightFailedReason, type NightlyResultCallbackBody, type NightlyRunPayload, type WorkerInvocation, type TestEnvCheck } from "@agentx/contracts";
+import { NIGHTLY_CALLBACK_BODY_MAX_BYTES, NIGHTLY_RUN_WALL_CLOCK_MS, NightlyResultSchema, agentXError, redactText, type NightFailedReason, type NightlyResultCallbackBody, type NightlyRunPayload, type WorkerInvocation, type TestEnvCheck } from "@agentx/contracts";
 import { EventBatcher, type EventBatchSink } from "./events.js";
 import type { WorkerCancellationController } from "./cancel.js";
 import type { PreparationManifest } from "./prepare.js";
@@ -132,7 +132,8 @@ export async function runNightlyInvocation(
     await events.flush();
     return { conversationId, reopened: false, workflowMode: "CHECKS" };
   } catch (error) {
-    await events.append("error", { message: error instanceof Error ? error.message.slice(0, 300) : "the nightly run failed" }).catch(() => undefined);
+    // Redacted before it is cut (a cut can leave half a secret) and before it is written: the event is read by everyone who can open the project.
+    await events.append("error", { message: error instanceof Error ? redactText(error.message).slice(0, 300) : "the nightly run failed" }).catch(() => undefined);
     // Why the night did not finish, in a fixed word, for the project's health page and Home. A stop by a person says nothing; a broker that refused the result is not asked again; the broker also writes `infra` itself
     // if the operation ends with no word.
     const stopped = stop.signal.aborted;

@@ -9,6 +9,7 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import {
   Ec2RuntimeBindingSchema,
+  redactBlockReason,
   ProjectSetupSessionSchema,
   WORKSPACE_SESSION_STATE_INDEX,
   WorkspaceSessionSchema,
@@ -254,7 +255,8 @@ export class SessionManager {
     if (!moved && !(session?.state === "FAILED" && session.generation === generation)) {
       throw agentXError("STALE_FENCE", `session ${workspaceId} generation ${generation} is no longer provisioning`);
     }
-    const message = `RUNTIME_UNAVAILABLE: workspace compute failed to start: ${error}`.slice(0, 16_384);
+    // The provisioner's own error text (a boot failure can quote command output): redacted when it is written, before it is cut, because the operation error is shown to everyone who can open the task.
+    const message = redactBlockReason(`RUNTIME_UNAVAILABLE: workspace compute failed to start: ${error}`, 16_384);
     const failed: string[] = [];
     for (const outboxId of session?.waitingOutboxIds ?? []) {
       const response = await this.dependencies.documentClient.send(new GetCommand({ TableName: this.dependencies.tableName, Key: outboxKey(outboxId) }));

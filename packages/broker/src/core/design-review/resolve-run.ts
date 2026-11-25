@@ -9,7 +9,7 @@ import { workspaceKeys } from "../task-flow/workspace-location.js";
 // The planner's words are untrusted. Nothing in them sets a severity, a tier, an approver or the cost.
 import { createHash, randomUUID } from "node:crypto";
 import {
-  isBudgetExhaustedMessage, DESIGN_REVIEW_ROUNDS_MAX, DesignReviewBindingSchema, WorkflowSnapshotSchema, addDesignUsd, WORKFLOW_BLOCK_REASONS, WORKFLOW_LEFTOVER_PROCESSES_MESSAGE, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, agentXError, blockWorkflow, closeDesignReview, neutralizePacketText, queryAll, resolutionOf, workflowIsDesignReviewing, workflowRequestId,
+  isBudgetExhaustedMessage, DESIGN_REVIEW_ROUNDS_MAX, DesignReviewBindingSchema, WorkflowSnapshotSchema, addDesignUsd, WORKFLOW_BLOCK_REASONS, WORKFLOW_LEFTOVER_PROCESSES_MESSAGE, WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, agentXError, blockWorkflow, closeDesignReview, redactBlockReason, neutralizePacketText, queryAll, resolutionOf, workflowIsDesignReviewing, workflowRequestId,
   type DesignCitation, type DesignFinding, type DesignReviewRound, type PinnedCommits, type WorkflowArtifact, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
@@ -197,7 +197,8 @@ export async function designResolveOutcome(
     if (isBudgetExhaustedMessage(ended.error)) return asReviewed();
     if (ended.error?.includes(WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE) === true) return blockWorkflow(workflow, WORKFLOW_BLOCK_REASONS.stepRuleFilesUnverified, now);
     if (ended.error?.includes(WORKFLOW_LEFTOVER_PROCESSES_MESSAGE) === true) return blockWorkflow(workflow, WORKFLOW_BLOCK_REASONS.leftoverProcesses, now);
-    return blockWorkflow(workflow, `Rovara stopped while planning${ended.error === undefined ? "" : `: ${ended.error}`}`.slice(0, 500), now);
+    // The worker's own error text: redacted before it is cut, since the reason is read by everyone who can open the task.
+    return blockWorkflow(workflow, redactBlockReason(`Rovara stopped while planning${ended.error === undefined ? "" : `: ${ended.error}`}`, 500), now);
   }
   const text = await runtime.readArtifactText(operation, "plan.md", ANSWER_MAX_BYTES);
   if (text === undefined) return asReviewed();

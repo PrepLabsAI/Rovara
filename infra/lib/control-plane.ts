@@ -765,6 +765,24 @@ export class ControlPlaneStack extends Stack {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }).addAlarmAction(notifyOperator);
+    // The dispatcher logs one `dispatch.stale_address` line (packages/broker/src/aws/dispatcher.ts) when a worker answers 401 wrong_workspace or wrong_generation: the address on a workspace's session row belongs to a worker of
+    // another workspace (the address was reused after the machine went away). Same shape as the worker filter above, on the dispatcher's own log group.
+    new logs.MetricFilter(this, "DispatchStaleAddressMetric", {
+      logGroup: dispatcher.logGroup,
+      filterPattern: logs.FilterPattern.stringValue("$.event", "=", "dispatch.stale_address"),
+      metricNamespace: naming.metricsNamespace,
+      metricName: "DispatchStaleAddress",
+      metricValue: "1",
+    });
+    new cloudwatch.Alarm(this, "DispatchStaleAddressAlarm", {
+      alarmName: naming.alarmName("DispatchStaleAddress"),
+      alarmDescription: "A worker answered a dispatch with wrong_workspace or wrong_generation: a workspace's session address belongs to another workspace's machine (or another generation of its own). Search the dispatcher log group for dispatch.stale_address (both workspaces, session, address); check the session row and the instance.",
+      metric: agentxSum("DispatchStaleAddress", Duration.minutes(5)),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(notifyOperator);
     // Issue #46: a dispatch job that exhausts its receives lands here and nothing else reports it.
     // #1131: every deployment, production (the legacy template) included.
     {

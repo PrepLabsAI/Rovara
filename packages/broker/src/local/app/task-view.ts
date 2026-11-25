@@ -1,7 +1,7 @@
 // Lane L9-wire: the task as the clients read it (`DeveloperTaskView`, which the MCP tools and the CLI parse), over the task flow's own smaller view (L6a's `TaskView`). Only what the records
 // hold is filled; the optional parts (events, summary, proof, evidence, testing, run limits) are left out until their lanes are wired.
 import { shareView } from "../../developer/task-records.js";
-import type { TaskMoneyV1, ObjectStorage } from "@agentx/contracts";
+import { withRedactedBlockReason, type TaskMoneyV1, type ObjectStorage } from "@agentx/contracts";
 import type { DeveloperTaskListItem } from "@agentx/contracts";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
 import { textReaderOf } from "../../core/build-step/plan-input.js";
@@ -40,7 +40,7 @@ export async function developerTaskView(task: TaskRecord, view: TaskView, blobs:
     startupReason: view.startupReason,
     ...(view.feature === undefined ? {} : { feature: view.feature }),
     ...(view.closing ? { closing: true } : {}), createdAt: task.createdAt, updatedAt: task.updatedAt, events: [],
-    ...(workflow === undefined ? {} : { workflow: { ...withoutDesignReviewMoney(workflow, revealMoney), ...(planContent === undefined ? {} : { planContent }) } }),
+    ...(workflow === undefined ? {} : { workflow: withRedactedBlockReason({ ...withoutDesignReviewMoney(workflow, revealMoney), ...(planContent === undefined ? {} : { planContent }) }) }),
     ...(view.failure === undefined ? {} : { failure: view.failure }),
     ...(view.setupRecheck === undefined ? {} : { setupRecheck: view.setupRecheck }),
     ...(task.sessionId === undefined ? {} : { sessionId: task.sessionId }),
