@@ -2350,6 +2350,7 @@ async function companyAdminRoute(deps: DeveloperRouteDependencies, request: Adap
     projectsInCompany: async (names, company) => new Set((await projectsWithPolicy(deps, names, company)).keys()),
     ...(deps.developer.githubLink === undefined ? {} : { githubLinks: { store: deps.developer.githubLink.store, log: deps.developer.githubLink.log } }),
     ...(deps.developer.linearLink === undefined ? {} : { accountLinks: { store: deps.developer.linearLink.links, log: deps.developer.linearLink.log } }),
+    ...(deps.developer.endDeveloperSessions === undefined ? {} : { sessions: { end: deps.developer.endDeveloperSessions, log: (entry) => logDeveloperEvent(Object.fromEntries(Object.entries(entry).filter((field): field is [string, string | number] => typeof field[1] === "string" || typeof field[1] === "number"))) } }),
     ...(taskHandOverOf(deps, person) ?? {}),
   }, { caller: person, companyId, webApp: _webApp === true }, request, url);
 }
