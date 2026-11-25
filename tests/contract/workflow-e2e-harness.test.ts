@@ -1,32 +1,19 @@
-// Self-tests for the workflow E2E harness's controls: the clock, worker faults and version skew, recovery sweeps, Slack
-// variants, the feedback page, MCP, the webhook builder and secret rotation, wire mode, and the model fixtures.
+// Self-tests for the workflow E2E harness's clock, its faux coder and the model fixtures. The controls that start a task (worker
+// faults, recovery sweeps, Slack variants, the feedback page, MCP, webhooks, wire mode) drove the retired spec 056 workflow and went with its suites (#1350).
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
-import { PLAN_CLAIMS_MAX, WORKER_INVOCATION_FEATURES, parsePlanDocument } from "@agentx/contracts";
+import { PLAN_CLAIMS_MAX, parsePlanDocument } from "@agentx/contracts";
 import { fauxProvider, normalizeContext } from "@earendil-works/pi-ai";
-import { LOST_COMPUTE_ERROR, SLACK_MAYA, createWorkflowE2E, type WorkflowE2E } from "../support/workflow-e2e.js";
-import { OMAR } from "../support/developer-task-broker.js";
 import { feedbackCriticReply, workflowModel } from "../support/faux-scripts.js";
 import {
   conflictingAsImplement, duplicateFindingIds, feedbackBundles, implementWithLowConfidence, implementWithoutFileChanges, missingComment,
   ownerDecisionEmptyLists, planCitesMissingFile, planMissingWhy, planOverCeiling, planProse, planTiny, planTruncatedJson, planWithDecisions,
-  reviewerFindings, reviewerHangs, supersedeAwareImplement, SUPERSEDE_RULE,
+  reviewerFindings, supersedeAwareImplement, SUPERSEDE_RULE,
 } from "../support/model-fixtures.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 
 const PLAN = planAnswer(planDocument({ title: "Add greet(name)", why: [{ text: "Greet by name.", author: "Maya" }],
   claims: [{ id: "1", text: "Add greet to greeting.ts." }], decisions: [] }));
 const EDITS = [{ path: "repo/demo/greeting.ts", content: "export function greet(name: string): string {\n  return `Hello, ${name}`;\n}\n" }];
-const FIX = [{ path: "repo/demo/greeting.ts", content: "export function greet(name: string): string {\n  return `Hello, ${name.trim()}`;\n}\n" }];
-const edits = (latest: string) => (latest.includes("Implement only the owner-approved PR feedback") ? FIX : EDITS);
-
-async function toDraftPullRequest(e2e: WorkflowE2E): Promise<number> {
-  expect(await e2e.mention("quick: Add a greet(name) function")).toBe(200);
-  await e2e.settle();
-  await e2e.click("agentx_workflow_approve");
-  await e2e.settle();
-  expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
-  return e2e.github.pullRequests[0]!.number;
-}
 
 describe("workflow E2E harness", () => {
   let log: MockInstance<typeof console.log>;
@@ -60,173 +47,6 @@ describe("workflow E2E harness", () => {
     // A new Pi session starts with the same user text but has no prior assistant or tool-result messages.
     expect(await names([user(samePrompt)])).toEqual(["bash"]);
   });
-
-  it("result rewrites are kind-matched, one-shot, and leave defaults inert", async () => {
-    let failing = true;
-    const rewrites: string[] = [];
-    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS },
-      checkResult: () => failing ? { exitCode: 1, stdout: "", stderr: "expected failure\n" } : undefined });
-    await expect(e2e.repoFile("greeting.test.js")).rejects.toThrow();
-    e2e.worker.rewriteNextResult("task:IMPLEMENT", (result) => { rewrites.push("IMPLEMENT"); return result; });
-    e2e.worker.rewriteNextResult("task:PLAN", (result) => { rewrites.push("PLAN"); return result; });
-    expect(e2e.agentCheckRuns).toEqual([]);
-    expect(await e2e.mention("quick: Add a greet(name) function")).toBe(200);
-    await e2e.settle();
-    expect(rewrites).toEqual(["PLAN"]);
-    await e2e.click("agentx_workflow_approve");
-    await e2e.settle();
-    expect(rewrites).toEqual(["PLAN", "IMPLEMENT"]);
-    expect(e2e.workflow()).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
-    failing = false;
-    await e2e.click("agentx_workflow_send_back");
-    await e2e.settle();
-    expect(rewrites).toEqual(["PLAN", "IMPLEMENT"]);
-    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
-  }, 120_000);
-
-  it("worker.crashNext loses a coding run with no callback; runRecovery's reconciler step fails it", async () => {
-    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS } });
-    expect(await e2e.mention("quick: Add a greet(name) function")).toBe(200);
-    await e2e.settle();
-    e2e.worker.crashNext("task:IMPLEMENT");
-    await e2e.click("agentx_workflow_approve");
-    await e2e.settle();
-    expect(e2e.worker.crashed).toEqual([expect.objectContaining({ kind: "task" })]);
-    expect(e2e.workflow()).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING" });
-    const { operationId: crashedOperation, workspaceId } = e2e.worker.crashed[0]!;
-    const recovery = await e2e.runRecovery();
-    expect(recovery.dispatch.statusCode).toBe(200);
-    expect(recovery.lostOperations).toEqual([crashedOperation]);
-    await e2e.settle();
-    const operation = e2e.db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${crashedOperation}`);
-    expect(operation).toMatchObject({ status: "FAILED", error: LOST_COMPUTE_ERROR });
-    // What the task does next is tests/integration/workflow-lost-run.test.ts's.
-  }, 120_000);
-
-  it("worker.features routes invocations through the real dispatcher and EC2 feature gate", async () => {
-    const old = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS } });
-    old.worker.features([]);
-    expect(await old.mention("quick: Add a greet(name) function")).toBe(200);
-    await old.settle();
-    // The planning run carries a workflow mode, which a worker that lists no features cannot parse: the dispatcher fails it.
-    expect(old.worker.deliveryFailures.map((failure) => failure.kind)).toEqual(["task"]);
-    expect(old.worker.deliveryFailures[0]?.error).toMatch(/^RUNTIME_UNAVAILABLE: worker dispatch failed after 1 attempts/);
-    expect(old.prompts).toEqual([]);
-
-    const current = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS } });
-    current.worker.features([...WORKER_INVOCATION_FEATURES]);
-    await toDraftPullRequest(current);
-    expect(current.worker.deliveryFailures).toEqual([]);
-
-    // A worker that predates review feedback and plans gets reviews without those fields, as the gate drops them.
-    const older = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS } });
-    older.worker.features(WORKER_INVOCATION_FEATURES.filter((feature) => feature !== "task.workflowReviewPlan"));
-    await toDraftPullRequest(older);
-    const review = older.invocations.find((invocation) => invocation.kind === "task" && invocation.payload.workflowMode === "REVIEW");
-    expect(review?.kind === "task" ? review.payload.workflowReviewPlan : "missing").toBeUndefined();
-  }, 120_000);
-
-  it("mention variants: a Slack retry of the same event starts nothing new, and a bot's message is not a request", async () => {
-    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS } });
-    expect(await e2e.mention("quick: Add a greet(name) function", { eventId: "Ev0SAMEEVENT1" })).toBe(200);
-    expect(await e2e.mention("quick: Add a greet(name) function", { eventId: "Ev0SAMEEVENT1", retryNum: 1 })).toBe(200);
-    expect(e2e.db.find((item) => String(item.pk).startsWith("DEVTASK#") && item.sk === "META")).toHaveLength(1);
-    const posts = e2e.slack.posts.length;
-    expect(await e2e.mention("I am a bot", { type: "message", subtype: "bot_message", botId: "B0OTHERBOT1", threadTs: "1695500999.000001", ts: "1695500999.000001" })).toBe(200);
-    expect(e2e.slack.posts.length).toBe(posts);
-  }, 120_000);
-
-  it("click variants: a press delivered twice records one decision; a press on a named card; concurrently runs steps together", async () => {
-    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS } });
-    expect(await e2e.mention("quick: Add a greet(name) function")).toBe(200);
-    await e2e.settle();
-    const card = e2e.slack.lastPostWithAction("agentx_workflow_approve");
-    await e2e.click("agentx_workflow_approve", { messageTs: card.ts, deliver: "twice" });
-    await e2e.settle();
-    expect(e2e.workflow().decisions.filter((decision) => decision.decision === "APPROVE")).toHaveLength(1);
-    expect(e2e.slackActionTimestamps).toHaveLength(2);
-    expect(e2e.slackActionTimestamps[0]).toBe(e2e.slackActionTimestamps[1]);
-    await e2e.click("agentx_workflow_close");
-    expect(e2e.slackActionTimestamps[2]).not.toBe(e2e.slackActionTimestamps[1]);
-    expect(await e2e.concurrently(async () => 1, async () => 2)).toEqual([1, 2]);
-  }, 120_000);
-
-  it("feedbackPage and feedbackDecision drive the PR feedback page with its CSRF cookie and origin", async () => {
-    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits } });
-    const number = await toDraftPullRequest(e2e);
-    const comment = e2e.github.comment(number, "octocat", "Please trim the name before greeting.");
-    expect(await e2e.githubWebhook(number, { comment })).toBe(200);
-    await e2e.settle();
-    const page = await e2e.feedbackPage();
-    expect(page.status).toBe(200);
-    expect(page.csrf).toMatch(/^[A-Za-z0-9_-]{43}$/);
-    const review = JSON.parse((await e2e.feedbackPage(SLACK_MAYA, { api: true })).body) as { revision: number; reviewDigest: string; proposalDigest: string; bundleDigests: string[]; findings: Array<{ id: string }> };
-    const body = { requestId: "4b0f5d3e-2c1a-4e6b-9f7d-1a2b3c4d5e6f", expectedRevision: review.revision, reviewDigest: review.reviewDigest,
-      proposalDigest: review.proposalDigest, bundleDigests: review.bundleDigests, decision: "APPROVE", selectedFindingIds: review.findings.map((finding) => finding.id) };
-    expect((await e2e.feedbackDecision(body, { csrf: null })).status).toBe(403);
-    expect((await e2e.feedbackDecision(body, { origin: "https://evil.example" })).status).toBe(403);
-    expect((await e2e.feedbackPage(OMAR)).status).toBe(404);
-    expect((await e2e.feedbackDecision(body)).status).toBe(200);
-    await e2e.settle();
-    expect(e2e.workflow().feedbackDecisions?.at(-1)).toMatchObject({ decision: "APPROVE" });
-  }, 120_000);
-
-  it("e2e.mcp calls the real MCP tools against the same broker, as the named developer", async () => {
-    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS } });
-    expect(await e2e.mention("quick: Add a greet(name) function")).toBe(200);
-    await e2e.settle();
-    const listed = await e2e.mcp("agentx_list_tasks", {});
-    expect(listed.isError).toBe(false);
-    expect(JSON.stringify(listed.value)).toContain(e2e.taskId());
-    expect(JSON.stringify((await e2e.mcp("agentx_list_tasks", {}, OMAR)).value)).not.toContain(e2e.taskId());
-  }, 120_000);
-
-  it("webhook() builds each event kind; redelivery is a duplicate; a wrong signature is refused; recovery runs", async () => {
-    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits } });
-    const number = await toDraftPullRequest(e2e);
-    const made = e2e.github.review(number, "octocat", { body: null, state: "APPROVED" });
-    const deliveryId = "0b7f8a52-6a4c-4c1e-9d0e-0f2a6f1e9c11";
-    const first = await e2e.webhook({ kind: "pull_request_review", number, review: made.review, body: null, state: "APPROVED" }, { deliveryId });
-    expect(first).toMatchObject({ status: 200, body: { delivery: "ACCEPTED" } });
-    expect((await e2e.webhook({ kind: "pull_request_review", number, review: made.review, body: null, state: "APPROVED" }, { deliveryId })).body).toMatchObject({ delivery: "DUPLICATE" });
-    expect((await e2e.webhook({ kind: "pull_request", action: "synchronize", number }, { secret: "x".repeat(40) })).status).toBe(403);
-    await e2e.settle();
-    const edited = e2e.github.editComment(e2e.github.comment(number, "octocat", "first words").id, "second words");
-    expect((await e2e.webhook({ kind: "issue_comment", action: "edited", number, comment: edited })).status).toBe(200);
-    expect((await e2e.runWebhookRecovery()).statusCode).toBe(200);
-  }, 120_000);
-
-  it("webhook secret controls: a rotated secret is read again on a bad signature; a missing one answers 503", async () => {
-    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits } });
-    const number = await toDraftPullRequest(e2e);
-    e2e.rotateWebhookSecret("rotated-webhook-secret-0123456789abcdefghij");
-    expect((await e2e.webhook({ kind: "pull_request", action: "synchronize", number })).status).toBe(200);
-    e2e.setWebhookSecret(null);
-    expect((await e2e.webhook({ kind: "pull_request", action: "synchronize", number })).status).toBe(503);
-    const missing = await createWorkflowE2E({ webhookSecret: null, model: { plan: PLAN, edits } });
-    const other = await toDraftPullRequest(missing);
-    expect((await missing.webhook({ kind: "pull_request", action: "synchronize", number: other })).status).toBe(503);
-  }, 120_000);
-
-  it("wire mode reads PR feedback through the real GitHub App provider, with string GraphQL IDs", async () => {
-    const e2e = await createWorkflowE2E({ github: { wire: true }, model: { plan: PLAN, edits } });
-    const number = await toDraftPullRequest(e2e);
-    const made = e2e.github.review(number, "octocat", { body: "Trim it.", state: "CHANGES_REQUESTED", comments: [{ body: "Here.", path: "greeting.ts", line: 2 }] });
-    expect((await e2e.webhook({ kind: "pull_request_review", number, review: made.review })).status).toBe(200);
-    await e2e.settle();
-    expect(e2e.github.graphqlDatabaseIdTypes()).toEqual(new Set(["string"]));
-    expect(e2e.workflow().feedbackReview).toMatchObject({ status: "PENDING", reviewRef: { status: "COMPLETE" } });
-  }, 120_000);
-
-  it("workerTimeouts.reviewMs with reviewerHangs makes the review time out", async () => {
-    const e2e = await createWorkflowE2E({ workerTimeouts: { reviewMs: 200 }, model: { plan: PLAN, edits: EDITS, reviews: { CODE: [reviewerHangs] } } });
-    expect(await e2e.mention("quick: Add a greet(name) function")).toBe(200);
-    await e2e.settle();
-    await e2e.click("agentx_workflow_approve");
-    await e2e.settle();
-    expect(e2e.github.pullRequests).toEqual([]);
-    expect(e2e.workflow()).toMatchObject({ stage: "REVIEW", state: "BLOCKED" });
-  }, 120_000);
 });
 
 describe("model fixtures", () => {

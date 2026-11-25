@@ -1281,9 +1281,30 @@ describe("rovara up: from the approved plan to the checked code and its reviews,
     expect(opened.status).toBe(200);
   });
 
+  /**
+   * The browser and API rounds run as a CHECKS step through the application seam only a hosted install wires (aws/core-application-e2e.ts). These tests exercise the build step's own
+   * verdict reading under a stand-in seam, put in once the task is coding (planning reads the seam too; no display is projected). The laptop without it fails closed (the test right after).
+   */
+  const withApplicationSeam = (h: Awaited<ReturnType<typeof launch>>) => {
+    h.runtime.app.flow.deps.applicationE2E = { results: { project: async () => undefined } } as unknown as NonNullable<typeof h.runtime.app.flow.deps.applicationE2E>;
+  };
+
+  it("a task whose checks include the browser and API round blocks on an install with no application checks, with a fixed sentence", async () => {
+    const h = await launch();
+    const { taskId, coding } = await toCoding(h);
+    const store = h.runtime.registry.require("storage");
+    const record = (await store.get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!;
+    const workflow = { ...(record["workflow"] as Record<string, unknown>), e2e: { contractDigest: "1".repeat(64), policyDigest: "2".repeat(64), bundleDigest: "3".repeat(64), executionPlanDigest: "4".repeat(64), required: true, currentGroupRunIds: [], resultRefs: [] } };
+    await store.update({ key: { pk: `DEVTASK#${taskId}`, sk: "META" }, ops: [change.set("workflow", JSON.parse(JSON.stringify(workflow)) as JsonValue)] });
+    expect(h.runtime.app.flow.deps.applicationE2E).toBeUndefined();
+    expect((await h.callback(coding, "result", builtResult("d".repeat(40)))).status).toBe(200);
+    expect((await taskRecord(h, taskId)).workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED", blockReason: "Required application checks are unavailable in this install." });
+  });
+
   it("needs the committed source of the code for a task whose checks include the browser and API round, and never passes those checks without a verified round", async () => {
     const h = await launch();
     const { taskId, coding } = await toCoding(h);
+    withApplicationSeam(h);
     const store = h.runtime.registry.require("storage");
     const digest = (char: string) => char.repeat(64);
     const withChecks = async (extra: Record<string, unknown> = {}) => {
@@ -1321,6 +1342,7 @@ describe("rovara up: from the approved plan to the checked code and its reviews,
   it("does not lose the result of a task that needs the browser and API checks when its code is too big to keep: the checks block with a fixed sentence", async () => {
     const h = await launch();
     const { taskId, coding } = await toCoding(h);
+    withApplicationSeam(h);
     const store = h.runtime.registry.require("storage");
     const record = (await store.get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!;
     const workflow = { ...(record["workflow"] as Record<string, unknown>), e2e: { contractDigest: "1".repeat(64), policyDigest: "2".repeat(64), bundleDigest: "3".repeat(64), executionPlanDigest: "4".repeat(64), required: true, currentGroupRunIds: [], resultRefs: [] } };
@@ -1355,6 +1377,7 @@ describe("rovara up: from the approved plan to the checked code and its reviews,
     /** A task in its checks (VERIFY, running) with a round admitted: the workflow and the CHECKS operation as the round's start would have left them. */
     async function inChecks(h: Awaited<ReturnType<typeof launch>>) {
       const { taskId, coding } = await toCoding(h);
+      withApplicationSeam(h);
       const store = h.runtime.registry.require("storage");
       const record = (await store.get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!;
       const workflow = record["workflow"] as Record<string, unknown>;
@@ -2774,14 +2797,15 @@ describe("rovara up: the reviews and checks are read against the code and the ru
   });
 
   it("asks the owner when the task's spend cannot be read, and sends back with nothing priced", async () => {
+    // Each reader goes in once the task is at its reviews: approving the plan reads the spend too, and refuses an unknown one (services/decisions.ts).
     const h = await launch();
-    h.runtime.app.flow.deps.taskSpendUsd = async () => { throw new Error("the ledger is not readable"); };
     const { taskId, review } = await toReview(h);
+    h.runtime.app.flow.deps.taskSpendUsd = async () => { throw new Error("the ledger is not readable"); };
     await h.callback(review, "result", reviewsOf(review, "d".repeat(40), "findings"));
     expect((await taskRecord(h, taskId)).autofixAsk).toMatchObject({ reason: "inputs-missing" });
     const g = await launch();
-    g.runtime.app.flow.deps.taskSpendUsd = async () => undefined;
     const unpriced = await toReview(g);
+    g.runtime.app.flow.deps.taskSpendUsd = async () => undefined;
     await g.callback(unpriced.review, "result", reviewsOf(unpriced.review, "d".repeat(40), "findings"));
     expect((await taskRecord(g, unpriced.taskId)).workflow.decisions.filter((decision) => decision.source === "AUTO_FIX")).toHaveLength(1);
   });
@@ -2803,12 +2827,13 @@ describe("rovara up: the reviews and checks are read against the code and the ru
     async function blockedWith(seed: (taskId: string, put: Put) => Promise<void>, options: { endReports?: boolean; cap?: (store: Parameters<typeof hostedTaskCapUsd>[0]["store"]) => NonNullable<Harness["runtime"]["app"]["flow"]["deps"]["taskCapUsd"]>; autofix?: { capUsd?: number } } = {}) {
       const h = await launch();
       const store = h.runtime.registry.require("storage");
+      if (options.autofix !== undefined) h.runtime.app.flow.deps.autofix = options.autofix;
+      const { taskId, workspaceId, review } = await toReview(h);
+      // Installed once the task is at its reviews: approving the plan reads the cap and the spend too (services/decisions.ts), and the ledger rows these tests seed exist only from here (#1350).
       h.runtime.app.flow.deps.taskSpendUsd = createCompanyTaskSpend({ store, companyId: IMPLICIT_COMPANY_ID });
       // L4-TA6: the hosted live cap (or another the test names) instead of the laptop's own, and an install's own automatic-fixing cap.
       // Without one named, the hosted install's $15 task cap (the figure these L4-TSU tests were written against), not the laptop's own run limit this harness wires.
       h.runtime.app.flow.deps.taskCapUsd = (options.cap ?? ((inner) => hostedTaskCapUsd({ store: inner, companyId: IMPLICIT_COMPANY_ID, settings: { taskCapMicros: 15_000_000, companyDayCapMicros: 25_000_000 } })))(store);
-      if (options.autofix !== undefined) h.runtime.app.flow.deps.autofix = options.autofix;
-      const { taskId, workspaceId, review } = await toReview(h);
       await seed(taskId, (companyId, task, micros, over = {}) => store.put({ item: { pk: costPartition(companyId, task), sk: "TOTAL", entityType: "COST_TOTAL", companyId, taskId: task, currency: "USD", micros, entries: 2, unpricedEntries: 0, ...over } }));
       if (options.endReports !== false) await bookEndReports(h, taskId, workspaceId);
       await h.callback(review, "result", reviewsOf(review, "d".repeat(40), "findings"));
@@ -2862,8 +2887,8 @@ describe("rovara up: the reviews and checks are read against the code and the ru
       for (const booked of [true, false]) {
         const h = await launch();
         const store = h.runtime.registry.require("storage");
-        h.runtime.app.flow.deps.taskSpendUsd = createCompanyTaskSpend({ store, companyId: IMPLICIT_COMPANY_ID });
         const { taskId, workspaceId, review } = await toReview(h);
+        h.runtime.app.flow.deps.taskSpendUsd = createCompanyTaskSpend({ store, companyId: IMPLICIT_COMPANY_ID });
         await store.put({ item: { pk: costPartition(IMPLICIT_COMPANY_ID, taskId), sk: "TOTAL", entityType: "COST_TOTAL", companyId: IMPLICIT_COMPANY_ID, taskId, currency: "USD", micros: booked ? 13_000_000 : 100_000, entries: 2, unpricedEntries: 0 } });
         // the earlier runs reported; the review run that is about to be lost has not (a lost run reports nothing)
         await bookEndReports(h, taskId, workspaceId, [review.operationId]);
@@ -2992,9 +3017,9 @@ describe("rovara up: the reviews and checks are read against the code and the ru
         for (const [label, cap, reason] of [["over the cap", hostedCap(300_000), "spend-cap"], ["unknown", () => async () => undefined, "inputs-missing"]] as const) {
           const h = await launch();
           const store = h.runtime.registry.require("storage");
+          const { taskId, workspaceId, review } = await toReview(h);
           h.runtime.app.flow.deps.taskSpendUsd = createCompanyTaskSpend({ store, companyId: IMPLICIT_COMPANY_ID });
           h.runtime.app.flow.deps.taskCapUsd = cap(store);
-          const { taskId, workspaceId, review } = await toReview(h);
           await store.put({ item: { pk: costPartition(IMPLICIT_COMPANY_ID, taskId), sk: "TOTAL", entityType: "COST_TOTAL", companyId: IMPLICIT_COMPANY_ID, taskId, currency: "USD", micros: 100_000, entries: 2, unpricedEntries: 0 } });
           await bookEndReports(h, taskId, workspaceId, [review.operationId]);
           await bookEndReports(h, taskId, workspaceId);
@@ -3131,7 +3156,7 @@ describe("rovara up: merge tracking by polling, against a fake code host and a m
     clock.advance(2 * MINUTE);
     await h.runtime.tick();
     expect(await taskRecord(h, taskId)).toMatchObject({ workflow: { stage: "IMPLEMENT" } });
-    expect(await sessionLines(h, taskId)).toContainEqual(expect.stringMatching(/^CI is failing on unit-tests, so Rovara is fixing it \(round 1 of 3\)\.$/));
+    expect(await sessionLines(h, taskId)).toContainEqual(expect.stringMatching(/^Fixing failing checks, round 1 of 3: unit-tests\.$/));
     const fix = await h.nextJob(workspaceId, seen);
     expect(fix).toMatchObject({ payload: { workflowMode: "IMPLEMENT", workflowFix: { source: "ci", startFrom: commit } } });
     h.model.branches.set("fix", commit);
@@ -3714,7 +3739,7 @@ describe("rovara up: the 10-minute laptop journey from the plan's approval to a 
     await h.runtime.tick();
     const events = (await readSessionEvents(store, IMPLICIT_COMPANY_ID, (await store.get({ pk: `DEVTASK#${taskId}`, sk: "META" }))!["sessionId"] as never)).events.map((event) => event.text ?? "");
     expect(events.filter((line) => line.startsWith("Rovara marked demo pull request " + cr.id + " ready for review. "))).toHaveLength(1);
-    expect(events.some((line) => line.startsWith("CI is failing on unit-tests, so Rovara is fixing it"))).toBe(true);
+    expect(events.some((line) => line.startsWith("Fixing failing checks, round 1 of 3: unit-tests."))).toBe(true);
     expect(events.some((line) => line.startsWith("Approved by dana. Ready to merge"))).toBe(true);
     // L4-C B5: the pull request was out of draft when CI went red, so the fix round is told on it once (a reviewer's earlier read may be stale); nothing else is: the passing checks and the approval are silent.
     const posted = cr.comments.map((comment) => comment.body);
