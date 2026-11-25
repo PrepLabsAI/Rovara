@@ -55,7 +55,7 @@ export type ApplicationAdmissionInput = Readonly<{
   /**
    * T7b: set for a grounding round (the proposed plan's must-not-change scenarios on the unchanged code, before the owner is asked, for information only). Like a baseline its snapshot and
    * build source are the base commit's and it runs no model; unlike one it runs exactly the scenarios named, and the admission signs no member for it: the broker binds the purpose by the
-   * plan digest (`groundingPlanDigest`), which the verifier recomputes.
+   * plan digest, which the verifier recomputes.
    */
   grounding?: { baseCommitSha: string; attempt: number; scenarioIds: readonly string[] };
   /**
@@ -125,16 +125,6 @@ export function baselineIntentOf(intent: E2EApplicationPlanIntent, keepScenarioI
     runtimeAccountRefs: intent.runtimeAccountRefs.filter((account) => runtimeRefs.some((ref) => ref.applicationId === account.applicationId && ref.accountProfileId === account.profileId)) });
   if (!parsed.success) throw refusal(`the plan without its AI navigation steps is not a plan a baseline can run: ${parsed.error.issues[0]?.message ?? "invalid"}`);
   return parsed.data;
-}
-
-/** The domain of the plan digest a grounding round is bound by; no candidate, baseline or replay round uses it. */
-export const GROUNDING_PLAN_DIGEST_DOMAIN = "workflow-application-e2e-grounding-plan/v1";
-
-/** What a grounding round is bound to: the proposed plan artifact, the workflow revision it was proposed at, the base commit and the attempt. */
-export type GroundingPlanBinding = Readonly<{ taskId: string; artifactId: string; artifactSha256: string; workflowRevision: number; baseCommitSha: string; attempt: number }>;
-export function groundingPlanDigest(binding: GroundingPlanBinding): string {
-  return sha256(canonicalJson({ domain: GROUNDING_PLAN_DIGEST_DOMAIN, taskId: binding.taskId, artifactId: binding.artifactId, artifactSha256: binding.artifactSha256,
-    workflowRevision: binding.workflowRevision, baseCommitSha: binding.baseCommitSha, attempt: binding.attempt }));
 }
 
 /** The scenarios of a plan that a baseline round leaves out because they have an `agent` step (Ruling DD), by id and title, at most 64 (the display's bound). */

@@ -22,7 +22,7 @@ import { workflowE2EApplicationHostDeps, type WorkflowE2EApplicationRuntimeConfi
 import { ciImage } from "../support/ci-images.js";
 import { WEB_API_BUILD_IMAGE } from "../../packages/verifier/src/host/web-api-probe-runner.js";
 import { AGENT_GOAL, FIXED_RUNTIME_AT, ORDERS_M14_APP_FILES, ORDERS_M14_ROOT, createOrdersM14AgentPlan, sha256Hex } from "../support/orders-m14-agent.js";
-import { E2E_REPLAY_PURPOSE, replaySourceCasesOf, verifyReplayEvidence } from "../../packages/broker/src/core/e2e/replay.js";
+import { E2E_REPLAY_PURPOSE, replaySourceCasesOf, verifyReplayEvidence } from "../../packages/broker/src/e2e/replay-round.js";
 import type { E2EReplaySourceCase, E2EReplayTrace } from "@agentx/contracts";
 
 /** The task page's section for these rows as text (entities undone, so a sentence is matched as the owner reads it), and the Slack summary of them. */

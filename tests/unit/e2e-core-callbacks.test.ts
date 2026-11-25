@@ -57,7 +57,7 @@ type World = Awaited<ReturnType<typeof world>>;
 const currentTask = (patch: Partial<RoundTask> = {}): RoundTask => ({ taskId, workspaceId, workflow: { stage: "VERIFY", state: "RUNNING", revision: REVISION, candidate: { digest: CANDIDATE }, e2e: { currentRoundId: roundId, currentGroupRunIds: runIds } }, ...patch });
 const readers = (parts: Partial<Omit<RoundRecordReaders, "task">> & { task?: RoundTask | undefined } = {}): RoundRecordReaders => ({
   task: async () => ("task" in parts ? parts.task : currentTask()),
-  baseline: parts.baseline ?? (async () => undefined), replay: parts.replay ?? (async () => undefined), grounding: parts.grounding ?? (async () => undefined) });
+  baseline: parts.baseline ?? (async () => undefined) });
 const started = (patch: Partial<StartedRoundRecord> = {}): StartedRoundRecord => ({ state: "STARTED", operationId, roundId, admissionSha256: "", attempt: 1, ...patch });
 
 describe("the admission read", () => {
@@ -129,30 +129,32 @@ describe("the admission read", () => {
     await rejects(read(w, readers({ task: currentTask({ closedAt: "2026-01-01T00:00:00.000Z" }), baseline: async () => good }), 0), "STALE_FENCE");
   });
 
-  it("reads a replay round on the replay's own record, found by the round it replays and the attempt", async () => {
-    const sourceRoundId = randomUUID();
-    const w = await world({ ref: { kind: "application", purpose: "replay", sourceRoundId, attempt: 2 } });
-    const good = started({ admissionSha256: w.admission.sha });
-    const asked: unknown[] = [];
-    await expect(read(w, readers({ replay: async (id, key) => { asked.push([id, key]); return good; } }), 0)).resolves.toMatchObject({ offset: 0 });
-    expect(asked).toEqual([[taskId, { sourceRoundId, attempt: 2 }]]);
-    await rejects(read(w, readers({ replay: async () => ({ ...good, operationId: randomUUID() }) }), 0), "STALE_FENCE");
-    await rejects(read(w, readers({ replay: async () => undefined }), 0), "STALE_FENCE");
-    await rejects(read(w, readers({ task: currentTask({ closedAt: "2026-01-01T00:00:00.000Z" }), replay: async () => good }), 0), "STALE_FENCE");
-  });
+  // An audit replay and a grounding round are retired: nothing starts them and nothing records them. A worker that still holds one is refused in fixed words, before the task or any record is
+  // read, whatever an older release left stored, and the refusal never depends on (or changes) what is stored.
+  const replaySource = randomUUID();
+  describe.each([["replay", "the replay round is no longer the one that was started", { sourceRoundId: replaySource, attempt: 2 }, `E2E_REPLAY#${replaySource}#2`, "WORKFLOW_E2E_REPLAY"],
+    ["grounding", "the grounding round is no longer the one that was started", { baseCommitSha: "a".repeat(40), attempt: 1, planArtifactSha256: "9".repeat(64) }, `E2E_GROUNDING#${"9".repeat(64)}#1`, "WORKFLOW_E2E_GROUNDING"]] as const)(
+    "a retired %s round", (purpose, words, more, rowSk, rowType) => {
+    const never = async (): Promise<never> => { throw new Error("a retired round's read must not read the task or a record"); };
+    const refused = async (patch: Record<string, unknown> = {}) => {
+      const w = await world({ ref: { kind: "application", purpose, ...more } });
+      // The old record the previous release would have held for this round, started for this very operation and admission.
+      await w.store.put({ item: { pk: `DEVTASK#${taskId}`, sk: rowSk, entityType: rowType, taskId, state: "STARTED", operationId, roundId, admissionSha256: w.admission.sha, attempt: more.attempt, purpose } });
+      const before = JSON.stringify((await w.store.query({ pk: `DEVTASK#${taskId}` })).items);
+      const error = await readE2EAdmissionChunk(w.stores, { task: never, baseline: never }, { ...(await w.operation()), ...patch }, { stage: "read", offset: 0, sha256: w.admission.sha })
+        .then(() => undefined, (caught: unknown) => caught);
+      expect(JSON.stringify((await w.store.query({ pk: `DEVTASK#${taskId}` })).items)).toBe(before);
+      return error;
+    };
 
-  it("reads a grounding round on its record, for this plan, base commit and attempt, while the task still holds that plan", async () => {
-    const base = "a".repeat(40);
-    const plan = "9".repeat(64);
-    const w = await world({ ref: { kind: "application", purpose: "grounding", baseCommitSha: base, attempt: 1, planArtifactSha256: plan } });
-    const good = started({ admissionSha256: w.admission.sha, baseCommitSha: base, planArtifactSha256: plan });
-    const held = currentTask({ planGrounding: { artifactSha256: plan } });
-    await expect(read(w, readers({ task: held, grounding: async () => good }), 0)).resolves.toMatchObject({ offset: 0 });
-    await rejects(read(w, readers({ task: currentTask(), grounding: async () => good }), 0), "STALE_FENCE");
-    await rejects(read(w, readers({ task: currentTask({ planGrounding: { artifactSha256: "8".repeat(64) } }), grounding: async () => good }), 0), "STALE_FENCE");
-    for (const record of [undefined, { ...good, planArtifactSha256: "8".repeat(64) }, { ...good, baseCommitSha: "b".repeat(40) }, { ...good, attempt: 3 }, { ...good, state: "UNAVAILABLE" }]) {
-      await rejects(read(w, readers({ task: held, grounding: async () => record }), 0), "STALE_FENCE");
-    }
+    it("is refused with the fixed words and nothing read, even with its old record stored and the task open and current", async () => {
+      expect(await refused()).toMatchObject({ code: "STALE_FENCE", message: `STALE_FENCE: ${words}` });
+    });
+
+    it("is refused the same way for an operation that is not running; the checks-operation rules still come first", async () => {
+      expect(await refused({ status: "SUCCEEDED" })).toMatchObject({ code: "CALLBACK_FORBIDDEN" });
+      expect(await refused({ workflowMode: "IMPLEMENT" })).toMatchObject({ code: "CALLBACK_FORBIDDEN" });
+    });
   });
 
   it("answers a missing admission object as unavailable and one that no longer matches its address as invalid", async () => {

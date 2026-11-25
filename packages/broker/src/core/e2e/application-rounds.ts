@@ -23,8 +23,6 @@ import { workspaceKeys } from "../task-flow/workspace-location.js";
 import { iso, newId } from "../task-flow/support.js";
 import { baseOf, uuidFrom } from "../build-step/start.js";
 import { baselineStartItem, E2E_BASELINE_ATTEMPT, readWorkflowE2EBaselineRecord } from "./baseline.js";
-import { readWorkflowE2EReplayRecord } from "./replay.js";
-import { readWorkflowE2EGroundingRecord } from "./grounding.js";
 import { storeE2EAdmission, type RoundRecordReaders } from "./callbacks.js";
 import { readCandidateSourceExport, type CandidateSourceRef } from "./uploads.js";
 import { type UploadStores } from "./uploads-chunks.js";
@@ -169,7 +167,6 @@ export function createApplicationRounds(deps: ApplicationRoundsDeps): Applicatio
   const records: RoundRecordReaders = {
     task: (id) => readTask(deps.flow, id),
     baseline: async (task) => { const actual = await readTask(deps.flow, task.taskId); return actual === undefined ? undefined : readWorkflowE2EBaselineRecord(state, actual); },
-    replay: (taskId, round) => readWorkflowE2EReplayRecord(state, taskId, round), grounding: (ref) => readWorkflowE2EGroundingRecord(state, ref),
   };
   const start = async (task: ApplicationTask, current: CurrentApplicationSelection, plan: Awaited<ReturnType<typeof approvedPlan>>, source: Awaited<ReturnType<typeof readApplicationCandidateSource>>, baseline = false): Promise<StepStart> => {
     const workspace = await readWorkspace(deps.flow, task.workspaceId);

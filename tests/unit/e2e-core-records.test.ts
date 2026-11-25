@@ -1,4 +1,4 @@
-// The records of the baseline, replay and grounding rounds on the document store: each state transition, each refused transition, the stored keys and attributes (against the keys Cloud
+// The record of the baseline round on the document store: each state transition, each refused transition, the stored keys and attributes (against the keys Cloud
 // stores), the time to live, and the guards that keep a result from a round that is not the one that was started out of the record.
 import { describe, expect, it } from "vitest";
 import { INDEX_EXPIRY_ATTRIBUTE, indexExpiresAt, type DocumentStore, type TransactItem } from "@agentx/contracts";
@@ -7,10 +7,6 @@ import { createDocumentObjectStorage } from "../../packages/broker/src/core/proo
 import {
   baselineStartItem, markWorkflowE2EBaselineUnavailable, readWorkflowE2EBaseline, readWorkflowE2EBaselineRecord, recordWorkflowE2EBaseline, requestWorkflowE2EBaselineRound,
 } from "../../packages/broker/src/core/e2e/baseline.js";
-import { markWorkflowE2EReplayUnavailable, readWorkflowE2EReplayRecord, recordWorkflowE2EReplay } from "../../packages/broker/src/core/e2e/replay.js";
-import {
-  markWorkflowE2EGroundingUnavailable, readWorkflowE2EGroundingRecord, recordWorkflowE2EGrounding,
-} from "../../packages/broker/src/core/e2e/grounding.js";
 import { E2E_BASELINE_ATTEMPT } from "../../packages/broker/src/core/e2e/baseline.js";
 
 const AT = "2026-11-10T10:00:00.000Z";
@@ -127,117 +123,5 @@ describe("the baseline record", () => {
     expect(await readWorkflowE2EBaselineRecord(deps, task)).toBeUndefined();
     await store.put({ item: { ...base, state: "REQUESTED" } });
     expect((await readWorkflowE2EBaselineRecord(deps, task))?.state).toBe("REQUESTED");
-  });
-});
-
-describe("the replay record", () => {
-  const task = { taskId: "task-1" };
-  const round = { sourceRoundId: "src-1", attempt: 1 };
-  const started = { ...round, operationId: "op-1", roundId: "round-1", admissionSha256: hex("c"), startedAt: AT, deadlineAt: LATER };
-  const expected = { ...round, operationId: "op-1", roundId: "round-1", admissionSha256: hex("c") };
-  const verified = (overrides: Record<string, unknown> = {}) => ({ [Symbol("verified-replay")]: true, roundId: "round-1", admissionSha256: hex("c"),
-    replay: { status: "PASS", reproduced: true, downloadSha256Match: true }, ...overrides }) as never;
-  const setup = () => { const store = new MemoryDocumentStore(); return { store, deps: { store, now: clock(AT) } }; };
-  // The stored shape the deleted request and start writes made (a literal: nothing writes a replay record any more, the rows are read as they were left).
-  const seedStarted = (store: MemoryDocumentStore) => store.put({ item: { pk: "DEVTASK#task-1", sk: "E2E_REPLAY#src-1#1", entityType: "WORKFLOW_E2E_REPLAY", schemaVersion: 1, taskId: "task-1", sourceRoundId: "src-1",
-    purpose: "replay", attempt: 1, state: "STARTED", requestedAt: AT, operationId: started.operationId, roundId: started.roundId, admissionSha256: started.admissionSha256, startedAt: started.startedAt,
-    deadlineAt: started.deadlineAt, [INDEX_EXPIRY_ATTRIBUTE]: indexExpiresAt(started.startedAt) } });
-
-  it("records only for the round that was started, and keeps a recorded result", async () => {
-    const { store, deps } = setup();
-    await seedStarted(store);
-    for (const wrong of [{ operationId: "op-9" }, { roundId: "round-9" }, { admissionSha256: hex("d") }, { attempt: 2 }, { sourceRoundId: "src-2" }]) {
-      if ("roundId" in wrong || "admissionSha256" in wrong) await expect(recordWorkflowE2EReplay(deps, task, { verified: verified(), expected: { ...expected, ...wrong } })).rejects.toThrow();
-      else expect(await recordWorkflowE2EReplay(deps, task, { verified: verified(), expected: { ...expected, ...wrong } })).toBe(false);
-    }
-    await expect(recordWorkflowE2EReplay(deps, task, { verified: { roundId: "round-1", admissionSha256: hex("c"), replay: {} } as never, expected })).rejects.toThrow();
-    // A verification of some other round, matching what the caller expects, still does not match what the record started.
-    expect(await recordWorkflowE2EReplay(deps, task, { verified: verified({ roundId: "round-2" }), expected: { ...expected, roundId: "round-2" } })).toBe(false);
-    expect(await recordWorkflowE2EReplay(deps, task, { verified: verified({ admissionSha256: hex("e") }), expected: { ...expected, admissionSha256: hex("e") } })).toBe(false);
-    expect((await readWorkflowE2EReplayRecord(deps, "task-1", round))?.state).toBe("STARTED");
-    expect(await recordWorkflowE2EReplay(deps, task, { verified: verified(), expected })).toBe(true);
-    expect(await readWorkflowE2EReplayRecord(deps, "task-1", round)).toMatchObject({ state: "RECORDED", replay: { status: "PASS", reproduced: true } });
-    expect(await recordWorkflowE2EReplay(deps, task, { verified: verified(), expected })).toBe(false);
-    expect(await markWorkflowE2EReplayUnavailable(deps, task, round, "stopped", { from: ["REQUESTED", "STARTED", "UNAVAILABLE"] })).toBe(false);
-  });
-
-  it("marks unavailable only from a state named and for the operation named, and never creates a record", async () => {
-    const { store, deps } = setup();
-    expect(await markWorkflowE2EReplayUnavailable(deps, task, round, "stopped", { from: ["REQUESTED"] })).toBe(false);
-    expect(store.size).toBe(0);
-    await seedStarted(store);
-    expect(await markWorkflowE2EReplayUnavailable(deps, task, round, "timed-out", { from: ["STARTED"], operationId: "op-9" })).toBe(false);
-    expect(await markWorkflowE2EReplayUnavailable(deps, task, round, "timed-out", { from: ["REQUESTED"] })).toBe(false);
-    expect(await markWorkflowE2EReplayUnavailable(deps, task, round, "timed-out", { from: ["STARTED"], operationId: "op-1" })).toBe(true);
-    expect(await readWorkflowE2EReplayRecord(deps, "task-1", round)).toMatchObject({ state: "UNAVAILABLE", reason: "timed-out" });
-  });
-
-  it("reads no record whose result is not a result of the contract", async () => {
-    const { store, deps } = setup();
-    await store.put({ item: { pk: "DEVTASK#task-1", sk: "E2E_REPLAY#src-1#1", entityType: "WORKFLOW_E2E_REPLAY", taskId: "task-1", sourceRoundId: "src-1", purpose: "replay", attempt: 1, state: "RECORDED", requestedAt: AT, replay: { status: "?" } } });
-    expect(await readWorkflowE2EReplayRecord(deps, "task-1", round)).toBeUndefined();
-    expect(await readWorkflowE2EReplayRecord(deps, "task-2", round)).toBeUndefined();
-  });
-});
-
-describe("the grounding record", () => {
-  const task = { ownerKey: "developer:maya", workspaceId: "ws-1" };
-  const ref = { taskId: "task-1", planArtifactSha256: hex("a"), attempt: 1 };
-  const started = { baseCommitSha: "b".repeat(40), operationId: "op-1", roundId: "round-1", admissionSha256: hex("c"), selectionDigest: hex("d"), startedAt: AT, deadlineAt: LATER };
-  const expected = { operationId: "op-1", roundId: "round-1", admissionSha256: hex("c"), baseCommitSha: "b".repeat(40) };
-  const verified = (overrides: Record<string, unknown> = {}) => ({ [Symbol("verified-grounding")]: true, roundId: "round-1", admissionSha256: hex("c"),
-    results: { status: "PASSED", scenarios: [] }, findings: [], artifacts: [], ...overrides }) as never;
-  const setup = () => {
-    const store = new MemoryDocumentStore();
-    return { store, deps: { store, now: clock(AT), objects: createDocumentObjectStorage(store, { companyId: COMPANY }) } };
-  };
-  // The stored shapes the deleted request and start writes made (kept as literals: nothing writes a grounding record any more, the rows are read as they were left).
-  const row = { pk: "DEVTASK#task-1", sk: `E2E_GROUNDING#${hex("a")}#1`, entityType: "WORKFLOW_E2E_GROUNDING", schemaVersion: 1, taskId: "task-1", planArtifactSha256: hex("a"), purpose: "grounding", attempt: 1,
-    requestedAt: AT, scenarioIds: ["s1"], planArtifactId: "art-1", [INDEX_EXPIRY_ATTRIBUTE]: indexExpiresAt(AT) };
-  const seedRequested = (store: MemoryDocumentStore) => store.put({ item: { ...row, state: "REQUESTED" } });
-  const seedStarted = (store: MemoryDocumentStore) => store.put({ item: { ...row, state: "STARTED", baseCommitSha: started.baseCommitSha, operationId: started.operationId, roundId: started.roundId,
-    admissionSha256: started.admissionSha256, selectionDigest: started.selectionDigest, startedAt: started.startedAt, deadlineAt: started.deadlineAt } });
-
-  it("records only for the started round, and keeps a recorded result", async () => {
-    const { store, deps } = setup();
-    await seedStarted(store);
-    for (const wrong of [{ operationId: "op-9" }, { baseCommitSha: "e".repeat(40) }]) {
-      expect(await recordWorkflowE2EGrounding(deps, task, ref, { verified: verified(), expected: { ...expected, ...wrong } })).toBe(false);
-    }
-    await expect(recordWorkflowE2EGrounding(deps, task, ref, { verified: verified({ roundId: "x" }), expected })).rejects.toThrow();
-    expect(await recordWorkflowE2EGrounding(deps, task, ref, { verified: verified({ roundId: "round-2" }), expected: { ...expected, roundId: "round-2" } })).toBe(false);
-    expect(await recordWorkflowE2EGrounding(deps, task, ref, { verified: verified({ admissionSha256: hex("e") }), expected: { ...expected, admissionSha256: hex("e") } })).toBe(false);
-    await expect(recordWorkflowE2EGrounding(deps, task, ref, { verified: { roundId: "round-1", admissionSha256: hex("c"), results: {}, findings: [], artifacts: [] } as never, expected })).rejects.toThrow();
-    expect(await recordWorkflowE2EGrounding(deps, task, { ...ref, attempt: 2 }, { verified: verified(), expected })).toBe(false);
-    expect((await readWorkflowE2EGroundingRecord(deps, ref))?.state).toBe("STARTED");
-    expect(await recordWorkflowE2EGrounding(deps, task, ref, { verified: verified(), expected })).toBe(true);
-    expect(await readWorkflowE2EGroundingRecord(deps, ref)).toMatchObject({ state: "RECORDED", results: { status: "PASSED" }, findings: [], selectionDigest: hex("d") });
-    expect(await recordWorkflowE2EGrounding(deps, task, ref, { verified: verified(), expected })).toBe(false);
-    expect(await markWorkflowE2EGroundingUnavailable(deps, ref, "timed-out", { from: ["REQUESTED", "STARTED", "UNAVAILABLE"] })).toBe(false);
-  });
-
-  it("marks unavailable only with a fixed reason, from a state named, for the operation named", async () => {
-    const { store, deps } = setup();
-    await seedRequested(store);
-    await expect(markWorkflowE2EGroundingUnavailable(deps, ref, "a free sentence" as never, { from: ["REQUESTED"] })).rejects.toThrow(/fixed reason/);
-    await seedStarted(store);
-    expect(await markWorkflowE2EGroundingUnavailable(deps, ref, "run-failed", { from: ["REQUESTED"] })).toBe(false);
-    expect(await markWorkflowE2EGroundingUnavailable(deps, ref, "run-failed", { from: ["STARTED"], operationId: "op-9" })).toBe(false);
-    expect(await markWorkflowE2EGroundingUnavailable(deps, { ...ref, attempt: 2 }, "run-failed", { from: ["STARTED"] })).toBe(false);
-    expect(await markWorkflowE2EGroundingUnavailable(deps, ref, "run-failed", { from: ["STARTED"], operationId: "op-1" })).toBe(true);
-    expect(await readWorkflowE2EGroundingRecord(deps, ref)).toMatchObject({ state: "UNAVAILABLE", reason: "run-failed" });
-  });
-
-  it("reads a recorded result only whole, and a reason only when it is one of the fixed ones", async () => {
-    const { store, deps } = setup();
-    const base = { pk: "DEVTASK#task-1", sk: `E2E_GROUNDING#${hex("a")}#1`, entityType: "WORKFLOW_E2E_GROUNDING", taskId: "task-1", planArtifactSha256: hex("a"), purpose: "grounding", attempt: 1,
-      requestedAt: AT, scenarioIds: ["s1"], planArtifactId: "art-1" };
-    await store.put({ item: { ...base, state: "RECORDED", results: { status: "PASSED", scenarios: [] } } });
-    expect(await readWorkflowE2EGroundingRecord(deps, ref)).toBeUndefined();
-    await store.put({ item: { ...base, state: "UNAVAILABLE", reason: "something else" } });
-    expect(await readWorkflowE2EGroundingRecord(deps, ref)).toEqual(expect.objectContaining({ state: "UNAVAILABLE" }));
-    expect((await readWorkflowE2EGroundingRecord(deps, ref))).not.toHaveProperty("reason");
-    await store.put({ item: { ...base, state: "REQUESTED", scenarioIds: [] } });
-    expect(await readWorkflowE2EGroundingRecord(deps, ref)).toBeUndefined();
   });
 });
