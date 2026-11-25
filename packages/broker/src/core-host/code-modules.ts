@@ -130,7 +130,7 @@ export function codeAdapterModules(deps: CodeModuleDeps): CoreAdapterModule[] {
       point: "worker-machines", name: "ec2-sessions", owner: "E2 (Code's AWS deployment)",
       create: () => {
         const given = deps.workerMachines!;
-        requireFunctions("workerMachines", given, ["companyOfWorkspace", "binding", "stopInstance", "sign", "post", "ping"]);
+        requireFunctions("workerMachines", given, ["companyOfWorkspace", "binding", "stopInstance", "sign", "post", "ping", "verifyMachine"]);
         requireFunctions("workerMachines.sessions", given.sessions, ["get", "ensureSession", "deleteSession", "claimStop", "requestStop", "markStopped"]);
         return new SessionWorkerFleet(given);
       },

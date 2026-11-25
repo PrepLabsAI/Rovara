@@ -64,7 +64,7 @@ export const INSTALL_AWS_HOSTS: ReadonlyArray<{ host: (region: string, account?:
   { host: (r) => `al2023-repos-${r}-de612dc2.s3.dualstack.${r}.amazonaws.com`, why: "Amazon Linux 2023 package repository: a worker's boot installs Docker from it (exact bucket host)" },
   { host: (r) => `kms.${r}.amazonaws.com`, why: "session Lambdas sign and verify with the invoke key" },
   { host: (r) => `ssm.${r}.amazonaws.com`, why: "settings parameters" },
-  { host: (r) => `ec2.${r}.amazonaws.com`, why: "worker instances (reaper, reconciler)" },
+  { host: (r) => `ec2.${r}.amazonaws.com`, why: "worker instances (reaper, reconciler, the dispatcher's machine check before each worker POST)" },
   { host: (r) => `states.${r}.amazonaws.com`, why: "Step Functions (provisioner, deleter, dispatcher)" },
   { host: (r) => `lambda.${r}.amazonaws.com`, why: "Lambda API (dispatcher, reconciler)" },
   { host: (r) => `email.${r}.amazonaws.com`, why: "SES v2 (operator mail)" },

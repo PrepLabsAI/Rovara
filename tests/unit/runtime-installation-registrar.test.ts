@@ -2,9 +2,10 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { networkInterfaces } from "node:os";
 import { describe, expect, it } from "vitest";
 import { RuntimeInstallationProposalSchema, runtimeInstallChallengeDigest, runtimeInstallationProposalSha256, type RuntimeInstallChallenge } from "../../packages/contracts/src/runtime-installation.js";
-import { issueRuntimeInstallChallenge, registerRuntimeInstallation, type RuntimeInstallationDependencies } from "../../packages/broker/src/aws/runtime-installation.js";
+import { issueRuntimeInstallChallenge, registerRuntimeInstallation, requireIssuedInstance, runtimeInstallationRecords, type RuntimeInstallationDependencies } from "../../packages/broker/src/aws/runtime-installation.js";
 import type { AuthenticatedIdentity } from "../../packages/broker/src/auth.js";
 import { proposalFor } from "../support/p0-runtime-proposal.js";
+import { ProjectSetupRuntimeRecordSchema } from "../../packages/broker/src/aws/project-setup-runtime-catalog.js";
 import { assertRuntimeInstallationEndpointIdentity, assertRuntimeInstallationHostIdentity } from "../../packages/verifier/src/install-qualification.js";
 
 const sha = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
@@ -106,5 +107,46 @@ describe("runtime installation broker registration", () => {
     replay.challenge.challengeId = randomUUID();
     await expect(registerRuntimeInstallation(deps, admin, { proposal: replay, proposalSha256: "a".repeat(64) })).rejects.toThrow();
     expect(items.size).toBe(1);
+  });
+
+  it("never registers a standard runtime from a challenge that named no EC2 instance (WDI-SETUP): the one place the registrar reads it refuses", () => {
+    expect(() => requireIssuedInstance({})).toThrow(/EC2 instance/);
+    expect(() => requireIssuedInstance({ runnerInstanceId: "ami-0123456789abcdef0" })).toThrow(/EC2 instance/);
+    expect(() => requireIssuedInstance({ runnerInstanceId: 7 })).toThrow(/EC2 instance/);
+    expect(requireIssuedInstance({ runnerInstanceId: "i-0123456789abcdef0" })).toBe("i-0123456789abcdef0");
+  });
+
+  // WORKER-DELIVERY-IDENTITY (WDI-SETUP): the instance an administrator names on a challenge reaches the setup catalog row, and only there.
+  describe("the setup runtime's instance id", () => {
+    const INSTANCE = "i-0123456789abcdef0";
+    const baseRequest = { binding: { deploymentMode: "ec2-ebs", launchTemplateId: "lt-01234567", subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-01234567" }], volumeSizeGiB: 32, volumeType: "gp3" }, endpoint: "http://10.0.2.15:8080", generation: 3, transportCorrelationId: randomUUID(), profileId: "linux-arm64-docker-v1" };
+    const depsFor = (documentClient: unknown) => ({ documentClient, s3: { send: async () => { throw new Error("unused"); } }, tableName: "state", artifactBucketName: "artifacts", setupCatalogId: "configured-setup", featureCatalogId: "configured-feature" }) as unknown as RuntimeInstallationDependencies;
+
+    it("is kept on the challenge row when the administrator names it, and refused when it is not an instance id; the challenge itself is unchanged", async () => {
+      const { items, documentClient } = challengeStore();
+      const challenge = await issueRuntimeInstallChallenge(depsFor(documentClient), admin, { ...baseRequest, instanceId: INSTANCE });
+      expect(items.get(`RUNTIME_INSTALL_CHALLENGE#${challenge.challengeId}|CHALLENGE`)).toMatchObject({ runnerInstanceId: INSTANCE });
+      expect(JSON.stringify(challenge)).not.toContain(INSTANCE);
+      await expect(issueRuntimeInstallChallenge(depsFor(documentClient), admin, { ...baseRequest, instanceId: "not-an-instance" })).rejects.toThrow();
+      // The standard profile (the one that becomes the setup runtime) is never issued without one; another profile may be.
+      await expect(issueRuntimeInstallChallenge(depsFor(documentClient), admin, baseRequest)).rejects.toThrow(/EC2 instance/);
+      const itemsBefore = items.size;
+      const plain = await issueRuntimeInstallChallenge(depsFor(documentClient), admin, { ...baseRequest, profileId: "linux-arm64-web-api-v1" });
+      expect(items.size).toBe(itemsBefore + 1);
+      expect(items.get(`RUNTIME_INSTALL_CHALLENGE#${plain.challengeId}|CHALLENGE`)).not.toHaveProperty("runnerInstanceId");
+    });
+
+    it("is written to the setup catalog row (and not to the feature row) when registration carries it, and the row stays valid without it", async () => {
+      const { items, documentClient } = challengeStore();
+      const challenge = await issueRuntimeInstallChallenge(depsFor(documentClient), admin, { ...baseRequest, instanceId: INSTANCE });
+      void items;
+      const proposal = proposalFor(challenge);
+      const withId = runtimeInstallationRecords({ proposal: proposal as never, setupRevision: 1, featureRevision: 1, instanceId: INSTANCE });
+      expect(ProjectSetupRuntimeRecordSchema.parse(withId.setup)).toMatchObject({ instanceId: INSTANCE });
+      expect(withId.feature).not.toHaveProperty("instanceId");
+      const without = runtimeInstallationRecords({ proposal: proposal as never, setupRevision: 1, featureRevision: 1 });
+      expect(without.setup).not.toHaveProperty("instanceId");
+      expect(ProjectSetupRuntimeRecordSchema.parse(without.setup).instanceId).toBeUndefined();
+    });
   });
 });

@@ -292,8 +292,8 @@ describe("control-plane infrastructure", () => {
     // Broker, outbox publisher, dispatcher, Slack ingress, the EC2 session steps (#83), idle
     // reaper (#85) and reconciler (#86), the eval batch tick (spec 052), and the channel API and its event sender
     // (spec 062 Phase 7d: the built-in Slack adapter), and developer sign-in for account linking (spec 064). #1148: and the core engine's attention email sender
-    // (which exists only while CoreAttentionEmail is on).
-    template.resourceCountIs("AWS::Lambda::Function", 13);
+    // (which exists only while CoreAttentionEmail is on). WORKER-DELIVERY-IDENTITY step 0: and the EC2 instance state-change handler.
+    template.resourceCountIs("AWS::Lambda::Function", 14);
     expect(json).not.toContain("ZipFile");
     expect(json).not.toContain("not packaged");
     expect(json).toContain("STATE_TABLE_NAME");
@@ -338,8 +338,8 @@ describe("control-plane infrastructure", () => {
     const stack = new ControlPlaneStack(app, "LoggedControlPlane");
     const template = Template.fromStack(stack);
 
-    // One per Lambda, plus the EC2 session provisioner's and deleter's (#83). #1148: the attention email sender's too. Code train 23: the HTTP API's access log group.
-    template.resourceCountIs("AWS::Logs::LogGroup", 16);
+    // One per Lambda, plus the EC2 session provisioner's and deleter's (#83). #1148: the attention email sender's too. Code train 23: the HTTP API's access log group. WORKER-DELIVERY-IDENTITY step 0: the instance state-change handler's.
+    template.resourceCountIs("AWS::Logs::LogGroup", 17);
     template.allResourcesProperties("AWS::Logs::LogGroup", {
       RetentionInDays: 30,
     });
@@ -991,8 +991,8 @@ describe("Slack interactivity infrastructure (spec 014)", () => {
     // Broker, outbox publisher, dispatcher, Slack ingress, the EC2 session steps (#83), idle
     // reaper (#85) and reconciler (#86), the eval batch tick (spec 052), and the channel API and its event sender
     // (spec 062 Phase 7d: the built-in Slack adapter), and developer sign-in for account linking (spec 064). #1148: and the core engine's attention email sender
-    // (which exists only while CoreAttentionEmail is on).
-    template.resourceCountIs("AWS::Lambda::Function", 13);
+    // (which exists only while CoreAttentionEmail is on). WORKER-DELIVERY-IDENTITY step 0: and the EC2 instance state-change handler.
+    template.resourceCountIs("AWS::Lambda::Function", 14);
   });
 });
 

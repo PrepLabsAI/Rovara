@@ -30,6 +30,8 @@ export const RuntimeInstallChallengeRequestSchema = z.object({
   endpoint: RuntimeInstallChallengeSchema.shape.endpoint,
   generation: RuntimeInstallChallengeSchema.shape.generation,
   transportCorrelationId: RuntimeInstallChallengeSchema.shape.transportCorrelationId,
+  /** WORKER-DELIVERY-IDENTITY (WDI-SETUP): the EC2 instance at `endpoint`, if the administrator names it; kept on the challenge row (not in the challenge digest) and copied to the setup catalog row at registration. */
+  instanceId: z.string().regex(/^i-[0-9a-f]{8,17}$/).optional(),
 }).strict();
 export type RuntimeInstallChallengeRequest = ReturnType<typeof RuntimeInstallChallengeRequestSchema.parse>;
 
@@ -65,12 +67,18 @@ function assertSeamAuthority(identity: AuthenticatedIdentity, scoped: boolean): 
   throw agentXError("FORBIDDEN", "administrator claim is required");
 }
 
+/** Fixed words of the refusal for a standard-profile challenge or registration with no EC2 instance. */
+export const NEEDS_INSTANCE_WORDS = "the standard runtime must be installed with its EC2 instance: issue the challenge with the instance id (agentx admin runtime-installation challenge --instance-id i-...)";
+
 export async function issueRuntimeInstallChallenge(
   deps: RuntimeInstallationDependencies,
   identity: AuthenticatedIdentity,
   requestInput: unknown,
 ): Promise<RuntimeInstallChallenge> {
   assertAdmin(identity);
+  // WDI-SETUP: the standard profile's registration becomes the project setup runtime, so its challenge must name the instance the dispatcher will ask EC2 about; a row without one is never written.
+  const request = RuntimeInstallChallengeRequestSchema.safeParse(requestInput);
+  if (request.success && request.data.profileId === "linux-arm64-docker-v1" && request.data.instanceId === undefined) throw agentXError("CONFIG_INVALID", NEEDS_INSTANCE_WORDS);
   return issueChallengeAs(deps, identity, requestInput);
 }
 
@@ -99,7 +107,7 @@ export async function issueChallengeAs(
   });
   const digest = runtimeInstallChallengeDigest(challenge);
   await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: {
-    ...rowExtras, ...challengeKey(id), entityType: "RUNTIME_INSTALL_CHALLENGE", state: "ISSUED", challengeDigest: digest,
+    ...rowExtras, ...challengeKey(id), entityType: "RUNTIME_INSTALL_CHALLENGE", state: "ISSUED", challengeDigest: digest, ...runnerInstanceField(request.instanceId),
     secretSha256: sha(Buffer.from(challenge.challengeSecret, "base64")), issuedAt: challenge.issuedAt, expiresAt: challenge.expiresAt,
     issuedByOwnerKey: identity.ownerKey, issuedBySubject: identity.subject,
     ttl: Math.ceil(Date.parse(challenge.expiresAt) / 1000),
@@ -107,8 +115,25 @@ export async function issueChallengeAs(
   return challenge;
 }
 
+/** The instance the issuing administrator named on the challenge; a standard runtime is never registered without one (the setup runtime row must carry it). */
+export function requireIssuedInstance(row: Record<string, unknown>): string {
+  const instance = row["runnerInstanceId"];
+  if (typeof instance !== "string" || !/^i-[0-9a-f]{8,17}$/.test(instance)) throw agentXError("CONFIG_INVALID", NEEDS_INSTANCE_WORDS);
+  return instance;
+}
+
+/** The challenge row's field for the instance the administrator named (none when they did not). */
+function runnerInstanceField(value: string | undefined): { runnerInstanceId?: string } {
+  return value === undefined ? {} : { runnerInstanceId: value };
+}
+
+/** The setup catalog row's field for it. */
+function catalogInstanceField(value: string | undefined): { instanceId?: string } {
+  return value === undefined ? {} : { instanceId: value };
+}
+
 export function runtimeInstallationRecords(input: {
-  proposal: RuntimeInstallationProposal; setupRevision: number; featureRevision: number; qualifiedAt?: string;
+  proposal: RuntimeInstallationProposal; setupRevision: number; featureRevision: number; qualifiedAt?: string; instanceId?: string | undefined;
 }): { setup: Record<string, unknown>; feature: Record<string, unknown> } {
   const proposal = RuntimeInstallationProposalSchema.parse(input.proposal);
   const binding = proposal.challenge.binding;
@@ -123,7 +148,7 @@ export function runtimeInstallationRecords(input: {
   const setup = {
     schemaVersion: 1, entityType: "PROJECT_SETUP_RUNTIME", runtimeCatalogId: proposal.challenge.setupCatalogId, catalogRevision: input.setupRevision,
     bindingDigest, binding, manifestDigest: proposal.manifest.sha256, runnerEnvironmentDigest, runnerEnvironment,
-    runnerToolchainDigest, runnerToolchain, endpoint: proposal.challenge.endpoint, generation: proposal.challenge.generation,
+    runnerToolchainDigest, runnerToolchain, endpoint: proposal.challenge.endpoint, ...catalogInstanceField(input.instanceId), generation: proposal.challenge.generation,
     transportCorrelationId: proposal.challenge.transportCorrelationId, supportedSetupScopes: ["source-interface"], state: "READY",
     qualifiedAt, expiresAt,
   };
@@ -230,13 +255,15 @@ export async function registerRuntimeInstallation(
   if (proposal.challenge.setupCatalogId !== deps.setupCatalogId || proposal.challenge.featureCatalogId !== deps.featureCatalogId) throw agentXError("FORBIDDEN", "runtime challenge catalogs do not match this deployment");
   const issued = await loadIssuedChallenge(deps, identity, proposal);
   if (proposal.challenge.profileId !== "linux-arm64-docker-v1" || proposal.runnerToolchain.platform !== "linux" || proposal.runnerToolchain.arch !== "arm64" || proposal.runnerToolchain.execPath !== "/usr/local/bin/node") throw agentXError("CONFIG_INVALID", "standard runtime registration requires qualification on the fixed Linux ARM64 worker supervisor");
+  // A challenge issued before the instance id existed cannot be redeemed (it lives five minutes): the setup runtime row is never written without one.
+  const issuedInstance = requireIssuedInstance(issued.challengeRow);
   const expectedSetupKey = projectSetupRuntimeKey(deps.setupCatalogId, projectSetupBindingDigest(proposal.challenge.binding));
   const expectedFeatureKey = e2eFeatureVerifierKey(deps.featureCatalogId, PROFILE_ID);
   const [setupRevisionBefore, featureRevisionBefore] = await Promise.all([readCatalogRevision(deps, expectedSetupKey), readCatalogRevision(deps, expectedFeatureKey)]);
   const { evidence, evidencePointer } = await prepareEvidence(deps, proposal, proposalSha256, issued, identity, MAX_PROPOSAL_BYTES);
   const setupRevision = (setupRevisionBefore ?? 0) + 1;
   const featureRevision = (featureRevisionBefore ?? 0) + 1;
-  const records = runtimeInstallationRecords({ proposal, setupRevision, featureRevision, qualifiedAt: new Date(nowFor(deps)).toISOString() });
+  const records = runtimeInstallationRecords({ proposal, setupRevision, featureRevision, qualifiedAt: new Date(nowFor(deps)).toISOString(), instanceId: issuedInstance });
   // Validate both catalog rows through their existing strict contracts before a single transaction can publish either.
   const setup = ProjectSetupRuntimeRecordSchema.parse(records.setup);
   const feature = E2EFeatureVerifierRecordSchema.parse(records.feature);

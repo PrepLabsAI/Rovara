@@ -93,6 +93,9 @@ describe("an EC2 worker authenticating invocations", () => {
     ["wrong workspace", (claims: WorkerInvokeTokenClaims) => `AgentX-Invoke ${tokenFor({ ...claims, workspaceId: randomUUID() })}`, "wrong_workspace"],
     ["wrong generation", (claims: WorkerInvokeTokenClaims) => `AgentX-Invoke ${tokenFor({ ...claims, generation: 2 })}`, "wrong_generation"],
     ["expired", (claims: WorkerInvokeTokenClaims) => `AgentX-Invoke ${tokenFor({ ...claims, expiresAt: NOW })}`, "expired"],
+    // REDACT review F4: expiry is checked before the workspace and generation, so a captured, validly signed, expired token for another workspace or generation learns nothing about this worker.
+    ["expired and for another workspace", (claims: WorkerInvokeTokenClaims) => `AgentX-Invoke ${tokenFor({ ...claims, workspaceId: randomUUID(), expiresAt: NOW })}`, "expired"],
+    ["expired and for another generation", (claims: WorkerInvokeTokenClaims) => `AgentX-Invoke ${tokenFor({ ...claims, generation: 2, expiresAt: NOW })}`, "expired"],
     ["another key's signature", (claims: WorkerInvokeTokenClaims) =>
       `AgentX-Invoke ${tokenFor(claims, generateKeyPairSync("ec", { namedCurve: "prime256v1" }).privateKey)}`, "bad_signature"],
     ["no signature", (claims: WorkerInvokeTokenClaims) => `AgentX-Invoke ${workerInvokeTokenPayload(claims)}`, "malformed"],

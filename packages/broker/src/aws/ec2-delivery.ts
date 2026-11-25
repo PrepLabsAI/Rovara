@@ -28,6 +28,7 @@ import {
 } from "@agentx/contracts";
 import { asksForApplicationPlan, asksForCodeAnchors, asksForPlanQuality, withoutApplicationPlanText, withoutCodeAnchorText, withoutPlanQualityText } from "./broker-shared.js";
 import type { Ec2OutboxRecord } from "./lambda.js";
+import { MACHINE_GONE_WORDS, type MachineToCheck, type MachineVerifier } from "./machine-check.js";
 import type { SessionManager } from "./sessions.js";
 
 /**
@@ -92,11 +93,12 @@ export const MACHINE_FALLBACK_MESSAGES = {
   "x86-unavailable": "x86 machines aren't available on this install yet, so this task runs on the standard size (ARM, 2 vCPU, 8 GB).",
 } as const satisfies Record<MachineFallback, string>;
 
-export type Ec2Delivery = "DELIVERED" | "WAITING_FOR_SESSION" | "WAITING_FOR_TASK_ACCESS" | { readinessGeneration: number };
+/** "MACHINE_GONE": EC2 says the row's machine is not the one at its address (machine-check.ts); nothing was sent, the row is marked lost and the operation already failed with the fixed words. The message is done. */
+export type Ec2Delivery = "DELIVERED" | "WAITING_FOR_SESSION" | "WAITING_FOR_TASK_ACCESS" | "MACHINE_GONE" | { readinessGeneration: number };
 
 export interface ProjectSetupSessionPort {
   ensureSession(input: { setupExecutionId: string; subjectId: string; approvalRevision: number; transportCorrelationId: string; binding: Ec2RuntimeBinding; waitingOutboxId: string }):
-    Promise<{ ready: true; generation: number; privateIp: string } | { ready: false; generation: number; state: string }>;
+    Promise<{ ready: true; generation: number; privateIp: string; instanceId?: string | undefined } | { ready: false; generation: number; state: string }>;
 }
 
 export interface Ec2DeliveryDependencies {
@@ -109,6 +111,13 @@ export interface Ec2DeliveryDependencies {
   /** KMS Sign, ECDSA_SHA_256 over the message bytes; returns the DER signature. */
   sign: (message: Uint8Array) => Promise<Uint8Array>;
   post: (url: string, init: { authorization: string; body: string }) => Promise<{ status: number; body: string }>;
+  /**
+   * Asked immediately before every POST (after the token is signed): is the machine at the row's address still the row's machine (machine-check.ts)? `{ ok: false }` means it is gone: nothing is sent,
+   * the row is already marked lost, and `failOperation` ends the operation. A rejection (EC2 could not be asked) is a retryable failure of the attempt; nothing was sent.
+   */
+  verifyMachine: MachineVerifier;
+  /** Ends the record's operation for good with these words, as the dispatcher's own terminal transition does (outbox-failure.ts). */
+  failOperation: (record: Ec2OutboxRecord, error: string, machine: { markedLost: boolean }) => Promise<void>;
   /** Records a progress event on the operation, once per outbox record. */
   progress: (record: Ec2OutboxRecord, message: string) => Promise<void>;
   /** DEC 254zb: records the machine size note on the operation, once per outbox record. Absent: no note (today). */
@@ -193,7 +202,7 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
     await checkAdmissionAgentSteps(invocation, dependencies.workflowE2EAdmissionUsesAgentSteps);
     const needsModelFreeLimits = await admissionNeedsModelFreeLimits(invocation, dependencies.workflowE2EAdmissionNeedsModelFreeLimits);
     let binding: Ec2RuntimeBinding | undefined;
-    let session: { ready: true; generation: number; privateIp: string; machineFallback?: MachineFallback } | { ready: false; generation: number; state: string };
+    let session: { ready: true; generation: number; privateIp: string; instanceId?: string | undefined; subnetId?: string | undefined; machineFallback?: MachineFallback } | { ready: false; generation: number; state: string };
     if (invocation.kind === "project-setup-smoke") {
       if (dependencies.projectSetupSessions === undefined || dependencies.projectSetupBinding === undefined) {
         throw deliveryRefusal("RUNTIME_UNAVAILABLE", "project setup session transport is not configured");
@@ -233,24 +242,7 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
     const modelChoice = applicationAdmission === undefined || dependencies.workflowE2EAdmissionNeedsModelChoice === undefined ? undefined
       : () => dependencies.workflowE2EAdmissionNeedsModelChoice!(applicationAdmission);
     const sent = await forWorker(invocation, `http://${session.privateIp}:${WORKER_PORT}/ping`, dependencies.workerFeatures, admissionSchemaVersion, needsModelFreeLimits, modelChoice);
-    if (invocation.kind === "task" && invocation.payload.workflowE2EPlanVersion !== undefined
-      && !(sent.kind === "task" && sent.payload.workflowE2EPlanVersion !== undefined)) {
-      // Without the recorder the operation record would keep saying version 2 was offered while the worker was sent a portable-only run, so the broker would
-      // accept a v2 plan it never asked for: a missing recorder is a wiring error, and the run does not go out.
-      if (dependencies.applicationPlanNotNegotiated === undefined) {
-        throw deliveryRefusal("CONFIG_INVALID", "the application plan version was dropped for this worker but no applicationPlanNotNegotiated recorder is configured");
-      }
-      await dependencies.applicationPlanNotNegotiated(record);
-    }
-    if (invocation.kind === "task" && asksForPlanQuality(invocation.payload.prompt)
-      && !(sent.kind === "task" && asksForPlanQuality(sent.payload.prompt))) {
-      // Without the recorder the operation would keep saying the planner was asked for the new plan members while this worker was sent a prompt without them, and a revision prompt
-      // would then name members its strict parser rejects: a missing recorder is a wiring error, and the run does not go out (the same as the application plan above).
-      if (dependencies.planQualityNotNegotiated === undefined) {
-        throw deliveryRefusal("CONFIG_INVALID", "the plan quality guidance was dropped for this worker but no planQualityNotNegotiated recorder is configured");
-      }
-      await dependencies.planQualityNotNegotiated(record);
-    }
+    await recordDroppedForWorker(dependencies, record, invocation, sent);
     if (await guardCurrentAuthority() === "PARKED") return "WAITING_FOR_TASK_ACCESS";
     const payload = workerInvokeTokenPayload({
       workspaceId: record.workspaceId,
@@ -269,6 +261,12 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
     // Signing may cross an authority revocation boundary. Recheck setup approval immediately before
     // the transport side effect; the opaque worker correlation is not durable setup authority.
     if (invocation.kind === "project-setup-smoke" && await guardCurrentAuthority() === "PARKED") return "WAITING_FOR_TASK_ACCESS";
+    // WORKER-DELIVERY-IDENTITY (b-plus): the last thing before the bytes leave. A machine that is not the row's gets nothing, and no retry goes to its address.
+    const verdict = await dependencies.verifyMachine(machineToCheck(invocation, record.workspaceId, session, binding));
+    if (!verdict.ok) {
+      await dependencies.failOperation(record, MACHINE_GONE_WORDS, { markedLost: verdict.markedLost });
+      return "MACHINE_GONE";
+    }
     const response = await dependencies.post(`http://${session.privateIp}:${WORKER_PORT}/invocations`, {
       authorization: `${WORKER_INVOKE_AUTHORIZATION_SCHEME} ${workerInvokeToken(payload, signature)}`,
       body: JSON.stringify(sent),
@@ -279,6 +277,40 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
     }
     return "DELIVERED";
   };
+}
+
+/**
+ * What was dropped from the invocation for this worker is recorded on the operation before the post (the broker must not accept an answer to something it was not sent). A missing recorder is a wiring
+ * error and the run does not go out.
+ */
+async function recordDroppedForWorker(dependencies: Ec2DeliveryDependencies, record: Ec2OutboxRecord, invocation: WorkerInvocation, sent: WorkerInvocation): Promise<void> {
+  if (invocation.kind === "task" && invocation.payload.workflowE2EPlanVersion !== undefined
+    && !(sent.kind === "task" && sent.payload.workflowE2EPlanVersion !== undefined)) {
+    // Without the recorder the operation record would keep saying version 2 was offered while the worker was sent a portable-only run, so the broker would
+    // accept a v2 plan it never asked for: a missing recorder is a wiring error, and the run does not go out.
+    if (dependencies.applicationPlanNotNegotiated === undefined) {
+      throw deliveryRefusal("CONFIG_INVALID", "the application plan version was dropped for this worker but no applicationPlanNotNegotiated recorder is configured");
+    }
+    await dependencies.applicationPlanNotNegotiated(record);
+  }
+  if (invocation.kind === "task" && asksForPlanQuality(invocation.payload.prompt)
+    && !(sent.kind === "task" && asksForPlanQuality(sent.payload.prompt))) {
+    // Without the recorder the operation would keep saying the planner was asked for the new plan members while this worker was sent a prompt without them, and a revision prompt
+    // would then name members its strict parser rejects: a missing recorder is a wiring error, and the run does not go out (the same as the application plan above).
+    if (dependencies.planQualityNotNegotiated === undefined) {
+      throw deliveryRefusal("CONFIG_INVALID", "the plan quality guidance was dropped for this worker but no planQualityNotNegotiated recorder is configured");
+    }
+    await dependencies.planQualityNotNegotiated(record);
+  }
+}
+
+/** The row's machine as the check names it. A project setup row is the shared setup runtime: it carries the instance of its runtime catalog row when that was registered with one (machine-check.ts). */
+function machineToCheck(invocation: WorkerInvocation, workspaceId: string, session: { generation: number; privateIp: string; instanceId?: string | undefined; subnetId?: string | undefined }, binding: Ec2RuntimeBinding | undefined): MachineToCheck {
+  const base = { workspaceId, generation: session.generation, instanceId: session.instanceId, privateIp: session.privateIp };
+  // A setup run's subnets are its runtime binding's (the digest the setup session was admitted under); a workspace's is the subnet its own session was placed in (the project's binding may have changed since).
+  return invocation.kind === "project-setup-smoke"
+    ? { ...base, kind: "project-setup", setupExecutionId: invocation.payload.setupExecutionId, subnetIds: (binding?.subnets ?? []).map((subnet) => subnet.subnetId) }
+    : { ...base, kind: "workspace", subnetIds: session.subnetId === undefined ? [] : [session.subnetId] };
 }
 
 /** What a worker that cannot run a version 2 application admission (web and API runtime bindings keyed by kind) is told; the feature it must list is `task.workflowE2EApplicationChecks.v2`. */

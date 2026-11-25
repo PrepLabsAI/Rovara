@@ -18,6 +18,7 @@ import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import type { Ec2RuntimeBinding, WorkspaceSession, WorkspaceSessionState } from "@agentx/contracts";
 import { requiredEnvironment } from "./lambda.js";
 import { failActiveOperation } from "./outbox-failure.js";
+import { markSessionLost } from "./session-lost.js";
 import { SessionManager, workspaceBinding } from "./sessions.js";
 import { expireIndexDays, indexSweepWanted } from "./index-expiry.js";
 import { sweepStuckSetups } from "./stuck-setup.js";
@@ -354,10 +355,7 @@ async function reconcileReady(
   if (instance === undefined || instance.state !== "running") {
     // Terminated, stopped or gone from under a READY session: its work cannot finish.
     if (instance !== undefined && !GONE.has(instance.state)) await dependencies.terminate(instance.instanceId);
-    if (!(await dependencies.sessions.markLost(session))) return;
-    const operationId = await dependencies.failActiveOperation(session.workspaceId, "RUNTIME_UNAVAILABLE: workspace compute was lost; retry the request");
-    report.lostInstances.push(session.instanceId!);
-    log({ event: "reconciler.instance_lost", workspaceId: session.workspaceId, instanceId: session.instanceId, failedOperationId: operationId });
+    await markLostNow(dependencies, session, report, log, "instance_gone");
     return undefined;
   }
   let status: string | undefined;
@@ -369,10 +367,12 @@ async function reconcileReady(
   if (status === "Healthy" || status === "HealthyBusy") {
     if (session.pingFailures !== undefined) await dependencies.sessions.clearPingFailures(session);
   } else if (await dependencies.sessions.recordPingFailure(session) >= UNRESPONSIVE_PROBES) {
-    // Replaced: the next run finds the instance gone and handles it as lost.
     await dependencies.terminate(session.instanceId!);
     report.unresponsiveInstances.push(session.instanceId!);
     log({ event: "reconciler.instance_unresponsive", workspaceId: session.workspaceId, instanceId: session.instanceId });
+    // WORKER-DELIVERY-IDENTITY step 0: lost in this same run. Leaving the row READY until the next run (10 minutes) kept an address of a machine we had just terminated open to deliveries, and
+    // to whatever new machine took it.
+    await markLostNow(dependencies, session, report, log, "unresponsive");
   }
   if ((session.waitingOutboxIds ?? []).length > 0) {
     const { requeued } = await dependencies.sessions.requeueParked(session.workspaceId);
@@ -393,6 +393,20 @@ async function reconcileReady(
     }
   }
   return status === "Healthy" ? "idle" : status === "HealthyBusy" ? "busy" : undefined;
+}
+
+/** A READY session whose machine is gone (or was just terminated here): STOPPED, its running operation failed with the fixed words, counted as a lost instance (the LostInstancesAlarm's metric). */
+async function markLostNow(
+  dependencies: ReconcilerDependencies,
+  session: WorkspaceSession,
+  report: ReconcilerReport,
+  log: (entry: Record<string, unknown>) => void,
+  cause: "instance_gone" | "unresponsive",
+): Promise<void> {
+  const loss = await markSessionLost(dependencies, session);
+  if (!loss.marked) return;
+  report.lostInstances.push(session.instanceId!);
+  log({ event: "reconciler.instance_lost", workspaceId: session.workspaceId, instanceId: session.instanceId, failedOperationId: loss.failedOperationId, cause });
 }
 
 async function reconcileProvisioning(
