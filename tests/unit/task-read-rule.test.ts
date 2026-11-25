@@ -47,7 +47,7 @@ const TABLE: Record<PersonaName, string> = {
   "starter via the bound channel": "- - - - - - - - - - - - - -",
 };
 const CELL: Record<string, Cell> = { o: "owner", r: "reader", p: "page", s: "shared", k: "script", "-": "refused", x: "part" };
-const expectedOf = (persona: PersonaName, read: TaskRead): Cell => CELL[TABLE[persona].split(" ")[FUNCTION_READS.indexOf(read)]!]!;
+const expectedOf = (persona: PersonaName, read: TaskRead): Cell => CELL[TABLE[persona].split(" ")[(FUNCTION_READS as readonly TaskRead[]).indexOf(read)]!]!;
 
 /** The seams the host binds for this person: the stored share (a live project member's, as stored) and the old People page rule. */
 function seamsOf(persona: Persona, withLiveGrant = true): TaskReadSeams {
