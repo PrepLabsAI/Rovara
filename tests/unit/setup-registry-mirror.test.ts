@@ -2,7 +2,7 @@
 // refused"). The mirror writes the exact revision, only for the company that owns the old rows, only while the old registry is where the setup was made from, and nothing on a rejection. While a proposal waits, the
 // refusal says so.
 import { describe, expect, it } from "vitest";
-import { orgProjectCatalogKey, projectCatalogKey, projectMetaKey, projectRevisionKey, type JsonValue } from "@agentx/contracts";
+import { change, orgProjectCatalogKey, projectCatalogKey, projectMetaKey, projectRevisionKey, type JsonValue } from "@agentx/contracts";
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { planCoreProjectWrites } from "../../packages/broker/src/aws/core-project-backfill.js";
 import { coreCopyRefusalWords, CORE_COPY_REFUSED } from "../../packages/broker/src/aws/core-copy-refusal.js";
@@ -98,6 +98,26 @@ describe("L4-SF (c): the old registry follows an approved setup", () => {
     const { world } = await setupWorld({ legacy: [["payments", FAKE_COMPANY]] });
     const mirror = createSetupRegistryMirror({ store: world.store, companyId: FAKE_COMPANY });
     await expect(mirror.itemsFor({ project: "payments", baseRevision: 2, candidateRevision: 3 }, "2026-11-17T00:00:00.000Z")).rejects.toMatchObject({ message: SETUP_REGISTRY_MOVED });
+  });
+
+  it("copies the no-automated-tests fact (a revision-row attribute beside `definition`) onto the old PROJECT# row, which the hosted checklist reads for a project not in a named company; no fact on the core row, none on the old row", async () => {
+    const FACT = { at: "2026-11-24T10:00:00.000Z", looked: ["tests_folder"] };
+    for (const withFact of [true, false]) {
+      const { world, person, call } = await setupWorld({ legacy: [["payments", FAKE_COMPANY]] });
+      const { digest } = await seedCandidate(world, FAKE_COMPANY, "payments", LOW);
+      if (withFact) await world.store.update({ key: projectRevisionKey(FAKE_COMPANY, "payments", 2), ops: [change.set("noAutomatedTests", FACT)] });
+      const maintainer = person("p-maint", FAKE_COMPANY, "member", { payments: "administrator" });
+      expect((await call(post(`${RUN}/decide`, decideBody(digest)), maintainer)).status).toBe(200);
+      const old = await legacyRow(world, "payments", 2);
+      expect(old, String(withFact)).toBeDefined();
+      if (withFact) {
+        expect(old?.["noAutomatedTests"]).toEqual(FACT);
+        // The legacy row and the core row of revision N+1 stay the same content.
+        expect((await world.store.get(projectRevisionKey(FAKE_COMPANY, "payments", 2)))?.["noAutomatedTests"]).toEqual(FACT);
+      } else {
+        expect(old).not.toHaveProperty("noAutomatedTests");
+      }
+    }
   });
 
   it("two projects: approving one project leaves the other's old rows alone", async () => {

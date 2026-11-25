@@ -8,7 +8,7 @@
 // It is built once, when the re-run starts, and kept on the new task (`setupAgentCarryOver`); it never comes from the client's request. Building it never fails a start: any error leaves the run starting as it always did.
 // The text in it came from the repository and from commands (the journal's command and output were redacted when they were stored). It is DATA: the worker shows it to the model in a block that says so.
 import {
-  SETUP_CARRY_OVER_HOSTS_MAX, SETUP_CARRY_OVER_LINE_CHARS, SETUP_CARRY_OVER_MAX_BYTES, SETUP_CARRY_OVER_PROPOSAL_MAX_BYTES, SetupCarryOverSchema, redactText,
+  SETUP_CARRY_OVER_HOSTS_MAX, SETUP_CARRY_OVER_LINE_CHARS, SETUP_CARRY_OVER_MAX_BYTES, SETUP_CARRY_OVER_PROPOSAL_MAX_BYTES, SetupCarryOverSchema, redactText, setupResultOf,
   type DocumentStore, type SetupCarryOver, type SetupCarryOverCut, type SetupJournalEntry, type SetupProposal,
 } from "@agentx/contracts";
 import { taskKey } from "../task-flow/keys.js";
@@ -58,7 +58,9 @@ export function carriedProposalOf(proposal: SetupProposal | undefined): { text: 
 
 /** One line of the summary for a command: how it ended, then the command, and for a failure the last line of its output. Plain, one line, at most `SETUP_CARRY_OVER_LINE_CHARS` (+ a little for the output). */
 export function journalLineOf(entry: SetupJournalEntry): string {
-  const outcome = entry.timedOut ? "timed out" : entry.exitCode === 0 ? "worked" : entry.exitCode === null ? "did not finish" : `failed (exit ${String(entry.exitCode)})`;
+  // DEC 254zzz495 (N1): a pure search that matched nothing is "found nothing", so the next run is not told a search failed.
+  const result = setupResultOf(entry);
+  const outcome = result === "timed_out" ? "timed out" : result === "worked" ? "worked" : result === "nothing_found" ? "found nothing" : entry.exitCode === null ? "did not finish" : `failed (exit ${String(entry.exitCode)})`;
   const typed = entry.source === "person" ? " (typed by a person)" : "";
   const last = entry.exitCode === 0 ? "" : plain(entry.tail.trim().split("\n").filter((row) => row.trim() !== "").at(-1) ?? "", 100);
   return `#${String(entry.n)} ${outcome}${typed}: ${plain(entry.command, SETUP_CARRY_OVER_LINE_CHARS - 40)}${last === "" ? "" : ` | output ended: ${last}`}`.slice(0, SETUP_CARRY_OVER_LINE_CHARS + 100);

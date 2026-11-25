@@ -126,6 +126,16 @@ const html = (body: string, status = 200): Reply => ({ status, type: "text/html;
 const redirect = (location: string): Reply => ({ status: 303, type: "text/plain; charset=utf-8", body: "", headers: { location } });
 const notFound = (): Reply => ({ status: 404, type: "text/plain; charset=utf-8", body: "not found\n" });
 
+/**
+ * The items a "Use this setup" form chose: the ticked ones (an id that is not a plain id is dropped, at most 64), or nothing ticked = every item that passed (undefined). DEC 254zzz495 (N3): "Use without setup or tests"
+ * (`none=1`) is the person's explicit empty choice (an empty list: no command changes), which is not the same as ticking nothing.
+ */
+function confirmChoice(form: URLSearchParams | undefined): string[] | undefined {
+  if (form?.get("none") === "1") return [];
+  const chosen = (form?.getAll("item") ?? []).filter((id) => /^[A-Za-z0-9_-]{1,100}$/u.test(id)).slice(0, 64);
+  return chosen.length === 0 ? undefined : chosen;
+}
+
 function noticeOf(url: URL): string | undefined {
   const code = url.searchParams.get("n");
   return code === null || !Object.hasOwn(NOTICES, code) ? undefined : NOTICES[code];
@@ -798,8 +808,7 @@ export async function createLocalPagesServer(options: LocalPagesOptions): Promis
           const revision = Number(request.form?.get("revision"));
           if (actions.setupConfirm === undefined || !Number.isSafeInteger(revision) || revision < 0) return redirect(`${back}?n=invalid`);
           if (!verified(request, { action: "setup.confirm", subject: project, requestId, revision })) return redirect(`${back}?n=form`);
-          const chosen = (request.form?.getAll("item") ?? []).filter((id) => /^[A-Za-z0-9_-]{1,100}$/u.test(id)).slice(0, 64);
-          return done(await actions.setupConfirm({ project, requestId, expectedRevision: revision, itemIds: chosen.length === 0 ? undefined : chosen }));
+          return done(await actions.setupConfirm({ project, requestId, expectedRevision: revision, itemIds: confirmChoice(request.form) }));
         }
         case "discard": {
           if (actions.setupDiscard === undefined) return redirect(`${back}?n=setupoff`);

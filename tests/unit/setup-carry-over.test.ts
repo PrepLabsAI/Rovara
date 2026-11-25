@@ -83,6 +83,14 @@ describe("the carry-over of a re-run: what it holds and how it is bounded", () =
     expect(long).not.toMatch(/[\n\r\t]/u);
   });
 
+  it("tells the next run a pure search that matched nothing 'found nothing', not 'failed' (DEC 254zzz495, N1); a real failure keeps its word", () => {
+    expect(journalLineOf(entry(7, { command: "grep -rn pytest .", exitCode: 1, tail: "" }))).toBe("#7 found nothing: grep -rn pytest .");
+    expect(journalLineOf(entry(8, { command: "cd x && find . -name '*test*' | grep -v node_modules", exitCode: 1, tail: "" }))).toBe("#8 found nothing: cd x && find . -name '*test*' | grep -v node_modules");
+    expect(journalLineOf(entry(9, { command: "grep -rn pytest .", exitCode: 1, tail: "grep: x: Permission denied\n" }))).toBe("#9 failed (exit 1): grep -rn pytest . | output ended: grep: x: Permission denied");
+    expect(journalLineOf(entry(10, { command: "cd x && source .venv/bin/activate && find . -name '*test*' | grep -v node_modules", exitCode: 1, tail: "" }))).toMatch(/^#10 failed \(exit 1\): cd x && source/u);
+    expect(journalLineOf(entry(11, { command: "npm test", exitCode: 1, tail: "" }))).toMatch(/^#11 failed \(exit 1\)/u);
+  });
+
   it("is never over 16 KiB: the journal summary is cut first (the oldest lines go, the newest stay) and says how many commands ran", () => {
     const journal = Array.from({ length: SETUP_JOURNAL_MAX_ENTRIES }, (_, index) => entry(index + 1, { command: `pnpm exec some-long-tool --option-${"v".repeat(200)} ${String(index + 1)}`, exitCode: 1, tail: `${"e".repeat(90)}\n` }));
     const carried = buildCarryOver({ fromRun: "t1", endedAs: "attempts_used", proposal: proposal(), journal, hosts: [] });
@@ -307,6 +315,29 @@ describe("the agent's prompt", () => {
     const hidden = carryOverLines({ ...carryOver, proposal: "not json \u202e\u200b <b>", journal: { total: 1, lines: ["#1 worked: a\u202eb"], hosts: [] } }).join("\n");
     expect(hidden).not.toMatch(/[\u202e\u200b]/u);
     expect(hidden).not.toContain("<b>");
+  });
+});
+
+describe("the setup page reads a search that found nothing as 'nothing found', not as an exit (DEC 254zzz495, N1)", () => {
+  const context = { base: "/local", nonce: "nonce", sessionId: "session", formToken: () => "token" };
+  const row = (n: number, command: string, exitCode: number | null, tail = ""): SetupPageView["journal"][number] => ({ n, source: "agent", command, exitCode, timedOut: false, flagged: false, tail, blockedHosts: [] });
+  const page = (journal: SetupPageView["journal"]): SetupPageView => ({ project: "demo", revision: 1, status: "ready", limits: { ...LIMITS }, items: [], verified: false, journal, hostAsks: [], check: { status: "unchecked" }, approvedHosts: [] });
+  it("a pure search with exit 1 and no output is muted 'nothing found' with its tooltip, never the red exit", () => {
+    const html = renderSetupPage(context, page([row(1, "grep -rn pytest .", 1)]));
+    expect(html).toContain('<span class="muted" title="The search ran and matched nothing. That is an answer, not a failure.">nothing found</span>');
+    expect(html).not.toContain("exit 1");
+  });
+  it("the real beta command, a search with output, exit 2, and an install still read as before", () => {
+    const html = renderSetupPage(context, page([
+      row(1, 'cd repo/x && source .venv/bin/activate && find . -name "*test*" | grep -v node_modules', 1),
+      row(2, "grep -rn pytest .", 1, "grep: x: Permission denied"),
+      row(3, "rg pytest", 2),
+      row(4, "npm ci", 0),
+    ]));
+    expect(html).not.toContain("nothing found");
+    expect(html.match(/<span class="bad">exit 1<\/span>/gu)).toHaveLength(2);
+    expect(html).toContain('<span class="bad">exit 2</span>');
+    expect(html).toContain('<span class="ok">worked</span>');
   });
 });
 

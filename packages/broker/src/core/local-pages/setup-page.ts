@@ -1,6 +1,7 @@
 // The setup page: what a setup run is doing and found, in the owner's own session. A command, a website and the use of a setup are decided here and nowhere else (a route and a token cannot). Everything that came
 // from the repository or the model (a command, a path, its output, a website name) is shown as plain text, marked as from the repository, and never as a link or an instruction.
 import { randomUUID } from "node:crypto";
+import { SETUP_NOTHING_FOUND_WORDS, SETUP_NO_COMMANDS_WORDS, SETUP_READY_NO_TESTS_WORDS, setupResultOf } from "@agentx/contracts";
 import { esc, layout, untrusted } from "./html.js";
 import type { PageContext } from "./pages.js";
 import type { ApprovalOffer, SetupEvalDiscoveryView, SetupItemView, SetupPageView } from "./views.js";
@@ -62,8 +63,17 @@ export function renderSetupPage(context: PageContext, view: SetupPageView): stri
       + `<td class="${VERDICT_CLASS[item.verdict]}">${esc(VERDICT_WORDS[item.verdict])}</td></tr>`;
   };
 
+  // DEC 254zzz495 (N3): a setup can always be used. "Use without setup or tests" records an empty setup: it changes no command, and it still goes through the check on a fresh workspace and your approval.
+  const useWithoutForm = (): string => {
+    if (view.status !== "ready" || view.apply !== undefined) return "";
+    const requestId = randomUUID();
+    return `<form method="post" action="${action("confirm")}" class="row">${hidden("requestId", requestId)}${hidden("revision", view.revision)}${hidden("none", "1")}${token("confirm", { requestId, revision: view.revision })}${button(SETUP_NO_COMMANDS_WORDS.use)}</form>`;
+  };
+
   const proposal = (): string => {
-    if (view.items.length === 0) return "";
+    if (view.items.length === 0) {
+      return view.status === "ready" && view.apply === undefined ? `<div class="panel"><h2>${esc(SETUP_NO_COMMANDS_WORDS.title)}</h2><p>${esc(SETUP_NO_COMMANDS_WORDS.body(view.project))}</p>${useWithoutForm()}</div>` : "";
+    }
     const usable = view.items.some((item) => item.usable);
     const requestId = randomUUID();
     const table = `<table><thead><tr><th></th><th>What</th><th>Value</th><th>Checked against the repository</th></tr></thead><tbody>${view.items.map(itemRow).join("")}</tbody></table>`;
@@ -72,7 +82,7 @@ export function renderSetupPage(context: PageContext, view: SetupPageView): stri
       : table;
     // TE-H1 slice 3: a suggestion of pages for browser evidence is saved nowhere from here: the owner reads it on the recipe page, changes it and saves it there.
     const browser = view.items.some((item) => item.kind === "browser_evidence") ? `<p>Rovara suggests pages for browser evidence. <a href="${esc(context.base)}/browser-evidence/${esc(view.project)}">Read it and save it on the browser evidence page.</a></p>` : "";
-    return `<div class="panel"><h2>What Rovara found</h2>${form}${browser}</div>`;
+    return `<div class="panel"><h2>What Rovara found</h2>${form}${useWithoutForm()}${browser}</div>`;
   };
 
   const apply = (): string => {
@@ -81,6 +91,7 @@ export function renderSetupPage(context: PageContext, view: SetupPageView): stri
     const lines = (label: string, list: readonly string[]): string => (list.length === 0 ? "" : `<p><strong>${esc(label)}</strong></p><pre>${list.map((line) => untrusted(line)).join("\n")}</pre>`);
     const decide = (decision: "approve" | "reject", offerOf: ApprovalOffer): string => `<form method="post" action="${action("apply")}" class="row">${hidden("decision", decision)}${hidden("requestId", offerOf.requestId)}${hidden("revision", offerOf.revision)}${hidden("digest", offerOf.artifactDigest)}${hidden("ft", context.formToken({ action: "setup.apply", subject: view.project, requestId: offerOf.requestId, revision: offerOf.revision, artifactDigest: offerOf.artifactDigest }))}${button(decision === "approve" ? "Approve these commands" : "Reject", decision === "approve" ? "primary" : "danger")}</form>`;
     return `<div class="panel"><h2>Waiting for your approval</h2><p>Rovara is running these commands on a fresh workspace. The check is <span class="${CHECK_CLASS[view.apply.check.status]}">${esc(CHECK_WORDS[view.apply.check.status])}</span>${view.apply.check.failedStep === undefined ? "" : `: ${untrusted(view.apply.check.failedStep)}`}.</p>`
+      + (view.apply.noAutomatedTests === undefined ? "" : `<p><strong>${esc(SETUP_READY_NO_TESTS_WORDS.headline)}</strong>: ${esc(SETUP_READY_NO_TESTS_WORDS.body(view.project))}${view.apply.noAutomatedTests.looked.length === 0 ? "" : ` <span class="muted">${esc(SETUP_READY_NO_TESTS_WORDS.looked(view.apply.noAutomatedTests.looked))}</span>`}</p>`)
       + lines("Setup commands", view.apply.setup) + lines("Test commands", view.apply.readiness) + lines("Prompt locations (a change to one asks for the AI evaluation)", view.apply.promptLocations ?? [])
       + (offer === undefined ? "" : `<div class="row">${decide("approve", offer)}${decide("reject", offer)}</div><p class="muted">Approving makes these the project's setup and test commands for every task that starts after it.</p>`)
       + `<form method="post" action="${action("discard")}" class="row">${token("discard")}${button("Discard")}</form></div>`;
@@ -128,7 +139,16 @@ export function renderSetupPage(context: PageContext, view: SetupPageView): stri
 
   const approved = (): string => view.approvedHosts.length === 0 ? "" : `<div class="panel"><h2>Addresses you allowed</h2><p class="muted">The next machines of this project reach these. Taking one back does not change a machine that is already running.</p><table><tbody>${view.approvedHosts.map((entry) => `<tr><td><code>${esc(entry.host)}</code>${entry.at === undefined ? "" : ` <span class="muted">allowed ${esc(entry.at.slice(0, 10))}</span>`}</td><td><form method="post" action="${action("forget")}" class="row">${hidden("host", entry.host)}${hidden("ft", context.formToken({ action: "setup.forget", subject: `${view.project}:${entry.host}` }))}${button("Take it back")}</form></td></tr>`).join("")}</tbody></table></div>`;
 
-  const journal = (): string => view.journal.length === 0 ? "" : `<div class="panel"><h2>What it ran</h2><table><thead><tr><th>#</th><th>Command</th><th>Result</th></tr></thead><tbody>${view.journal.map((entry) => `<tr><td>${esc(entry.n)}</td><td><code>${untrusted(entry.command)}</code>${entry.source === "person" ? " <span class=\"muted\">(you)</span>" : ""}${entry.flagged ? " <span class=\"warn\">downloads and runs code</span>" : ""}</td><td>${entry.timedOut ? "<span class=\"bad\">timed out</span>" : entry.exitCode === 0 ? "<span class=\"ok\">worked</span>" : `<span class="bad">exit ${esc(entry.exitCode ?? "?")}</span>`}<pre>${untrusted(entry.tail)}</pre></td></tr>`).join("")}</tbody></table></div>`;
+  // N1 (DEC 254zzz495): a pure search that matched nothing reads "nothing found" in the muted class (an answer, not a failure); everything else keeps its word.
+  const resultCell = (entry: SetupPageView["journal"][number]): string => {
+    const result = setupResultOf(entry);
+    if (result === "timed_out") return "<span class=\"bad\">timed out</span>";
+    if (result === "worked") return "<span class=\"ok\">worked</span>";
+    if (result === "nothing_found") return `<span class="muted" title="${esc(SETUP_NOTHING_FOUND_WORDS.tooltip)}">${esc(SETUP_NOTHING_FOUND_WORDS.row.toLowerCase())}</span>`;
+    return `<span class="bad">exit ${esc(entry.exitCode ?? "?")}</span>`;
+  };
+
+  const journal = (): string => view.journal.length === 0 ? "" : `<div class="panel"><h2>What it ran</h2><table><thead><tr><th>#</th><th>Command</th><th>Result</th></tr></thead><tbody>${view.journal.map((entry) => `<tr><td>${esc(entry.n)}</td><td><code>${untrusted(entry.command)}</code>${entry.source === "person" ? " <span class=\"muted\">(you)</span>" : ""}${entry.flagged ? " <span class=\"warn\">downloads and runs code</span>" : ""}</td><td>${resultCell(entry)}<pre>${untrusted(entry.tail)}</pre></td></tr>`).join("")}</tbody></table></div>`;
 
   const checkRequest = randomUUID();
   const checkPanel = `<div class="panel"><h2>The project's setup check</h2><p>The project's own setup and test commands are <span class="${CHECK_CLASS[view.check.status]}">${esc(CHECK_WORDS[view.check.status])}</span>${view.check.failedStep === undefined ? "" : `: ${untrusted(view.check.failedStep)}`}.</p>`

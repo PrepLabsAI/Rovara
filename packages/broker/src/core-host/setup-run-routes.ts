@@ -255,6 +255,8 @@ async function applyView(input: HostedSetupRunInput, deps: SetupApplyDeps, proje
     // L4-SC: the fakes the candidate sets (the approver sees which variable is redirected and from which spec), bound into the digest the approval names.
     ...(apply.fakes === undefined ? {} : { fakes: apply.fakes }),
     ...(apply.promptLocations.length === 0 ? {} : { promptLocations: apply.promptLocations }),
+    // DEC 254zzz495 (N3): the candidate has no test command ("Ready, no automated tests"). Present only then; where the run looked for tests, as fixed words.
+    ...(apply.noAutomatedTests === undefined ? {} : { noAutomatedTests: true, testsLookedIn: apply.noAutomatedTests.looked }),
     // Browser testing: this candidate is a project's browser testing setup (decided on its own page, by a live company owner or admin), not a setup run's commands.
     ...(apply.browserTesting === undefined ? {} : { browserTesting: true }),
     check: { status: apply.checkState.status, ...(apply.checkState.failedStep === undefined ? {} : { failedStep: apply.checkState.failedStep }) },

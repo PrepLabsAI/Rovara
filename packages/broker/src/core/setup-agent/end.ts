@@ -9,6 +9,8 @@ import { readTask } from "../task-flow/reads.js";
 import { iso, log } from "../task-flow/support.js";
 import { taskKey } from "../task-flow/keys.js";
 import { recordSetupAgentEnd, type SetupRepositories } from "./agent.js";
+import { setupRunEndedLine } from "./end-summary.js";
+import { readSetupJournal } from "./journal.js";
 
 /** The project's repositories as the proposal is read against them, from the revision the run started on. */
 export async function setupRepositoriesOf(deps: Pick<TaskFlowDeps, "projects">, task: Pick<TaskRecord, "project" | "startingRevision">): Promise<SetupRepositories | undefined> {
@@ -31,8 +33,22 @@ export async function endSetupAgentTask(
   const fresh = (await readTask(deps, task.taskId)) ?? task;
   const repositories = (await setupRepositoriesOf(deps, fresh)) ?? { names: [], urls: {} };
   const result = ended.outcome?.kind === "setup-run" ? ended.outcome.result : undefined;
-  await recordSetupAgentEnd(deps, fresh, operation, { status: ended.status, result, error: ended.error, repositories }, now);
+  const recorded = await recordSetupAgentEnd(deps, fresh, operation, { status: ended.status, result, error: ended.error, repositories }, now);
+  // N0 (DEC 254zzz495): one summary line for the run, written once (the first end; a repeat of the worker's result finds the result kept and writes nothing).
+  if (recorded && fresh.agentRunEnd === undefined) await logSetupRunEnded(deps, fresh);
   // The run is over: its workspace, machine and slot go back. The record of what it learned stays.
   await closeLoadedTask(deps, fresh, fresh.developerId).catch((error: unknown) => log(deps, { event: "setup_agent.close_failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" }));
   await deps.store.update({ key: taskKey(task.taskId), ops: [change.set("updatedAt", iso(deps))], condition: when.present() }).catch(() => undefined);
+}
+
+/** The run's `setup_run_ended` line (counts and fixed words only, `end-summary.ts`), from the result kept on the task and the run's journal. A line that cannot be made is a log line that says so; it never fails the end. */
+async function logSetupRunEnded(deps: TaskFlowDeps, task: TaskRecord): Promise<void> {
+  try {
+    const stored = (await readTask(deps, task.taskId))?.setupAgentResult;
+    if (stored === undefined) return;
+    const journal = await readSetupJournal({ store: deps.store }, { orgId: deps.companyId, project: task.project, taskId: task.taskId });
+    log(deps, { ...setupRunEndedLine({ project: task.project, result: stored, journal }) });
+  } catch (error) {
+    log(deps, { event: "setup_run_ended.failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
+  }
 }
