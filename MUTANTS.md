@@ -1231,3 +1231,43 @@ Old-engine own-task bound-channel check (follow-up to the SURVIVED row above), `
 |---|---|---|
 | developer-routes.ts taskReaderPerson (old-engine channel check) | The nested catch around `checkProjectAccess` returns `mayStart: false` again | killed, 1 failed (the earlier SURVIVED row) |
 | developer-routes.ts taskReaderPerson | The live-company catch returns `projectMember: false` again | killed, 1 failed |
+
+## MEMBERSHIP-READ-FAILS-SAFE, the pre-review round: every guard, run on head aa138f0b5 (the same tree, before the rebase onto code/next b05b02740, which changed none of these files; the rebased head has the same content)
+
+Run against: the two journeys (removed-member-answer, membership-read-families), core-task-people-identity, membership-read-signin-paths, company-signin-auth, own-task-channel-read-failure, task-access, removed-member-refresh, core-app-routes, company-check, access-recheck-merged-signin, web-proof-read-failure, task-view-read-failure, company-member-routes, company-reads-mount, core-host-lessons-api, company-shared-signin, recheck2-independent. A plain error (not a throttle) is the injected failure.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| core-app-routes.ts | A failed caller mapping answers 401 UNAUTHENTICATED again | killed, 5 failed |
+| session-mint.ts companyMayMint | The catch returns false again (a failed read at the refresh revokes) | killed, 5 failed |
+| engine-boundary.ts route | The unreadable mapping answered 401 again | killed, 3 failed |
+| deployed-decisions.ts liveMemberRole | A failed read returns undefined again | killed, 2 failed |
+| dev-routes.ts route | A failed membership read no longer answers 503 | killed, 4 failed |
+| developer-routes.ts authenticateClientToken | The oidc catch turns a failed read into the 401 again | killed, 5 failed |
+| company-check.ts membershipReader | The failed read mapped to AUTH_REQUIRED again | killed, 3 failed |
+| server.ts retryable | A membership read failure is not answered 503 | killed, 4 failed |
+| task-readers.ts ownTaskHold | The catch returns false again | killed, 3 failed |
+| developer-routes.ts taskReaderPerson (live company) | The catch returns projectMember false again | killed, 4 failed |
+| developer-routes.ts taskReaderPerson (old-engine channel check) | The nested catch returns mayStart false again | killed, 1 failed |
+| admin-actions.ts projectGrant | The grant read not wrapped | killed, 3 failed |
+| core-engine-root.ts projectGrantRoleFromDynamo | The grant read not wrapped | killed, 3 failed |
+| server.ts refresh, company sign-in settings (previously SURVIVED) | The catch returns ended again | killed, 1 failed |
+| server.ts stillSeated (previously SURVIVED) | The rethrow removed (a failed hop revokes) | killed, 1 failed |
+| developer-routes.ts companylessSession (previously SURVIVED) | The rethrow removed | killed, 1 failed |
+| developer-routes.ts companyOidcSession | The catch returns the 401 again | killed, 9 failed |
+| developer-routes.ts requireSessionSurvivor | The catch returns the refusal again | killed, 9 failed |
+| company-invites.ts companylessEligible | The reads unwrapped, a failure is false | killed, 1 failed |
+| session-mint.ts memberOf | A failed join is "not a member" again | killed, 1 failed |
+| server.ts authorizationCodeGrant | The checks no longer run before the code is burned | killed, 1 failed |
+| task-people.ts checked | The catch returns denied again | killed, 3 failed |
+| task-person-identity.ts qualifyWeb (membership, grant) and the identity record reads | Each rethrow removed | killed, 1 to 2 failed each |
+| task-access.ts taskAccessOfRecord | The catch returns not found again | killed, 1 failed |
+| read-rule.ts liveGrantOf, storedShare | Each rethrow removed | killed, 1 failed each |
+| lessons-slack-switch-api.ts, knowledge-switch-api.ts projectRole, person-erase-route.ts, lessons-api.ts | Each rethrow removed | killed, 1 failed each |
+| company-member-routes.ts, company-member-forwarding.ts | The membership read's rethrow, and the forwarding helper's "unavailable" mapping, removed | killed, 1 failed each |
+| company-reads.ts membershipOf | The rethrow removed | killed, 1 failed |
+| hosted-merge-routes.ts, developer-tasks.ts taskView money | Each rethrow removed | killed, 1 failed each |
+| developer-routes.ts markedReads, developer record read, company membership read | Each wrapper removed | killed, 1 failed each |
+| session-mint.ts isUnreadableMembershipRow | A malformed row is a retryable failure again | killed, 1 failed |
+
+Not mutated (no test; internal rethrows listed in REMOVED-MEMBER-ANSWER-FINDINGS.md rows 22 to 26): the script-token creator's grant check, the task action registry's owner read, the session list's owner-left words, the sign-in links admin check, the broker's task-company administrator check.
