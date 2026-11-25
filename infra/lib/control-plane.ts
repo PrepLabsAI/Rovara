@@ -470,8 +470,9 @@ export class ControlPlaneStack extends Stack {
       keySpec: kms.KeySpec.ECC_NIST_P256,
       keyUsage: kms.KeyUsage.SIGN_VERIFY,
       pendingWindow: Duration.days(7),
-      // Tokens live 60 seconds and workers get the public key at boot, so nothing outlives the key.
-      removalPolicy: RemovalPolicy.DESTROY,
+      // Tokens live 60 seconds, but workers get the PUBLIC key at boot and keep it: a replaced key makes every running worker refuse the dispatcher until it is relaunched.
+      // Retained: a stack delete or a failed replacement must never schedule this key for deletion.
+      removalPolicy: RemovalPolicy.RETAIN,
     });
     invokeSigningKey.grant(dispatcher, "kms:Sign");
     invokeSigningKey.addToResourcePolicy(new iam.PolicyStatement({
@@ -1120,12 +1121,14 @@ export class ControlPlaneStack extends Stack {
       // Sign in with ChatGPT (#338): seals each developer's ChatGPT tokens in the State table. A
       // connection belongs to a signed-in developer, so it exists only where developer sign-in
       // does. Only the broker encrypts and decrypts with it, always under an encryption context
-      // naming the developer and the field. Deleting it (with the stack) only leaves connections to redo.
+      // naming the developer and the field. It ALSO seals every company's Linear OAuth tokens (linear-wiring.ts reuses it), and chatGptHostId derives the install's id shown to OpenAI from its ARN.
+      // Deleting or replacing it makes all of those tokens permanently unreadable (each user and company must reconnect): never treat it as safe to replace.
       const chatGptConnectionKey = new kms.Key(this, "ChatGptConnectionKey", {
         description: "AgentX: seals developers' Sign in with ChatGPT tokens",
         enableKeyRotation: true,
         pendingWindow: Duration.days(7),
-        removalPolicy: RemovalPolicy.DESTROY,
+        // Retained: see the comment above; a deleted key cannot be re-created with the same ARN.
+        removalPolicy: RemovalPolicy.RETAIN,
       });
       // Named environments only: the legacy (production) template keeps the grant on the broker's role, as mainline deploys it.
       if (naming.env !== undefined) {

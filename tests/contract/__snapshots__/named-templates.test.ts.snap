@@ -5588,7 +5588,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       "Type": "AWS::IAM::Policy",
     },
     "ChannelApiSlackAdapterSecret5DDDDC01": {
-      "DeletionPolicy": "Delete",
+      "DeletionPolicy": "RetainExceptOnCreate",
       "Properties": {
         "Description": "Signing secret of the built-in Slack channel adapter (spec 062 FR-073); 64 letters and digits, read as base64",
         "GenerateSecretString": {
@@ -5605,7 +5605,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         ],
       },
       "Type": "AWS::SecretsManager::Secret",
-      "UpdateReplacePolicy": "Delete",
+      "UpdateReplacePolicy": "Retain",
     },
     "ChannelApiSlackAdapterSelfInvokeCEFFE71C": {
       "Properties": {
@@ -5676,7 +5676,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       "Type": "AWS::ApiGatewayV2::Route",
     },
     "ChannelApiStateE5478A65": {
-      "DeletionPolicy": "Delete",
+      "DeletionPolicy": "RetainExceptOnCreate",
       "Properties": {
         "AttributeDefinitions": [
           {
@@ -5714,10 +5714,10 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         },
       },
       "Type": "AWS::DynamoDB::Table",
-      "UpdateReplacePolicy": "Delete",
+      "UpdateReplacePolicy": "Retain",
     },
     "ChatGptConnectionKey03C49F9D": {
-      "DeletionPolicy": "Delete",
+      "DeletionPolicy": "RetainExceptOnCreate",
       "Properties": {
         "Description": "AgentX: seals developers' Sign in with ChatGPT tokens",
         "EnableKeyRotation": true,
@@ -5774,7 +5774,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         ],
       },
       "Type": "AWS::KMS::Key",
-      "UpdateReplacePolicy": "Delete",
+      "UpdateReplacePolicy": "Retain",
     },
     "CompanySecretsRole63E074C9": {
       "Properties": {
@@ -6751,7 +6751,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       "Type": "AWS::ApiGatewayV2::Integration",
     },
     "DeveloperSignInPolicyHookKey1CC2C9E2": {
-      "DeletionPolicy": "Delete",
+      "DeletionPolicy": "RetainExceptOnCreate",
       "Properties": {
         "Description": "Signs AgentX staging policy hook questions",
         "KeyPolicy": {
@@ -6904,7 +6904,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         ],
       },
       "Type": "AWS::KMS::Key",
-      "UpdateReplacePolicy": "Delete",
+      "UpdateReplacePolicy": "Retain",
     },
     "DeveloperSignInPolicyHookKeyAlias9F9A2B5B": {
       "Properties": {
@@ -6963,7 +6963,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       "UpdateReplacePolicy": "Retain",
     },
     "DeveloperSignInTaskTokenKey10D3ED68": {
-      "DeletionPolicy": "Delete",
+      "DeletionPolicy": "RetainExceptOnCreate",
       "Properties": {
         "Description": "Signs AgentX staging task tokens",
         "KeyPolicy": {
@@ -7067,7 +7067,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         ],
       },
       "Type": "AWS::KMS::Key",
-      "UpdateReplacePolicy": "Delete",
+      "UpdateReplacePolicy": "Retain",
     },
     "DeveloperSignInTaskTokenKeyAliasBA394975": {
       "Properties": {
@@ -7082,7 +7082,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       "Type": "AWS::KMS::Alias",
     },
     "DeveloperSignInTokenKey9F4912A4": {
-      "DeletionPolicy": "Delete",
+      "DeletionPolicy": "RetainExceptOnCreate",
       "Properties": {
         "Description": "Signs AgentX staging developer access tokens",
         "KeyPolicy": {
@@ -7146,7 +7146,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         ],
       },
       "Type": "AWS::KMS::Key",
-      "UpdateReplacePolicy": "Delete",
+      "UpdateReplacePolicy": "Retain",
     },
     "DeveloperSignInTokenKeyAlias797634DB": {
       "Properties": {
@@ -9290,7 +9290,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       "Type": "AWS::ApiGatewayV2::Api",
     },
     "InvokeSigningKey2B33EC11": {
-      "DeletionPolicy": "Delete",
+      "DeletionPolicy": "RetainExceptOnCreate",
       "Properties": {
         "Description": "Signs AgentX staging invocations to EC2 workers",
         "KeyPolicy": {
@@ -9351,7 +9351,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         ],
       },
       "Type": "AWS::KMS::Key",
-      "UpdateReplacePolicy": "Delete",
+      "UpdateReplacePolicy": "Retain",
     },
     "InvokeSigningKeyAliasB29C73C1": {
       "Properties": {
