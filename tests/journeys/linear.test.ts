@@ -79,9 +79,9 @@ describe("journey 4: Linear, a person who has not linked waits and an admin star
     const waiting = await waitingTickets(world);
     expect(waiting.items.map((item) => ({ id: item.id, reason: item.reason }))).toEqual([{ id: "ENG-3", reason: "unlinked" }]);
     // Maya is a member with the project grant but not its administrator: the fixed refusal, nothing started.
-    const member = await world.proof.probe(() => world!.maya("GET", "/v1/app/projects/payments/intake"));
+    const member = await world.maya("GET", "/v1/app/projects/payments/intake");
     expect({ status: member.status, code: (member.body.error as { code: string }).code }).toEqual({ status: 403, code: "FORBIDDEN" });
-    const pressed = await world.proof.probe(() => world!.maya("POST", `/v1/app/projects/payments/intake/${intakeItemIdOf("linear", "ENG-3")}/start`, { requestId: randomUUID() }));
+    const pressed = await world.maya("POST", `/v1/app/projects/payments/intake/${intakeItemIdOf("linear", "ENG-3")}/start`, { requestId: randomUUID() });
     expect(pressed.status).toBe(403);
     expect(startedTasks(world)).toEqual([]);
     // The project's admin presses Start: the work is theirs.
