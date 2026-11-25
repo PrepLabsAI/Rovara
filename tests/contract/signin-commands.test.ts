@@ -421,6 +421,22 @@ describe("agentx signin disable and show", () => {
   });
 });
 
+describe("agentx signin show with GitHub", () => {
+  const discovery = (methods: Record<string, unknown>) => async () => Response.json({ env: "staging", apiVersion: "1.0", issuer: "i", authorizationEndpoint: "https://a/x", tokenEndpoint: "https://a/t", revocationEndpoint: "https://a/r", clientId: "agentx-cli", methods });
+  const githubOn = { ...slackOn, slack: false, github: { clientId: "Iv1.abc", clientSecretName: "agentx/staging/developer-github" } };
+  it.each([
+    ["a GitHub-only install", { slack: false, oidc: null, github: { displayName: "GitHub" } }, "GitHub"],
+    ["Slack, GitHub and company sign-in", { slack: true, oidc: { displayName: "Okta" }, github: { displayName: "GitHub" } }, "Slack and GitHub and Okta"],
+    ["nothing on", { slack: false, oidc: null, github: null }, "nothing"],
+  ])("lists what the control plane offers for %s", async (_name, methods, offered) => {
+    const h = await services([], { fetch: discovery(methods) });
+    await writeSignInSettings(h.store, githubOn);
+    const shown = await runSigninShow(h.s, "staging");
+    expect(shown.lines).toContain(`The control plane offers: ${offered}`);
+    expect(shown.data).toMatchObject({ offered });
+  });
+});
+
 describe("the agentx signin command (F14)", () => {
   it("takes the same flag names as agentx init, and reads the company secret from --signin-oidc-client-secret-env", async () => {
     const h = await services([]);

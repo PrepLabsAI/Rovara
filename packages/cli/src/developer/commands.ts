@@ -82,7 +82,7 @@ function refusalMessage(body: unknown): string | undefined {
 
 export function whoamiText(result: { env: string; url: string; projects: DeveloperProjectsResponse }): string {
   const { developer, projects, notices } = result.projects;
-  const method = developer.provider === "slack" ? "Slack" : "your company sign-in";
+  const method = developer.provider === "slack" ? "Slack" : developer.provider === "github" ? "GitHub" : "your company sign-in";
   const link = developer.slackUserId === undefined ? "" : ` (${developer.slackUserId})`;
   const lines = [`Signed in to AgentX environment ${result.env} (${result.url}) as ${sanitizeServerText(developer.name)}, with ${method}${link}.`];
   if (projects.length === 0) {

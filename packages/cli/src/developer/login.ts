@@ -25,8 +25,10 @@ async function readConfiguration(options: DeveloperLoginOptions, base: URL, url:
   }
   const version = apiVersionCompatible(configuration.apiVersion, DEVELOPER_API_VERSION);
   if (!version.compatible) throw agentXError("CONFIG_INVALID", `this AgentX (API ${configuration.apiVersion}) needs a newer CLI; upgrade: npx ${CLI_PACKAGE_NAME}@latest login ${url}`);
-  if (!configuration.methods.slack && configuration.methods.oidc === null) {
-    throw agentXError("CONFIG_INVALID", "no developer sign-in method is enabled in this AgentX; ask an admin to run agentx signin enable slack");
+  // Any one usable method will do: the server's sign-in page (or, with one method on, the provider itself) takes the person from there.
+  const { slack, oidc, github } = configuration.methods;
+  if (!slack && (oidc ?? null) === null && (github ?? null) === null) {
+    throw agentXError("CONFIG_INVALID", "no developer sign-in method is on in this AgentX: Slack, GitHub and your company sign-in are all off; ask your Rovara admin to turn one on");
   }
   return configuration;
 }
