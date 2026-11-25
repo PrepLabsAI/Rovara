@@ -1,7 +1,7 @@
 
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
+import { orgProjectCatalogKey, projectRevisionKey, when, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { createAllowAllAdmission, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import type { CoreRegistryError} from "../../packages/broker/src/core-host/index.js";
@@ -49,7 +49,7 @@ describe("the core task mark", () => {
     expect(coreTaskMarkFor(now)).toEqual({ engine: "core", areas: { merge: "core", build: "core", flow: "core" }, flags: "cc=on", stampedAt: "2026-11-15T10:00:00.000Z" });
     const put = coreTaskMarkItem(FAKE_COMPANY, "t-golden", coreTaskMarkFor(now));
     expect(JSON.stringify(put.item)).toBe(JSON.stringify({ pk: "TASK_ENGINE#t-golden", sk: "STAMP", entityType: "TASK_ENGINE", orgId: FAKE_COMPANY, taskId: "t-golden", coreEngine: { engine: "core", areas: { merge: "core", build: "core", flow: "core" }, flags: "cc=on", stampedAt: "2026-11-15T10:00:00.000Z" } }));
-    expect(put.condition).toBeDefined();
+    expect(put.condition).toEqual(when.absent());
   });
 
   it("reads an absent or malformed mark item as no mark (the boundary's `isCoreTask` then treats an unreadable one as an error, never as not the core's)", async () => {
