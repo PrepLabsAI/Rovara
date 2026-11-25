@@ -1062,3 +1062,12 @@ Every mutant is a change to `cloudWordsReason` in scripts/port-guard.ts, run aga
 | M14 | `llmgateway`, `aigateway` leave the Cloud-only list alone | survived: equivalent (the gateway rule refuses `llmgateway` and `aigateway` itself, as M3 shows from the other side) |
 
 The restored tree passes (305 of 305).
+
+## CLI-LOGIN-GITHUB (agentx login accepts a GitHub-only install), 2026-11-25, on base a0bc104f9
+
+Measured on the lane's working tree over tests/contract/developer-login.test.ts (20 tests). Each mutant was applied alone, the one file run, and the file restored.
+
+| Mutant / location | Mutation | Failing tests (of the file) | Restored |
+|---|---|---|---|
+| M1, cli/src/developer/login.ts `readConfiguration` | GitHub is ignored again (only Slack and the company sign-in count as on) | 2 of 20 | green |
+| M2, cli/src/developer/login.ts `readConfiguration` | the no-method check is dropped, so an install with every method off is accepted | 2 of 20 | green |

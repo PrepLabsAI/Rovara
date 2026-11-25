@@ -94,8 +94,9 @@ What is built today:
   Linear, Jira, Asana, or any other remote MCP server.
 - **Day-2 commands.** `agentx config`, `doctor`, `upgrade` (and `upgrade --export` for a platform
   team's pipeline) and `destroy` run and remove an installed environment.
-- **Developer sign-in.** Developers sign in with Slack, your company's sign-in, or both, with
-  `agentx login <url>`. They need no AWS credentials.
+- **Developer sign-in.** Developers sign in with Slack, GitHub, your company's sign-in, or any mix, with
+  `agentx login <url>`: the browser page offers the methods the install has on, and `login` stops
+  with a clear message only when none is on. They need no AWS credentials.
 - **Tasks from an AI tool.** `agentx mcp install` adds Rovara to Claude Code, Codex or Cursor, and
   `agentx mcp` gives that tool 11 Rovara tools. With them it lists the projects the developer may
   use, starts, checks, continues, shares, cancels and closes coding tasks, and opens pull requests.
