@@ -1,7 +1,7 @@
 // Run-scoped accounts. Expiry is at most round end + 15 minutes. A revocation counts as confirmed only when the account's sessions were ended,
 // it was revoked, an existence probe says it is gone AND replaying a credential the round really held is refused; where the replay cannot run, publication is held for the token lifetime. Leases are durable
 // before the account exists, and a sweeper revokes what a crash left behind.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { RUN_SCOPED_ASSUMED_TOKEN_TTL_MS, RUN_SCOPED_DEFAULT_MAX_HOLD_MS, RUN_SCOPED_GRACE_MS, RUN_SCOPED_MAX_ROUND_MS, RUN_SCOPED_REVOKE_ATTEMPTS, RUN_SCOPED_SESSION_PROBES_MAX, RUN_SCOPED_STORE_ATTEMPTS, cognitoPresenceOf, cognitoTestPoolProvisioner, evidenceAccountsOf, holdFor, httpHookProvisioner, provisionRunScopedAccounts, revocationSettledAt,
   revokeRunScopedAccounts, runScopedExpiry, seedCommandProvisioner, sessionStateOfStatus, sweepRunScopedLeases,
   type AccountPresence, type AccountProvisionerPort, type LeaseAlert, type AccountProvisionerPorts, type LeaseRecord, type LeaseStore, type RunScopedAccount, type RunScopedLease, type SessionCredential, type SessionState } from "../../packages/broker/src/e2e/run-scoped-accounts.js";
@@ -11,6 +11,8 @@ import { TestEnvAccountSchema, type TestEnvAccount } from "../../packages/contra
 const COGNITO_PASSWORD = ["Pw", "from", "cognito", "1"].join("-");
 
 const NOW = Date.parse("2026-11-03T10:00:00.000Z");
+/** The tests read time as NOW; a call that passes no clock reads the real one (see the test for it). */
+const revokeAtNow = (input: Parameters<typeof revokeRunScopedAccounts>[0]) => revokeRunScopedAccounts({ clock: () => NOW, ...input });
 const ENDS = "2026-11-03T10:30:00.000Z";
 const seed: TestEnvAccount = TestEnvAccountSchema.parse({ profileId: "buyer", provisioner: "seed_command", command: { cwd: "app", executable: "python", args: ["seed.py"], timeoutSeconds: 60 } });
 const cognito: TestEnvAccount = TestEnvAccountSchema.parse({ profileId: "admin", provisioner: "cognito_test_pool", userPoolId: "us-west-2_AbC123xyz", region: "us-west-2", roleArn: "arn:aws:iam::123456789012:role/test-accounts" });
@@ -168,7 +170,7 @@ describe("revocation and its proof (C1)", () => {
 
   it("is NOT confirmed when a replayed credential still works, and waiting never settles it", async () => {
     const port = live(fake({ replay: (credential, ended) => (!ended || credential.kind === "bearer" ? "alive" : "dead") }));
-    const report = await revokeRunScopedAccounts({ leases, accounts: all, ports: ports(port), now: NOW, sessions });
+    const report = await revokeAtNow({ leases, accounts: all, ports: ports(port), now: NOW, sessions });
     expect(report.confirmed).toBe(false);
     expect(report.accounts.map((item) => item.sessionProof)).toEqual(["dead", "alive", "alive"]);
     expect(revocationSettledAt(report, NOW + 10 * RUN_SCOPED_ASSUMED_TOKEN_TTL_MS)).toBe(false);
@@ -181,7 +183,7 @@ describe("revocation and its proof (C1)", () => {
       ["the probe throws", live(fake({ replayThrows: true })), sessions],
     ];
     for (const [name, port, kept] of cases) {
-      const report = await revokeRunScopedAccounts({ leases, accounts: all, ports: ports(port), now: NOW, sessions: kept, maxTokenTtlMs: 3_600_000 });
+      const report = await revokeAtNow({ leases, accounts: all, ports: ports(port), now: NOW, sessions: kept, maxTokenTtlMs: 3_600_000 });
       expect(report.confirmed, name).toBe(false);
       expect(report.heldUntil, name).toBe("2026-11-03T11:00:00.000Z");
       expect(revocationSettledAt(report, Date.parse("2026-11-03T10:59:59.000Z")), name).toBe(false);
@@ -189,19 +191,19 @@ describe("revocation and its proof (C1)", () => {
     }
   });
   it("holds for the STATED token lifetime with no cap, assumes a day only when none is stated (and says so), and refuses a lifetime above the configured maximum hold", async () => {
-    const day = await revokeRunScopedAccounts({ leases: leases.slice(0, 1), accounts: all, ports: ports(live(fake({ noReplay: true }))), now: NOW });
+    const day = await revokeAtNow({ leases: leases.slice(0, 1), accounts: all, ports: ports(live(fake({ noReplay: true }))), now: NOW });
     expect(day.heldUntil).toBe(new Date(NOW + RUN_SCOPED_ASSUMED_TOKEN_TTL_MS).toISOString());
     expect(day.ttlAssumed).toBe(true);
-    const week = await revokeRunScopedAccounts({ leases: leases.slice(0, 1), accounts: all, ports: ports(live(fake({ noReplay: true }))), now: NOW, maxTokenTtlMs: 7 * 24 * 3_600_000 });
+    const week = await revokeAtNow({ leases: leases.slice(0, 1), accounts: all, ports: ports(live(fake({ noReplay: true }))), now: NOW, maxTokenTtlMs: 7 * 24 * 3_600_000 });
     expect(week.heldUntil).toBe(new Date(NOW + 7 * 24 * 3_600_000).toISOString());
     expect(week.ttlAssumed).toBeUndefined();
-    const fortnight = await revokeRunScopedAccounts({ leases: leases.slice(0, 1), accounts: all, ports: ports(live(fake({ noReplay: true }))), now: NOW, maxTokenTtlMs: 14 * 24 * 3_600_000 });
+    const fortnight = await revokeAtNow({ leases: leases.slice(0, 1), accounts: all, ports: ports(live(fake({ noReplay: true }))), now: NOW, maxTokenTtlMs: 14 * 24 * 3_600_000 });
     expect(fortnight.heldUntil).toBe(new Date(NOW + 14 * 24 * 3_600_000).toISOString());
     expect(holdFor({ statedTtlMs: Number.NaN })).toEqual({ ms: RUN_SCOPED_ASSUMED_TOKEN_TTL_MS, assumed: true });
     expect(holdFor({ statedTtlMs: -5 })).toEqual({ ms: RUN_SCOPED_ASSUMED_TOKEN_TTL_MS, assumed: true });
     expect(holdFor({ statedTtlMs: 10 })).toEqual({ ms: 60_000, assumed: false });
     // above the configured maximum: refused, never shortened
-    const refused = await revokeRunScopedAccounts({ leases: leases.slice(0, 1), accounts: all, ports: ports(live(fake({ noReplay: true }))), now: NOW, maxTokenTtlMs: 30 * 24 * 3_600_000 });
+    const refused = await revokeAtNow({ leases: leases.slice(0, 1), accounts: all, ports: ports(live(fake({ noReplay: true }))), now: NOW, maxTokenTtlMs: 30 * 24 * 3_600_000 });
     expect(refused).toMatchObject({ confirmed: false, holdRefused: "token_lifetime_over_max_hold" });
     expect(refused.heldUntil).toBeUndefined();
     expect(revocationSettledAt(refused, NOW + 365 * 24 * 3_600_000)).toBe(false);
@@ -209,11 +211,19 @@ describe("revocation and its proof (C1)", () => {
     expect(holdFor({ maxHoldMs: 3_600_000 })).toEqual({ refused: "token_lifetime_over_max_hold" });
     expect(RUN_SCOPED_DEFAULT_MAX_HOLD_MS).toBe(14 * 24 * 3_600_000);
   });
+  it("starts the hold from the real clock when none is passed, not from the start time (PC-N3)", async () => {
+    const later = NOW + 3 * 3_600_000;
+    const spy = vi.spyOn(Date, "now").mockReturnValue(later);
+    try {
+      const report = await revokeRunScopedAccounts({ leases: leases.slice(0, 1), accounts: all, ports: ports(live(fake({ noReplay: true }))), now: NOW, maxTokenTtlMs: 3_600_000 });
+      expect(report.heldUntil).toBe(new Date(later + 3_600_000).toISOString());
+    } finally { spy.mockRestore(); }
+  });
   it("is not confirmed with nothing to prove, and for a lease whose account or port is unknown, and a registered account is never revocable", async () => {
-    expect((await revokeRunScopedAccounts({ leases: [], accounts: all, ports: ports(fake()), now: NOW })).confirmed).toBe(false);
-    expect((await revokeRunScopedAccounts({ leases: [lease("ghost", "seed_command")], accounts: all, ports: ports(fake()), now: NOW })).confirmed).toBe(false);
-    expect((await revokeRunScopedAccounts({ leases: [leases[0]!], accounts: all, ports: { seed_command: undefined, cognito_test_pool: undefined, http_hook: undefined }, now: NOW })).confirmed).toBe(false);
-    expect((await revokeRunScopedAccounts({ leases: [lease("old", "seed_command")], accounts: [registered], ports: ports(fake()), now: NOW })).confirmed).toBe(false);
+    expect((await revokeAtNow({ leases: [], accounts: all, ports: ports(fake()), now: NOW })).confirmed).toBe(false);
+    expect((await revokeAtNow({ leases: [lease("ghost", "seed_command")], accounts: all, ports: ports(fake()), now: NOW })).confirmed).toBe(false);
+    expect((await revokeAtNow({ leases: [leases[0]!], accounts: all, ports: { seed_command: undefined, cognito_test_pool: undefined, http_hook: undefined }, now: NOW })).confirmed).toBe(false);
+    expect((await revokeAtNow({ leases: [lease("old", "seed_command")], accounts: [registered], ports: ports(fake()), now: NOW })).confirmed).toBe(false);
   });
   it("replays at most 32 credentials per account, and any beyond that count as uncontrolled, so the proof fails closed", async () => {
     expect(RUN_SCOPED_SESSION_PROBES_MAX).toBe(32);
@@ -224,7 +234,7 @@ describe("revocation and its proof (C1)", () => {
     const endSessions = port.endSessions.bind(port);
     port.endSessions = async (input) => { ended.add(input.account.profileId); return endSessions(input); };
     port.sessionState = async ({ account, credential }) => { replayed.push(credential.value); return ended.has(account.profileId) ? "dead" : "alive"; };
-    const report = await revokeRunScopedAccounts({ leases: leases.slice(0, 1), accounts: all, ports: ports(port), now: NOW, sessions: new Map([["buyer", issued]]), maxTokenTtlMs: 600_000 });
+    const report = await revokeAtNow({ leases: leases.slice(0, 1), accounts: all, ports: ports(port), now: NOW, sessions: new Map([["buyer", issued]]), maxTokenTtlMs: 600_000 });
     // 32 credentials, each replayed before and after; the 33rd is never replayed and is uncontrolled
     expect(replayed).toHaveLength(64);
     expect(replayed).not.toContain("bearer-value-32");
@@ -233,7 +243,7 @@ describe("revocation and its proof (C1)", () => {
     expect(report.heldUntil).toBe("2026-11-03T10:10:00.000Z");
     expect(revocationSettledAt(report, NOW + 599_999)).toBe(false);
     // exactly 32 is fully proved
-    const exact = await revokeRunScopedAccounts({ leases: leases.slice(0, 1), accounts: all, ports: ports(live(fake())), now: NOW, sessions: new Map([["buyer", issued.slice(0, 32)]]) });
+    const exact = await revokeAtNow({ leases: leases.slice(0, 1), accounts: all, ports: ports(live(fake())), now: NOW, sessions: new Map([["buyer", issued.slice(0, 32)]]) });
     expect(exact.accounts[0]?.sessionProof).toBe("dead");
     expect(exact.confirmed).toBe(true);
   });
@@ -337,7 +347,7 @@ describe("a probe that proves nothing never confirms (C1-a, C1-b)", () => {
     const store = memoryStore();
     const provisioned = await provisionRunScopedAccounts({ accounts: [hook], roundId: "r", roundEndsAt: ENDS, now: NOW, ports: hookPorts(server.port), store, newLeaseId });
     if (!provisioned.ok) throw new Error("provision");
-    return revokeRunScopedAccounts({ leases: provisioned.leases, accounts: [hook], ports: hookPorts(server.port), store, now: NOW, sessions, maxTokenTtlMs: 3_600_000, ...over });
+    return revokeAtNow({ leases: provisioned.leases, accounts: [hook], ports: hookPorts(server.port), store, now: NOW, sessions, maxTokenTtlMs: 3_600_000, ...over });
   }
   it("positive control for the brief's second case: the same round with the control satisfied is confirmed, so the holds above are the missing controls' doing", async () => {
     const withControl = await round(hookServer({ replay: "honest" }), new Map([["partner", [BEARER]]]));

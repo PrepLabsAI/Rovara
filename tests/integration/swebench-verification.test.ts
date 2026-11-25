@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { agentxPreambleSha256, SwebenchRunResultSchema, type SwebenchRunnerConfig, type SwebenchRunResult } from "../../packages/contracts/src/index.js";
 import { createDefaultPiSessionAdapter, type PiSessionAdapter } from "../../packages/worker/src/pi-session.js";
 import { runSwebenchAgent } from "../../packages/worker/src/swebench/agent.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 import type { SwebenchInstance } from "../../packages/worker/src/swebench/dataset.js";
 import { runSwebench, type RunReporter } from "../../packages/worker/src/swebench/run.js";
 import type { CheckRunners } from "../../packages/worker/src/verification/checks.js";

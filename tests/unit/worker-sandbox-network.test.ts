@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { TASK_SANDBOX_NETWORK, TaskSandbox, sandboxNetworkFromEnvironment, taskSandboxRunArgs } from "../../packages/worker/src/task-sandbox.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 const IMAGE = "worker:test";
 const TASK = "0b9f6a1e-6c1e-4c53-9d0a-5d3a1d6f2c11";

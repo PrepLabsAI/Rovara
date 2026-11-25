@@ -12,7 +12,7 @@ import {
   startEvalStandIns, startEvalStandInsOnce, writeEvalStandInRunFiles, type EvalStandInNetwork,
 } from "../../packages/worker/src/eval-standin-hosted.js";
 import { createRunCa } from "../../packages/worker/src/run-ca.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 const WORKSPACE = "0b9f6a1e-6c1e-4c53-9d0a-5d3a1d6f2c11";
 const OPERATION = "7c1f0d3a-2b8e-4a55-8f3b-9a1c2d3e4f50";

@@ -16,7 +16,7 @@ import { OWNER_LABEL, isolationNames, type IsolationNames } from "../../packages
 import { runCollected, type CollectedProcess } from "../../packages/worker/src/collected-process.js";
 import { checkSandboxPlan, waitForSealedDnsHelper, withDetachedWorking, writeCheckSandboxFiles } from "../../packages/worker/src/check-sandbox.js";
 import { startServicesNetwork, type ServicesNetwork } from "../../packages/worker/src/run-network.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 import { taskSandboxRunArgs } from "../../packages/worker/src/task-sandbox.js";
 
 const IMAGE = process.env.ROVARA_LOCAL_DOCKER_IMAGE;

@@ -19,10 +19,8 @@ import type { PullRequestUpdateSink } from "./callback-client.js";
 import { runCodeBuildGates, type CodeBuildSink } from "./codebuild.js";
 import type { RepositoryCredentialProvider } from "./repository-credentials.js";
 import { CANDIDATE_EXCLUDE_PYTHON_USER_SITE_PATHSPEC } from "./isolated-git.js";
-import { containWorkspace, runReadinessChecks, temporaryIndexTree, type OtherOperationWait } from "./publish.js";
+import { fetchContainedCredential, runReadinessChecks, temporaryIndexTree, type OtherOperationWait } from "./publish.js";
 import type { TaskShellSelection } from "./task-sandbox.js";
-import { stopWorkspaceProcesses } from "./workspace-processes.js";
-import { sweepWorkspaceContainers } from "./workspace-containers.js";
 import { storedCommandOutput } from "./command-failure.js";
 import type { PreparationManifest } from "./prepare.js";
 import type { DevcontainerCli } from "./devcontainer.js";
@@ -74,24 +72,18 @@ export async function maintainPullRequest(options: {
   assertCredentialFreeRemote(remoteUrl);
   if (remoteUrl !== repository.url) throw agentXError("CONFIG_INVALID", "repository remote does not match the registered project");
 
-  // A workflow task's fix runs no readiness checks, so nothing but leftover programs from the fix's own run could
-  // reach the push token. As in publication, none is left before the credential is fetched. (A merge of the base branch runs the checks, but the
-  // coder's leftovers are just as unwelcome.)
-  if (invocation.payload.workflowCandidateTreeSha !== undefined || invocation.payload.workflowSync !== undefined) {
-    await containWorkspace(rootPath, {
-      sweep: options.sweepWorkspaceContainers ?? ((root: string) => sweepWorkspaceContainers({ rootPath: root })),
-      stop: options.stopWorkspaceProcesses ?? ((root: string) => stopWorkspaceProcesses({ rootPath: root })),
-      ...(options.otherOperationActive === undefined ? {} : { otherOperationActive: options.otherOperationActive }),
-      ...(options.otherOperationWait === undefined ? {} : { otherOperationWait: options.otherOperationWait }),
-    });
-  }
-  const credential = await options.credentialProvider(repository);
+  // Two tokens, as in publication, each fetched through fetchContainedCredential: no container but the worker's own and no process of the worker's user is left when a token is requested, and when
+  // that cannot be done no token is fetched. This first one only reads the head and the base. This worker's provider asks for push access for every maintenance (repository-credentials.ts: only a preparation asks
+  // for a clone token), so it is a contained push token that is never kept: it is not in a variable that outlives this call, and it is gone before any readiness check runs project code. The token that pushes is
+  // fetched again (`pushCredential`), after the checks, right before the first push.
   await credentialedGit(repositoryPath, [
     // From the registered URL, never the remote's name, so a repository remote setting cannot redirect it.
     "fetch", "--no-tags", repository.url,
     `refs/heads/${invocation.payload.headBranch}:refs/remotes/origin/${invocation.payload.headBranch}`,
     `refs/heads/${invocation.payload.baseBranch}:refs/remotes/origin/${invocation.payload.baseBranch}`,
-  ], credential, "Git fetch failed", { mode: "write", refs: true });
+  ], await fetchContainedCredential({ ...options, rootPath, repository }), "Git fetch failed", { mode: "write", refs: true });
+  /** The token that pushes: fetched after the readiness checks, once the cleanup has run again, and used by the pushes that follow and nothing else. */
+  const pushCredential = () => fetchContainedCredential({ ...options, rootPath, repository });
   const remoteHead = (await git(repositoryPath, ["rev-parse", `refs/remotes/origin/${invocation.payload.headBranch}^{commit}`])).trim();
   if (remoteHead !== invocation.payload.expectedHeadCommit) {
     throw agentXError("STALE_FENCE", "pull request head changed since AgentX last observed it");
@@ -168,6 +160,7 @@ export async function maintainPullRequest(options: {
       "-m", reviewedTree === undefined ? `AgentX: update PR #${invocation.payload.pullRequestNumber}` : reviewedFixMessage(invocation.payload.workflowFix?.source),
     ])).trim();
     await git(repositoryPath, ["checkout", "--force", "-B", invocation.payload.headBranch, commit]);
+    const credential = await pushCredential();
     const codeBuildChecks = await validateCandidate(
       repositoryPath,
       invocation,
@@ -279,7 +272,9 @@ export async function maintainPullRequest(options: {
     const failure = agentXError("CONFIG_INVALID", "one or more registered readiness checks failed");
     throw reconciled ? failure : await undoMerge(repositoryPath, remoteHead, failure);
   }
-  const codeBuildChecks = reconciled
+  // A merge that left nothing to push needs no push token.
+  const credential = reconciled ? undefined : await pushCredential();
+  const codeBuildChecks = credential === undefined
     ? []
     : await validateCandidate(
       repositoryPath,
@@ -291,7 +286,7 @@ export async function maintainPullRequest(options: {
       credential,
       options.codeBuildSink,
     );
-  if (!reconciled && workflowSync !== undefined) {
+  if (credential !== undefined && workflowSync !== undefined) {
     // A workflow task's merge is pushed onto the head AgentX recorded and nothing else: GitHub is asked again right before the push, so a branch a person moved (or deleted) meanwhile is never
     // pushed over. A push GitHub refuses (the App can't push workflow files) leaves the workspace as it was, on the pull request's head.
     try {
@@ -302,7 +297,7 @@ export async function maintainPullRequest(options: {
     } catch (error) {
       throw await undoMerge(repositoryPath, remoteHead, error);
     }
-  } else if (!reconciled) {
+  } else if (credential !== undefined) {
     await push(repositoryPath, repository.url, invocation.payload.headBranch, credential);
   }
   const callback = await options.pullRequestUpdateSink({

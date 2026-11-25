@@ -4,7 +4,7 @@ import { afterEach, expect, it, vi } from "vitest";
 import { TestEnvironmentBodySchema, WorkerInvocationSchema, testEnvDigest, testEnvIsProved, TEST_ENV_PROVE_MEASURE_FEATURE } from "@agentx/contracts";
 import { runSetupProve, runSetupProveJob, type SetupProvePorts } from "../../packages/worker/src/setup-prove.js";
 import { TaskSandbox } from "../../packages/worker/src/task-sandbox.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 import type { BuildSandbox } from "../../packages/worker/src/saved-env/build.js";
 
 // Fake methods are function properties so assertions inspect them without detaching a receiver.

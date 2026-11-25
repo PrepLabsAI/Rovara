@@ -9,7 +9,7 @@ import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { SAVED_ENV_LABEL_KEY, SAVED_ENV_LABEL_REVISION, parseCommandLine, savedEnvRepositoryName, savedEnvStepMarksStale, type ProjectDefinition, type PrepareSavedEnv, type SavedEnvRegistryAuth, type SavedEnvUseStep } from "../../packages/contracts/src/index.js";
 import { prepareWorkspace, type PrepareWorkspaceOptions, type RepositoryMaterializer } from "../../packages/worker/src/prepare.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 import { checkSeedTree, replaceFileExclusively, savedEnvMaterializer, seededGitConfig, type SavedEnvUseOptions } from "../../packages/worker/src/saved-env/use.js";
 
 const cleanup: string[] = [];

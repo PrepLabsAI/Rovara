@@ -11,7 +11,7 @@ import { TEST_SERVICES_DEVCONTAINER_SENTENCE, assertSealedNetworkMembers, refuse
 import { runNetworkAddresses, runNetworkHelperIp, runNetworkLabelArgs, runNetworkName } from "../../packages/worker/src/run-network.js";
 import { buildServiceEnvironment, createRunDirectoryFiles, createServiceRedactor, type ServiceEnvironment } from "../../packages/worker/src/service-env.js";
 import { helperContainerName, type HelperFiles } from "../../packages/worker/src/service-helpers.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "../../packages/worker/src/git.js";
 import { createCheckRunners, planChecks, runChecks } from "../../packages/worker/src/verification/checks.js";
 

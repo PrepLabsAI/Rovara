@@ -13,7 +13,7 @@ import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
 import { agentShellTool, type PiSessionAdapter, type PiSessionInput } from "../../packages/worker/src/pi-session.js";
 import { runReadinessChecks } from "../../packages/worker/src/publish.js";
 import { createCheckRunners } from "../../packages/worker/src/verification/checks.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 import { TaskSandbox } from "../../packages/worker/src/task-sandbox.js";
 
 const run = promisify(execFile);

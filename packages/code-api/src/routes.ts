@@ -6,7 +6,13 @@
 // reaches a row only with the row's scope; the Rovara CLI's own token reaches every row, as before. Migration plan v3.2, lane ID part 1 (DEC 214 decision 7): named scopes.
 import { z } from "zod";
 import type { ClientScope } from "./scopes.js";
+import { ROUTE_NOT_SERVED_MESSAGE } from "./errors.js";
+import { TASK_CHANGES_EXAMPLE, TaskChangesReadSchema } from "./task-changes.js";
+import { TASK_CHECKS_EXAMPLE, TaskChecksReadSchema } from "./task-checks.js";
+import { TASK_EXISTING_READ_EXAMPLES, TaskCommentsReadSchema, TaskDiffReadSchema, TaskEventsReadSchema, TaskEvidenceListSchema, TaskPeopleReadSchema, TaskPlanReadSchema } from "./task-existing-reads.js";
+import { TASK_SPEC_EXAMPLE, TaskSpecReadSchema } from "./task-spec.js";
 import { TaskStandingWireSchema } from "./task-standing.js";
+import { TASK_TIMELINE_EXAMPLE, TaskTimelineReadSchema } from "./task-timeline.js";
 
 /**
  * What a row needs from a sign-in client's token:
@@ -48,6 +54,10 @@ export interface Route {
 export function routeIdOf(route: Pick<Route, "id" | "method" | "path">): string {
   return route.id ?? `${route.method} ${route.path}`;
 }
+
+/** RD-2.0: what a read the table lists but Code does not serve yet may answer, and its example refusal (the same words for every task). */
+const NOT_SERVED_ERRORS: readonly RouteRefusal[] = [{ code: "TASK_NOT_FOUND", status: 404 }, { code: "ROUTE_NOT_SERVED", status: 404 }];
+const NOT_SERVED_REFUSAL = { error: { code: "ROUTE_NOT_SERVED", message: ROUTE_NOT_SERVED_MESSAGE } } as const;
 
 /**
  * The /v1/dev/* rows (the developer API) first, then the core engine's /v1/app/* rows (Lane L12, served on the broker's HTTP API only while the core switch serves), each group in the order it
@@ -111,17 +121,23 @@ export const ROUTES: readonly Route[] = [
   { method: "GET", path: "/v1/dev/tasks", requires: "tasks:read" },
   // F2-B: the task read carries `standing` (where the task stands for the person reading it). The answer is read tolerantly: only `standing` is named here, every other member passes through, and a standing that does not read leaves the answer as it is.
   { id: "tasks.read", method: "GET", path: "/v1/dev/tasks/{taskId}", requires: "tasks:read", response: z.object({ task: z.object({ standing: TaskStandingWireSchema.optional().catch(undefined) }).passthrough() }).passthrough() },
-  { method: "GET", path: "/v1/dev/tasks/{taskId}/events", requires: "tasks:read" },
-  { method: "GET", path: "/v1/dev/tasks/{taskId}/plan", requires: "tasks:read" },
-  { method: "GET", path: "/v1/dev/tasks/{taskId}/people", requires: "tasks:read" },
+  // RD-2.0: the task page's reads. The six that Code already served now name themselves and carry a tolerant response schema (task-existing-reads.ts); the four new ones (spec, checks, changes, timeline) are listed after the proof index below.
+  { id: "tasks.events", method: "GET", path: "/v1/dev/tasks/{taskId}/events", requires: "tasks:read", response: TaskEventsReadSchema, example: { response: TASK_EXISTING_READ_EXAMPLES.events } },
+  { id: "tasks.plan", method: "GET", path: "/v1/dev/tasks/{taskId}/plan", requires: "tasks:read", response: TaskPlanReadSchema, example: { response: TASK_EXISTING_READ_EXAMPLES.plan } },
+  { id: "tasks.people", method: "GET", path: "/v1/dev/tasks/{taskId}/people", requires: "tasks:read", response: TaskPeopleReadSchema, example: { response: TASK_EXISTING_READ_EXAMPLES.people } },
   { method: "GET", path: "/v1/dev/tasks/{taskId}/people/requests/{requestId}", requires: "tasks:read" },
   { method: "GET", path: "/v1/dev/tasks/{taskId}/workflow/feedback", requires: "tasks:read" },
   // #644: comments and steering notes, a pull request's diff, plan-document comments.
   { method: "GET", path: "/v1/dev/tasks/{taskId}/messages", requires: "tasks:read" },
-  { method: "GET", path: "/v1/dev/tasks/{taskId}/diff", requires: "tasks:read" },
-  { method: "GET", path: "/v1/dev/tasks/{taskId}/comments", requires: "tasks:read" },
+  { id: "tasks.diff", method: "GET", path: "/v1/dev/tasks/{taskId}/diff", requires: "tasks:read", response: TaskDiffReadSchema, example: { response: TASK_EXISTING_READ_EXAMPLES.diff } },
+  { id: "tasks.comments", method: "GET", path: "/v1/dev/tasks/{taskId}/comments", requires: "tasks:read", response: TaskCommentsReadSchema, example: { response: TASK_EXISTING_READ_EXAMPLES.comments } },
   // Cloud's Proof tab: the task's proof index (what the proof page shows as checked for its current code, and its failing tests), under the task read's own rule.
-  { method: "GET", path: "/v1/dev/tasks/{taskId}/evidence", requires: "tasks:read" },
+  { id: "tasks.evidence.list", method: "GET", path: "/v1/dev/tasks/{taskId}/evidence", requires: "tasks:read", response: TaskEvidenceListSchema, example: { response: TASK_EXISTING_READ_EXAMPLES.evidence } },
+  // RD-2.0: the new reads of the task page, each in one answer (core-host/task-screen-routes.ts mounts them; each answers ROUTE_NOT_SERVED until its lane fills it: RD-2a spec, RD-2b1 checks, RD-2b2 changes, RD-2c timeline). Under the task read's own rule.
+  { id: "tasks.spec", method: "GET", path: "/v1/dev/tasks/{taskId}/spec", requires: "tasks:read", response: TaskSpecReadSchema, errors: NOT_SERVED_ERRORS, example: { response: TASK_SPEC_EXAMPLE, refusal: NOT_SERVED_REFUSAL } },
+  { id: "tasks.checks", method: "GET", path: "/v1/dev/tasks/{taskId}/checks", requires: "tasks:read", response: TaskChecksReadSchema, errors: NOT_SERVED_ERRORS, example: { response: TASK_CHECKS_EXAMPLE, refusal: NOT_SERVED_REFUSAL } },
+  { id: "tasks.changes", method: "GET", path: "/v1/dev/tasks/{taskId}/changes", requires: "tasks:read", response: TaskChangesReadSchema, errors: NOT_SERVED_ERRORS, example: { response: TASK_CHANGES_EXAMPLE, refusal: NOT_SERVED_REFUSAL } },
+  { id: "tasks.timeline", method: "GET", path: "/v1/dev/tasks/{taskId}/timeline", requires: "tasks:read", response: TaskTimelineReadSchema, errors: NOT_SERVED_ERRORS, example: { response: TASK_TIMELINE_EXAMPLE, refusal: NOT_SERVED_REFUSAL } },
   // Tasks: start.
   { method: "POST", path: "/v1/dev/tasks", requires: "tasks:start" },
   // Tasks: act on a task the person may act on.
