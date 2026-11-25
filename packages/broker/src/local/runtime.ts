@@ -63,8 +63,6 @@ import { isScriptTokenHeader } from "../core/script-tokens/token-format.js";
 import { startCallbackServer, type CallbackServer } from "./callback-server.js";
 import { createLocalCodeHosts } from "./github-code-host.js";
 import { createLocalTrackers } from "./trackers.js";
-import { listProjects } from "./app/projects.js";
-import { createStoreProjectSource } from "../core/task-flow/project-source.js";
 import { codeHostForRepositoryAddress } from "../plugins/routing.js";
 import { createDockerRunner, type DockerRunner } from "./docker-runner.js";
 import { DockerWorkerMachines, ownerWantsPiMcp } from "./docker-worker-machines.js";
@@ -94,6 +92,7 @@ import { applyTestServicesMarker, prepareLocalTestServices } from "./test-servic
 import { createOwnerImageService, createOwnerImageStore } from "./test-services-owner-list.js";
 import { createDockerImageRegistry } from "./docker-image-registry.js";
 import { savedEnvEnabled } from "../core/test-env/saved-env-switch.js";
+import { registeredRepositoryRecordsOf } from "./registered-repositories.js";
 import { PolicyHookSetupError, applyPolicyHook, type PolicyHookInstall } from "../core/policy-hook/index.js";
 
 /** The model providers whose keys `rovara up` looks for (the environment variable is `<PROVIDER>_API_KEY`). */
@@ -533,12 +532,7 @@ async function startLocked(options: LocalRuntimeOptions, stateDirectory: string)
   // is used instead. The repositories a host may be used for are the registered projects' (the store the app registers them in, read when asked, so a plug-in storage works too).
   const companyOrg = OrgIdSchema.parse(config.companyId ?? IMPLICIT_COMPANY_ID);
   /** The registered projects' repositories (not archived), as their records state them: the address and the code host connection the record names, if any. */
-  const registeredRepositoryRecords = async (): Promise<Array<{ url: string; host?: { kind: string } | undefined }>> => {
-    const store = registry.require("storage");
-    const source = createStoreProjectSource(store, companyOrg);
-    const latest = await Promise.all((await listProjects(store, companyOrg)).map((project) => source.latest(project.name)));
-    return latest.flatMap((revision) => (revision === undefined || revision.archived === true ? [] : revision.definition.repositories.map((repository) => ({ url: repository.url, host: repository.host }))));
-  };
+  const registeredRepositoryRecords = (): ReturnType<typeof registeredRepositoryRecordsOf> => registeredRepositoryRecordsOf(registry.require("storage"), companyOrg);
   const registeredRepositories = async (): Promise<string[]> => (await registeredRepositoryRecords()).map((repository) => repository.url);
   // Port lane P6 (item L1): the company's standing rules come from `<state folder>/company-instructions.md` (read fresh at every step); a configured `company-instructions` plug-in replaces it.
   registry.register("company-instructions", "file", new FileCompanyInstructions({ path: join(stateDirectory, COMPANY_INSTRUCTIONS_FILE_NAME) }), { isDefault: true });

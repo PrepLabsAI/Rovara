@@ -80,7 +80,7 @@ import { join, posix } from "node:path";
 import { HIDDEN_EVAL_MOUNT_PATH, agentXError } from "@agentx/contracts";
 import { MODEL_HELPER_ALIAS, RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_LABEL, RUN_NETWORK_WORKSPACE_LABEL, runNetworkAddresses, runNetworkHelperIp, type ServicesNetwork } from "./run-network.js";
 import { SEALED_DNS_TABLE_MAX } from "./setup-dns-watch.js";
-import type { DockerCli } from "./swebench/containers.js";
+import type { DockerCli } from "./docker-cli.js";
 import { MASK_OPTIONS, SANDBOX_FILE_OPS_NODE, SANDBOX_INIT, TASK_SANDBOX_LABEL, TASK_SANDBOX_NETWORK, TASK_SANDBOX_PIDS_LIMIT, TASK_SANDBOX_USER, TASK_SANDBOX_WORKSPACE_LABEL, taskSandboxRunArgs } from "./task-sandbox.js";
 
 /** Where the image keeps the sealed helper's program (environments/base/Dockerfile copies the worker's dist). */

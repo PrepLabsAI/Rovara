@@ -4,7 +4,7 @@ Deployment provisions the pinned worker image, Node 22.23.2, Docker, the private
 
 The qualification candidate runs with 2 vCPU and 4 GiB of container memory. The supervisor host must provide at least those CPU and memory resources in addition to the operating system and worker service; the default AWS worker profile is `m6g.large` (2 vCPU, 8 GiB RAM).
 
-An administrator issues a fresh challenge through the broker. The control plane derives the setup and feature catalog IDs from deployment configuration. The administrator supplies the intended EC2 binding, private worker endpoint, generation, transport correlation UUID, and fixed `linux-arm64-docker-v1` profile:
+An administrator issues a fresh challenge through the broker. The control plane derives the setup and feature catalog IDs from deployment configuration. The administrator supplies the intended EC2 binding, private worker endpoint, generation, transport correlation UUID, and fixed `linux-arm64-docker-v1` profile. For that profile it also names the EC2 instance at the endpoint (`--instance-id i-...`): registration refuses a challenge issued without one, and the dispatcher asks EC2 about that instance (running, at that address, in one of the binding's subnets, carrying no workspace tag) before every project setup run is sent to it. The setup instance must be placed in one of the binding's subnets; an instance in any other subnet is refused. EC2 is the check each time, so a wrong id can only make setup runs refuse, never let another machine through:
 
 ```sh
 agentx --env <environment> admin runtime-installation challenge \
@@ -13,6 +13,7 @@ agentx --env <environment> admin runtime-installation challenge \
   --generation 3 \
   --transport-correlation-id 11111111-1111-4111-8111-111111111111 \
   --profile linux-arm64-docker-v1 \
+  --instance-id i-0123456789abcdef0 \
   --out ./runtime-install-challenge.json
 ```
 

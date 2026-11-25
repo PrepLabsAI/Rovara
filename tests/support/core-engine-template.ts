@@ -49,7 +49,8 @@ export function withoutCoreEngine(template: unknown): unknown {
     expect(dispatcherVariables, name).toHaveProperty(name);
     delete dispatcherVariables[name];
   }
-  removePackedPieces(dispatcherVariables, "AGENTX_SETTINGS", ["am", "cd", "cl", "ct", "gw"]);
+  // CORE-RUN-STOP-RELAY (Rule D): `rl` (the outbox stream relay is deployed) is asserted in core-engine-infrastructure.test.ts and taken out here, so the recorded pins hold.
+  removePackedPieces(dispatcherVariables, "AGENTX_SETTINGS", ["am", "cd", "cl", "ct", "gw", "rl"]);
   delete dispatcherVariables.ROVARA_POLICY_HOOK;
   const dispatcherPolicy = Object.entries(synthesized.Resources).find(([id, resource]) => id.startsWith("DispatcherServiceRoleDefaultPolicy") && resource.Type === "AWS::IAM::Policy")!;
   const statements = (dispatcherPolicy[1].Properties.PolicyDocument as { Statement: Array<{ Sid?: string }> }).Statement;
@@ -107,7 +108,7 @@ export function withoutCoreEngine(template: unknown): unknown {
   // Web task channel C8 (option b): the attention email switch, packed (the web app's host is the sender function's alone).
   expect(settingsJoin).toMatch(/ae=",\{"Ref":"CoreAttentionEmail"\}/u);
   expect(settingsJoin).not.toContain("CoreAttentionEmailHost");
-  removePackedPieces(variables, "AGENTX_SETTINGS", ["aa", "ae", "am", "cd", "cl", "ct", "gw", "lm", "mx", "sy"]);
+  removePackedPieces(variables, "AGENTX_SETTINGS", ["aa", "ae", "am", "cd", "cl", "ct", "gw", "lm", "mx", "rl", "sy"]);
   delete variables.ROVARA_POLICY_HOOK;
 
   return template;

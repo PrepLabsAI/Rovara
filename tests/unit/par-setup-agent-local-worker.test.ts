@@ -9,7 +9,7 @@ import { FakeDocker } from "../support/local/fake-docker.js";
 import { assertSetupSandboxRunArgs, guardedSetupDocker } from "../../packages/worker/src/setup-agent.js";
 import { sharedRunNetwork } from "../../packages/worker/src/setup-agent-invocation.js";
 import { taskSandboxRunArgs } from "../../packages/worker/src/task-sandbox.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 const rootPath = "/work/root";
 const LOCAL_NETWORK = "rovara-sbx-0123456789abcdef";

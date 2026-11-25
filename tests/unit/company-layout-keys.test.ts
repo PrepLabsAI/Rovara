@@ -1,6 +1,6 @@
 // DEC 254zzz80 (R2-F1): one place picks a project-revision or project-grant key. A named company uses its own partition; the built-in company and no company keep the legacy keys.
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, projectMetaKey } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, PROJECT_REVISION_UNREADABLE, projectMetaKey } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import {
   grantKeyFor, grantsPkFor, latestRevisionRowFor, namedCompany, namedCompanyLatestRevisionRow, projectMemberRowKeyFor, projectMembersPkFor, revisionKeyFor, revisionPkFor,
@@ -32,7 +32,7 @@ describe("company-layout keys", () => {
     expect(grantsPkFor(B, P)).not.toBe(grantsPkFor(A, P));
   });
 
-  it("the latest revision in the core's order: catalog pointer, else newest non-candidate; drift and unparsable rows are absent", async () => {
+  it("the latest revision in the core's order: catalog pointer, else newest non-candidate; drift is absent and an unparsable current row is refused", async () => {
     const db = new FakeDynamoDb({ seed: 3 });
     const rev = (n: number, extra: Record<string, unknown> = {}) => db.set({ pk: `ORG#${A}#PROJECT#p`, sk: `REV#${String(n).padStart(12, "0")}`, entityType: "PROJECT", definition: definition("p", n), ...extra });
     rev(1); rev(2); rev(3, { candidate: true });
@@ -47,8 +47,9 @@ describe("company-layout keys", () => {
     db.delete(`ORG#${A}#PROJECT_CATALOG`, "PROJECT#p");
     rev(2, { companyId: B });
     expect(await namedCompanyLatestRevisionRow(db, "S", A, "p")).toBeUndefined();
+    // The CURRENT revision (the newest non-candidate, with no pointer) that does not parse is refused with the stable sentence, never reported absent and never swapped for an older one (arch rule 9).
     rev(2, { definition: { name: "p", revision: 2 } });
-    expect(await namedCompanyLatestRevisionRow(db, "S", A, "p")).toBeUndefined();
+    await expect(namedCompanyLatestRevisionRow(db, "S", A, "p")).rejects.toThrow(PROJECT_REVISION_UNREADABLE);
     // The legacy partition for the built-in company, unchanged.
     db.set({ pk: "PROJECT#p", sk: "REV#0001", definition: { revision: 9 } });
     expect(((await latestRevisionRowFor(db, "S", IMPLICIT_COMPANY_ID, "p"))?.definition as { revision: number }).revision).toBe(9);

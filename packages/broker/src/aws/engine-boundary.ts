@@ -24,6 +24,7 @@ import { setupCheckRecordKey } from "../core/setup-agent/check.js";
 import { engineStampKey, stampOf, type Engine, type EngineStamp } from "../core-host/engine-stamp.js";
 import type { CoreArea } from "../core-host/flags.js";
 import { NOT_ON_THE_CORE_YET, type DeployedCaller } from "../core-host/dev-routes.js";
+import { answerTaskRoute } from "../core-host/task-route-answer.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { taskPointerKey } from "../developer/task-records.js";
 import type { ChatThreadInput, ChatThreadInputResult } from "../core-host/chat-thread-input.js";
@@ -371,7 +372,17 @@ export function coreAnswerValue(answer: BrokerResponse): unknown {
 }
 
 /**
- * A developer task route for a task the core owns. The core's handlers answer it when they serve it. When they do not (no core entry on this install, or an operation it has no handler
+ * D1-1: a developer task route for a task the core owns. The core answers it, whatever the answer is (`core-host/task-route-answer.ts` over the entry's final `route`: its own words for a task it may not show this caller, and for a route it does not serve);
+ * this only turns the answer into the developer route's value or error. An install with no core entry has no core to answer: `missing()` is the old route's branch for a task that is not the core's.
+ */
+export async function serveCoreTaskRoute(entry: CoreTaskEntry | undefined, request: BrokerRequest, caller: CoreEntryCaller, taskId: string, missing: () => Promise<unknown>): Promise<unknown> {
+  if (entry === undefined) return await missing();
+  return coreAnswerValue(await answerTaskRoute((asked, by) => entry.route(asked, by), request, caller, taskId));
+}
+
+/**
+ * A developer task route for a task the core owns, with the CALLER'S words for a task it may not see (the Slack Keep press's own sentence). The developer routes use `serveCoreTaskRoute`, where the core says the words;
+ * this one goes with the Slack press handler bodies (D1-2a). The core's handlers answer it when they serve it. When they do not (no core entry on this install, or an operation it has no handler
  * for), the core's own task read decides what may be said: someone it lets read the task is told the operation is not on the core here yet; anyone else gets `missing()`, which is the
  * developer route's own answer for an id with no task (input checks, wrong method and words included), so a core task's id answers exactly like an id with no task. Never falls back to
  * the workflow's readers for the task itself.

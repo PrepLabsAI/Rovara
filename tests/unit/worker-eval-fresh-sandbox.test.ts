@@ -12,7 +12,7 @@ import {
 } from "../../packages/worker/src/verification/eval-bridged-exec.js";
 import { planModelHostBlock } from "../../packages/worker/src/model-helper-block.js";
 import { RUN_NETWORK_LABEL } from "../../packages/worker/src/run-network.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 const WS = "0123456789abcdef";
 const IMAGE = `rovara/worker@sha256:${"c".repeat(64)}`;

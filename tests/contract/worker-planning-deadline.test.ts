@@ -213,6 +213,25 @@ describe("a model failure in the task's events", () => {
 
 });
 
+describe("the task's failure event (REDACT-BLOCK-REASON scope 2)", () => {
+  // Built at run time: no key-shaped literal is in this file.
+  const webhookSecret = ["whsec_", "Ab3dEf9h".repeat(4)].join("");
+  it("is redacted when it is written, with the shapes the event writer's own scrub does not know", async () => {
+    const { settled, sent } = await run({ async prompt() { throw new Error(`webhook check failed for endpoint secret ${webhookSecret}; the password is Tr0ub4dor&3`); } });
+    expect((await settled).ok).toBe(false);
+    const message = String((sent.find((event) => event.type === "error")?.payload as { message?: string } | undefined)?.message);
+    expect(message).toContain("[REDACTED]");
+    expect(message).not.toContain(webhookSecret);
+    expect(message).not.toContain("Tr0ub4dor");
+    expect(JSON.stringify(sent)).not.toContain(webhookSecret);
+  });
+  it("keeps the words of a failure with nothing secret in it", async () => {
+    const { settled, sent } = await run({ async prompt() { throw new Error("the model could not be reached"); } });
+    expect((await settled).ok).toBe(false);
+    expect((sent.find((event) => event.type === "error")?.payload as { message?: string } | undefined)?.message).toBe("the model could not be reached");
+  });
+});
+
 describe("a refused event send", () => {
   it("does not crash a planning run or lose its result", async () => {
     const { settled, artifacts, logs } = await run({ async prompt(emit) { emit(planEnd()); } }, {

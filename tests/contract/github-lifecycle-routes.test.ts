@@ -134,6 +134,13 @@ describe("disconnect", () => {
     project(h.db, "odd", A, [repo("https://github.com/acme/x")]);
     h.db.set({ ...h.db.get(revisionKeyFor(A, "odd", 2).pk, "REV#000000000002")!, definition: { name: "odd", revision: 2 } });
     expect((await h.disconnect(101)).status).toBe(409);
+    // Arch rule 9: a catalogue that names a revision row that is not there counts as using it too (the refusal of the unreadable current revision is caught here and counted, never an error and never the older revision's answer).
+    const dangling = await world();
+    project(dangling.db, "gone", A, [repo("https://github.com/acme/other")]);
+    dangling.db.set({ ...orgProjectCatalogKey(A, "gone"), entityType: "PROJECT_CATALOG", latestRevision: 9 });
+    const refused = await dangling.disconnect(101);
+    expect(refused.status).toBe(409);
+    expect(JSON.stringify(refused.body)).toContain("gone");
     const many = await world();
     for (let i = 0; i <= PROJECT_SCAN_MAX; i++) many.db.set({ ...orgProjectCatalogKey(A, `p${i}`), entityType: "PROJECT_CATALOG", latestRevision: 1 });
     expect(await many.disconnect(101)).toEqual(refusal(503, "RUNTIME_UNAVAILABLE", DISCONNECT_UNAVAILABLE));

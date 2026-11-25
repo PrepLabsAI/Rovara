@@ -22,6 +22,8 @@ const BEFORE = [
   "SLACK_ORCHESTRATOR_ROLE_ARN", "SLACK_ORGANIZATION_WORKSPACE_LIMIT", "SLACK_REQUEST_QUEUE_URL", "SLACK_TEAM_ID", "SLACK_THREADS_TABLE_NAME", "STATE_TABLE_NAME",
   "SWEBENCH_SETTINGS_PREFIX", "TURN_RECORDS_TABLE_NAME",
 ];
+/** F1 L1a-1 deleted the two invitation switches (the parameters and their packed settings tu and tv): the broker no longer has these two of the 45. Nothing read either variable. */
+const RETIRED = ["AGENTX_TASK_PEOPLE_PRIVATE_INVITATIONS_ENABLED", "AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED"];
 /** What packing adds, and nothing else: the account (ARNs and URLs are built from it), the names parameter's pointer and revision (and the names read from it), the settings, and the layout. */
 const PACKING = ["AGENTX_ACCOUNT_ID", "AGENTX_INSTALL_LAYOUT", "AGENTX_NAMES", "AGENTX_NAMES_PARAMETER", "AGENTX_NAMES_REVISION", "AGENTX_SETTINGS"];
 /** CODE-PUBLIC-URL: the public address the broker derives its issuer from (packed `pu`); empty while the install has none. */
@@ -32,7 +34,7 @@ const SLACK_COMPANY = ["SLACK_COMPANY_WORKSPACES"];
 const CORE = [
   "ATTENTION_EMAIL_FUNCTION_NAME", "COMPANY_READS", "CORE_DISPATCH_DEAD_LETTER_URL", "CORE_DISPATCH_QUEUE_URL", "CORE_LESSONS_REFLECT_DEAD_LETTER_URL", "CORE_LESSONS_REFLECT_QUEUE_URL",
   "POLICY_HOOK_KEY_ARN", "ROVARA_ATTENTION_EMAIL", "ROVARA_CORE_AGENT_MODEL", "ROVARA_CORE_AGENT_MODEL_CHOICE", "ROVARA_CORE_ANSWERS_MODEL",
-  "ROVARA_CORE_COMPANY_DAY_CAP_USD", "ROVARA_CORE_LEARNING_MODEL", "ROVARA_CORE_LESSONS", "ROVARA_CORE_MODEL_GATEWAY_URL", "ROVARA_CORE_SYSTEM_RUNS",
+  "ROVARA_CORE_COMPANY_DAY_CAP_USD", "ROVARA_CORE_LEARNING_MODEL", "ROVARA_CORE_LESSONS", "ROVARA_CORE_MODEL_GATEWAY_URL", "ROVARA_CORE_OUTBOX_STREAM_RELAY", "ROVARA_CORE_SYSTEM_RUNS",
   "ROVARA_CORE_TASK_CAP_USD", "ROVARA_POLICY_HOOK", "ROVARA_SAVED_ENVIRONMENTS", "ROVARA_SAVED_ENV_MANAGE_ROLE_ARN", "ROVARA_SAVED_ENV_PULL_ROLE_ARN", "ROVARA_SAVED_ENV_PUSH_ROLE_ARN",
   "ROVARA_SAVED_ENV_REPO_PREFIX", "ROVARA_TEST_SERVICES", "ROVARA_TEST_SERVICES_HOSTED_IMAGES", "TASK_TOKEN_KEY_ARN",
 ];
@@ -122,7 +124,7 @@ describe("production's broker, packed (#1149)", () => {
       const { env, reads, parameterName } = await bootedBroker(template, { CompanySignIn: companySignIn, CompanySelfServe: companySignIn });
       expect(parameterName).toBe("/agentx/production/broker-names");
       expect(reads).toEqual(["/agentx/production/broker-names"]);
-      expect(Object.keys(env).sort()).toEqual([...BEFORE, ...PACKING, ...CORE, ...SLACK_COMPANY, ...WEBHOOK, ...PUBLIC_API].sort());
+      expect(Object.keys(env).sort()).toEqual([...BEFORE.filter((name) => !RETIRED.includes(name)), ...PACKING, ...CORE, ...SLACK_COMPANY, ...WEBHOOK, ...PUBLIC_API].sort());
       expect(env.SLACK_COMPANY_WORKSPACES).toBe("disabled");
       expect(env.AGENTX_INSTALL_LAYOUT).toBe("legacy");
       expect(env.GITHUB_WEBHOOK_SECRET_ID).toBe("agentx/production/github-webhook-secret");

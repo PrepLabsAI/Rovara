@@ -12,6 +12,7 @@ import { hydrateBrokerSettings } from "../../packages/broker/src/aws/broker-envi
 import { CORE_AGENT_MODEL_CHOICE_VARIABLE as BROKER_CHOICE_VARIABLE } from "../../packages/broker/src/core-host/offered-models-http.js";
 import { configKey } from "../../packages/cli/src/config/keys.js";
 import { OPERATOR_PARAMETERS } from "../../packages/cli/src/deploy/parameters.js";
+import { packedPiecesOf } from "../support/broker-environment-template.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
 skipLambdaBundling();
@@ -28,12 +29,9 @@ const functionVariables = (template: Json, pattern: RegExp): Record<string, unkn
   expect(found, String(pattern)).toHaveLength(1);
   return (found[0]![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
 };
-/** A packed AGENTX_SETTINGS (Fn::Join of `code=` and value pieces) as code -> piece. */
+/** A packed AGENTX_SETTINGS (Fn::Join of `code=` and value pieces) as code -> piece (an intrinsic, or a literal such as `rl=on`, which CDK merges into the string beside it). */
 function packed(variables: Record<string, unknown>): Map<string, unknown> {
-  const parts = (variables.AGENTX_SETTINGS as { "Fn::Join": [string, unknown[]] })["Fn::Join"][1];
-  const out = new Map<string, unknown>();
-  for (let index = 0; index < parts.length; index += 2) out.set(/^,?([a-z]{2})=$/u.exec(String(parts[index]))![1]!, parts[index + 1]);
-  return out;
+  return packedPiecesOf(variables.AGENTX_SETTINGS);
 }
 const users = (template: Json, needle: string) => Object.entries(template.Resources).filter(([, resource]) => JSON.stringify(resource).includes(needle)).map(([id, resource]) => `${id.replace(/[0-9A-F]{8}$/u, "")}:${resource.Type}`);
 

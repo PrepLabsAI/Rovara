@@ -1,6 +1,6 @@
 // Moved to @agentx/contracts in feature 013 so the Slack orchestrator's turn records share the shape.
 import { SECOND_REVIEW_OPERATION_TAG, createTaskUsageTelemetry as telemetryOf, type TaskUsageOutcome as Outcome, type UsageStats } from "@agentx/contracts";
-import { MODEL_QUOTA_DETAIL, budgetExhaustedFromMarker, modelNotAllowedFromMarker } from "@agentx/model-runtime";
+import { MODEL_QUOTA_DETAIL, budgetExhaustedFromMarker, failedBeforeResponse, modelNotAllowedFromMarker } from "@agentx/model-runtime";
 import { sanitizeModelCallEvent } from "./model-call-monitor.js";
 import { redactCredentials, WORKER_EVENT_PAYLOAD_MAX_BYTES } from "./events.js";
 export {
@@ -85,8 +85,10 @@ export interface UsageCheckpointer {
   readonly checkpointed: boolean;
 }
 
-// Fixed refusal sentences emitted by model-runtime.safeError, including routed
-// models whose Pi provider name is not a member of the provider catalog.
+// LEGACY READER (SPEND-UNREPORTED-RUN item 2, root cause R2). The decider is model-runtime's stable code on the failed message (`failedBeforeResponse`). These are the fixed sentences model-runtime.safeError
+// words for a person, kept ONLY to read a message that carries no code: one from an older runtime (a worker image from before the code, a session transcript it wrote), for the skew window. A message that
+// carries the code is decided by the code alone and never by its words. A failure with no HTTP status (network, DNS, TLS, reset) is read by the code; an older runtime's message for it (no code) is not matched
+// by its words (rule 6: decide by code), and the broker's settle covers such a run.
 const PRE_STREAM_REFUSAL_DETAILS = new Set([
   "upstream unavailable; check provider status before retrying",
   "the provider is overloaded; wait before retrying",
@@ -135,12 +137,13 @@ export function createMissingUsageDetector(): { observe(event: unknown): boolean
       const text = message.errorMessage;
       const status = message.status ?? (failure?.outcome === "failed" ? failure.status : undefined)
         ?? Number(typeof text === "string" ? (/^([4-5]\d\d)(?=[\s:]|$)/u.exec(text) ?? /^[A-Za-z][A-Za-z0-9 ._-]{0,40} API error \(([4-5]\d\d)\)/u.exec(text))?.[1] : undefined);
-      const refusal = !began && (message.stopReason === "error" || message.stopReason === "aborted") && (
-        (typeof status === "number" && status >= 300 && status <= 599)
+      // By code: a message that carries model-runtime's code failed before any response, with or without an HTTP status. A message with no code (an older runtime's) is read the old way, by status and by words.
+      const coded = failedBeforeResponse(message) !== undefined;
+      const legacyRefusal = (): boolean => (typeof status === "number" && status >= 300 && status <= 599)
         || (failure?.outcome === "failed" && ["key-rejected", "limit-or-rate-limited", "model-not-found", "request-rejected"].includes(failure.class))
         || (typeof text === "string" && PRE_STREAM_REFUSAL_DETAILS.has(/^[A-Za-z][A-Za-z0-9 ._-]{0,30} request failed; ([^\n]{1,200})$/u.exec(text)?.[1] ?? ""))
-        || budgetExhaustedFromMarker(text) !== undefined || modelNotAllowedFromMarker(text) !== undefined || text === "Retry cancelled" || text === "Model request refused: the conversation holds tool calls but declares no tools"
-      );
+        || budgetExhaustedFromMarker(text) !== undefined || modelNotAllowedFromMarker(text) !== undefined || text === "Retry cancelled" || text === "Model request refused: the conversation holds tool calls but declares no tools";
+      const refusal = !began && (message.stopReason === "error" || message.stopReason === "aborted") && (coded || legacyRefusal());
       if (refusal) refusedCalls += 1;
       // Only a started response stream can be a missing-usage call.
       return began && !refusal && (u === undefined || ![u.input, u.output, u.cacheRead, u.cacheWrite, u.cost?.total].some(n => typeof n === "number" && Number.isFinite(n) && n > 0));

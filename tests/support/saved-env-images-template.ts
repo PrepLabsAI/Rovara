@@ -8,7 +8,7 @@
 // tests/contract/saved-env-images-infrastructure.test.ts. A template with none of them (the legacy deployment, which gets none of it) is returned as it is.
 import { expect } from "vitest";
 import {
-  SAVED_ENV_KEEP_DEFAULT, SAVED_ENV_MANAGE_ACTIONS, SAVED_ENV_PULL_ACTIONS, SAVED_ENV_PUSH_ACTIONS,
+  SAVED_ENV_MANAGE_ACTIONS, SAVED_ENV_PULL_ACTIONS, SAVED_ENV_PUSH_ACTIONS,
   defaultBoundaryStatements, deployBoundaryStatements, savedEnvLifecyclePolicy, savedEnvManageRoleName, savedEnvPullRoleName, savedEnvPushRoleName, savedEnvRepositoryPolicy, serviceRoleStatements,
 } from "@agentx/contracts";
 
@@ -94,7 +94,7 @@ export function expectedTemplateProperties(env: string): Record<string, unknown>
     Description: expect.any(String),
     EncryptionConfiguration: { EncryptionType: "AES256" },
     ImageTagMutability: "IMMUTABLE",
-    LifecyclePolicy: JSON.stringify(savedEnvLifecyclePolicy(SAVED_ENV_KEEP_DEFAULT)),
+    LifecyclePolicy: JSON.stringify(savedEnvLifecyclePolicy()),
     Prefix: `rovara-env/${env}`,
   };
 }

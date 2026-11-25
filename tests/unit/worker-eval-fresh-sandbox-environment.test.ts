@@ -11,7 +11,7 @@ import { savedEnvRepositoryName, type EvalEnvironment } from "@agentx/contracts"
 import { EVAL_BRIDGE_SOCKET_NAME, EVAL_HELPER_DIR_NAME, FRESH_EVAL_WORKSPACE, createFreshEvalSandbox, freshEvalSandboxArgProblems, type FreshEvalSandboxConfig, type FreshEvalSandboxRun } from "../../packages/worker/src/verification/eval-bridged-exec.js";
 import { EvalSandboxRunFailure, runFailureOf } from "../../packages/worker/src/verification/eval-run-diagnostic.js";
 import { RUN_NETWORK_LABEL } from "../../packages/worker/src/run-network.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 const WS = "0123456789abcdef";
 const IMAGE = `rovara/worker@sha256:${"c".repeat(64)}`;

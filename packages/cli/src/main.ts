@@ -596,7 +596,8 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .requiredOption("--transport-correlation-id <uuid>", "current trusted worker/session correlation UUID")
     .requiredOption("--profile <id>", "fixed runtime profile: linux-arm64-docker-v1, linux-arm64-web-api-v1 or darwin-arm64-colima-v1")
     .requiredOption("--out <path>", "new private file receiving the challenge, including its one-use secret")
-    .action(async (options: { bindingFile: string; endpoint: string; generation: string; transportCorrelationId: string; profile: string; out: string }, command: Command) => {
+    .option("--instance-id <id>", "the EC2 instance whose private address is the endpoint (i-...); required for linux-arm64-docker-v1, the profile that becomes the project setup runtime")
+    .action(async (options: { bindingFile: string; endpoint: string; generation: string; transportCorrelationId: string; profile: string; out: string; instanceId?: string }, command: Command) => {
       const globals = globalOptions(command);
       const session = await adminSessionFor(globals.env);
       if (!session) throw agentXError("AUTH_REQUIRED", "an unexpired administrator session is required; sign in explicitly with `agentx login --admin`");
@@ -605,7 +606,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       const result = await requestRuntimeInstallChallenge({
         controlPlaneUrl: settings.controlPlaneUrl, accessToken: session.accessToken, bindingFile: options.bindingFile,
         endpoint: options.endpoint, generation: Number(options.generation), transportCorrelationId: options.transportCorrelationId,
-        profileId, outputFile: options.out,
+        profileId, outputFile: options.out, ...(options.instanceId === undefined ? {} : { instanceId: options.instanceId }),
       }, services.fetchImplementation);
       services.stdout.write(formatSuccess(result, globals.json));
     });

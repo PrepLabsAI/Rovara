@@ -16,7 +16,7 @@ import { modelSpendIsMetered, setupModelPrice } from "../../packages/worker/src/
 import { resolveTaskSessionModel } from "../../packages/worker/src/task-model.js";
 import { runSetupAgentInvocation } from "../../packages/worker/src/setup-agent-invocation.js";
 import { runWikiBuildInvocation } from "../../packages/worker/src/wiki-build-invocation.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 const run = promisify(execFile);
 const roots: string[] = [];

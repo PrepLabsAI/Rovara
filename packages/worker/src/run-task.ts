@@ -37,7 +37,7 @@ import {
 import { devcontainerMounts } from "./devcontainer-file-paths.js";
 import type { FileOpsTarget } from "./file-ops-exec.js";
 import { sweepFileOps } from "./sandbox-file-tools.js";
-import { createDockerCli, type DockerCli } from "./swebench/containers.js";
+import { createDockerCli, type DockerCli } from "./docker-cli.js";
 import { runSetupAgentInvocation } from "./setup-agent-invocation.js";
 import { runWikiBuildInvocation } from "./wiki-build-invocation.js";
 import { runNightlyInvocation } from "./nightly-invocation.js";
@@ -1534,7 +1534,7 @@ async function runTask(
         outcome = "FAILED";
         taskFailure = loopStop ?? asError(error);
         try {
-          await emit("error", { message: taskFailure.message });
+          await emit("error", { message: redactText(taskFailure.message) });
         } catch (reportingError) {
           evidenceFailure = reportingError;
         }

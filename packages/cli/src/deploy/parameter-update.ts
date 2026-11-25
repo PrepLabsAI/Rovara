@@ -2,7 +2,7 @@
 // UsePreviousTemplate and UsePreviousValue for every other parameter, so NoEcho values are never
 // sent again. It shows the parameter changes and the resource changes, and asks first.
 import { CreateChangeSetCommand, DeleteChangeSetCommand, DescribeChangeSetCommand, DescribeStacksCommand, ExecuteChangeSetCommand, type Change, type Stack } from "@aws-sdk/client-cloudformation";
-import { agentXError } from "@agentx/contracts";
+import { CODE_SETTING_ROWS, agentXError, namedEnvironmentOnlyFromRows } from "@agentx/contracts";
 import { assertPublicApiUrlConfirmed } from "./public-api-url.js";
 import { ADOPTED_STACK_NAMES } from "../environments/adopt.js";
 import { GITHUB_SIGN_IN_PARAMETER_NAMES, SIGN_IN_SINCE_PARAMETER_NAMES } from "../signin/settings.js";
@@ -21,7 +21,7 @@ export interface ParameterUpdateInput {
 }
 
 /** Parameters only named environments' templates declare (spec 025 E16): the legacy deployment never has them, so no upgrade adds them. */
-const NAMED_ENVIRONMENT_ONLY_PARAMETERS: ReadonlySet<string> = new Set(["McpConfirmElicitation", "ChannelAdapters", "CoreTaskCapUsd", "CoreCompanyDayCapUsd", "CorePolicyHook", "CoreLessons", "CoreSystemRuns", "CoreModelGatewayHost", "CoreAgentModel", "CoreAnswersModel", "CoreLearningModel", "CoreAttentionEmail", "CoreAttentionEmailHost", "CoreAttentionEmailSender", "TestServices", "TestServiceImages", "CoreAgentModelChoice", "WorkerSandboxEgress"]);
+export const NAMED_ENVIRONMENT_ONLY_PARAMETERS: ReadonlySet<string> = new Set(namedEnvironmentOnlyFromRows(CODE_SETTING_ROWS));
 const LEGACY_STACK_NAMES: ReadonlySet<string> = new Set(Object.values(ADOPTED_STACK_NAMES));
 
 const NO_CHANGES = ["didn't contain changes", "No updates are to be performed"];

@@ -13,7 +13,7 @@
 import { randomBytes } from "node:crypto";
 import { EMULATOR_CONTROL_PATHS, HELPER_CREDENTIAL_PATTERNS, controlRequestArgs, type HelperFiles, type StartedHelper } from "./service-helpers.js";
 import type { ServicesNetwork } from "./run-network.js";
-import type { DockerCli } from "./swebench/containers.js";
+import type { DockerCli } from "./docker-cli.js";
 
 export type EmulatorControlFailure = "refused" | "failed" | "stopped" | "too_large";
 const SENTENCES: Record<EmulatorControlFailure, string> = {

@@ -142,8 +142,8 @@ const STOPPED_BY_OWNER = /^(planning|implementation|verification retry|independe
 const stoppedByOwner = (blockReason: string | undefined): boolean => blockReason !== undefined && STOPPED_BY_OWNER.test(blockReason);
 
 function visibleBlockReason(reason: string): string | undefined {
-  if (isE2EPlanCorrectionBlockReason(reason)) return reason;
-  return isCiFixBlockReason(reason) || isBranchSyncBlockReason(reason) ? redactText(reason).replace(/[\p{Cc}\p{Cf}]/gu, " ").slice(0, 500) : undefined;
+  // The E2E plan-correction reason carries the broker's own `ApplicationPlanDefect` message (aws/broker.ts), which can quote the plan; it is redacted like the CI-fix and branch-sync reasons.
+  return isE2EPlanCorrectionBlockReason(reason) || isCiFixBlockReason(reason) || isBranchSyncBlockReason(reason) ? redactText(reason).replace(/[\p{Cc}\p{Cf}]/gu, " ").slice(0, 500) : undefined;
 }
 
 /** The broker's own reason a step stopped, in words the owner can act on; any other reason is internal. */

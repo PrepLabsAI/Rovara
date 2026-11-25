@@ -93,6 +93,9 @@ describe("an EC2 worker authenticating invocations", () => {
     ["wrong workspace", (claims: WorkerInvokeTokenClaims) => `AgentX-Invoke ${tokenFor({ ...claims, workspaceId: randomUUID() })}`, "wrong_workspace"],
     ["wrong generation", (claims: WorkerInvokeTokenClaims) => `AgentX-Invoke ${tokenFor({ ...claims, generation: 2 })}`, "wrong_generation"],
     ["expired", (claims: WorkerInvokeTokenClaims) => `AgentX-Invoke ${tokenFor({ ...claims, expiresAt: NOW })}`, "expired"],
+    // REDACT review F4: expiry is checked before the workspace and generation, so a captured, validly signed, expired token for another workspace or generation learns nothing about this worker.
+    ["expired and for another workspace", (claims: WorkerInvokeTokenClaims) => `AgentX-Invoke ${tokenFor({ ...claims, workspaceId: randomUUID(), expiresAt: NOW })}`, "expired"],
+    ["expired and for another generation", (claims: WorkerInvokeTokenClaims) => `AgentX-Invoke ${tokenFor({ ...claims, generation: 2, expiresAt: NOW })}`, "expired"],
     ["another key's signature", (claims: WorkerInvokeTokenClaims) =>
       `AgentX-Invoke ${tokenFor(claims, generateKeyPairSync("ec", { namedCurve: "prime256v1" }).privateKey)}`, "bad_signature"],
     ["no signature", (claims: WorkerInvokeTokenClaims) => `AgentX-Invoke ${workerInvokeTokenPayload(claims)}`, "malformed"],
@@ -102,7 +105,9 @@ describe("an EC2 worker authenticating invocations", () => {
     const request = post(invocation, header(claimsFor(invocation)));
     const refused = await handleWorkerRequest(request, state);
     expect(refused.status).toBe(401);
-    await expect(refused.json()).resolves.toEqual({ error: "invocation is not authorized", reason });
+    // A token for another workspace or generation (signed, so from the dispatcher) is told whose machine this is; every other refusal is the fixed body alone.
+    const whose = reason === "wrong_workspace" || reason === "wrong_generation" ? { workspaceId: authentication.workspaceId, generation: authentication.generation } : {};
+    await expect(refused.json()).resolves.toEqual({ error: "invocation is not authorized", reason, ...whose });
     expect(request.bodyUsed).toBe(false);
     expect(await journal.get(invocation.operationId)).toBeUndefined();
     expect(execute).not.toHaveBeenCalled();

@@ -1,0 +1,56 @@
+{
+  "contracts/shared/audit-v1.sha256.json": [
+    "shared"
+  ],
+  "contracts/shared/charge-receipt.v1.json": [
+    "shared"
+  ],
+  "contracts/shared/eval-authority-developer-id.v1.json": [
+    "shared"
+  ],
+  "contracts/shared/model-gateway-product-ai.v1.json": [
+    "shared"
+  ],
+  "contracts/shared/model-gateway-product-bedrock.v2.json": [
+    "shared"
+  ],
+  "contracts/shared/model-gateway-token.v1.json": [
+    "shared"
+  ],
+  "contracts/shared/policy-hook.v1.json": [
+    "shared"
+  ],
+  "contracts/shared/task-money.v1.json": [
+    "shared"
+  ],
+  "packages/broker/src/core/build-step/check-results.ts": [
+    "marked"
+  ],
+  "packages/broker/src/core/build-step/prompts.ts": [
+    "marked"
+  ],
+  "packages/broker/src/plugins/code-host/github/app-client.ts": [
+    "marked"
+  ],
+  "packages/broker/src/plugins/code-host/github/provider.ts": [
+    "marked"
+  ],
+  "packages/contracts/src/audit-record-v1.ts": [
+    "pinned"
+  ],
+  "packages/contracts/src/charge-receipt.ts": [
+    "marked"
+  ],
+  "packages/contracts/src/model-egress/address.ts": [
+    "marked"
+  ],
+  "packages/contracts/src/start-estimates.ts": [
+    "pinned"
+  ],
+  "packages/contracts/src/task-money.ts": [
+    "marked"
+  ],
+  "packages/contracts/src/task-words.ts": [
+    "marked"
+  ]
+}

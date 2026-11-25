@@ -35,7 +35,7 @@ const NAMES = {
   channelEventDeadLetters: "agentx-staging-control-plane-ChannelApiEventDeadLettersE21C25D1-1A2B3C4",
 } as const satisfies Record<BrokerNameKey, string>;
 const SETTINGS = {
-  memberWorkspaceLimit: "3", organizationWorkspaceLimit: "20", taskPeopleChanges: "false", taskPeoplePublicInvitations: "true", taskPeoplePrivateInvitations: "false",
+  memberWorkspaceLimit: "3", organizationWorkspaceLimit: "20", taskPeopleChanges: "false",
   workflowDependencies: "false", slackTeamId: "T0123ABCD", signInSlack: "enabled", signInSlackSince: "1794693600", oidcSince: "0", signInGithub: "disabled", githubSince: "0", mcpConfirmElicitation: "enabled", channelAdapters: "enabled",
   coreTaskCap: "5", coreCompanyDayCap: "25", coreLessons: "off", coreSystemRuns: "off",
   coreModelGateway: "gateway.example.dev", coreAgentModel: "claude-sonnet-4-6", slackCompanyWorkspaces: "0", companySignIn: "1", testServices: "1", savedEnvironments: "0", testServiceImages: "mirrored", coreAttentionEmail: "off",
@@ -43,6 +43,8 @@ const SETTINGS = {
   coreLearningModel: "claude-haiku-5-5",
   // CODE-PUBLIC-URL: empty, an install without a public address (the common case, and today's behaviour).
   publicApiUrl: "",
+  // G1: the core outbox stream relay (packed `rl`) is on for the broker and the dispatcher.
+  coreOutboxStreamRelay: "on",
   // #1149: a named broker's settings: the legacy layout marker (installLayout) is the legacy install's alone.
 } as const satisfies Record<Exclude<BrokerSettingKey, "installLayout">, string>;
 

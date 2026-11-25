@@ -30,11 +30,11 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import {
   SAVED_ENV_IMAGE_CEILING_DAYS,
   savedEnvRepositoryName,
-  SAVED_ENV_KEEP_DEFAULT,
-  SAVED_ENV_KEEP_MAX,
-  SAVED_ENV_KEEP_MIN,
+  SAVED_ENV_JOB_LEASE_MS,
+  SAVED_ENV_KEEP,
   SAVED_ENV_LIGHT_AFTER_IDLE_DAYS_DEFAULT,
   SAVED_ENV_MAX_AGE_DAYS,
+  SAVED_ENV_REBUILD_BACKOFF_MS,
   SAVED_ENV_USE_STEPS,
   savedEnvStepMarksStale,
   PrepareSavedEnvSchema,
@@ -50,10 +50,10 @@ import { mintPullSession, mintPushSession, repositoryOf, verifyRepository, type 
 const DAY_MS = 86_400_000;
 /** A recorded image the registry does not list yet is kept this long. */
 const RECORD_GRACE_MS = 10 * 60_000;
-/** A job that has not finished in this long is abandoned; the next check takes the project over. */
-export const SAVED_ENV_JOB_LEASE_MS = 3 * 3_600_000;
-/** After a failed build the project waits this long before the next automatic rebuild (a reset ignores it). */
-export const SAVED_ENV_FAILURE_BACKOFF_MS = 30 * 60_000;
+/** A job that has not finished in this long is abandoned; the next check takes the project over. The number lives in contracts (`SAVED_ENV_JOB_LEASE_MS`); this keeps the old import path. */
+export { SAVED_ENV_JOB_LEASE_MS };
+/** After a failed build the project waits this long before the next automatic rebuild (a reset ignores it). The first step of `SAVED_ENV_REBUILD_BACKOFF_MS`; the 2 h and 8 h steps and the stop come with the pass (SI-3). */
+export const SAVED_ENV_FAILURE_BACKOFF_MS = SAVED_ENV_REBUILD_BACKOFF_MS[0];
 /** How often the periodic poll looks at a project. */
 export const SAVED_ENV_POLL_MS = 30 * 60_000;
 /** A project whose polls keep failing is looked at less and less often, never less often than this. */
@@ -166,8 +166,6 @@ export interface SavedEnvDeps {
   currentKey(orgId: string, projectId: string, heads: ReadonlyMap<string, string> | undefined): Promise<string | undefined>;
   /** The head commit of each repository's default branch, by repository name, or undefined when the code host cannot answer. Read when a job is queued, not when it is recorded. */
   defaultHeads(orgId: string, projectId: string): Promise<ReadonlyMap<string, string> | undefined>;
-  /** `savedEnv.keep` of the company (1 to 10). */
-  keep(orgId: string): Promise<number>;
   /** `savedEnv.lightAfterIdleDays`. */
   lightAfterIdleDays?(orgId: string, projectId: string): Promise<number>;
   now(): number;
@@ -184,7 +182,6 @@ export type SavedEnvStoreDeps = Pick<SavedEnvDeps, "store" | "now"> & { session:
 type Disabled = { ok: false; reason: "disabled" };
 const disabled = (deps: SavedEnvStoreDeps): Disabled | undefined => (deps.session.config.enabled ? undefined : { ok: false, reason: "disabled" });
 const iso = (ms: number): string => new Date(ms).toISOString();
-const keepOf = (value: number): number => Math.min(SAVED_ENV_KEEP_MAX, Math.max(SAVED_ENV_KEEP_MIN, Number.isInteger(value) ? value : SAVED_ENV_KEEP_DEFAULT));
 const token = (deps: SavedEnvDeps): string => (deps.random ?? (() => randomBytes(24).toString("hex")))();
 
 function sameToken(left: string, right: string): boolean {
@@ -505,9 +502,8 @@ export async function recordBuild(deps: SavedEnvDeps, ids: { orgId: string; proj
   if (!verified.ok || verified.state !== "matches") return refuse("repository_mismatch");
 
   const image: SavedEnvImageRecord = { approved: job.approved, digest: result.imageDigest, tag: result.tag, manifest: result.manifest, recordedAt: iso(deps.now()), status: "ready" };
-  const keep = keepOf(await deps.keep(ids.orgId).catch(() => SAVED_ENV_KEEP_DEFAULT));
   const written = await commitWhileLeased(
-    (state) => ({ ...state, images: [image, ...state.images.filter((known) => known.digest !== image.digest)].slice(0, keep), job: undefined, health: "healthy", lastFailure: undefined, lastFailureAt: undefined }),
+    (state) => ({ ...state, images: [image, ...state.images.filter((known) => known.digest !== image.digest)].slice(0, SAVED_ENV_KEEP), job: undefined, health: "healthy", lastFailure: undefined, lastFailureAt: undefined }),
     (state) => audit(deps, state, "build_recorded", { digest: image.digest, reason: job.reason }),
   );
   if (written === undefined) return { ok: false, reason: "stale_write" };
@@ -673,8 +669,7 @@ export async function walk(deps: SavedEnvDeps, ids: { orgId: string; projectId: 
     listed = found === "absent" ? [] : found;
   } catch { return { ok: false, reason: "unavailable" }; }
   const now = deps.now();
-  const keep = keepOf(await deps.keep(ids.orgId).catch(() => SAVED_ENV_KEEP_DEFAULT));
-  const named = new Set(state.images.slice(0, keep).map((image) => image.digest));
+  const named = new Set(state.images.slice(0, SAVED_ENV_KEEP).map((image) => image.digest));
   // While a job's lease is live, a build may have pushed a digest it has not reported yet (it can take longer than the grace period): unnamed digests stay. The age ceiling and the untagged rule still apply.
   const building = state.job !== undefined && Date.parse(state.job.leaseUntil) > now;
   const doomed = new Set<string>();
@@ -690,7 +685,7 @@ export async function walk(deps: SavedEnvDeps, ids: { orgId: string; projectId: 
   }
   const alive = new Set(listed.map((image) => image.digest).filter((digest) => !doomed.has(digest)));
   // An image recorded in the last few minutes stays even if the registry's list does not show it yet (listing is not instantly consistent): dropping it would queue a rebuild of what was just built.
-  const images = state.images.slice(0, keep).filter((image) => alive.has(image.digest) || (!doomed.has(image.digest) && now - Date.parse(image.recordedAt) < RECORD_GRACE_MS));
+  const images = state.images.slice(0, SAVED_ENV_KEEP).filter((image) => alive.has(image.digest) || (!doomed.has(image.digest) && now - Date.parse(image.recordedAt) < RECORD_GRACE_MS));
   if (images.length === state.images.length) return { ok: true, deleted: doomed.size };
   const written = await commit(deps, state, { ...state, images, health: images.length === 0 && state.health === "healthy" ? "needs_repair" : state.health }, audit(deps, state, "ceiling_walk", { count: doomed.size }));
   return written === undefined ? { ok: false, reason: "stale_write" } : { ok: true, deleted: doomed.size };

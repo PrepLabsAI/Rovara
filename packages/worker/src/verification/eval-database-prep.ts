@@ -12,7 +12,7 @@
 // the same missing keys are written to BOTH sides' databases (identical rows, by the generator), and the questions that asked are returned for the round to ask again, once, on both sides (`eval-round.ts`, `fillMissingRows`).
 import { createHash } from "node:crypto";
 import { formatCommandLine, standInSetVersion, type ProjectCommand, type SeedScriptLock } from "@agentx/contracts";
-import type { DockerCli } from "../swebench/containers.js";
+import type { DockerCli } from "../docker-cli.js";
 import { loadSeedFile, readDatabaseText, seedFileDigest, SeedFileError, type SeedFileTarget } from "../service-seed-file.js";
 import {
   PLAIN_NAME, STAND_IN_LIMITS, STAND_IN_ROW_GENERATOR_VERSION, STAND_IN_SCHEMA_STATEMENT, parentKeyColumns, parseSampledKeys, parseStandInSchema, planFillForLookups, planStandInRows, sampleKeysStatement,

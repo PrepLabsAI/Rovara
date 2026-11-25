@@ -13,7 +13,7 @@ import type { DevcontainerCli } from "../../packages/worker/src/devcontainer.js"
 import { createWorkerResources, createWorkspacePiSession, type PiSessionAdapter, type PiSessionInput } from "../../packages/worker/src/pi-session.js";
 import { prepareWorkspace } from "../../packages/worker/src/prepare.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 const run = promisify(execFile);
 const IMAGE = `123456789012.dkr.ecr.us-west-2.amazonaws.com/agentx-staging/worker@sha256:${"d".repeat(64)}`;

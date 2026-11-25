@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { SETUP_AGENT_LIMITS_DEFAULT } from "../../packages/contracts/src/index.js";
 import type { PiSessionAdapter, PiSessionHandle } from "../../packages/worker/src/pi-session.js";
 import { runSetupAgentInvocation } from "../../packages/worker/src/setup-agent-invocation.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 const run = promisify(execFile);
 const roots: string[] = [];

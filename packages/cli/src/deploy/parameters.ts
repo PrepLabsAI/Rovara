@@ -3,7 +3,7 @@ import { coreEngineParameters, type CoreEngineAnswers } from "./core-engine-answ
 // It turns the operator's answers, a release manifest, and the stack outputs collected so far into
 // the exact CloudFormation Parameters map for one environment stack. The caller (phase 15d's `agentx
 // init`/`agentx upgrade`) reads secrets and calls CloudFormation; this file only computes values.
-import { CONTROL_PLANE_FOUNDATION_PARAMETERS, EGRESS_ADDRESSES_PARAMETER_PATTERN, PUBLIC_API_URL_PARAMETER, ImageDigest, NAT_EGRESS_ADDRESSES_OUTPUT, KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS, environmentPullThroughPrefix, environmentStackName, operatorTrustProblem } from "@agentx/contracts";
+import { CODE_SETTING_ROWS, CONTROL_PLANE_FOUNDATION_PARAMETERS, EGRESS_ADDRESSES_PARAMETER_PATTERN, PUBLIC_API_URL_PARAMETER, ImageDigest, NAT_EGRESS_ADDRESSES_OUTPUT, KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS, environmentPullThroughPrefix, environmentStackName, operatorParametersFromRows, operatorTrustProblem } from "@agentx/contracts";
 import type { ReleaseManifest, StackPart } from "@agentx/contracts";
 import { signInStackParameters, type StoredDeveloperSignIn } from "../signin/settings.js";
 
@@ -61,7 +61,7 @@ export interface InstallAnswers {
   /**
    * CODE-PUBLIC-URL (DEC 254zzz505): the install's permanent public address, an https origin (empty: the API's own host). Absent: the deployed value is kept. deployEnvironment fills it in from
    * the address stack's PublicApiOrigin output (public-api-url.ts) and gives it to the foundation (its DNS firewall must allow the host), the control plane and the Slack service.
-   * TODO(F1): becomes a settings row of F1's install layer, with its CLI key and docs generated from it.
+   * It is a settings row of F1's install layer (install-rows.ts, `install.control-plane.PublicApiUrl`); OPERATOR_PARAMETERS and the broker's packed setting are derived from it.
    */
   publicApiUrl?: string;
   /** CODE-PUBLIC-URL: this install is declared to have an address stack; a deploy that finds none is refused. */
@@ -78,46 +78,15 @@ export const SECRET_PARAMETERS: ReadonlySet<string> = new Set(["CallbackSigningK
  * Stack parameters an operator sets after install (the budget question, agentx config set) that an
  * upgrade's answers do not carry. An upgrade keeps each one's deployed value unless its answers set
  * it, so no upgrade resets them to the template default. Models are not here: they live in the
- * settings, which the upgrade's answers read.
+ * settings, which the upgrade's answers read (the OpenRouter key's ARN is, because the settings may hold none).
+ *
+ * Derived from Code's install rows (packages/contracts/src/settings/install-rows.ts: a row's `kept` position puts its parameter, and the parameters of the stacks it is copied to,
+ * in this list). The rows carry each parameter's template description, not the history of why it is kept (the DEC comments that sat in the old literal are gone); the golden test
+ * (tests/contract/settings-install-golden.test.ts) holds this to the list it replaced plus the L1a-1 differences, each stated with its reason there.
+ * Since L1a-1 this list is not what stops a reset: every engine carries a parameter an upgrade does not supply (deploy/carry.ts). It is what an upgrade sends EXPLICITLY (from the deployed
+ * value, unless the answers or the stored sign-in supply one), reports by config key when a release drops it, and reads for the gateway preflight.
  */
-export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>> = {
-  access: [],
-  // CODE-PUBLIC-URL: the foundation's DNS firewall allows the install's public address (the same value as the control plane's), and an upgrade keeps it.
-  foundation: [PUBLIC_API_URL_PARAMETER],
-  identity: [],
-  // The AI navigation model the customer chose (agentx config set models.e2eAgent): a stack parameter and not a model role, so it is not in the settings the upgrade's answers read.
-  // MODEL3: the fallback model the customer chose (agentx config set models.fallback), also a parameter of the Slack stack.
-  runtime: ["E2eAgentModelId", "ModelFallback"],
-  "control-plane": ["BudgetMonthlyUsd", "BudgetScope", "SlackAppPostedMessages", "SlackThreadTurnsPerMinute", "SlackMemberWorkspaceLimit", "SlackOrganizationWorkspaceLimit", "McpConfirmElicitation", "TaskPeopleChangesEnabled", "TaskPeoplePublicInvitationsEnabled", "TaskPeoplePrivateInvitationsEnabled", "WorkflowDependenciesEnabled",
-    // Spec 062: channel adapters and Slack through the channel API, as the operator set them (agentx config set).
-    "ChannelAdapters", "SlackViaChannel",
-    // Migration plan v3.2 lane E2: retain every core setting the operator may tune across upgrades.
-    "CoreTaskCapUsd", "CoreCompanyDayCapUsd", "CorePolicyHook", "CoreLessons", "CoreSystemRuns",
-    // Core switch-on blocker (2026-11-17): the model gateway's origin and the agent model (agentx config set coreEngine.modelGatewayUrl / coreEngine.agentModel).
-    "CoreModelGatewayHost", "CoreAgentModel",
-    // DEC 254z-amend3: the test services switch (default on); an operator's opt-out survives every upgrade.
-    "TestServices",
-    // DEC 254zm: whether the starter copies are in place (none | mirrored); set by the operator after the copy, kept across upgrades.
-    "TestServiceImages", "SavedEnvironments",
-    // L4-NETG (DEC 254zzz77): how the worker hosts' sandboxes reach the internet (bridge | gateway), set with `agentx config set workerSandboxEgress`, kept across upgrades.
-    "WorkerSandboxEgress",
-    // Web task channel C8 (option b): the attention email switch, the web app's host and the attention email's own SES identity, as the operator set them.
-    "CoreAttentionEmail", "CoreAttentionEmailHost", "CoreAttentionEmailSender",
-    // L4-AM (DEC 254zzn(2)): the hosted answers model (agentx config set coreEngine.answersModel), empty = the agent model.
-    "CoreAnswersModel",
-    // DEC 254zzz58: the hosted lessons learning model (agentx config set coreEngine.learningModel), empty = claude-haiku-5-5 (DEC 254zzz63; a company may choose its own).
-    "CoreLearningModel",
-    // DEC 254zg (a): Code's company layer and self-serve create (agentx config set company.signIn / company.selfServe).
-    "CompanySignIn", "CompanySelfServe",
-    // DEC 254zk: per-company Slack bots (agentx config set slack.companyWorkspaces).
-    "SlackCompanyWorkspaces",
-    // Live switches check 2026-11-18: the per-company model choice (agentx config set coreEngine.agentModelChoice).
-    "CoreAgentModelChoice",
-    // CODE-PUBLIC-URL (DEC 254zzz505): the install's permanent public address, carried by every upgrade (a rebuilt stack takes it from the address stack's output, public-api-url.ts).
-    PUBLIC_API_URL_PARAMETER],
-  // DEC 254zg (a): the Slack service's copy of CompanySignIn, set together with the control plane's.
-  slack: ["SlowTurnMinutes", "ModelFallback", "CompanySignIn", "SlackCompanyWorkspacesState"],
-};
+export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>> = operatorParametersFromRows(CODE_SETTING_ROWS);
 
 /** Fresh install order: the control plane needs the GitHub App. The `runtime` part is the EC2 worker settings (#117); the control plane reads them only when it boots a worker. */
 export function installOrder(identityMode: "cognito" | "oidc"): DeployPart[] {
@@ -359,13 +328,17 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
         const problem = operatorTrustProblem({ principal: answers.operatorPrincipalArn, externalId: answers.operatorExternalId, account: answers.account });
         if (problem !== undefined) throw new Error(problem);
       }
-      return { ...base, OperatorPrincipalArn: answers.operatorPrincipalArn ?? "", ...(answers.operatorExternalId === undefined ? {} : { OperatorExternalId: answers.operatorExternalId }) };
+      return { ...base, OperatorPrincipalArn: answers.operatorPrincipalArn ?? "",
+        // Always sent (F1 L1a-1 review R2): left out, the one carry rule would keep a deployed external id after the principal is cleared, which the stack's own rule refuses.
+        OperatorExternalId: answers.operatorExternalId ?? "" };
 
     case "foundation":
       return { ...base, ...publicApiUrlParameter(answers) };
 
     case "identity":
-      return answers.setupPageUrl === undefined ? base : { ...base, SetupPageUrl: answers.setupPageUrl };
+      // Always sent (F1 L1a-1 review B1): empty on every install but a cloud one, and after an upgrade. Left out, the one carry rule would keep the installer's address for good (a dead
+      // callback and logout URL on the CLI client, and "finish at <dead URL>" in every invitation).
+      return { ...base, SetupPageUrl: answers.setupPageUrl ?? "" };
 
     case "control-plane": {
       validateControlPlaneAnswers(answers);
@@ -436,7 +409,8 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
         ModelProvider: answers.models.providers?.orchestrator ?? "amazon-bedrock",
         ModelId: answers.models.orchestrator,
         ...secret, ...routing,
-        ...(answers.models.providers?.classifier ? { GateClassifierProvider: answers.models.providers.classifier } : {}),
+        // Always sent (F1 L1a-1 review R1): the answers drop `providers` when every role uses Bedrock, and the one carry rule would then keep an old provider beside a Bedrock model id.
+        GateClassifierProvider: answers.models.providers?.classifier ?? "amazon-bedrock",
         GateClassifierModelId: answers.models.classifier,
       };
     }

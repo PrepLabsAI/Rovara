@@ -9,8 +9,8 @@
  * cannot be packed, the same reason CoreModelGatewayHost is a host), so the parameter holds lowercase DNS labels and nothing a packing separator could be.
  * Lowercase only also keeps the issuer, which is compared as an exact string, from differing by case between the two places that hold it.
  *
- * TODO(F1): move this parameter into a settings row of F1's install layer (briefs/arch-cleanup/F1-SETTINGS-PLAN.md) when that lands on code/next, with its CLI key and docs
- * generated from the row. Until then it is a plain stack parameter, carried on upgrade through the CLI's OPERATOR_PARAMETERS.
+ * The parameter is a row of F1's install layer (packages/contracts/src/settings/install-rows.ts, `install.control-plane.PublicApiUrl`): its kept-on-upgrade position (OPERATOR_PARAMETERS, on the
+ * control plane and the foundation) and its packed broker setting (`pu`, BROKER_SETTINGS.publicApiUrl) are derived from that row.
  */
 import { PUBLIC_API_ORIGIN_OUTPUT } from "./api-address.js";
 

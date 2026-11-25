@@ -9,6 +9,7 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import {
   Ec2RuntimeBindingSchema,
+  redactBlockReason,
   ProjectSetupSessionSchema,
   WORKSPACE_SESSION_STATE_INDEX,
   WorkspaceSessionSchema,
@@ -53,7 +54,7 @@ export interface DeletionInput {
 
 export type EnsureSessionResult =
   /** `machineFallback`: this generation runs on the default size instead of the project's choice, for that fixed reason (the task is told). */
-  | { ready: true; generation: number; privateIp: string; machineFallback?: MachineFallback }
+  | { ready: true; generation: number; privateIp: string; /** The READY row's instance: the dispatcher asks EC2 about it before any POST (machine-check.ts). */ instanceId?: string | undefined; /** The subnet it was placed in (the check holds the instance to it). */ subnetId?: string | undefined; machineFallback?: MachineFallback }
   | { ready: false; generation: number; state: WorkspaceSessionState };
 
 export interface SessionExecutions {
@@ -118,7 +119,7 @@ export class SessionManager {
             set: { lastActivityAt: this.now() },
             when: { state: "READY", generation: ready.generation },
           })))) continue;
-          return { ready: true, generation: ready.generation, privateIp: ready.privateIp!, ...(ready.machineFallback === undefined ? {} : { machineFallback: ready.machineFallback }) };
+          return { ready: true, generation: ready.generation, privateIp: ready.privateIp!, instanceId: ready.instanceId, subnetId: ready.subnetId, ...(ready.machineFallback === undefined ? {} : { machineFallback: ready.machineFallback }) };
         }
         case "NONE":
         case "STOPPED":
@@ -254,7 +255,8 @@ export class SessionManager {
     if (!moved && !(session?.state === "FAILED" && session.generation === generation)) {
       throw agentXError("STALE_FENCE", `session ${workspaceId} generation ${generation} is no longer provisioning`);
     }
-    const message = `RUNTIME_UNAVAILABLE: workspace compute failed to start: ${error}`.slice(0, 16_384);
+    // The provisioner's own error text (a boot failure can quote command output): redacted when it is written, before it is cut, because the operation error is shown to everyone who can open the task.
+    const message = redactBlockReason(`RUNTIME_UNAVAILABLE: workspace compute failed to start: ${error}`, 16_384);
     const failed: string[] = [];
     for (const outboxId of session?.waitingOutboxIds ?? []) {
       const response = await this.dependencies.documentClient.send(new GetCommand({ TableName: this.dependencies.tableName, Key: outboxKey(outboxId) }));
@@ -404,7 +406,7 @@ export class SessionManager {
    * READY → STOPPED when the reconciler finds the READY session's instance gone. Holds only for the
    * instance it saw, so a session that moved on (a new generation, a claim) is left alone.
    */
-  async markLost(seen: WorkspaceSession): Promise<boolean> {
+  async markLost(seen: Pick<WorkspaceSession, "workspaceId" | "generation" | "instanceId">): Promise<boolean> {
     const lost = this.update(seen.workspaceId, {
       set: { state: "STOPPED" },
       remove: ["instanceId", "privateIp", "pingFailures"],
@@ -415,6 +417,32 @@ export class SessionManager {
       ConditionExpression: `${lost.ConditionExpression} AND instanceId = :seenInstance`,
       ExpressionAttributeValues: { ...lost.ExpressionAttributeValues, ":seenInstance": seen.instanceId },
     });
+  }
+
+  /**
+   * The READY session that holds `instanceId`, or undefined (the instance never had a session here, or its session moved on: STOPPING after a stop, a new generation). Read from the sparse
+   * state index, as the reconciler reads it every run; the instance state-change handler (instance-state-change.ts) uses it to find the row of an instance that just ended.
+   * COST: there is no key on the instance id, so each call reads the whole READY index (read capacity for every READY session, once per state-change event, three events per instance in the
+   * account and region); the filter only keeps the transfer and parsing to the one match. Fine while READY sessions number in the tens or low hundreds; a GSI on instanceId (a table change) is the
+   * keyed lookup if that grows.
+   */
+  async findReadyByInstance(instanceId: string): Promise<WorkspaceSession | undefined> {
+    let exclusiveStartKey: Record<string, unknown> | undefined;
+    do {
+      const page = await this.dependencies.documentClient.send(new QueryCommand({
+        TableName: this.dependencies.tableName,
+        IndexName: WORKSPACE_SESSION_STATE_INDEX.name,
+        KeyConditionExpression: "#index = :state",
+        FilterExpression: "instanceId = :instance",
+        ExpressionAttributeNames: { "#index": WORKSPACE_SESSION_STATE_INDEX.partitionKey },
+        ExpressionAttributeValues: { ":state": "READY", ":instance": instanceId },
+        ...(exclusiveStartKey === undefined ? {} : { ExclusiveStartKey: exclusiveStartKey }),
+      }));
+      const found = (page.Items ?? []).map(sessionFromItem).find((session) => session.instanceId === instanceId);
+      if (found !== undefined) return found;
+      exclusiveStartKey = page.LastEvaluatedKey;
+    } while (exclusiveStartKey !== undefined);
+    return undefined;
   }
 
   /** Counts one more failed health probe of a READY session; returns the new count, or 0 if it moved on. */
@@ -639,7 +667,7 @@ export class ProjectSetupSessionManager {
   async ensureSession(input: {
     setupExecutionId: string; subjectId: string; approvalRevision: number; transportCorrelationId: string;
     binding: Ec2RuntimeBinding; waitingOutboxId: string;
-  }): Promise<{ ready: true; generation: number; privateIp: string } | { ready: false; generation: number; state: string }> {
+  }): Promise<{ ready: true; generation: number; privateIp: string; instanceId?: string | undefined } | { ready: false; generation: number; state: string }> {
     const binding = Ec2RuntimeBindingSchema.parse(input.binding);
     const session = await this.get(input.setupExecutionId);
     if (session === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "an authorized project setup worker session is not available; no workspace session or compute was created");
@@ -649,9 +677,35 @@ export class ProjectSetupSessionManager {
       || session.bindingDigest !== bindingDigest) {
       throw agentXError("STALE_FENCE", "project setup session does not match the current approved setup execution");
     }
-    if (session.state === "READY") return { ready: true, generation: session.generation, privateIp: session.privateIp! };
+    if (session.state === "READY") return { ready: true, generation: session.generation, privateIp: session.privateIp!, instanceId: session.instanceId };
     if (session.state === "PROVISIONING") return { ready: false, generation: session.generation, state: session.state };
     throw agentXError("RUNTIME_UNAVAILABLE", `project setup session is ${session.state}; explicit setup retry is required`);
+  }
+}
+
+/**
+ * READY to STOPPED for a project setup session whose machine is gone (WDI-SETUP): the address and instance are removed, so nothing is sent to it again. Conditional on the state, the generation and the
+ * instance the dispatcher's check asked EC2 about, so a session that moved on is left alone. The setup runtime is shared and its rows are not in the sparse state index, so this is reached only from
+ * that check (the instance state-change handler finds workspace sessions only).
+ */
+export async function markProjectSetupSessionLost(
+  documentClient: Pick<DynamoDBDocumentClient, "send">,
+  tableName: string,
+  seen: { setupExecutionId: string; generation: number; instanceId: string },
+): Promise<boolean> {
+  try {
+    await documentClient.send(new UpdateCommand({
+      TableName: tableName,
+      Key: projectSetupSessionKey(seen.setupExecutionId),
+      UpdateExpression: "SET #state = :stopped REMOVE privateIp, instanceId",
+      ConditionExpression: "#state = :ready AND generation = :generation AND instanceId = :instance",
+      ExpressionAttributeNames: { "#state": "state" },
+      ExpressionAttributeValues: { ":stopped": "STOPPED", ":ready": "READY", ":generation": seen.generation, ":instance": seen.instanceId },
+    }));
+    return true;
+  } catch (error) {
+    if (isConditionalFailure(error)) return false;
+    throw error;
   }
 }
 

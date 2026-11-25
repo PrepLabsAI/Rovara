@@ -50,7 +50,8 @@ export function withoutCompanySignIn(input: unknown): unknown {
   conditioned(signIn.COMPANY_SELF_SERVE, selfServe, "enabled", "disabled");
   delete signIn.COMPANY_SELF_SERVE;
   const broker = variablesOf(template, /^Broker[0-9A-F]{8}$/u);
-  expect(JSON.stringify(broker.AGENTX_SETTINGS)).toContain(`",si=",{"Fn::If":["${on}","1","0"]}`);
+  // (`si=",` without the leading quote: a literal piece such as `rl=on` is merged into the string before it.)
+  expect(JSON.stringify(broker.AGENTX_SETTINGS)).toContain(`si=",{"Fn::If":["${on}","1","0"]}`);
   removePackedPieces(broker, "AGENTX_SETTINGS", ["si"]);
   for (const id of conditions) delete template.Conditions![id];
   return template;

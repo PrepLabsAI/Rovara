@@ -24,7 +24,7 @@ import {
 import { EVAL_STAND_IN_HELPER_MAX_LIFETIME_MS, EVAL_STAND_IN_HELPER_MIN_LIFETIME_MS } from "./eval-standin-helper.js";
 import { RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_LABEL, RUN_NETWORK_WORKSPACE_LABEL, type ServicesNetwork } from "./run-network.js";
 import { DOCKER_CALL_TIMEOUT_MS } from "./setup-network.js";
-import type { DockerCli } from "./swebench/containers.js";
+import type { DockerCli } from "./docker-cli.js";
 
 /** Where the worker image keeps the helper's program (environments/base/Dockerfile builds the worker's dist). */
 export const EVAL_STAND_IN_HELPER_ENTRY = "/opt/agentx/packages/worker/dist/eval-standin-helper.js";

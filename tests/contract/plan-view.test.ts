@@ -10,6 +10,7 @@ import { PLAN_UNREADABLE_CATEGORIES, PLAN_UNREADABLE_SENTENCES, planCheckSummary
 import { plainBlockReason, workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
 import { renderPlanDocument } from "../../packages/broker/src/aws/plan-page/render-plan.js";
 import { readTaskPlanDocument } from "../../packages/broker/src/aws/task-plan-document.js";
+import { readsAsRow } from "../support/code-api-row-read.js";
 import { pageTask } from "../support/page-tasks.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 
@@ -244,6 +245,19 @@ describe("what the card and page show of tonight's plan mistakes (fix round 1)",
 });
 
 describe("GET /v1/dev/tasks/:id/plan", () => {
+
+  it("RD-2.0: the served answer (a real coding plan with checks, decisions and scenarios) reads, whole, with the `tasks.plan` row's schema", async () => {
+    const fixture = pageTask();
+    const artifact = fixture.addVersion("plan", ordersPlan());
+    const task = fixture.db.get(`DEVTASK#${fixture.taskId}`, "META") as never;
+    const served = await readTaskPlanDocument(task, async (key) => fixture.objects.get(key), {});
+    const body = JSON.parse(JSON.stringify({ plan: served })) as { plan: { content: { claims: unknown[]; decisions: unknown[]; checks: { proposed: unknown[] } }; versions: number[] } };
+    expect(body.plan.versions).toEqual([artifact.version]);
+    expect(body.plan.content.claims.length).toBeGreaterThan(0);
+    expect(body.plan.content.decisions.length).toBeGreaterThan(0);
+    expect(body.plan.content.checks.proposed.length).toBeGreaterThan(0);
+    readsAsRow("tasks.plan", body);
+  });
 
   it("reads only this task's own storage", async () => {
     const fixture = pageTask();

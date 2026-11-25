@@ -111,10 +111,11 @@ export function verifyInvokeAuthorization(
   } catch {
     return { ok: false, reason: "malformed" };
   }
-  if (claims.workspaceId !== authentication.workspaceId) return { ok: false, reason: "wrong_workspace" };
-  if (claims.generation !== authentication.generation) return { ok: false, reason: "wrong_generation" };
+  // Expiry first (REDACT review F4): a captured, validly signed token that has expired is refused as expired, so no answer about this worker's workspace or generation is ever given for it.
   const now = authentication.now?.() ?? Math.floor(Date.now() / 1_000);
   if (claims.expiresAt <= now) return { ok: false, reason: "expired" };
+  if (claims.workspaceId !== authentication.workspaceId) return { ok: false, reason: "wrong_workspace" };
+  if (claims.generation !== authentication.generation) return { ok: false, reason: "wrong_generation" };
   return { ok: true, claims };
 }
 

@@ -5,7 +5,7 @@ import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/de
 
 describe("workflow dependency runtime configuration", () => {
 
-  it("composes the real developer route feature settings without changing People or invitations", () => {
+  it("composes the real developer route feature settings without changing People", () => {
     const build = (flag: string | undefined) => createDeveloperApiConfiguration({
       DEVELOPER_TOKEN_ISSUER: "https://issuer.example/v1/auth",
       DEVELOPER_IDENTITY_FUNCTION_ARN: "developer-identity",
@@ -14,8 +14,6 @@ describe("workflow dependency runtime configuration", () => {
       DEVELOPER_SIGNIN_SLACK: "enabled",
       AGENTX_WORKFLOW_DEPENDENCIES_ENABLED: flag,
       AGENTX_TASK_PEOPLE_CHANGES_ENABLED: "true",
-      AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED: "false",
-      AGENTX_TASK_PEOPLE_PRIVATE_INVITATIONS_ENABLED: "false",
     }, () => ({
       channelMembers: async () => ({ ok: true as const, memberOf: [] as string[] }),
       verifyAccessToken: async () => ({}),

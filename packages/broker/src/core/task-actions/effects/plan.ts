@@ -13,6 +13,8 @@ const REFUSAL_REASON: Record<string, "stale" | "not_yours" | "not_offered"> = {
   stale: "stale", not_found: "stale", not_waiting: "stale", expired: "stale", invalid_outcome: "not_offered", unsupported: "not_offered", invalid: "not_offered",
   // The chat's method is not offered for this document or this risk (a high risk plan is decided on the web): the move is not on offer.
   method_not_allowed: "not_offered",
+  // Paid work cannot start while the task's spend is unreadable: not on offer now (the registry has no reason of its own for it; the decision card and the plan page say why).
+  spend_unreadable: "not_offered",
 };
 function refusalOf(reason: string): Error {
   const mapped = REFUSAL_REASON[reason] ?? "not_yours";

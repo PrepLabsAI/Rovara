@@ -3,12 +3,13 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { AgentXError } from "@agentx/contracts";
+import { AgentXError, OMITTED_PARAMETER_BY_ENGINE } from "@agentx/contracts";
 import type { DeployEvent } from "../../packages/cli/src/deploy/deployer.js";
 import { CDK_CONSTRUCT_IDS, assertCdkBootstrapped, assertSourceAtRelease, buildSource, cdkDeployer, type CommandRunner } from "../../packages/cli/src/deploy/cdk-engine.js";
 import { sourceReleaseVersion, synthDeclaredParameters } from "../../packages/cli/src/deploy/cdk-source.js";
 import type { ParameterStore } from "../../packages/cli/src/environments/parameter-store.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
+import { keptAdditionsOfL1a1 } from "../support/kept-additions.js";
 
 installGatewayFixture();
 
@@ -77,6 +78,30 @@ describe("cdk engine", () => {
     const values = args.flatMap((arg, index) => (args[index - 1] === "--parameters" ? [arg] : []));
     expect(values).toHaveLength(5);
     for (const value of values) expect(value.slice(0, value.indexOf(":"))).toBe("agentx-staging-control-plane");
+  });
+
+  // F1 lanes L1a-0 and L1a-1 (carried.ts, deploy/carry.ts): this engine's half of the ONE carry rule. It names only the parameters it is given and never asks the CDK CLI to forget the previous
+  // ones, so an omitted parameter keeps its deployed value; the templates engine (templates-engine.test.ts) now sends UsePreviousValue for the same parameters.
+  it("names only the parameters it is given and leaves the CDK CLI to carry every other deployed value (F1 L1a-1, the one carry rule)", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-"));
+    const runner = recordingRunner(dir, { "agentx-staging-runtime": {} });
+    const deployer = cdkDeployer({ brokerTemplate, runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => undefined });
+    await deployer.deploy({ part: "runtime", stackName: "agentx-staging-runtime", parameters: { ModelId: "model" }, roleArn: "arn:aws:iam::1:role/r", terminationProtection: false });
+    const { args } = runner.calls[0]!;
+    expect(args.flatMap((arg, index) => (args[index - 1] === "--parameters" ? [arg] : []))).toEqual(["agentx-staging-runtime:ModelId=model"]);
+    expect(args.join(" ")).not.toContain("E2eAgentModelId");
+    expect(args.filter((arg) => /previous-parameters/u.test(arg))).toEqual([]);
+    expect(OMITTED_PARAMETER_BY_ENGINE.cdk).toMatch(/^is carried/u);
+  });
+
+  it.each(keptAdditionsOfL1a1().map(({ part, name }) => [`${part}/${name}`, name] as const))("leaves %s, a parameter L1a-1 added to the kept set, to the CDK CLI's carry when the deploy does not name it", async (_label, name) => {
+    const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-"));
+    const runner = recordingRunner(dir, { "agentx-staging-runtime": {} });
+    const deployer = cdkDeployer({ brokerTemplate, runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => undefined });
+    await deployer.deploy({ part: "runtime", stackName: "agentx-staging-runtime", parameters: { ModelId: "model" }, roleArn: "arn:aws:iam::1:role/r", terminationProtection: false });
+    const { args } = runner.calls[0]!;
+    expect(args.join(" ")).not.toContain(name);
+    expect(args.filter((arg) => /previous-parameters/u.test(arg))).toEqual([]);
   });
 
   it("builds the release source with npm ci then npm run build, through the runner, each with a display string", async () => {

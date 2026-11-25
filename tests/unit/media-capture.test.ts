@@ -196,6 +196,14 @@ describe("scrubbing a trace", () => {
     expect(bomb.length).toBeLessThan(1_000_000);
     expect(scrubTraceZip(bomb, () => false)).toBeNull();
   });
+  it("refuses a trace line nested too deep to walk, with null rather than a RangeError (PC-N6)", () => {
+    const deep = `${"[".repeat(200_000)}${"]".repeat(200_000)}`;
+    expect(() => scrubTraceLines(`${deep}\n`)).not.toThrow();
+    expect(scrubTraceLines(`${deep}\n`)).toBeNull();
+    const nested = zip([{ name: "trace.trace", data: `${deep}\n` }]);
+    expect(() => scrubTraceZip(nested, () => false)).not.toThrow();
+    expect(scrubTraceZip(nested, () => false)).toBeNull();
+  });
   it("refuses a zip64 archive and a central directory that points outside the file", () => {
     const z64 = Buffer.from(zip([{ name: "a", data: "x" }])); z64.writeUInt16LE(0xffff, z64.length - 22 + 10);
     expect(scrubTraceZip(z64, () => false)).toBeNull();

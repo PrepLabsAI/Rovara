@@ -6,8 +6,11 @@ import { withoutLinearWebhookGuard } from "../support/linear-webhook-route-templ
 import { stuckStoppingInstall, withoutStuckStoppingAlarm } from "../support/stuck-stopping-alarm-template.js";
 import { withoutApiAccessLog } from "../support/api-access-log-template.js";
 import { withoutPublicApiUrl } from "../support/public-api-url-template.js";
+import { withoutCoreOutboxStreamRelay } from "../support/core-outbox-stream-relay-template.js";
 import { withoutWorkerCallbackAlarm } from "../support/worker-callback-alarm-template.js";
 import { withoutDispatcherLessonsPeople } from "../support/dispatcher-lessons-people-template.js";
+import { withoutMachineGone } from "../support/machine-gone-template.js";
+import { withTaskPeopleInvitationSwitches } from "../support/task-people-invitations-template.js";
 import { App, CfnParameter, Stack, aws_iam as iam } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -157,7 +160,9 @@ const SAMPLE_TABLE_ARN = "arn:aws:dynamodb:us-east-1:111122223333:table/agentx-s
 
 beforeAll(() => {
   const app = buildAgentXApp({ agentxEnv: "staging" });
-  const raw = controlPlane(app, "agentx-staging-control-plane");
+  // WORKER-DELIVERY-IDENTITY (2026-11-25), Rule D: the instance state-change handler, its rule and the dispatcher's one Describe statement are asserted and taken out of the control plane first
+  // (withoutMachineGone), so every pin, tuple list and resource-type map below holds as recorded; tests/contract/instance-state-change-infrastructure.test.ts pins the addition itself.
+  const raw = withoutMachineGone(controlPlane(app, "agentx-staging-control-plane"));
   namedRaw = structuredClone(raw);
   const full = withoutSlackCompanyMode(raw) as TemplateJson;
   namedWithSignInGrants = structuredClone(full);
@@ -171,7 +176,7 @@ beforeAll(() => {
   brokerArnEstimate = (policy.node.tryGetContext(ARN_ESTIMATE_CONTEXT) as number | undefined) ?? 150;
   brokerEstimate = document.statements.reduce((total, statement) => total + statement._estimateSize({ actionEstimate: 20, arnEstimate: brokerArnEstimate }), 0);
   longestNamed = withoutSlackCompanyMode(controlPlane(buildAgentXApp({ agentxEnv: LONGEST_ENV }), `agentx-${LONGEST_ENV}-control-plane`)) as TemplateJson;
-  legacy = controlPlane(buildAgentXApp(), "AgentXControlPlane");
+  legacy = withoutMachineGone(controlPlane(buildAgentXApp(), "AgentXControlPlane"));
 }, 300_000);
 
 // DEC 254zzz284: the only new authority is the broker's membership transaction fence.
@@ -195,8 +200,8 @@ function withoutBrokerMemberConditionCheck(template: TemplateJson): TemplateJson
 
 describe("broker membership condition-check grant", () => {
   it("adds only the exact member-key statement to the broker; every other action, resource and principal stays pinned", () => {
-    // Webhook lane W3 + DEC 254zzz432: the webhook secret slot and the stuck-stopping alarm are asserted and taken out too, so both pins below still hold. Linear webhook guard: so are the Linear route's throttle and alarm (outermost).
-    const before = withoutLinearWebhookGuard(withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(structuredClone(namedRaw)), { named: true }), { env: "staging" }), stuckStoppingInstall("staging"))))));
+    // Webhook lane W3 + DEC 254zzz432: the webhook secret slot and the stuck-stopping alarm are asserted and taken out too, so both pins below still hold. F1 L1a-1: and the relay is taken out and the two deleted invitation switches are put back (Rule D, tests/support/task-people-invitations-template.ts). Linear webhook guard: so are the Linear route's throttle and alarm (outermost).
+    const before = withoutLinearWebhookGuard(withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withTaskPeopleInvitationSwitches(withoutCoreOutboxStreamRelay(structuredClone(namedRaw)))), { named: true }), { env: "staging" }), stuckStoppingInstall("staging"))))));
     // The providers branch also adds this exact capability output. Keep a measured
     // combined pin, then remove only the asserted output to retain the upstream pin.
     expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("c15528809bc3dac1d2d2caf3cce7776a14d387dbf10b607732ae86ac28b468af");
@@ -243,8 +248,9 @@ describe("developer sign-in infrastructure (named environments)", () => {
     expect(p.DeveloperSignInSlackSince).toMatchObject({ Type: "String", Default: "0", AllowedPattern: "^[0-9]{1,12}$" });
     expect(p.DeveloperOidcSince).toMatchObject({ Type: "String", Default: "0", AllowedPattern: "^[0-9]{1,12}$" });
     expect(p.TaskPeopleChangesEnabled).toMatchObject({ Type: "String", Default: "false", AllowedValues: ["true", "false"] });
-    expect(p.TaskPeoplePublicInvitationsEnabled).toMatchObject({ Type: "String", Default: "false", AllowedValues: ["true", "false"] });
-    expect(p.TaskPeoplePrivateInvitationsEnabled).toMatchObject({ Type: "String", Default: "false", AllowedValues: ["true", "false"] });
+    // F1 L1a-1 deleted the two invitation switches: nothing read them.
+    expect(p).not.toHaveProperty("TaskPeoplePublicInvitationsEnabled");
+    expect(p).not.toHaveProperty("TaskPeoplePrivateInvitationsEnabled");
     expect(p.WorkflowDependenciesEnabled).toMatchObject({ Type: "String", Default: "false", AllowedValues: ["true", "false"] });
     for (const parameter of Object.values(p)) expect(JSON.stringify(parameter)).not.toContain("—");
   });
@@ -441,10 +447,11 @@ describe("developer sign-in infrastructure (named environments)", () => {
     const variables = (prefix: string) => unpackedBrokerVariables((named.Resources[functionId(named, prefix)]!.Properties.Environment as { Variables: Record<string, unknown> }).Variables, named);
     expect(variables("Broker")).toMatchObject({
       AGENTX_TASK_PEOPLE_CHANGES_ENABLED: { Ref: "TaskPeopleChangesEnabled" },
-      AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED: { Ref: "TaskPeoplePublicInvitationsEnabled" },
-      AGENTX_TASK_PEOPLE_PRIVATE_INVITATIONS_ENABLED: { Ref: "TaskPeoplePrivateInvitationsEnabled" },
       AGENTX_WORKFLOW_DEPENDENCIES_ENABLED: { Ref: "WorkflowDependenciesEnabled" },
     });
+    // F1 L1a-1: the two invitation switches are gone from the broker's environment too.
+    expect(Object.keys(variables("Broker"))).not.toContain("AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED");
+    expect(Object.keys(variables("Broker"))).not.toContain("AGENTX_TASK_PEOPLE_PRIVATE_INVITATIONS_ENABLED");
     for (const prefix of ["Broker", "DeveloperSignInFunction"]) {
       expect(variables(prefix).DEVELOPER_SIGNIN_SLACK_SINCE).toEqual({ Ref: "DeveloperSignInSlackSince" });
       expect(variables(prefix).DEVELOPER_OIDC_SINCE).toEqual({ Ref: "DeveloperOidcSince" });
@@ -463,10 +470,11 @@ describe("developer sign-in infrastructure (named environments)", () => {
 describe("the legacy deployment (production)", () => {
   it("has the full developer sign-in and tasks, as named environments do, under its legacy names", () => {
     const text = JSON.stringify(legacy);
-    for (const present of ["TaskPeopleChangesEnabled", "TaskPeoplePublicInvitationsEnabled", "TaskPeoplePrivateInvitationsEnabled", "WorkflowDependenciesEnabled", "McpConfirmElicitation",
+    for (const present of ["TaskPeopleChangesEnabled", "WorkflowDependenciesEnabled", "McpConfirmElicitation",
       "ChatGptConnectionKey", "DeveloperTaskNotifier"]) {
       expect(text, present).toContain(present);
     }
+    for (const gone of ["TaskPeoplePublicInvitationsEnabled", "TaskPeoplePrivateInvitationsEnabled"]) expect(text, gone).not.toContain(gone);
     // #1149: the legacy broker packs these two settings (AGENTX_WORKFLOW_DEPENDENCIES_ENABLED as `wd`, MCP_CONFIRM_ELICITATION as `mc`); the sign-in function still has its own whole.
     for (const packed of [",wd=", ",mc=", "MCP_CONFIRM_ELICITATION"]) expect(text, packed).toContain(packed);
     for (const present of ["SlackTeamId", "DeveloperSignInSlack", "DeveloperOidcIssuer", "DeveloperOidcClientId", "DeveloperOidcSince"]) expect(legacy.Parameters[present], present).toBeDefined();
@@ -792,7 +800,9 @@ describe("task-token key and membership IAM", () => {
     withoutChatGptKeyDeny(remainder);
     // L4-NETG (DEC 254zzz77, rule D): the WorkerSandboxEgress parameter and the session steps' one variable, asserted and taken out so the pin stays the one recorded before.
     withoutWorkerSandboxEgress(remainder);
-    const text = JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>");
+    // F1 L1a-1: the two deleted invitation switches are put back last (the strippers above read the broker's packed settings with today's table), so the pin below holds as recorded.
+    const withSwitches = withTaskPeopleInvitationSwitches(remainder);
+    const text = JSON.stringify(withSwitches).replace(/[a-f0-9]{64}/g, "<asset-hash>");
     // Re-pinned after reviewing the named-only IAM headroom policy diff; all R3R4 assertions remain. Re-pinned again for the stacked core engine (#663) and hosted wiring
     // (StepUpEmailSender, passkey and SES statements, the policy hook key, COMPANY_READS, the company-secrets role, the queue TLS Deny; each is asserted in hosted-wiring-infrastructure.test.ts),
     // and R2 step 4 (the dispatcher's core queue mapping, its reads, the conditional deleter policy, its core variables, the outbox pending index).
@@ -820,10 +830,12 @@ describe("task-token key and membership IAM", () => {
     // b28 first-gateway fix: every current broker advertises its capability before a gateway
     // is configured. Pin the complete new template AND prove this exact output is its only delta.
     expect(remainder.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
+    // F1 L1a-1 (2026-11-25): re-pinned for exactly the deletion of the two dead invitation parameters and their two packed broker settings (tu, tv). Rule D: with them put back (`text`, next line) the pin recorded before holds.
+    expect(createHash("sha256").update(JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("c94d1038a5827e483d68f6164315cab1de5fa3e8d22bbeedf6c0ba9d35746e4a");
     expect(createHash("sha256").update(text).digest("hex")).toBe("185703cb9f7d43c6b9bf301e25dfc84923d7dbf3135f9115fd53d278dbd7f0ac");
     // RETAIN (Rule D): with exactly the policies put back the recorded pins hold (six of the seven: this chain takes the task token key out with the core engine).
-    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(remainder), "named", { expectSeven: 6 })).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("9d3f6f734b745c5d93a2d5a4fb79505c9c91a9bab4e5d9ecdbe1f0cb9070eac5");
-    const beforeFirstGateway = structuredClone(remainder);
+    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(withSwitches), "named", { expectSeven: 6 })).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("9d3f6f734b745c5d93a2d5a4fb79505c9c91a9bab4e5d9ecdbe1f0cb9070eac5");
+    const beforeFirstGateway = structuredClone(withSwitches);
     delete beforeFirstGateway.Outputs.ModelRunPriceVersion;
     const beforeText = JSON.stringify(beforeFirstGateway).replace(/[a-f0-9]{64}/g, "<asset-hash>");
     expect(createHash("sha256").update(beforeText).digest("hex")).toBe("f0cf92b1219ee72d2c095476d1826b9c6baa41f3a4d0a2d16470a966848c2f07");

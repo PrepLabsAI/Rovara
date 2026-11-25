@@ -62,6 +62,37 @@ describe("agentx upgrade --export (FR-026)", () => {
     expect(readme).not.toContain("agentx-staging-access --change-set-name");
   });
 
+  // F1 L1a-1, the one carry rule (deploy/carry.ts): every deployed parameter the new template declares and the upgrade does not supply is UsePreviousValue, not only the operator's list.
+  it("marks every other deployed parameter the new template declares UsePreviousValue, as the engines carry it, and sends none the template does not declare", async () => {
+    const out = await freshDir();
+    await writeUpgradeBundle({
+      dir: out, settings, answers,
+      release: await releaseWithPackage({ CallbackSigningKey: {}, BudgetMonthlyUsd: {}, GitHubAppId: {}, PromptCacheRetention: {}, SomeHandSetParameter: {}, NewInThisRelease: {} }), parts: ["control-plane"], outputs,
+      deployed: { "control-plane": { CallbackSigningKey: "****", BudgetMonthlyUsd: "250", GitHubAppId: "123", PromptCacheRetention: "short", SomeHandSetParameter: "by-hand", RemovedInThisRelease: "x" } },
+    });
+    const parameters = JSON.parse(await readFile(join(out, "parameters", "control-plane.json"), "utf8")) as Array<Record<string, unknown>>;
+    for (const name of ["PromptCacheRetention", "SomeHandSetParameter"]) expect(parameters, name).toContainEqual({ ParameterKey: name, UsePreviousValue: true });
+    expect(parameters.find((entry) => entry.ParameterKey === "RemovedInThisRelease")).toBeUndefined();
+    expect(parameters.find((entry) => entry.ParameterKey === "NewInThisRelease")).toBeUndefined();
+    expect(parameters.filter((entry) => entry.ParameterKey === "GitHubAppId")).toEqual([{ ParameterKey: "GitHubAppId", ParameterValue: "123" }]);
+    expect(await readFile(join(out, "README.md"), "utf8")).toContain("Every parameter this upgrade does not set is marked UsePreviousValue");
+  });
+
+  it("does not send an empty SlackTeamId when the stored sign-in names no team id: the deployed one is kept", async () => {
+    const out = await freshDir();
+    const signIn = { settings: { schemaVersion: 1 as const, env: "staging", slack: false, github: { clientId: "gh-client", clientSecretName: "agentx/staging/developer-github" }, since: { github: 3 }, updatedAt: "2026-11-25T00:00:00.000Z", updatedBy: "someone" } };
+    await writeUpgradeBundle({
+      dir: out, settings, answers: { ...answers, developerSignIn: signIn },
+      release: await releaseWithPackage({ CallbackSigningKey: {}, GitHubAppId: {}, SlackTeamId: {}, DeveloperSignInSlack: {}, DeveloperSignInGithub: {}, DeveloperGithubClientId: {}, DeveloperGithubSince: {} }), parts: ["control-plane"], outputs,
+      deployed: { "control-plane": { CallbackSigningKey: "****", GitHubAppId: "123", SlackTeamId: "T0DEPLOYED", DeveloperSignInSlack: "disabled", DeveloperSignInGithub: "enabled", DeveloperGithubClientId: "gh-client", DeveloperGithubSince: "3" } },
+    });
+    const parameters = JSON.parse(await readFile(join(out, "parameters", "control-plane.json"), "utf8")) as Array<Record<string, unknown>>;
+    expect(parameters).toContainEqual({ ParameterKey: "SlackTeamId", UsePreviousValue: true });
+    expect(parameters.filter((entry) => entry.ParameterKey === "SlackTeamId")).toHaveLength(1);
+    expect(parameters).toContainEqual({ ParameterKey: "DeveloperSignInGithub", ParameterValue: "enabled" });
+    expect(parameters).toContainEqual({ ParameterKey: "DeveloperSignInSlack", ParameterValue: "disabled" });
+  });
+
   it("refuses a release that adds a secret parameter, which a bundle cannot carry", async () => {
     const out = await freshDir();
     await expect(writeUpgradeBundle({ dir: out, settings, answers, release: await releaseWithPackage(), parts: ["control-plane"], outputs, deployed: { "control-plane": { GitHubAppId: "123" } } }))
