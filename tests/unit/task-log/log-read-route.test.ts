@@ -88,7 +88,7 @@ describe("who reads a task's log", () => {
   });
 
   it("a person the task's People list names as a viewer reads it, and a person it denies does not", async () => {
-    const store = await world({ people: { schemaVersion: 1, people: [{ developerId: id(person("pat")), role: "viewer" }, { developerId: id(person("dee")), role: "denied" }] } });
+    const store = await world({ people: { schemaVersion: 1, people: [{ developerId: person("pat").personId, role: "viewer" }, { developerId: person("dee").personId, role: "denied" }] } });
     await fill(store);
     const table: Table = { pat: { role: "member", grants: { web: "viewer" } }, dee: { role: "member", grants: { web: "contributor" } } };
     expect((await get(routes(store, table), person("pat")))?.statusCode).toBe(200);
