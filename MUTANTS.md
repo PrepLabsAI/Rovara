@@ -1214,3 +1214,13 @@ One rule (`developer/membership-read.ts`): a read that says "no membership / rev
 | developer-routes.ts authenticateClientToken | The oidc catch turns a failed read into the 401 refusal again (the rethrow removed) | killed, 1 failed (company-signin-auth) |
 | company-check.ts membershipReader | The failed read mapped to AUTH_REQUIRED again, outside readingMembership | killed, 3 failed |
 | server.ts retryable | A membership read failure is not answered 503 (propagates) | killed, 3 failed |
+
+Own-task and grant reads (code/next after the project-grant hotfix landed; MEMBERSHIP-READ-FAILS-SAFE), run against `tests/journeys/removed-member-answer.test.ts`, whose failing read is a plain error (not a throttle the broker already answers 503) so every unwrapped read shows:
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| task-readers.ts ownTaskHold | The catch returns false again (a failed read is "not your task": 404 TASK_NOT_FOUND) | killed, 1 failed |
+| developer-routes.ts taskReaderPerson | The live-company catch returns `projectMember: false` again | killed, 1 failed |
+| admin-actions.ts projectGrant | The grant read not wrapped in `readingMembership` (a raw throw is swallowed by ownTaskHold) | killed, 1 failed |
+| core-engine-root.ts projectGrantRoleFromDynamo | The grant read not wrapped (a raw throw answers 400 CONFIG_INVALID) | killed, 1 failed |
+| developer-routes.ts taskReaderPerson (old-engine channel check) | The nested catch around `checkProjectAccess` returns `mayStart: false` again | SURVIVED: no journey drives an old-engine task's own person through the bound-channel test; the one-line rethrow is the same as the other catches |

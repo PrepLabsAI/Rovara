@@ -90,18 +90,19 @@ it("large or polluted bodies refuse as a whole, within the existing timeout", as
   await expect(w.call("PUT", JSON.parse('{"expectedRevision":0,"overrides":{"__proto__":{"extra_review":true}}}'))).rejects.toThrow(/^invalid settings request$/);
   expect(w.db.find((row) => row.entityType === "PROJECT_SETTINGS")).toEqual([]);
 }, 2000);
+// A failed GRANT read is the one retryable 503 with the existing words (membership-read.ts); a failed project read keeps this route's own fixed words. Neither echoes the cause.
 it("failed project and administrator reads never echo their cause", async () => {
   // A named company: its catalog pointer, its selected revision and the grant are each a point read.
   for (const marker of ["PROJECT_CATALOG", "REV#", "MEMBER#"]) {
     const w = world();
     w.db.injectFault({ command: "GetCommand", match: (input) => JSON.stringify(input).includes(marker), error: { name: "InternalServerError", message: "private-canary" } });
-    await expect(w.call("PUT", { expectedRevision: 0, preset: "balanced" })).rejects.toThrow(/^settings unavailable$/);
+    await expect(w.call("PUT", { expectedRevision: 0, preset: "balanced" })).rejects.toThrow(/^(settings unavailable|AgentX could not reach AWS just now; try again in a moment)$/);
   }
   // The implicit company's legacy path: the shared project query and its grant read.
   for (const command of ["QueryCommand", "GetCommand"]) {
     const w = world(); w.setCompany(IMPLICIT_COMPANY_ID); w.project(IMPLICIT_COMPANY_ID); w.role("administrator", IMPLICIT_COMPANY_ID);
     w.db.injectFault({ command, ...(command === "GetCommand" ? { match: (input) => JSON.stringify(input).includes("MEMBER#") } : {}), error: { name: "InternalServerError", message: "private-canary" } });
-    await expect(w.call("PUT", { expectedRevision: 0, preset: "balanced" })).rejects.toThrow(/^settings unavailable$/);
+    await expect(w.call("PUT", { expectedRevision: 0, preset: "balanced" })).rejects.toThrow(/^(settings unavailable|AgentX could not reach AWS just now; try again in a moment)$/);
   }
 });
 

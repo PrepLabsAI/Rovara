@@ -5,7 +5,7 @@
 // on the same front. A member starts a task and has its screen open (control: every read is 200), then:
 //   (a) is REMOVED FROM THE COMPANY (the membership row is stamped revoked; sessions alive, which is the window between the stamp and the session end): the web client's every route and the access check
 //       answer 401 AUTH_REQUIRED at sign-in, exactly as before the fix;
-//   (b) the membership store THROWS once, for ONE read of one request (every read a request makes in turn): no route may answer 401 (a 401 ends the person's session at Cloud), and every
+//   (b) the membership store THROWS once (a plain error, not a throttle the broker would already answer 503, so every unwrapped read shows), for ONE read of one request (every read a request makes in turn): no route may answer 401 (a 401 ends the person's session at Cloud), and every
 //       route that cannot be served answers a retryable 503 (never "no such task", never "no such session");
 //   (c) PROOF a failing read cannot keep anyone in: a REMOVED person is served nothing on any route whichever read fails; a session that has ENDED stays ended (401) whichever read fails.
 // A case that fails names the route, the read that failed and the answer.
@@ -70,6 +70,13 @@ async function memberWithTaskOpen() {
   return { w: world, taskId };
 }
 
+/** A read of a person's company membership row, or of their project grant row (`MEMBER#<person>` / `PROJECT#<name>`, under the company's partition or not): the reads this journey fails one at a time. */
+function isMembershipOrGrantRead(input: Record<string, unknown>): boolean {
+  const key = input["Key"] as { pk?: unknown; sk?: unknown } | undefined;
+  if (typeof key?.pk !== "string" || typeof key.sk !== "string") return false;
+  return key.pk.startsWith("COMPANY_MEMBER#") || (/(?:^|#)MEMBER#/u.test(key.pk) && key.sk.startsWith("PROJECT#"));
+}
+
 /** A request the broker's own front answers (its sign-in check, before any engine is asked) is not the core's, and is not held to the real-core rule. */
 function frontAnswers(w: JourneyWorld, since: number): void {
   for (const call of w.proof.seen.slice(since)) if (!call.answeredByCore) call.kind = "other";
@@ -130,7 +137,7 @@ describe("a member with a task screen open", () => {
     const db = w.harness.db as unknown as { send: (command: { input: Record<string, unknown> }) => Promise<unknown> };
     const original = db.send;
     db.send = async (command) => {
-      if (JSON.stringify(command.input).includes("COMPANY_MEMBER#")) { state.count += 1; if (state.count === state.failAt) throw Object.assign(new Error("throttled"), { name: "ProvisionedThroughputExceededException" }); }
+      if (isMembershipOrGrantRead(command.input)) { state.count += 1; if (state.count === state.failAt) throw new Error("the store failed"); }
       return original(command);
     };
     const web: Ask = surfaces(w, refusedBeforeTheCore(w))[0]![1];
@@ -158,9 +165,9 @@ async function readsWithOneFailedMembershipRead(w: JourneyWorld, taskId: string,
   const db = w.harness.db as unknown as { send: (command: { input: Record<string, unknown> }) => Promise<unknown> };
   const original = db.send;
   db.send = async (command) => {
-    if (JSON.stringify(command.input).includes("COMPANY_MEMBER#")) {
+    if (isMembershipOrGrantRead(command.input)) {
       state.count += 1;
-      if (state.count === state.failAt) throw Object.assign(new Error("throttled"), { name: "ProvisionedThroughputExceededException" });
+      if (state.count === state.failAt) throw new Error("the store failed");
     }
     return original(command);
   };

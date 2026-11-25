@@ -415,7 +415,8 @@ export function projectGrantRoleFromDynamo(client: DynamoSender, tableName: stri
   return async (personId, project, companyId) => {
     if (typeof personId !== "string" || personId === "" || /[#\s]/u.test(personId) || typeof project !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u.test(project)) return undefined;
     const key = grantKeyFor(companyId, personId, project);
-    const response = await client.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> };
+    // A grant read that throws is "the read failed" (a retryable 503, membership-read.ts), never "no grant".
+    const response = await readingMembership(() => client.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true }))) as { Item?: Record<string, unknown> };
     const row = response?.Item;
     if (row === undefined || row["pk"] !== key.pk || row["sk"] !== key.sk || row["projectName"] !== project) return undefined;
     const company = namedCompany(companyId);

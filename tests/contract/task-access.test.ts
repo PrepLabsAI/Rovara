@@ -1,6 +1,7 @@
 // Who may read, comment, suggest, decide and ask on a task page: one access rule and one table of roles and actions.
 import { describe, expect, it, vi } from "vitest";
 import { TASK_ACTION_ROLES, can, resolveTaskAccess, resolveTaskReadAccess } from "../../packages/broker/src/developer/task-access.js";
+import { membershipReadFailed } from "../../packages/broker/src/developer/membership-read.js";
 import { getTaskDocumentView } from "../../packages/broker/src/aws/developer-tasks.js";
 import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
 import { OMAR, PRIYA, SAM, pagePlan, pageTask } from "../support/page-tasks.js";
@@ -97,6 +98,18 @@ describe("resolveTaskAccess: the task's own person holds it only while they hold
         const error = await refusal(resolveTaskAccess(fixture.deps, PRIYA, fixture.taskId, action));
         expect([String(projectMember), action, error.code]).toEqual([String(projectMember), action, "TASK_NOT_FOUND"]);
       }
+    }
+  });
+});
+
+describe("resolveTaskAccess when the membership read FAILED (MEMBERSHIP-READ-FAILS-SAFE)", () => {
+  it("is the retryable 503 for every action, never 'no such task': the task's own person is not told their task is gone because a read failed", async () => {
+    for (const action of [undefined, "read", "decide", "retry", "close", "control", "publish", "feedback", "ask", "comment"] as const) {
+      const fixture = pageTask();
+      fixture.addVersion("plan", pagePlan());
+      fixture.deps.taskReaderPerson = async () => { throw membershipReadFailed(); };
+      const error = await refusal(resolveTaskAccess(fixture.deps, PRIYA, fixture.taskId, action));
+      expect([String(action), error.code]).toEqual([String(action), "RUNTIME_UNAVAILABLE"]);
     }
   });
 });

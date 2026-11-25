@@ -4,6 +4,7 @@
 // checked on every read; for anyone else a shared task reads as not found, exactly as an unshared one.
 //
 // Stored on the task's own partition: `DEVTASK#<taskId>` / `READER#<developerId>`.
+import { rethrowMembershipReadFailure } from "../developer/membership-read.js";
 import { DeleteCommand, GetCommand, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import {
   TASK_READERS_MAX,
@@ -118,8 +119,8 @@ export async function readerShare(deps: TaskReaderDependencies, task: DeveloperT
  * only while the list names them so: a starter the list denied, or a task handed or taken over to someone else, is not held by the starter even if the project is granted back), and an owner needs a live company
  * member's own project GRANT (ARCH RULING (b): a person who reaches the project only through its Slack channel is never an owner). With no list it is the task's own stored person, who holds it by the access that
  * let them START it: the project grant, or (the start's own test, `checkProjectAccess`) fresh bound-channel membership while the project lets channel members use it (a task the retired workflow started: DELETE WITH
- * THE OLD TASKS). A person removed from the project or the company, who left the channel, or whose project turned channel use off keeps no hold on their old task through the stored id alone. A read that fails, or no
- * way to ask, is "no".
+ * THE OLD TASKS). A person removed from the project or the company, who left the channel, or whose project turned channel use off keeps no hold on their old task through the stored id alone. No way to ask is "no"; a MEMBERSHIP read that
+ * fails is the retryable 503 (membership-read.ts), never "no".
  */
 export async function holdsOwnTask(deps: Pick<TaskReaderDependencies, "taskReaderPerson" | "documentClient" | "tableName">, task: DeveloperTaskRecord, developerId: string): Promise<boolean> {
   try {
@@ -128,7 +129,7 @@ export async function holdsOwnTask(deps: Pick<TaskReaderDependencies, "taskReade
     const hold = await ownTaskHold(deps, task, developerId);
     // A People list's owner needs the project GRANT; the stored person of a task with no list holds it as the start's own test says (a grant, or for an old-engine task the channel).
     return owners === undefined ? hold !== false : hold === "grant";
-  } catch { return false; }
+  } catch (error) { rethrowMembershipReadFailure(error); return false; }
 }
 
 /** Whether the task's records name `developerId` its owner: the People list's owners when it has a list, else the task's own stored person. */
@@ -143,7 +144,7 @@ async function ownTaskHold(deps: Pick<TaskReaderDependencies, "taskReaderPerson"
   try {
     const now = await deps.taskReaderPerson(developerId, task.project, taskCompanyId(task), { ownTask: true, taskId: task.taskId });
     return now?.projectMember === true ? "grant" : now?.mayStart === true ? "channel" : false;
-  } catch { return false; }
+  } catch (error) { rethrowMembershipReadFailure(error); return false; }
 }
 
 /** The same test as `holdsOwnTask`, as a refusal: the task's own person who no longer holds the project reads as "no such task" (the caller's own words). */
@@ -167,7 +168,7 @@ export async function listsAsOwn(deps: Pick<TaskReaderDependencies, "taskReaderP
     const hold = await ownTaskHold(deps, task, developerId);
     if (hold === "grant") held.set(task.project, true);
     return owners === undefined ? hold !== false : hold === "grant";
-  } catch { return false; }
+  } catch (error) { rethrowMembershipReadFailure(error); return false; }
 }
 
 /** `GET …/readers`: the owner's list. The caller is the owner. */

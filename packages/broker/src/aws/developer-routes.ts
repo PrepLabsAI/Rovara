@@ -1320,14 +1320,15 @@ async function taskReaderPerson(deps: DeveloperRouteDependencies, developerId: s
       if (options.taskId === undefined || await ownerOfExistingTask(deps, options.taskId) !== "workflow") return { name, projectMember: held, mayStart: false };
       await checkProjectAccess(deps, { developerId, ...(person.slackUserId === undefined ? {} : { slackUserId: person.slackUserId }) }, project);
       return { name, projectMember: held, mayStart: true };
-    } catch { return { name, projectMember: held, mayStart: false }; }
+    } catch (error) { rethrowMembershipReadFailure(error); return { name, projectMember: held, mayStart: false }; }
   };
   // DEC 254zzz80 / 254zzz98 (review L2): a reader of a task must be a LIVE member of the TASK's company, and their grant is read where that company keeps it (beside its
   // revision): never in the reader's own other company, so a share never says whether a person of another company holds a grant there. No live company: no grant.
   // With no company layer at all, nothing here is company-scoped: the legacy grant, byte for byte as before.
   if ((deps.companies ?? deps.developer.companies) === undefined) return answer(await projectGrant(memberActions(deps), project, developerId, undefined) !== undefined);
   let company: string | undefined;
-  try { company = await liveNamedCompany(deps, developerId); } catch { return { name, projectMember: false }; }
+  // A membership read that FAILED is not "not a member": it goes up as the retryable 503 (membership-read.ts), so the task's own person is never told "no such task" for it.
+  try { company = await liveNamedCompany(deps, developerId); } catch (error) { rethrowMembershipReadFailure(error); return { name, projectMember: false }; }
   const owning = taskCompany === undefined ? company : namedCompany(taskCompany);
   if (owning !== company) return { name, projectMember: false };
   return answer(await projectGrant(memberActions(deps), project, developerId, owning) !== undefined);
