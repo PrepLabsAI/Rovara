@@ -226,6 +226,8 @@ describe("the core's handlers on the deployed API", () => {
     // RD-2a filled the spec read (tests/unit/rd2a-spec-read.test.ts is its oracle: a real task answers, a missing, another company's and an unreadable one answer the same refusal). The others stay stubs until their lanes fill them.
     const STUBS = ["checks", "changes", "timeline"] as const;
     const notServed = { error: { code: "ROUTE_NOT_SERVED", message: ROUTE_NOT_SERVED_MESSAGE } };
+    // A read leaves this list when its lane fills the handler (RD-2b2: changes; its own oracle test is tests/unit/rd2b2-changes-read.test.ts).
+    const STUBS = READS.filter((read) => read !== "changes");
 
     it("answers a reader of the task ROUTE_NOT_SERVED, the row's own example refusal; a missing task and another company's are the same missing-task answer; nothing is written", async () => {
       const { world, app, companyOf, remember } = await world2();

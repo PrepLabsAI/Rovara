@@ -1259,3 +1259,31 @@ N2 (`answer` of a changed decision passed through `redactText`) has no test: the
 ## RD-2a on the read rule (rebased onto 49080fbea, 2026-11-25)
 
 The spec handler no longer reads the task or asks any access rule: the mount asks `decideTaskRead` once and hands `context.decision` (core-host/task-screen-routes.ts); `readTaskSpec` reads `context.decision.task`. The earlier mutant "handler without the read rule" is now a mount mutant (RD-2.0-READ-RULE M-series: `routeTaskScreen` that skips `context.decide`), killed by `tests/unit/task-read-rule.test.ts` (the 18 x 14 table on the real routes, spec cells) and the golden (`tests/contract/rd-2-0-read-rule-golden.test.ts`, the four admitted persons' spec cells are listed in `CHANGED`). A share's spec answer is the table's 403 TASK_PART_NOT_SHOWN (ship B), pinned by the same table.
+
+## RD-2b2 - the task page's Changes read (`core/task-view/changes.ts`, `core-host/task-changes-routes.ts`; branch base RD-2.0 a65c40ce7, working tree before the commit)
+
+Production guards this lane adds: the read rule (`readableTask` is `loadReadableTask` alone: after the coordinator's ruling this file has no shared-reader rule of its own); secret redaction and unsafe-character removal in `plainLine` and the patch; the patch limits (per file, whole answer); the file and page caps; the labels (`worker_report` is never `checkedAgainstCodeHost`); the https-only pull request address; the diff route's "too long" words and non-200 answers; the why join (latest review round only, a finding only for its own repository, the per-file cap, code evidence only); the one mount line that hands the deployment's old task rules to the handler. Each mutant was applied singly to the working tree, `tests/unit/rd2b2-changes-read.test.ts` run, the file restored byte for byte.
+
+| Mutant | Mutation | Killed by (rd2b2-changes-read.test.ts) |
+|---|---|---|
+| M1, M2 | (the shared-reader fallback mutants; the fallback was removed per the ruling, and "has no shared-reader rule of its own" now pins that a person the old rule would admit reads no such task and `readsAsReader` is never asked) | n/a |
+| M3 | `loadReadableTask` replaced by a bare read | "another company's caller, a colleague, a company admin ..." and the empty-read test |
+| M4 | patch not redacted | "removes control and direction characters ..." |
+| M5 | unsafe (control, direction) characters kept in a path | same |
+| M6 | path and why text not redacted | same |
+| M7 | whole-answer patch budget off | "keeps a patch under the per-file limit ..." |
+| M8 | per-file patch limit off | same |
+| M9 | file cap off | "lists at most CHANGES_FILES_MAX files ..." |
+| M10 | page cap off | same |
+| M11 | worker report labelled `checkedAgainstCodeHost: true` | "serves the worker's report labelled unchecked ..." and two more |
+| M12 | any pull request address served (not only https) | "a count that is not a whole non-negative number ..." |
+| M13 | the diff route's "too long" words served as a patch | "pages the pull request's files through the deployment's diff route ..." |
+| M14 | a finding shown for a file of another repository | "joins by path ..." |
+| M15 | the first review round read instead of the latest | same |
+| M16 | evidence of any kind with a path counts | SURVIVED: equivalent (only `code` evidence has a `path` in the plan schema) |
+| M17 | per-file why cap off | "shows at most CHANGES_WHY_PER_FILE_MAX entries ..." |
+| M18 | the mount no longer hands `taskRules` to the handler | "pages the pull request's files ..." and the reader test |
+| M19 | the code host's kept list ignored | "falls back to the code host's kept list ..." and two more |
+| M20 | a non-200 diff answer accepted | SURVIVED the first test set (a failing answer has no page-shaped body); killed by the added "a diff answer that is not a 200 is not used ..." |
+
+19 of 20 killed by tests; M16 is an equivalent mutant (no plan evidence kind but `code` has a path).

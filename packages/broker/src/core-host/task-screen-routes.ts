@@ -12,6 +12,7 @@ import type { TaskCaller } from "../core/task-flow/deps.js";
 import type { TaskReadDecision } from "../core/task-flow/read-rule.js";
 import type { TaskFlow } from "../core/task-flow/flow.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
+import type { CoreDevWiring } from "./dev-routes.js";
 import { readTaskChanges } from "./task-changes-routes.js";
 import { readTaskChecks } from "./task-checks-routes.js";
 import { readTaskSpec } from "./task-spec-routes.js";
@@ -28,6 +29,8 @@ export interface TaskScreenContext {
   request: BrokerRequest;
   /** The one read rule's decision for this person and this read, made once by the mount. */
   decision: TaskReadDecision;
+  /** The deployment's old task rules (aws/core-task-rule-routes.ts), where wired: the changes read pages a pull request's files through its diff route. */
+  taskRules?: CoreDevWiring["taskRules"];
 }
 export type TaskScreenHandler = (context: TaskScreenContext) => Promise<BrokerResponse>;
 
@@ -45,7 +48,7 @@ export const TASK_SCREEN_HANDLERS: Readonly<Record<TaskScreenRead, TaskScreenHan
 };
 
 export async function routeTaskScreen(context: Omit<TaskScreenContext, "taskId" | "decision"> & { decide(read: TaskScreenRead): Promise<TaskReadDecision> }, route: { taskId: string; read: TaskScreenRead }): Promise<BrokerResponse> {
-  const { flow, blobs, caller, request } = context;
+  const { flow, blobs, caller, request, taskRules } = context;
   const decision = await context.decide(route.read);
-  return TASK_SCREEN_HANDLERS[route.read]({ flow, blobs, caller, request, taskId: route.taskId, decision });
+  return TASK_SCREEN_HANDLERS[route.read]({ flow, blobs, caller, request, taskId: route.taskId, decision, ...(taskRules === undefined ? {} : { taskRules }) });
 }
