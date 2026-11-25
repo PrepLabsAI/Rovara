@@ -1,12 +1,12 @@
-// The files of the browser and API checks, on the object-storage port: the screenshots behind a round's rows, the content-addressed admission a round runs from, and the readers that hold a
-// stored admission to its reference. The object keys are Cloud's, byte for byte (`private/<owner>/<workspace>/workflow-e2e-artifacts/<sha256>`, `workflow-e2e-admissions/sha256/<sha256>.json`).
+// The files of the browser and API checks, on the object-storage port: the screenshots behind a round's rows and the read that holds a stored admission to its reference (the admission is
+// stored by `storeE2EAdmission` in callbacks.ts). The object keys are Cloud's, byte for byte (`private/<owner>/<workspace>/workflow-e2e-artifacts/<sha256>`, `workflow-e2e-admissions/sha256/<sha256>.json`).
 //
 // Differences from the S3 version: a put never replaces an object (the port is immutable by default), so storing a content-addressed object again reads the first one back and keeps it only
 // when the bytes are the same; Cloud's retention tag on a screenshot is the port's retention class of the same name (`e2e-screenshot`), which an adapter maps to its own days.
 import { createHash } from "node:crypto";
 import {
-  E2E_ARTIFACT_RETENTION_TAG_VALUE, E2E_DISPLAY_SCREENSHOT_MAX_BYTES, ObjectConflictError, agentXError, e2eAgentRouteNeedsModelChoice,
-  type E2EDisplayBaseline, type E2EModelRouteDefinition, type E2EScenarioResults, type E2EWorkflowAdmissionRef, type ObjectStorage,
+  E2E_ARTIFACT_RETENTION_TAG_VALUE, E2E_DISPLAY_SCREENSHOT_MAX_BYTES, ObjectConflictError,
+  type E2EDisplayBaseline, type E2EScenarioResults, type E2EWorkflowAdmissionRef, type ObjectStorage,
 } from "@agentx/contracts";
 import type { DeveloperTaskRecord } from "../../developer/task-records.js";
 import { readWorkflowE2ENotifierProjection, workflowE2EArtifactKey } from "../../aws/workflow-e2e-notifier-projection.js";
@@ -37,15 +37,6 @@ export async function putContentAddressed(objects: ObjectStorage, key: string, b
     const existing = await objects.get(key, bytes.byteLength + 1);
     return existing !== undefined && sameBytes(existing, bytes);
   }
-}
-
-/** Stores an admission under its content address; an object already there must be the same bytes. */
-export async function storeWorkflowE2EAdmission(store: WorkflowE2EArtifactStore, input: { key: string; sha256: string; bytes: Uint8Array; taskId: string; candidateDigest: string }): Promise<void> {
-  if (input.bytes.byteLength > WORKFLOW_E2E_ADMISSION_MAX_BYTES) throw agentXError("CONFIG_INVALID", "the immutable E2E admission exceeds its bounded object size");
-  if (sha256Of(input.bytes) !== input.sha256) throw agentXError("CONFIG_INVALID", "the E2E admission does not have the digest it is stored under");
-  const kept = await putContentAddressed(store.objects, input.key, input.bytes,
-    { contentType: "application/json", metadata: { sha256: input.sha256, task: input.taskId, candidate: input.candidateDigest }, retention: "task-document" });
-  if (!kept) throw agentXError("RUNTIME_UNAVAILABLE", "the content-addressed E2E admission object conflicts with its digest");
 }
 
 /**
@@ -125,72 +116,4 @@ export async function readStoredAdmission(store: WorkflowE2EArtifactStore, refer
   const bytes = Buffer.from(raw);
   if (bytes.byteLength !== byteLength || sha256Of(bytes) !== sha256) return undefined;
   return { text: bytes.toString("utf8"), bytes };
-}
-
-const parsedAdmission = async <T>(store: WorkflowE2EArtifactStore, reference: E2EWorkflowAdmissionRef): Promise<T | undefined> => {
-  const admission = await readStoredAdmission(store, reference);
-  if (admission === undefined) return undefined;
-  try { return JSON.parse(admission.text) as T; } catch { return undefined; }
-};
-
-/** What kind of admission a reference names, from its `schemaVersion`; anything that cannot be established answers undefined, which the dispatcher treats as a refusal to deliver. */
-export function createWorkflowE2EAdmissionSchemaReader(store: WorkflowE2EArtifactStore) {
-  return async (reference: E2EWorkflowAdmissionRef): Promise<string | undefined> => {
-    const schemaVersion = (await parsedAdmission<{ schemaVersion?: unknown } | null>(store, reference))?.schemaVersion;
-    return typeof schemaVersion === "string" ? schemaVersion : undefined;
-  };
-}
-
-/**
- * Whether the application admission a reference names has an `agent` step in its scenario bundle, and is not an audit replay: a replay runs those steps with no model channel, so it
- * never needs the worker to list the agent-steps feature. Anything that cannot be established answers undefined, which the dispatcher treats as a refusal.
- */
-export function createWorkflowE2EAdmissionAgentStepsReader(store: WorkflowE2EArtifactStore) {
-  return async (reference: E2EWorkflowAdmissionRef): Promise<boolean | undefined> => {
-    const parsed = await parsedAdmission<{ bundle?: { scenarios?: unknown }; replay?: unknown } | null>(store, reference);
-    const scenarios = parsed?.bundle?.scenarios;
-    if (!Array.isArray(scenarios)) return undefined;
-    if (parsed?.replay !== undefined) return false;
-    return scenarios.some((scenario) => Array.isArray((scenario as { steps?: unknown })?.steps) && ((scenario as { steps: Array<{ kind?: unknown }> }).steps).some((step) => step?.kind === "agent"));
-  };
-}
-
-/**
- * Whether an application admission relies on the normal no-model limits for a group: its policy pins a route (so its groups with no agent step are capped by the no-model limits, not
- * given the policy's agent-sized limits) and some scenario has no agent step. Read from the content-addressed object, never from the reference. A baseline's policy pins no route and a
- * routeless policy keeps its stored limits, so neither relies on it. Over-asking is safe; the answer is undefined when the object cannot be read as the admission the reference names.
- */
-export function createWorkflowE2EAdmissionNeedsModelFreeLimitsReader(store: WorkflowE2EArtifactStore) {
-  return async (reference: E2EWorkflowAdmissionRef): Promise<boolean | undefined> => {
-    const parsed = await parsedAdmission<{ bundle?: { scenarios?: unknown }; policy?: { modelRouteRevision?: unknown } } | null>(store, reference);
-    const scenarios = parsed?.bundle?.scenarios;
-    if (!Array.isArray(scenarios)) return undefined;
-    const routeRevision = parsed?.policy?.modelRouteRevision;
-    if (routeRevision === undefined) return undefined;
-    if (routeRevision === null) return false;
-    return scenarios.some((scenario) => Array.isArray((scenario as { steps?: unknown })?.steps) && !((scenario as { steps: Array<{ kind?: unknown }> }).steps).some((step) => step?.kind === "agent"));
-  };
-}
-
-/**
- * Whether the route an application admission pins needs a worker that lists the model-choice feature: the admission's `modelRoute` names a revision, and the registry's definition of
- * that revision says whether the model is not the recommended one or the request shape is `minimal`. An admission that pins no route needs nothing. Anything it cannot establish
- * (the object, the registry row, a fault reading it) answers undefined, which the dispatcher treats as a refusal: it never guesses that a route is the default.
- */
-export function createWorkflowE2EAdmissionModelChoiceReader(input: WorkflowE2EArtifactStore & {
-  /** Reads the registry's definition of a route revision (`readAdmittedE2EModelRoute` over the install's registry rows); null when there is none. The registry is not on the ports yet, so the caller binds it. */
-  readRoute: (route: { routeId: string; routeRevision: string }) => Promise<E2EModelRouteDefinition | null>;
-}) {
-  return async (reference: E2EWorkflowAdmissionRef): Promise<boolean | undefined> => {
-    const parsed = await parsedAdmission<{ modelRoute?: unknown } | null>(input, reference);
-    if (parsed === undefined) return undefined;
-    const route = parsed?.modelRoute;
-    if (route === null) return false;
-    const named = route as { routeId?: unknown; routeRevision?: unknown } | undefined;
-    if (typeof named?.routeId !== "string" || typeof named.routeRevision !== "string") return undefined;
-    try {
-      const definition = await input.readRoute({ routeId: named.routeId, routeRevision: named.routeRevision });
-      return definition === null ? undefined : e2eAgentRouteNeedsModelChoice(definition);
-    } catch { return undefined; }
-  };
 }
