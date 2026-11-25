@@ -854,3 +854,17 @@ Review round 1 (Opus FAIL 0d9409cc3: F1 admin on a Slack entry, F2 demoted start
 | M7, `compute` | a starter demoted to viewer or commenter keeps `owner` (only a denial clears it) | tests/unit/session-features-access.test.ts and tests/journeys/session-people-key.test.ts (c3) | red (1 of 20 unit, 1 of 7 journeys) |
 | M5b, `compute` | a denied starter keeps `owner` (now seen in the journey: a company admin starter reads `owner: false`) | same unit file and the journey (c2) | red (1 of 20 unit, 1 of 7 journeys) |
 | M8, `peopleEntryOf` | an entry grants on any stored role, with no grant check (the Slack-entry and company-admin cases) | tests/unit/session-features-access.test.ts | red (2 of 20) |
+## TASK-ENDED-NOTICE: the hosted task-end notice to the model gateway and its reconcile (2026-11-25)
+
+Measured on the lane's working tree over tests/unit/task-ended-notice.test.ts (25 tests). Each mutant was applied alone, the one file run, and the file restored.
+
+| Mutant / location | Mutation | Failing tests (of the file) | Restored |
+|---|---|---|---|
+| M1, core-host/task-ended-http.ts answer check | any 200 body counts as delivered (no same company and task check) | 5 of 25 | green |
+| M2, task-ended-http.ts status split | a 404 (an older gateway) is retried like a 5xx | 3 of 25 | green |
+| M3, task-ended-http.ts `TASK_ENDED_TRIES` | four tries instead of three | 1 of 25 | green |
+| M4, core/task-flow/task-end.ts `reconcileTaskEnds` | another company's markers are sent | 1 of 25 | green |
+| M5, task-end.ts `callTaskEndSeam` | a "pending" answer is recorded as delivered | 5 of 25 | green |
+| M6, task-end.ts `announceTaskEnd` | waits for the host without the time bound | 1 of 25 | green |
+| M7, task-end.ts `reconcileTaskEnds` | the `notifiedAt` filter is dropped | SURVIVES, on purpose not killed: a delivered marker has already left the due-time index, so the filter is a second guard on a row the index no longer lists. |
+| M8, task-end.ts `reconcileTaskEnds` | no age limit | 1 of 25 | green |
