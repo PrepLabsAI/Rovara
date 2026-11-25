@@ -284,3 +284,61 @@ Each mutant applied singly, tests/unit/machine-check.test.ts, tests/contract/wor
 | machine-check-aws.ts `failOperation` | A cancel fails the active operation even when this call did not move the row | killed, 1 failed |
 | same | A cancel fails the active operation even when it is not the cancel's target | killed, 1 failed |
 | ec2-delivery.ts `machineToCheck` | A setup run held to the wrong subnets | killed, 2 failed |
+
+## SI-2 — the saved-image rebuild as a system run (tests/unit/saved-env-run.test.ts, system-starter.test.ts, setup-check-watch.test.ts)
+
+Each mutant applied singly to the code of 138b4422f (tests of 289e8a97d), the three files run, restored with git checkout. M9 is equivalent (see the row); M10 and M25 first survived and are killed by the tests added in 289e8a97d.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| starter.ts step 3 | The upkeep switch read for every kind but `setup_check` (a rebuild reads it) | killed |
+| starter.ts `startable` | `saved_env_rebuild` startable with no rebuild start | killed |
+| starter.ts step 3b | The rebuild's reads before the cap and the audit removed | killed |
+| starter.ts step 4 | The cap refusal skipped for the rebuild | killed |
+| starter.ts step 6 | The place not given back when the audit cannot be written | killed |
+| starter.ts step 7 | `not_started` audit record and place give-back removed for a rebuild that had nothing to start | killed |
+| saved-env-run.ts start transaction | The start record put without `when.absent()` | killed |
+| same | The check on the registry row reduced to the job id (no version) | killed |
+| same | The check on the registry row without the job id | survived: equivalent (a job change always changes `version`) |
+| same | The watch without its own limit (50 minutes) | killed |
+| same | The close record without `purpose` | killed |
+| same | The run owned by a person | killed |
+| same | The project index attributes written on the workspace | killed |
+| same | A start record naming another company taken as a repeat / as no start | killed (2) |
+| same | A failed row check not answered `nothing_queued` | killed |
+| same | No second try after a lost slot race | killed |
+| saved-env-slots.ts claim | The claim condition reduced to `absent`, or to "lease before year 9999" | killed (2) |
+| saved-env-slots.ts `freeFor` | Another job's slot read as free; an unreadable lease read as free | killed (2) |
+| saved-env-slots.ts `releaseSlots` | Delete without the job id and company | killed |
+| saved-env-rebuild.ts `readRebuildFacts` | The approved-environment check removed; the "not yet handed to a worker" check removed; the commit count check removed | killed (3) |
+| check.ts `closeSetupCheck` | The purpose guard removed (a rebuild's close resumes tasks) | killed |
+| usage.ts `maxMinutesMsOf` | The two-hour cap for every kind | killed |
+
+## SI-2 — re-run on the head after the split and the pre-review fixes (code of 7950013dc, tests of 9101cb647)
+
+The earlier SI-2 table above was run on 138b4422f, before the starter and rebuild-run split. These 44 mutants were applied singly to 7950013dc and run against tests/unit/saved-env-run.test.ts and tests/unit/system-starter.test.ts, each file restored with git checkout. 42 killed, 1 equivalent, and the one other survivor (B1) killed by the test added in 9101cb647 (re-run: killed).
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| starter.ts step 3 | upkeep switch read for every kind but `setup_check` | killed |
+| starter.ts `startable` | rebuild startable with no rebuild start | killed |
+| starter.ts step 3b | the rebuild's reads removed | killed |
+| starter.ts step 4 | the cap refusal skipped for the rebuild | killed |
+| starter.ts step 6 | place not given back when the audit cannot be written | killed |
+| starter.ts `runAs` | place not given back on a start that did not happen | killed |
+| starter.ts step 4 (M1 of the review) | the place written under job `nightly` | killed |
+| starter.ts `giveBack` (S3b) | a repeat's failure gives back the counted place | killed |
+| starter.ts `precheckOf` (S7c) | the reads' throw not caught | killed |
+| saved-env-run.ts start record | put without `when.absent()` | survived, then killed by 9101cb647 (a record that lands between the reads and the write) |
+| saved-env-run.ts row check | version dropped / job id and dispatched check dropped | killed / survived: equivalent (a job handed on always commits version + 1) |
+| same | watch limit dropped; `purpose` dropped; job id dropped from the close record (S2); run owned by a person; project index attributes written | killed (5) |
+| same | start record of another company taken as a repeat; request id not compared; `already_started` answered as busy | killed (3) |
+| same | the failed row check answered `nothing_queued` at once (S1); no second try | killed (2) |
+| same | expiry removed from the start record (M2), the workspace, the pointer, the operation (S6) | killed (4) |
+| same | lease not required to cover the watch (S7a) | killed |
+| same | older marker not put (S7b), not read in the reads (S7b, killed by 9101cb647) | killed (2) |
+| same | repeat after a lost start-record race answered `already_started` (S3a); the reads' "project's check running" removed (S4); "other" start in the reads ignored | killed (3) |
+| saved-env-slots.ts | claim reduced to `absent`, or to lease before year 9999; another job's slot free; unreadable lease free; delete without job id and company; expiry removed from slot rows (M2) | killed (6) |
+| check.ts `closeSetupCheck` | purpose guard removed; slots not released on close (S2) | killed (2) |
+| usage.ts | the two-hour cap for every kind | killed |
+| saved-env-rebuild.ts `readRebuildFacts` | commit count; approved check; "not handed to a worker" check removed | killed (3) |
