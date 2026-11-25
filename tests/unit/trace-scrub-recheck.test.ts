@@ -200,3 +200,72 @@ describe("PC-N4: the markup scan of a resource blob (review P3 delta)", () => {
     expect(performance.now() - started).toBeLessThan(10_000);
   });
 });
+
+describe("PC-N4: quoted > and entities with no semicolon in a resource blob (review P3 leftovers)", () => {
+  const VALUE = "html-split-0123456789";
+  const blanked = (html: string) => text(run({ "trace.network": "", "resources/page.html": html }, [VALUE]))!.includes(`resources/page.html:${TRACE_BLANKED}`);
+  it.each([
+    ["a > inside a double-quoted value", '<p>html-spl<b data-k=">" class="x">it-0123456789</p>'],
+    ["a > inside a single-quoted value", "<p>html-spl<b data-k='a>b'>it-0123456789</p>"],
+    ["a > in a title value", 'html-spl<b title="x>y">it-0123456789'],
+    ["a > in a value with spaces around the =", 'html-spl<b title = ">" >it-0123456789'],
+    ["a > in a single-quoted value holding a double quote", "html-spl<b t='\"x>y'>it-0123456789"],
+    ["a quoted value that never closes (the tag ends at its first >)", '<p>html-spl<b data-k="x>it-0123456789</p>'],
+    ["a single-quoted value that never closes", "<p>html-spl<b data-k='x>it-0123456789</p>"],
+    ["an apostrophe in an unquoted value (title=O'Brien)", "html-spl<span data-x=O'Brien>it-0123456789</span> isn't <br>"],
+    ["a quote in an attribute name", "html-spl<b x'y>it-0123456789 don't</b>"],
+    ["a quote inside <!...>", 'html-spl<!x">it-0123456789 "q" a "b <br>'],
+    ["a quote inside <?...>", 'html-spl<?x">it-0123456789 "q" a "b <br>'],
+    ["&#173 with no semicolon", "html-spl&#173it-0123456789"],
+    ["&#xAD with no semicolon", "html-spl&#xADit-0123456789"],
+    ["&#8203 with no semicolon", "html-spl&#8203it-0123456789"],
+    ["&#x200B with no semicolon", "html-spl&#x200Bit-0123456789"],
+    ["&shy with no semicolon", "html-spl&shyit-0123456789"],
+    ["&#173 at the end of a word", "html-spl&#173 it-0123456789".replace(" ", "")],
+  ])("blanks a resource whose secret is split by %s", (_name, html) => { expect(blanked(html)).toBe(true); });
+  it("opens a quote only after an = (as a browser reads an attribute value)", () => {
+    expect(markupTextOf("a<b x'y>c")).toBe("ac");
+    expect(markupTextOf("a<b t=O'B>c'd>e")).toBe("ac'd>e");
+    expect(markupTextOf('a<b t = ">" >c')).toBe("ac");
+    expect(markupTextOf("a<b t='\"x>y'>c")).toBe("ac");
+    expect(markupTextOf('a<b t="1"u=\'>\'>c')).toBe("ac");
+    expect(markupTextOf('a<b ="x>y">c')).toBe('ay">c'); // a leading = starts a name; the quote is part of it
+    expect(markupTextOf('a<b t=="x>y">c')).toBe('ay">c'); // the second = starts an unquoted value
+    expect(markupTextOf('a</b t=">">c')).toBe("ac");
+    expect(markupTextOf('a</b="x>y">c')).toBe('ay">c'); // an end tag's name runs to a space, / or >
+  });
+  it("ends <!...>, <?...> and </ + a non-letter at the first > whatever quotes it holds", () => {
+    expect(markupTextOf('a<!x">c">d')).toBe('ac">d');
+    expect(markupTextOf("a<?x'>c'>d")).toBe("ac'>d");
+    expect(markupTextOf('a</ x">c">d')).toBe('ac">d');
+    expect(markupTextOf("a<!DOCTYPE html>b")).toBe("ab");
+  });
+  it("keeps a quote that is in the text, and a > after a quote-less tag", () => {
+    expect(markupTextOf("it's a \"q\" <b>bold</b> > done")).toBe("it's a \"q\" bold > done");
+  });
+  it("reads a longer number or name as itself, and &shy plus letters as a soft hyphen then the letters", () => {
+    expect(markupTextOf("a&#1730b&#xADE;c&#x20000;d&shyness")).toBe("a&#1730b&#xADE;c&#x20000;d" + "ness");
+    expect(markupTextOf("a&#173b&#xADg")).toBe("abg");
+    expect(markupTextOf("a&#173;b&#xAD;c&shy;d")).toBe("abcd");
+    expect(markupTextOf("a&zwnjb&NoBreakc&SHY;d")).toBe("a&zwnjb&NoBreakc&SHY;d");
+  });
+  it("does not let a quote opened past the tag cap, or junk quotes, end a tag late", () => {
+    expect(markupTextOf(`a<b t="${"x".repeat(5_000)}">c`)).toContain("x");
+    expect(blanked(`html-spl<a t="${"x".repeat(5_000)}>">it-0123456789`)).toBe(false);
+  });
+  it.each([["<a \" (an open quote in a name)", '<a "'.repeat(250_000)], ["<a ' (an open quote in a name)", "<a '".repeat(250_000)], ['<a x=" (an open value)', '<a x="'.repeat(166_000)], ["<a x=' (an open value)", "<a x='".repeat(166_000)], ['<a x=">"... (every > quoted)', '<a x=">"'.repeat(111_000)], ["<a x='>'... (every > quoted)", "<a x='>'".repeat(111_000)]])("scans a 1 MB blob of %s in linear time", (_name, blob) => {
+    const started = performance.now();
+    const out = markupTextOf(blob);
+    expect(performance.now() - started).toBeLessThan(2_000);
+    expect(out.length).toBeGreaterThan(0);
+  });
+  it.each([["a quote in an attribute name", '<a "'], ["an open single quote", "<a '"], ["an open value", '<a x="']])("still blanks a quoted > after 20,000 copies of %s", (_name, junk) => {
+    expect(blanked(`${junk.repeat(20_000)}${"z".repeat(5_000)}\nhtml-spl<b title="x>y">it-0123456789`)).toBe(true);
+  });
+  it("scans 32 MB of open-quote junk in a few seconds", () => {
+    const started = performance.now();
+    markupTextOf('<a x="'.repeat(5_000_000));
+    markupTextOf('<a "'.repeat(8_000_000));
+    expect(performance.now() - started).toBeLessThan(10_000);
+  });
+});
