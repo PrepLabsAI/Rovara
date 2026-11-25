@@ -63,6 +63,17 @@ describe("the core task mark", () => {
     expect(coreTaskMarkOf(await world.store.get(coreTaskMarkKey("t-cloud")))).toBeUndefined();
   });
 
+  it("reads and writes a mark by its own three area keys, whatever the registry's CORE_AREAS later holds (a rollback to release N-1 and every stored mark depend on it)", async () => {
+    const world = createFakeWorld();
+    // A stored mark with the three keys plus one more is read; the reader demands only the three it always demanded.
+    await world.store.put({ item: { ...coreTaskMarkKey("t-extra"), coreEngine: { engine: "core", areas: { merge: "core", build: "core", flow: "core", e2e: "core" }, flags: "cc=on", stampedAt: "2026-11-15T10:00:00.000Z" } } });
+    expect(coreTaskMarkOf(await world.store.get(coreTaskMarkKey("t-extra")))).toMatchObject({ engine: "core", areas: { merge: "core", build: "core", flow: "core" } });
+    // A mark missing one of the three is still unreadable, and a new mark has exactly the three, in this order.
+    await world.store.put({ item: { ...coreTaskMarkKey("t-short"), coreEngine: { engine: "core", areas: { merge: "core", build: "core" }, flags: "cc=on", stampedAt: "x" } } });
+    expect(coreTaskMarkOf(await world.store.get(coreTaskMarkKey("t-short")))).toBeUndefined();
+    expect(Object.keys(coreTaskMarkFor(new Date("2026-11-15T10:00:00.000Z")).areas)).toEqual(["merge", "build", "flow"]);
+  });
+
   it("writes the in-use mark once per company per store, only when absent", async () => {
     const world = createFakeWorld();
     const put = vi.spyOn(world.store, "put");

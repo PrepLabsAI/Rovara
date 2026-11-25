@@ -6,7 +6,13 @@
 // The mark is kept PERMANENTLY and its shape is the one release N-1 wrote, byte for byte: release N-1 and earlier parse it strictly and THROW on an item they cannot read, so a changed shape
 // breaks a rollback hard (an error, not a fallback). Only a later release may relax the strict shape check in the reader; the mark is never removed.
 import { when, type DocumentKey, type DocumentStore, type StoredDocument, type TransactItem } from "@agentx/contracts";
-import { CORE_AREAS, type CoreArea } from "./flags.js";
+
+/**
+ * The three area keys every mark has carried since it was first written. FROZEN and local on purpose: release N-1 and earlier require exactly these keys and THROW on a mark they cannot read, so
+ * neither the writer nor the reader may follow the registry's `CORE_AREAS` if a later lane adds or renames an area there. A new area never changes a mark.
+ */
+const MARK_AREAS = Object.freeze(["merge", "build", "flow"] as const);
+type MarkArea = (typeof MARK_AREAS)[number];
 
 /** The words a stored mark may carry for an engine: `core` is all a release ever wrote; `workflow` is read, never written (the reader never refuses what an earlier release could have stored). */
 export type MarkedEngine = "workflow" | "core";
@@ -20,7 +26,7 @@ export interface CoreTaskMark {
   /** `core` for every mark a release writes. */
   engine: MarkedEngine;
   /** Each step group's engine for this task (all `core` as written). */
-  areas: Readonly<Record<CoreArea, MarkedEngine>>;
+  areas: Readonly<Record<MarkArea, MarkedEngine>>;
   /** The settings text the task started under. Written as the fixed text `cc=on` (the old combined switch, always on); read as any text. */
   flags: string;
   stampedAt: string;
@@ -31,7 +37,7 @@ export const CORE_TASK_MARK_FLAGS = "cc=on";
 
 /** The mark a new core task gets now: the old strict shape, constant. */
 export function coreTaskMarkFor(now: Date): CoreTaskMark {
-  const areas = Object.fromEntries(CORE_AREAS.map((area) => [area, "core"])) as Record<CoreArea, MarkedEngine>;
+  const areas: Record<MarkArea, MarkedEngine> = { merge: "core", build: "core", flow: "core" };
   return { engine: "core", areas, flags: CORE_TASK_MARK_FLAGS, stampedAt: now.toISOString() };
 }
 
@@ -41,8 +47,8 @@ export function coreTaskMarkOf(record: Readonly<Record<string, unknown>> | undef
   if (raw === null || typeof raw !== "object") return undefined;
   const value = raw as Partial<CoreTaskMark>;
   if (value.engine !== "workflow" && value.engine !== "core") return undefined;
-  const areas = value.areas as Partial<Record<CoreArea, unknown>> | undefined;
-  if (areas === null || typeof areas !== "object" || CORE_AREAS.some((area) => areas[area] !== "workflow" && areas[area] !== "core")) return undefined;
+  const areas = value.areas as Partial<Record<MarkArea, unknown>> | undefined;
+  if (areas === null || typeof areas !== "object" || MARK_AREAS.some((area) => areas[area] !== "workflow" && areas[area] !== "core")) return undefined;
   if (typeof value.flags !== "string" || typeof value.stampedAt !== "string") return undefined;
   return value as CoreTaskMark;
 }
