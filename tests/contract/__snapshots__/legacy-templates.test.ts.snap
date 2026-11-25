@@ -16336,7 +16336,13 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
         "SUPERSEDES_EXEC=none; SUPERSEDES_SHA=none",
         "WAITING_EXEC=\\"$(aws codepipeline get-pipeline-state --name AgentXProductionRelease --query 'stageStates[?stageName==\`Production\`].inboundExecution.pipelineExecutionId | [0]' --output text)\\" || { echo \\"WARN: the execution waiting for Production could not be read; the summary will not name it\\" >&2; WAITING_EXEC=; }",
         "if [[ \\"$WAITING_EXEC\\" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] && [ \\"$WAITING_EXEC\\" != \\"\${EXEC_ID:-}\\" ]; then WAITING_SHA=\\"$(aws codepipeline get-pipeline-execution --pipeline-name AgentXProductionRelease --pipeline-execution-id \\"$WAITING_EXEC\\" --query 'pipelineExecution.artifactRevisions[?name==\`Source\`].revisionId | [0]' --output text)\\" || WAITING_SHA=; [[ \\"$WAITING_SHA\\" =~ ^[0-9a-f]{40}$ ]] || WAITING_SHA=none; SUPERSEDES_EXEC=\\"$WAITING_EXEC\\"; SUPERSEDES_SHA=\\"$WAITING_SHA\\"; echo \\"NOTE: this run replaces the execution $WAITING_EXEC, which is waiting for Production\\"; fi",
-        "export CODE_CTX=\\"live:$RELEASED_SHA,target:$CODE_ROLLBACK_TARGET,supersedes:$SUPERSEDES_EXEC,supersedesSha:$SUPERSEDES_SHA\\"",
+        "TRIGGER_KIND=unknown; TRIGGER_TYPE=; TRIGGER_SOURCES=",
+        "if [[ \\"\${EXEC_ID:-}\\" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then TRIGGER_TYPE=\\"$(aws codepipeline get-pipeline-execution --pipeline-name AgentXProductionRelease --pipeline-execution-id \\"$EXEC_ID\\" --query pipelineExecution.trigger.triggerType --output text)\\" || TRIGGER_TYPE=; TRIGGER_SOURCES=\\"$(aws codepipeline list-action-executions --pipeline-name AgentXProductionRelease --filter \\"pipelineExecutionId=$EXEC_ID\\" --query \\"actionExecutionDetails[?stageName=='Source' && status=='Succeeded'].[actionName,output.outputVariables.CommitId,output.outputVariables.TagName]\\" --output text)\\" || TRIGGER_SOURCES=; fi",
+        "CLOUD_SOURCE=\\"$(printf '%s\\\\n' \\"$TRIGGER_SOURCES\\" | awk -F'\\\\t' '$1==\\"CloudGitHub\\"{print $2\\" \\"$3}')\\"; CODE_SOURCE=\\"$(printf '%s\\\\n' \\"$TRIGGER_SOURCES\\" | awk -F'\\\\t' '$1==\\"GitHub\\"{print $2\\" \\"$3}')\\"",
+        "read -r CLOUD_SOURCE_SHA CLOUD_SOURCE_TAG <<< \\"$CLOUD_SOURCE\\"; read -r CODE_SOURCE_SHA CODE_SOURCE_TAG <<< \\"$CODE_SOURCE\\"",
+        "if [ \\"$TRIGGER_TYPE\\" = StartPipelineExecution ]; then TRIGGER_KIND=manual; elif [ \\"$TRIGGER_TYPE\\" = WebhookV2 ] && [ \\"$(printf '%s\\\\n' \\"$CLOUD_SOURCE\\" | wc -l)\\" -eq 1 ] && [ \\"$(printf '%s\\\\n' \\"$CODE_SOURCE\\" | wc -l)\\" -eq 1 ] && [[ \\"$CLOUD_SOURCE_SHA\\" =~ ^[0-9a-f]{40}$ ]] && [[ \\"$CODE_SOURCE_SHA\\" =~ ^[0-9a-f]{40}$ ]]; then if [[ \\"$CLOUD_SOURCE_TAG\\" =~ ^v[0-9]+\\\\.[0-9]+\\\\.[0-9]+$ ]] && [ \\"$CODE_SOURCE_TAG\\" = None ]; then TRIGGER_KIND=\\"cloud-tag@$CLOUD_SOURCE_TAG\\"; elif [ \\"$CLOUD_SOURCE_TAG\\" = None ] && [ \\"$CODE_SOURCE_TAG\\" = None ]; then TRIGGER_KIND=code-push; fi; fi",
+        "echo \\"NOTE: this run was started by: $TRIGGER_KIND (trigger type \${TRIGGER_TYPE:-unreadable})\\"",
+        "export CODE_CTX=\\"live:$RELEASED_SHA,target:$CODE_ROLLBACK_TARGET,supersedes:$SUPERSEDES_EXEC,supersedesSha:$SUPERSEDES_SHA,trigger:$TRIGGER_KIND\\"",
         "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { HIST_VALUE=\\"$(aws ssm get-parameter --name /agentx/release/code-history/beta --query Parameter.Value --output text)\\" || { echo \\"port-guard: the Code release history could not be read; refusing to run the release\\" >&2; exit 2; }; }",
         "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { HIST_FLAT=\\"$(printf '%s' \\"$HIST_VALUE\\" | tr -d ' \\\\t\\\\r\\\\n')\\"; HIST_RE='^\\\\[(\\"[0-9a-f]{40}\\"(,\\"[0-9a-f]{40}\\")*)?\\\\]$'; [[ \\"$HIST_FLAT\\" =~ $HIST_RE ]] || { echo \\"port-guard: the Code release history is not a list of commits; refusing to run the release\\" >&2; exit 2; }; }",
         "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { [[ \\"$HIST_FLAT\\" == *\\"\\\\\\"$CODE_ROLLBACK_TARGET\\\\\\"\\"* ]] || { echo \\"port-guard: the rollback target is not in this stage's Code release history; refusing to run the release\\" >&2; exit 2; }; }",
@@ -16564,6 +16570,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
               "Action": [
                 "codepipeline:GetPipelineState",
                 "codepipeline:GetPipelineExecution",
+                "codepipeline:ListActionExecutions",
               ],
               "Effect": "Allow",
               "Resource": {
@@ -18282,7 +18289,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                   "Version": "1",
                 },
                 "Configuration": {
-                  "CustomData": "Approve THIS run only: pipeline execution #{codepipeline.PipelineExecutionId}. Production releases Code commit #{CodeSource.CommitId} with the Cloud source commit of this run, #{CloudSourceVariables.CommitId}. Cloud ref #{variables.CLOUD_REF}, Cloud production #{variables.CLOUD_PROD}, Code release #{variables.CODE_RELEASE}, mode #{variables.PIPELINE_MODE}, rollback target #{variables.CODE_ROLLBACK_TARGET}. The Cloud tag Beta resolved and deployed is the one named in Beta's Preflight log: check it before you approve. Reject any run that is not the one you meant to release.",
+                  "CustomData": "Approve THIS run only: pipeline execution #{codepipeline.PipelineExecutionId}. Production releases Code commit #{CodeSource.CommitId} with the Cloud source commit of this run, #{CloudSourceVariables.CommitId}. Cloud ref #{variables.CLOUD_REF}, Cloud production #{variables.CLOUD_PROD}, Code release #{variables.CODE_RELEASE} (from-trigger: a Cloud tag run releases Cloud only, a Code push releases Code), mode #{variables.PIPELINE_MODE}, rollback target #{variables.CODE_ROLLBACK_TARGET}. The Cloud tag Beta resolved and deployed, and whether Code was released or skipped, are in Beta's Preflight log: check them before you approve. Reject any run that is not the one you meant to release.",
                 },
                 "Name": "ApproveProduction",
                 "RoleArn": {
@@ -18682,8 +18689,8 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
             "Name": "CLOUD_REF",
           },
           {
-            "DefaultValue": "run",
-            "Description": "run releases the Code commit of this run; skip releases Cloud only (Code waits for a later run). Preflight may force skip, never run",
+            "DefaultValue": "from-trigger",
+            "Description": "from-trigger: a Cloud tag push releases Cloud only, a Code push releases Code; by hand name run or skip. Preflight may force skip, never run",
             "Name": "CODE_RELEASE",
           },
           {

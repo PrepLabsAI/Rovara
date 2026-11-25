@@ -913,4 +913,9 @@ function regionPattern(): string {
 // No parameter, output, bucket, trigger, variable, other role or other policy moved; no role was given any codepipeline permission (release-pipeline-prod-approval.test.ts pins that).
 // RELEASE-STACKS-ADDRESS (2026-11-25; pin before it: 7e66d04fc164d8a3edc90962636c21a8d514ec15369e0275dc04fa8283a30d46): the release roles may read the address stack. Changed, and only these (nothing added or removed; shown by a resource-by-resource comparison of the synthesized templates before and after):
 // ReleaseBuildRoleDefaultPolicy and BetaReleaseBuildRoleDefaultPolicy, whose ReadReleaseStacks cloudformation:DescribeStacks statement gains one resource, stack/AgentXApiAddress/* (AGENTX_RELEASE_STACKS gained "AgentXApiAddress"). The legacy-templates snapshot changes by those two resources.
-const PRODUCTION_PIPELINE_TEMPLATE_SHA256 = "ddd23afa7a00a60f4559a3fd980009d3b476e0a5cead70d1e3e0307faa5f927b";
+// PIPELINE-CODE-RELEASE-BY-TRIGGER (2026-11-25; pin before it: ddd23afa7a00a60f4559a3fd980009d3b476e0a5cead70d1e3e0307faa5f927b): CODE_RELEASE's default becomes from-trigger (decided from which source started the run). Changed, and only these (the legacy-templates snapshot changes by the same four hunks, applied by script from the failing test's own diff, no -u):
+//   1. Pipeline: the CODE_RELEASE variable's default (run -> from-trigger) and description; the ApproveProduction CustomData text (what from-trigger means, and that Beta's Preflight log says whether Code was released).
+//   2. BetaCodePreflight (the CodeBuild project): six commands before the CODE_CTX export (which source started the run) and a fifth trigger part in the Beta CODE_CTX value; Production's Code Preflight is unchanged.
+//   3. BetaCodePreflightRoleDefaultPolicy: ReadWaitingRun gains codepipeline:ListActionExecutions (this pipeline only; read-only).
+// No parameter, output, bucket, trigger, other variable, other role or other policy moved.
+const PRODUCTION_PIPELINE_TEMPLATE_SHA256 = "f666faa65ac67edcd17eae5a4387458ea6c299e6bc67d426d08490cdea306e3f";
