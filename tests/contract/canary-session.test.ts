@@ -8,6 +8,7 @@ import { authenticateDeveloper } from "../../packages/broker/src/aws/developer-r
 import { handler as awsHandler } from "../../packages/broker/src/aws/canary-session.js";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { CANARY_MINTS_PER_HOUR, CANARY_SESSION_SECONDS, canarySessionConfigFromEnvironment, createCanarySession } from "../../packages/broker/src/developer/canary-session.js";
+import { sessionLogId } from "../../packages/broker/src/developer/session-log-id.js";
 import { GITHUB_ISSUER } from "../../packages/broker/src/developer/providers.js";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
 import { CANARY, COMPANY, CONFIG, ENV, OTHER_COMPANY, OWNER, SECONDS, TABLE, world, type World } from "../support/canary-session-world.js";
@@ -67,7 +68,9 @@ describe("a minted session", () => {
     expect(everything).not.toContain("agxr_");
     expect(JSON.stringify(w.logs)).not.toContain(answer.token);
     expect(JSON.stringify(w.logs)).not.toContain(answer.token.split(".")[1]!);
-    expect(w.logs).toEqual([{ event: "signin.canary_session", sessionId: answer.sessionId, developerId: CANARY }]);
+    // The line carries a short hash of the session id under `session`, never the id itself.
+    expect(w.logs).toEqual([{ event: "signin.canary_session", session: sessionLogId(answer.sessionId), developerId: CANARY }]);
+    expect(JSON.stringify(w.logs)).not.toContain(answer.sessionId);
     // The refresh row holds only a hash of a secret nobody holds: no stored field is a usable token.
     expect(JSON.stringify([...w.db.items.values()])).not.toContain("agxr_");
   });
