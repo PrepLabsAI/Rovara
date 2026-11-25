@@ -106,11 +106,22 @@ async function world(layout: Layout = "named") {
 }
 
 describe("the dispatcher's company-scoped lessons people port", () => {
-  it("gives each company's step its own lessons, the running person's roster standing read live, and writes nothing", async () => {
+  it("gives each company's step its own lessons, the running person's roster standing read live, and writes only its load record", async () => {
     const w = await world();
     for (const write of w.writes) write.mockClear();
+    // The only writes are the load record (R4-0: manifest, its references, the operation's reference, the use rows), each under the partition of the company that was loading.
+    const putsOf = () => (w.writes[0]!.mock.calls as unknown as Array<[{ item: { pk: string; entityType?: string } }]>).map(([call]) => call.item);
     const a = await w.flowFor(A).learned!(request(A));
+    const afterA = putsOf();
     const b = await w.flowFor(B).learned!(request(B));
+    const forB = putsOf().slice(afterA.length);
+    expect(afterA.length).toBeGreaterThan(0);
+    expect(forB.length).toBeGreaterThan(0);
+    for (const item of [...afterA, ...forB]) expect(["LESSON_LOAD", "LESSON_LOAD_REF", "LESSON_USE", "LESSON_REF"]).toContain(item.entityType);
+    for (const item of afterA) expect(item.pk).toContain(A);
+    for (const item of forB) expect(item.pk).toContain(B);
+    for (const item of afterA) expect(item.pk).not.toContain(B);
+    for (const item of forB) expect(item.pk).not.toContain(A);
     expect(a.learnedContext?.lessons.map((lesson) => lesson.id)).toEqual(["les_aaaa1111"]);
     expect(b.learnedContext?.lessons.map((lesson) => lesson.id)).toEqual(["les_bbbb1111"]);
     expect(JSON.stringify(a)).not.toContain("B private advice");
@@ -119,7 +130,7 @@ describe("the dispatcher's company-scoped lessons people port", () => {
     expect(w.sent.some((read) => read.key.pk === `COMPANY_MEMBER#${WORLD[A].runner}` && read.table === SIGN_IN && read.projection !== undefined)).toBe(true);
     expect(w.sent.some((read) => read.key.pk === `ORG#${B}#MEMBER#${WORLD[B].runner}` && read.table === STATE)).toBe(true);
     expect(w.sent.some((read) => read.key.pk.includes(WORLD[A].author) || read.key.pk.includes(WORLD[B].author))).toBe(false);
-    for (const write of w.writes) expect(write).not.toHaveBeenCalled();
+    for (const write of w.writes.slice(1)) expect(write).not.toHaveBeenCalled();
   });
 
   it("every read the port makes is one the dispatcher role is granted (GetItem, the two sign-in keys, their projected attributes)", async () => {
