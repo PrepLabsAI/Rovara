@@ -326,7 +326,10 @@ export async function createJourneyWorld(options: { world?: FakeWorldOptions; li
       async issueCreated(workspace: FakeWorkspace, input: { teamId: string; actor: string | undefined; key: string; labels?: string[] }) {
         sequence += 1;
         const issue = { id: `issue-${workspace.urlKey}-${input.key}-${String(sequence)}`, identifier: input.key, title: `Fix the login (${input.key})` };
-        server.addIssue(workspace, { ...issue, labels: input.labels ?? ["rovara"] });
+        // The issue as Linear has it now (R1 + L1 6.2b): the doorbell reads the issue by id from Linear, never from the delivery, so Linear's own history names who added each label, and when.
+        const labels = input.labels ?? ["rovara"];
+        const history = labels.map((name, index) => ({ id: `history-${issue.id}-${String(index)}`, createdAt: new Date(nowMs()).toISOString(), ...(input.actor === undefined ? {} : { actorId: input.actor }), addedLabelIds: [`lbl-${name}`] }));
+        server.addIssue(workspace, { ...issue, teamId: input.teamId, labels, history });
         const raw = JSON.stringify({ type: "Issue", action: "create", organizationId: workspace.id, webhookTimestamp: nowMs(), ...(input.actor === undefined ? {} : { actor: { id: input.actor } }),
           data: { id: issue.id, identifier: input.key, teamId: input.teamId, url: `https://linear.app/${workspace.urlKey}/issue/${input.key}/x`, labels: (input.labels ?? ["rovara"]).map((name) => ({ name })) } });
         const signature = createHmac("sha256", LINEAR_WEBHOOK_SECRET).update(Buffer.from(raw, "utf8")).digest("hex");
