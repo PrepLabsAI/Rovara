@@ -12,7 +12,7 @@ import { revokeProjectAccess } from "../../packages/broker/src/aws/admin-actions
 import { CompanySignInStore } from "../../packages/broker/src/developer/company-membership.js";
 import { DeveloperSignInStore } from "../../packages/broker/src/developer/store.js";
 import { createJourneyWorld, MAYA, type JourneyWorld } from "./harness/hosted-core.js";
-import { pageReader, removeFromCompany, writeReviewSession } from "./harness/page.js";
+import { asRemovedPerson, pageReader, removeFromCompany, writeReviewSession } from "./harness/page.js";
 import { bearerRequest, writeCliSession } from "./harness/surviving.js";
 import { planUntilCard, startTask } from "./harness/task.js";
 
@@ -54,21 +54,18 @@ function routes(taskId: string): Array<{ route: string; method: string; path: st
   ];
 }
 
-/** `removed`: the person is out, so each request is a PROBE that must be refused (core-proof.ts); the owner's own control run before the removal is not. */
+/** `removed` (not `project`): the person is out of the company, so each request is refused, either by the core itself or at SIGN-IN with a 401 before any engine is asked (`asRemovedPerson`, harness/page.ts); the owner's own control run before the removal is not. Removed from the PROJECT only, the core answers every request itself. */
 async function observe(w: JourneyWorld, taskId: string, removed = true, project = false): Promise<Observed[]> {
   const moves = removed;
-  // The person's OWN two lists (their tasks, their decision cards) answer 200 to a person who is still in the company and name nothing of this task (`shows` checks that): they are not probes that must be refused.
-  let listing = false;
-  const asked = <T>(request: () => Promise<T>): Promise<T> => removed && !(listing && project) ? w.proof.probe(request) : request();
+  // Removed from the PROJECT only, the person's OWN two lists (their tasks, their decision cards) answer 200 and name nothing of this task (`shows` checks that).
+  const asked = <T>(request: () => Promise<T>): Promise<T> => removed && !project ? asRemovedPerson(w, request) : request();
   const web: Ask = async (method, path, body) => { const r = await asked(() => w.maya(method, path, body)); return { status: r.status, text: JSON.stringify(r.body) }; };
   const cliPerson = writeCliSession(w, MAYA, Math.floor(Date.now() / 1000) + 6 * 86_400);
   const cli: Ask = async (method, path, body) => { const r = await asked(() => bearerRequest(w, cliPerson, method, path, body)); return { status: r.status, text: r.text }; };
   const out: Observed[] = [];
   for (const [surface, ask] of [["web client", web], ["CLI session", cli]] as const) {
     for (const r of routes(taskId).filter((candidate) => moves || candidate.method === "GET")) {
-      listing = LISTS.has(r.route);
       const answer = await ask(r.method, r.path, r.body);
-      listing = false;
       // "shows": a 2xx from a task's own route (or a list that names the task): the task was shown, or the move was taken.
       const shows = answer.status < 300 && (!LISTS.has(r.route) || answer.text.includes(taskId));
       out.push({ surface, route: r.route, status: answer.status, ...errorOf(answer.text), shows });

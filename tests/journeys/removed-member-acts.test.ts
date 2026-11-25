@@ -45,7 +45,7 @@ const snapshot = (w: JourneyWorld, taskId: string): string => JSON.stringify([w.
 interface Outcome { answer: string; access: boolean; moved: boolean }
 
 /** A web act's answer: an access refusal is 401, 403 or 404 and moves nothing. */
-const probed = (w: JourneyWorld) => (method: string, path: string, body?: unknown) => w.proof.probe(() => w.maya(method, path, body));
+const asRemoved = (w: JourneyWorld) => (method: string, path: string, body?: unknown) => w.maya(method, path, body);
 const webOutcome = (w: JourneyWorld, taskId: string, before: string, reply: { status: number; body: unknown }): Outcome => ({
   answer: `${String(reply.status)} ${JSON.stringify((reply.body as { error?: unknown }).error ?? reply.body).slice(0, 160)}`,
   access: [401, 403, 404].includes(reply.status), moved: snapshot(w, taskId) !== before,
@@ -106,7 +106,7 @@ const offeredBinding = (id: string) => async (w: JourneyWorld, taskId: string) =
 };
 const webPost = (path: (taskId: string) => string, body: (w: JourneyWorld, taskId: string) => Record<string, unknown>) => async (w: JourneyWorld, taskId: string): Promise<Outcome> => {
   const before = snapshot(w, taskId);
-  return webOutcome(w, taskId, before, await probed(w)("POST", path(taskId), body(w, taskId)));
+  return webOutcome(w, taskId, before, await asRemoved(w)("POST", path(taskId), body(w, taskId)));
 };
 
 const ACTS: Act[] = [
@@ -114,8 +114,8 @@ const ACTS: Act[] = [
     prepare: async (w, taskId, pre) => { pre.card = await decisionCard(w, taskId); },
     run: async (w, taskId, pre) => {
       const card = pre.card as Awaited<ReturnType<typeof decisionCard>>; const before = snapshot(w, taskId);
-      if (card.risk === "medium") await probed(w)("POST", `/v1/app/decisions/${card.path}/evidence-opened`, { shownDigest: card.shownDigest, requestId: randomUUID() });
-      return webOutcome(w, taskId, before, await probed(w)("POST", `/v1/app/decisions/${card.path}/approve`, { shownDigest: card.shownDigest, requestId: randomUUID() }));
+      if (card.risk === "medium") await asRemoved(w)("POST", `/v1/app/decisions/${card.path}/evidence-opened`, { shownDigest: card.shownDigest, requestId: randomUUID() });
+      return webOutcome(w, taskId, before, await asRemoved(w)("POST", `/v1/app/decisions/${card.path}/approve`, { shownDigest: card.shownDigest, requestId: randomUUID() }));
     } },
   slackAct("slack: approve the plan (registry plan.approve; starts the coding run)", "plan", "plan.approve", waitingPlanBinding),
   slackAct("slack: request changes on the plan (registry plan.request-changes)", "plan", "plan.request-changes", waitingPlanBinding, { note: "Please change it." }),
@@ -139,7 +139,7 @@ const ACTS: Act[] = [
     },
     run: async (w, taskId, pre) => {
       const before = snapshot(w, taskId);
-      const reply = await probed(w)("POST", `/v1/app/tasks/${taskId}/merge`, { requestId: randomUUID(), expectedHeads: pre.heads, risk: pre.risk });
+      const reply = await asRemoved(w)("POST", `/v1/app/tasks/${taskId}/merge`, { requestId: randomUUID(), expectedHeads: pre.heads, risk: pre.risk });
       const outcome = webOutcome(w, taskId, before, reply);
       return { ...outcome, moved: outcome.moved || (pre.pullRequest as { draft: { state: string } }).draft.state !== "open" };
     } },

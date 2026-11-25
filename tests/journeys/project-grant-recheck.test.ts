@@ -16,7 +16,7 @@ import { DeveloperSignInStore } from "../../packages/broker/src/developer/store.
 import { TASK_ACTION_ENTRIES } from "../../packages/broker/src/core/task-actions/entries.js";
 import { taskSessionId } from "../../packages/broker/src/core/sessions/create.js";
 import { createJourneyWorld, MAYA, type JourneyWorld } from "./harness/hosted-core.js";
-import { pageReader, removeFromCompany, writeReviewSession } from "./harness/page.js";
+import { asRemovedPerson, pageReader, removeFromCompany, writeReviewSession } from "./harness/page.js";
 import { bearerRequest, writeCliSession } from "./harness/surviving.js";
 import { planUntilCard, startTask } from "./harness/task.js";
 
@@ -86,20 +86,17 @@ function routes(taskId: string, sessionId: string): Route[] {
   ];
 }
 
-/** `removed`: the person is out, so each request is a PROBE that must be refused (core-proof.ts). Removed from the PROJECT only, the lists are not: they answer a person who is still in the company with 200 and name nothing of this task (`shows` checks that). */
+/** `removed`: "company": the person is out of the company, so each request is refused, either by the core itself or at SIGN-IN with a 401 before any engine is asked (`asRemovedPerson`, harness/page.ts). "project": still in the company, so the core answers every request itself (the lists with 200, naming nothing of this task: `shows` checks that). */
 async function observe(w: JourneyWorld, taskId: string, removed: "project" | "company" | false = "company"): Promise<Observed[]> {
   const sessionId = taskSessionId(taskId);
-  let listing = false;
-  const asked = <T>(request: () => Promise<T>): Promise<T> => removed !== false && !(listing && removed === "project") ? w.proof.probe(request) : request();
+  const asked = <T>(request: () => Promise<T>): Promise<T> => removed === "company" ? asRemovedPerson(w, request) : request();
   const web: Ask = async (method, path, body) => { const r = await asked(() => w.maya(method, path, body)); return { status: r.status, text: JSON.stringify(r.body) }; };
   const cliPerson = writeCliSession(w, MAYA, Math.floor(Date.now() / 1000) + 6 * 86_400);
   const cli: Ask = async (method, path, body) => { const r = await asked(() => bearerRequest(w, cliPerson, method, path, body)); return { status: r.status, text: r.text }; };
   const out: Observed[] = [];
   for (const [surface, ask] of [["web client", web], ["CLI session", cli]] as const) {
     for (const r of routes(taskId, sessionId)) {
-      listing = LISTS.has(r.route);
       const answer = await ask(r.method, r.path, r.body);
-      listing = false;
       const shows = answer.status < 300 && (!LISTS.has(r.route) || answer.text.includes(taskId));
       out.push({ surface, route: `${r.method} ${r.route}`, method: r.method, status: answer.status, ...errorOf(answer.text), shows, body: answer.text.slice(0, 160) });
     }
@@ -217,7 +214,7 @@ describe("a person who started a task (no People list) and is then removed", () 
     const presses = await pressEveryAction(w, taskId, offers);
     expect(presses.filter((line) => !REFUSED_AS_MISSING.test(line)), presses.join("\n")).toEqual([]);
     expect(ledgerOf(w, taskId)).toEqual(before);
-    // A removed person's requests are probes (refused before or by the core), so the check holds: nothing of the task was answered to them.
+    // A removed person's requests are each refused by the core or at sign-in with a 401 (the real-core check holds them to it), so nothing of the task was answered to them.
     w.proof.assertAllCore();
   }, 400_000);
 
