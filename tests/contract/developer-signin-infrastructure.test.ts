@@ -6,6 +6,7 @@ import { withoutLinearWebhookGuard } from "../support/linear-webhook-route-templ
 import { stuckStoppingInstall, withoutStuckStoppingAlarm } from "../support/stuck-stopping-alarm-template.js";
 import { withoutApiAccessLog } from "../support/api-access-log-template.js";
 import { withoutPublicApiUrl } from "../support/public-api-url-template.js";
+import { withoutCoreOutboxStreamRelay } from "../support/core-outbox-stream-relay-template.js";
 import { withoutWorkerCallbackAlarm } from "../support/worker-callback-alarm-template.js";
 import { withoutDispatcherLessonsPeople } from "../support/dispatcher-lessons-people-template.js";
 import { App, CfnParameter, Stack, aws_iam as iam } from "aws-cdk-lib";
@@ -196,7 +197,7 @@ function withoutBrokerMemberConditionCheck(template: TemplateJson): TemplateJson
 describe("broker membership condition-check grant", () => {
   it("adds only the exact member-key statement to the broker; every other action, resource and principal stays pinned", () => {
     // Webhook lane W3 + DEC 254zzz432: the webhook secret slot and the stuck-stopping alarm are asserted and taken out too, so both pins below still hold. Linear webhook guard: so are the Linear route's throttle and alarm (outermost).
-    const before = withoutLinearWebhookGuard(withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(structuredClone(namedRaw)), { named: true }), { env: "staging" }), stuckStoppingInstall("staging"))))));
+    const before = withoutLinearWebhookGuard(withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutCoreOutboxStreamRelay(structuredClone(namedRaw))), { named: true }), { env: "staging" }), stuckStoppingInstall("staging"))))));
     // The providers branch also adds this exact capability output. Keep a measured
     // combined pin, then remove only the asserted output to retain the upstream pin.
     expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("c15528809bc3dac1d2d2caf3cce7776a14d387dbf10b607732ae86ac28b468af");

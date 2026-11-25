@@ -25,7 +25,7 @@ import { Construct } from "constructs";
 import {
   CORE_DISPATCH_VISIBILITY_SECONDS, CORE_AGENT_MODEL_CHOICE_DEFAULT, CORE_AGENT_MODEL_CHOICE_VALUES, CORE_AGENT_MODEL_MAX_LENGTH, CORE_AGENT_MODEL_PATTERN, CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PATTERN, CORE_LEARNING_MODEL_MAX_LENGTH, CORE_LEARNING_MODEL_PATTERN, CORE_MODEL_GATEWAY_HOST_MAX_LENGTH, CORE_MODEL_GATEWAY_HOST_PATTERN,
   TEST_SERVICES_PARAMETER_DEFAULT, TEST_SERVICES_PARAMETER_VALUES, TEST_SERVICE_IMAGES_PARAMETER_DEFAULT, TEST_SERVICE_IMAGES_PARAMETER_VALUES, SAVED_ENVIRONMENTS_PARAMETER, SAVED_ENVIRONMENTS_PARAMETER_DEFAULT, SAVED_ENVIRONMENTS_PARAMETER_VALUES, CORE_DISPATCH_ATTEMPTS_MAX, CORE_DISPATCH_BATCH_SIZE, CORE_DISPATCH_DEAD_LETTER_URL_VARIABLE, CORE_DISPATCH_MAX_RECEIVES, CORE_DISPATCH_QUEUE_ARN_VARIABLE, CORE_DISPATCH_QUEUE_URL_VARIABLE, CORE_JOB_EVENT_SOURCE, CORE_JOB_SCHEDULES, POLICY_HOOK_PARAMETER_MAX_LENGTH,
-  coreDispatchDeadLetterName, coreDispatchQueueName, coreLessonsReflectDeadLetterName, coreLessonsReflectQueueName, LESSONS_REFLECT_MAX_RECEIVES, LESSONS_REFLECT_VISIBILITY_SECONDS, SYSTEM_RUNS_DEFAULT, SYSTEM_RUNS_PARAMETER_PATTERN, UPKEEP_NIGHT_JOB, type CoreJobSchedule,
+  CORE_OUTBOX_STREAM_RELAY_ON, coreDispatchDeadLetterName, coreDispatchQueueName, coreLessonsReflectDeadLetterName, coreLessonsReflectQueueName, LESSONS_REFLECT_MAX_RECEIVES, LESSONS_REFLECT_VISIBILITY_SECONDS, SYSTEM_RUNS_DEFAULT, SYSTEM_RUNS_PARAMETER_PATTERN, UPKEEP_NIGHT_JOB, type CoreJobSchedule,
 } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
 import { addBrokerSetting, addPackedSetting } from "./broker-names.js";
@@ -116,6 +116,12 @@ export class CoreEngine extends Construct {
     this.systemRuns = new CfnParameter(stack, "CoreSystemRuns", { type: "String", default: SYSTEM_RUNS_DEFAULT, maxLength: 64, allowedPattern: SYSTEM_RUNS_PARAMETER_PATTERN, description: "Core system-started runs (Rovara's own setup re-check and nightly check): off (the default), on, or on:<company id>[:<company id>]. Also enables the hourly upkeep-night schedule" });
     addBrokerSetting(broker, props.naming, "coreSystemRuns", this.systemRuns.valueAsString);
     addPackedSetting(dispatcher, "coreSystemRuns", this.systemRuns.valueAsString);
+    // CORE-RUN-STOP-RELAY (G1): the per-run stop at a cap is wired end to end on every install this template makes (a cap reached while a run goes books its usage, asks the worker to stop, stages the cancel in the
+    // outbox, relays it at once, then by the State stream through the developer task notifier (DeveloperTaskNotifier, relayCoreOutbox) and by the 1-minute `outbox-relay-backstop` schedule below; the dispatcher
+    // delivers it to the worker). So both functions declare it: the hosted admission then has `enforcesCost: true`, and work with no one present may start where a run is stopped at its cap.
+    // A constant, not a parameter: the relay is part of this same template (tests/contract/core-engine-infrastructure.test.ts "the outbox stream relay setting" holds the pieces and the setting together).
+    addBrokerSetting(broker, props.naming, "coreOutboxStreamRelay", CORE_OUTBOX_STREAM_RELAY_ON);
+    addPackedSetting(dispatcher, "coreOutboxStreamRelay", CORE_OUTBOX_STREAM_RELAY_ON);
     broker.addEnvironment("ROVARA_POLICY_HOOK", this.policyHook.valueAsString);
     dispatcher.addEnvironment("ROVARA_POLICY_HOOK", this.policyHook.valueAsString);
     // Core switch-on blocker (2026-11-17): the model gateway's host and the agent model, for both functions (core-host/gateway-model-access.ts). Stack parameters, so an upgrade keeps them
