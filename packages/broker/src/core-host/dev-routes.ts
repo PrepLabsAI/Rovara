@@ -618,7 +618,7 @@ function taskSurfaceAnswer(target: Mounted, request: BrokerRequest, taskCaller: 
   if (isPrFeedbackPath(path, request.method)) return feedbackAnswer(target, request, taskCaller, caller, membership);
   // RD-2.0: the task page's new reads (spec, checks, changes, timeline), one mount; each answers ROUTE_NOT_SERVED until its lane fills its handler (task-screen-routes.ts).
   const screen = taskScreenRoute(path, request.method);
-  if (screen !== undefined) return routeTaskScreen({ flow: target.runtime.flow, blobs: target.blobs, caller: taskCaller, request, ...(target.wiring.taskRules === undefined ? {} : { taskRules: target.wiring.taskRules }), decide: (read) => decideRead(target, caller, membership.role, { read, taskId: screen.taskId }) }, screen);
+  if (screen !== undefined) return routeTaskScreen({ flow: target.runtime.flow, blobs: target.blobs, caller: taskCaller, request, ...(target.wiring.taskRules === undefined ? {} : { taskRules: target.wiring.taskRules }), authorize: (read, task, seams) => decideRead(target, caller, membership.role, { read, task, ...(seams === undefined ? {} : { seams }) }), decide: (read) => decideRead(target, caller, membership.role, { read, taskId: screen.taskId }) }, screen);
   const parity = parityTaskRoute(path, request.method);
   if (parity === undefined) return undefined;
   return routeParityTask({

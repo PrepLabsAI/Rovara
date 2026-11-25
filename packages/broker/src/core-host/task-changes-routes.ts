@@ -1,7 +1,11 @@
 // RD-2b2: `GET /v1/dev/tasks/{taskId}/changes`, the task page's Changes tab in one answer (the view is core/task-view/changes.ts; the response schema is `TaskChangesReadSchema` in packages/code-api).
 //
-// WHO MAY READ: exactly the task read's own rule, first and before anything else is read: `loadReadableTask` (the company, then the company's `canRead`; a shared reader is admitted only when the one "may read this task" function says so, never by a rule of this file). Anyone else, another company's caller and a missing task all get the same TASK_NOT_FOUND answer. This read is NOT part of F2-E's reduced admin view: a
-// company admin who is not a reader gets the missing task's answer too (the rule has no admin branch). A script token never reaches here (dev-routes refuses it first).
+// WHO MAY READ is decided by the mount, once per request, by the one read rule (core/task-flow/read-rule.ts `decideTaskRead`, see task-screen-routes.ts): this file is given `context.decision` and has no access rule of its own (no copy of the
+// shared-reader rule, no gate). Anyone the task is not shown to gets the missing task's answer, a share (shown the task's summary, not its code changes) gets TASK_PART_NOT_SHOWN, both before this handler runs. A script token never reaches here.
+//
+// SOURCE CODE is the decision's own part, `decision.sourceCode` (read-rule.ts `mayReadSourceCode`): a live project grant proved on THIS request, decided for this reader and this task before any cache is asked. It covers the patches AND the file
+// paths (a path can reveal the structure of code): with it false NO source is read (not the pull request's pages, not the kept list, not the worker's report) and the answer lists no file. The page cache below holds the FULL answer of a page, keyed by
+// company, task, pull request and head, and is asked only after the decision says yes, so a cached page is never handed to a reader the decision refused.
 //
 // WHERE THE PULL REQUEST'S FILES COME FROM: the deployment's own diff route, asked through `taskRules.route` (the same rule, the same code-host reader, the same patch limit as `GET .../diff`), page by page. This file never imports
 // developer/task-code-routes.ts or aws/task-web.ts (the old Code task page's files go away with it). A failed page is an unlisted page, never an error and never a message: the answer says it is not checked, or lists less.
@@ -10,7 +14,6 @@ import type { PlanDocument } from "@agentx/contracts";
 import { readTaskPlanDocument } from "../aws/task-plan-document.js";
 import { reportedChangedFiles, verifiedChangedFiles } from "../core/build-step/changed-files.js";
 import { textReaderOf } from "../core/build-step/plan-input.js";
-import { loadReadableTask } from "../core/task-flow/reads.js";
 import type { TaskRecord } from "../core/task-flow/records.js";
 import { taskChangesOf, type PullRequestPage } from "../core/task-view/changes.js";
 import type { BrokerResponse } from "../handler.js";
@@ -26,18 +29,6 @@ const DiffAnswerSchema = z.object({
   more: z.boolean(),
 });
 
-/** The task, if this caller may read it by the task read's own rule (`loadReadableTask`); otherwise TASK_NOT_FOUND (the same for a missing task and another company's). No rule of this file's own: a shared reader is admitted by the one "may read this task" function when it exists. */
-const readableTask = (context: TaskScreenContext): Promise<TaskRecord> => loadReadableTask(context.flow.deps, context.caller, context.taskId);
-
-/**
- * THE ONE ACCESS DECISION FOR SOURCE CODE: may this reader see the repository's own content (the pull request's diff and its patches)? Today every reader of the task may (the rule that admitted them is the task read's). The
- * lane that makes the "may read this task" function (RD-2.0-READ-RULE) sets this per mode: for the changes read, source code follows the REPOSITORY's access, and a shared reader may not be a member of the repository. Nothing else in
- * this file decides it; the page reader below is only built when this says yes, and the rest of the answer (the kept lists, the why) carries no diff content.
- */
-export function mayReadSourceCode(): boolean {
-  return true;
-}
-
 /** Pages are kept for a short while (45 s) so a reload does not ask the code host again; see task-changes-cache.ts. */
 const PAGES = createPageCache({ ttlMs: 45_000, max: 30 });
 
@@ -47,8 +38,8 @@ export const pageCacheKey = (companyId: string, taskId: string, pullRequest: { r
 
 /** One page of one pull request's files through the deployment's diff route; `undefined` when it cannot be read (not wired, refused, the code host down, an answer of another shape). */
 function pageReader(context: TaskScreenContext, task: TaskRecord, cache: PageCache): ((pullRequest: { repository: string; number: number }, page: number) => Promise<PullRequestPage | undefined>) | undefined {
-  const { taskRules, caller, flow } = context;
-  if (taskRules === undefined) return undefined;
+  const { taskRules, authorize, caller, flow } = context;
+  if (taskRules === undefined || authorize === undefined) return undefined;
   // The head the task recorded for the pull request; without one nothing is cached (a new push could not be told from the old one).
   const headOf = (pullRequest: { repository: string; number: number }): string | undefined =>
     task.workflow?.pullRequests?.find((entry) => entry.repositoryId === pullRequest.repository && entry.number === pullRequest.number)?.headSha;
@@ -60,6 +51,8 @@ function pageReader(context: TaskScreenContext, task: TaskRecord, cache: PageCac
         request: { method: "GET", path: `${path}?${query}`, headers: {} }, path,
         person: { developerId: caller.principal.personId, name: caller.principal.displayName }, companyId: flow.deps.companyId,
         task: task, store: flow.deps.store,
+        // The diff route asks the one read rule for its own read ("diff"), as the person asking: a page is read only for a person that read admits too.
+        authorize: (read, seams) => authorize(read, task, seams),
       });
       if (answer.statusCode !== 200) return undefined;
       const parsed = DiffAnswerSchema.safeParse(JSON.parse(answer.body));
@@ -91,19 +84,21 @@ async function planOf(context: TaskScreenContext, task: TaskRecord): Promise<Pla
 }
 
 export function readTaskChanges(context: TaskScreenContext): Promise<BrokerResponse> {
-  return readTaskChangesWith(context, { mayReadSourceCode, cache: PAGES });
+  return readTaskChangesWith(context, { cache: PAGES });
 }
 
-/** The read, with its source-code gate and page cache supplied (the tests supply their own; the route uses `mayReadSourceCode` and the module's cache). Order: the task read's rule, then the gate, then the cache, then the code host. */
-export async function readTaskChangesWith(context: TaskScreenContext, parts: { mayReadSourceCode(): boolean; cache: PageCache }): Promise<BrokerResponse> {
-  const task = await readableTask(context);
+/** The read, with its page cache supplied (the tests supply their own). Order: the read rule's decision (the mount), then its source-code part, then the cache, then the code host. */
+export async function readTaskChangesWith(context: TaskScreenContext, parts: { cache: PageCache }): Promise<BrokerResponse> {
+  const task = context.decision.task;
   const { flow } = context;
-  const pullRequestPage = parts.mayReadSourceCode() ? pageReader(context, task, parts.cache) : undefined;
-  const changes = await taskChangesOf(task, {
+  // Source code (patches and file paths) only where the decision proved it on this request; otherwise no source of files is read at all.
+  const sourceCode = context.decision.sourceCode;
+  const pullRequestPage = sourceCode ? pageReader(context, task, parts.cache) : undefined;
+  const changes = await taskChangesOf(task, sourceCode ? {
     ...(pullRequestPage === undefined ? {} : { pullRequestPage }),
     verified: () => verifiedChangedFiles(flow.deps, task.workspaceId, task.workflow?.candidate?.digest),
     reported: () => reportedChangedFiles(flow.deps, task.workspaceId),
     plan: await planOf(context, task),
-  });
+  } : {});
   return { statusCode: 200, headers: { "content-type": "application/json", "cache-control": "no-store" }, body: JSON.stringify({ changes }) };
 }

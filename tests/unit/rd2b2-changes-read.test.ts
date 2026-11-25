@@ -7,6 +7,8 @@ import { describe, expect, it, vi } from "vitest";
 import { ROUTES, ROUTE_NOT_SERVED_MESSAGE, routeIdOf } from "@preplabsai/rovara-code-api";
 import { canonicalPlanJson, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type PlanDocument, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
+import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
+import type { TaskReadDecision } from "../../packages/broker/src/core/task-flow/read-rule.js";
 import { taskKey, operationKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { WORKSPACE_DIFF_ARTIFACT, artifactRowKey, verifiedFilesKey } from "../../packages/broker/src/core/build-step/changed-files.js";
 import { workspaceKeys } from "../../packages/broker/src/core/task-flow/workspace-location.js";
@@ -350,7 +352,7 @@ async function host(wiring: Partial<CoreDevWiring> = {}) {
     members.set(personId + companyId, { companyId, role });
     return { principal: { ...base, roles }, client: "web", webApp: true };
   };
-  const routes = createCoreDevRoutes({ app, companyOf: async (caller) => members.get(caller.principal.personId + caller.principal.companyId), wiring: () => ({ origin: () => "https://api.example", ...wiring }) });
+  const routes = createCoreDevRoutes({ app, companyOf: async (caller) => members.get(caller.principal.personId + caller.principal.companyId), wiring: () => ({ origin: () => "https://api.example", canReadProject: async () => true, ...wiring }) });
   const owner = callerOf(FAKE_COMPANY, "owner-person");
   const runtime = await app.runtimeFor(FAKE_COMPANY);
   const { task } = await runtime.flow.start({ principal: localOwnerPrincipal({ companyId: FAKE_COMPANY, personId: "owner-person" }), origin: "app", client: "test" }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
@@ -378,7 +380,7 @@ describe("the changes route on the core host", () => {
 
   it("another company's caller, a colleague, a company admin who is not a reader and a missing task all get the same answer, and nothing is written", async () => {
     const route = vi.fn(async () => ({ statusCode: 200, headers: {}, body: "{}" }));
-    const h = await host({ taskRules: { route, readsAsReader: async () => true } });
+    const h = await host({ taskRules: { route, sharedReader: async () => undefined } });
     await h.setWorkflow({ pullRequests: [pullRequest(7)] });
     const before = JSON.stringify(await h.world.store.get(taskKey(h.task.taskId)));
     const missing = await h.routes.route(get(`/v1/dev/tasks/${randomUUID()}/changes`), h.owner);
@@ -395,15 +397,20 @@ describe("the changes route on the core host", () => {
     expect(route).not.toHaveBeenCalled();
   });
 
-  it("has no shared-reader rule of its own: a person the old rule would admit reads no such task here (the one read rule will admit them), and a script token never gets here", async () => {
-    const readsAsReader = vi.fn(async () => true);
-    const h = await host({ taskRules: { route: async () => { throw new Error("not asked"); }, readsAsReader } });
+  it("has no shared-reader rule of its own: a person only the stored share admits is told the code changes are not shown (the table's cell, 403 TASK_PART_NOT_SHOWN), the code host is never asked, and a script token never gets here", async () => {
+    const sharedReader = vi.fn(async () => ({ role: "viewer" }));
+    const route = vi.fn(async () => { throw new Error("not asked"); });
+    const h = await host({ taskRules: { route, sharedReader } });
     const reader = h.callerOf(FAKE_COMPANY, "reader-person");
     const answer = await h.routes.route(get(`/v1/dev/tasks/${h.task.taskId}/changes`), reader);
-    const missing = await h.routes.route(get(`/v1/dev/tasks/${randomUUID()}/changes`), reader);
-    expect(answer?.statusCode).toBe(404);
-    expect(JSON.parse(answer!.body)).toEqual(JSON.parse(missing!.body));
-    expect(readsAsReader).not.toHaveBeenCalled();
+    expect(answer?.statusCode).toBe(403);
+    expect(JSON.parse(answer!.body)).toEqual({ error: { code: "TASK_PART_NOT_SHOWN", message: "The owner shared this task's summary with you. The code changes are not shown." } });
+    expect(sharedReader).toHaveBeenCalledTimes(1);
+    expect(route).not.toHaveBeenCalled();
+    // A stranger the share does not name is the missing task's answer; the same words as a task that does not exist.
+    const none = await host({ taskRules: { route, sharedReader: async () => undefined } });
+    const stranger = none.callerOf(FAKE_COMPANY, "reader-person");
+    expect(JSON.parse((await none.routes.route(get(`/v1/dev/tasks/${none.task.taskId}/changes`), stranger))!.body)).toEqual(JSON.parse((await none.routes.route(get(`/v1/dev/tasks/${randomUUID()}/changes`), stranger))!.body));
     const token = await h.routes.route(get(`/v1/dev/tasks/${h.task.taskId}/changes`), { ...reader, scriptToken: { tokenId: "stk_aaaaaaaaaaaaaaaaaaaa" } });
     expect(token?.statusCode).toBe(403);
   });
@@ -419,7 +426,7 @@ describe("the changes route on the core host", () => {
       const page = Number(new URL(input.request.path, "https://x.invalid").searchParams.get("page"));
       return { statusCode: 200, headers: {}, body: JSON.stringify(pages[page]) };
     });
-    const h = await host({ taskRules: { route, readsAsReader: async () => false } });
+    const h = await host({ taskRules: { route, sharedReader: async () => undefined } });
     // The task has a pull request and an approved plan whose first step cites src/health.ts.
     const plan = planDocument({ claims: [{ id: "1", text: "Health answers 200.", evidence: [{ kind: "code", path: "src/health.ts", startLine: 1, endLine: 3 }] }], decisions: [], checks: { proposed: [{ id: "unit", label: "Unit tests", command: { cwd: "repo/demo", executable: "npx", args: ["vitest"], timeoutSeconds: 60 } }], proves: { unit: ["1"] } } });
     const text = canonicalPlanJson(plan);
@@ -443,7 +450,7 @@ describe("the changes route on the core host", () => {
 
   it("falls back to the code host's kept list and then the worker's report, labelled, when the diff route cannot answer or is not wired", async () => {
     const refusing = vi.fn(async () => ({ statusCode: 502, headers: {}, body: JSON.stringify({ error: { message: "github down for ghp_secret" } }) }));
-    for (const taskRules of [undefined, { route: refusing, readsAsReader: async () => false }]) {
+    for (const taskRules of [undefined, { route: refusing, sharedReader: async () => undefined }]) {
       const h = await host(taskRules === undefined ? {} : { taskRules });
       // The deployment's company-bound reader of a workspace's saved files (the test runtime has none of its own).
       h.runtime.flow.deps.artifacts = createCompanyArtifactReader({ blobs: h.objects, store: h.world.store, companyId: FAKE_COMPANY });
@@ -468,24 +475,29 @@ describe("the changes route on the core host", () => {
     }
   });
 
-  it("the source-code gate: when it says no the code host is never asked, no patch is served, and the answer comes from the kept list", async () => {
+  it("the source-code part of the decision: when it says no, the code host is never asked and no file (path or patch) is served from any source; with it, the files and patches are", async () => {
     const route = vi.fn(async () => ({ statusCode: 200, headers: {}, body: JSON.stringify({ files: [{ path: "src/leak.ts", additions: 1, deletions: 0, patch: "+x" }], more: false }) }));
-    const rules = { route, readsAsReader: async () => false };
+    const rules = { route, sharedReader: async () => undefined };
     const h = await host({ taskRules: rules });
     const digest = "c".repeat(64);
     await h.setWorkflow({ pullRequests: [pullRequest(7)], candidate: { digest } });
     const location = await workspaceKeys(h.runtime.flow.deps, h.stored["workspaceId"] as string);
     await h.world.store.put({ item: { ...verifiedFilesKey(location.workspaceKey, digest), entityType: "VERIFIED_FILES", candidateDigest: digest, complete: true, verifiedAt: "2026-11-15T10:00:00.000Z", files: [{ repository: "demo", path: "src/checked.ts", added: 3, removed: 1 }] } });
-    const context = { flow: h.runtime.flow, blobs: h.objects, caller: { principal: localOwnerPrincipal({ companyId: FAKE_COMPANY, personId: "owner-person" }) }, taskId: h.task.taskId, request: get(`/v1/dev/tasks/${h.task.taskId}/changes`), taskRules: rules };
-    const closed = await readTaskChangesWith(context, { mayReadSourceCode: () => false, cache: createPageCache({ ttlMs: 1000, max: 5 }) });
-    expect(route).not.toHaveBeenCalled();
-    const body = JSON.parse(closed.body) as { changes: { files: Array<Record<string, unknown>> } };
-    expect(body.changes.files).toMatchObject([{ path: "src/checked.ts" }]);
-    expect(JSON.stringify(body)).not.toContain("leak.ts");
-    for (const entry of body.changes.files) expect(entry).not.toHaveProperty("patch");
-    const open = await readTaskChangesWith(context, { mayReadSourceCode: () => true, cache: createPageCache({ ttlMs: 1000, max: 5 }) });
+    const record = (await readTask(h.runtime.flow.deps, h.task.taskId))!;
+    const decisionOf = (sourceCode: boolean): TaskReadDecision => ({ task: record, mode: "owner", money: false, sourceCode, codeDetails: sourceCode, decidedByReadRule: true });
+    const contextOf = (sourceCode: boolean) => ({ flow: h.runtime.flow, blobs: h.objects, caller: { principal: localOwnerPrincipal({ companyId: FAKE_COMPANY, personId: "owner-person" }) }, taskId: h.task.taskId, request: get(`/v1/dev/tasks/${h.task.taskId}/changes`), taskRules: rules, decision: decisionOf(sourceCode), authorize: async () => decisionOf(sourceCode) });
+    const cache = createPageCache({ ttlMs: 1000, max: 5 });
+    // The same cache is shared: the reader who may read source fills it, and the one who may not is never handed what it holds (the decision is asked per request, before the cache).
+    const open = await readTaskChangesWith(contextOf(true), { cache });
     expect(route).toHaveBeenCalledTimes(1);
     expect(JSON.parse(open.body)).toMatchObject({ changes: { files: [{ path: "src/leak.ts", patch: "+x" }] } });
+    const closed = await readTaskChangesWith(contextOf(false), { cache });
+    expect(route).toHaveBeenCalledTimes(1);
+    const body = JSON.parse(closed.body) as { changes: { files: Array<Record<string, unknown>> } };
+    expect(body.changes.files).toEqual([]);
+    expect(closed.body).not.toContain("leak.ts");
+    expect(closed.body).not.toContain("checked.ts");
+    expect(closed.body).not.toContain("+x");
   });
 
   it("asks the code host once for the same pages: a reload and a request at the same time share them, a failed page is never remembered", async () => {
@@ -496,7 +508,7 @@ describe("the changes route on the core host", () => {
       const page = Number(new URL(input.request.path, "https://x.invalid").searchParams.get("page"));
       return { statusCode: 200, headers: {}, body: JSON.stringify({ files: [{ path: `src/p${page}.ts`, additions: 1, deletions: 0, patch: "+x" }], more: page < 2 }) };
     });
-    const h = await host({ taskRules: { route, readsAsReader: async () => false } });
+    const h = await host({ taskRules: { route, sharedReader: async () => undefined } });
     await h.setWorkflow({ pullRequests: [{ ...pullRequest(7), headSha: "e".repeat(40) }] });
     const ask = () => h.routes.route(get(`/v1/dev/tasks/${h.task.taskId}/changes`), h.owner);
     const [first, second] = await Promise.all([ask(), ask()]);
@@ -513,7 +525,7 @@ describe("the changes route on the core host", () => {
   it("a pull request with no recorded head is never cached (a new push could not be told apart), and the key names the company", async () => {
     let calls = 0;
     const route = vi.fn(async () => { calls += 1; return { statusCode: 200, headers: {}, body: JSON.stringify({ files: [{ path: "a.ts", additions: 1, deletions: 0 }], more: false }) }; });
-    const h = await host({ taskRules: { route, readsAsReader: async () => false } });
+    const h = await host({ taskRules: { route, sharedReader: async () => undefined } });
     await h.setWorkflow({ pullRequests: [pullRequest(7)] });
     await h.routes.route(get(`/v1/dev/tasks/${h.task.taskId}/changes`), h.owner);
     await h.routes.route(get(`/v1/dev/tasks/${h.task.taskId}/changes`), h.owner);
@@ -525,7 +537,7 @@ describe("the changes route on the core host", () => {
 
   it("a diff answer that is not a 200 is not used, even with a page-shaped body, and nothing of it is served", async () => {
     const page = { repository: "demo", number: 7, page: 1, more: false, files: [{ path: "src/leak.ts", additions: 1, deletions: 0, patch: "+x" }] };
-    const h = await host({ taskRules: { route: async () => ({ statusCode: 403, headers: {}, body: JSON.stringify(page) }), readsAsReader: async () => false } });
+    const h = await host({ taskRules: { route: async () => ({ statusCode: 403, headers: {}, body: JSON.stringify(page) }), sharedReader: async () => undefined } });
     await h.setWorkflow({ pullRequests: [pullRequest(7)] });
     const answer = await h.routes.route(get(`/v1/dev/tasks/${h.task.taskId}/changes`), h.owner);
     expect(answer?.statusCode).toBe(200);

@@ -9,7 +9,8 @@
 // and a person the task is shown to but not this part (a share) gets TASK_PART_NOT_SHOWN.
 import type { ObjectStorage } from "@agentx/contracts";
 import type { TaskCaller } from "../core/task-flow/deps.js";
-import type { TaskReadDecision } from "../core/task-flow/read-rule.js";
+import type { TaskRead, TaskReadDecision, TaskReadSeams } from "../core/task-flow/read-rule.js";
+import type { TaskRecord } from "../core/task-flow/records.js";
 import type { TaskFlow } from "../core/task-flow/flow.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import type { CoreDevWiring } from "./dev-routes.js";
@@ -31,6 +32,8 @@ export interface TaskScreenContext {
   decision: TaskReadDecision;
   /** The deployment's old task rules (aws/core-task-rule-routes.ts), where wired: the changes read pages a pull request's files through its diff route. */
   taskRules?: CoreDevWiring["taskRules"];
+  /** The one read rule for another read of this same task (the changes read pages the diff route, which asks the rule for its own read); bound by the mount with the person and their live company role. */
+  authorize?: (read: TaskRead, task: TaskRecord, seams?: TaskReadSeams) => Promise<TaskReadDecision>;
 }
 export type TaskScreenHandler = (context: TaskScreenContext) => Promise<BrokerResponse>;
 
@@ -48,7 +51,7 @@ export const TASK_SCREEN_HANDLERS: Readonly<Record<TaskScreenRead, TaskScreenHan
 };
 
 export async function routeTaskScreen(context: Omit<TaskScreenContext, "taskId" | "decision"> & { decide(read: TaskScreenRead): Promise<TaskReadDecision> }, route: { taskId: string; read: TaskScreenRead }): Promise<BrokerResponse> {
-  const { flow, blobs, caller, request, taskRules } = context;
+  const { flow, blobs, caller, request, taskRules, authorize } = context;
   const decision = await context.decide(route.read);
-  return TASK_SCREEN_HANDLERS[route.read]({ flow, blobs, caller, request, taskId: route.taskId, decision, ...(taskRules === undefined ? {} : { taskRules }) });
+  return TASK_SCREEN_HANDLERS[route.read]({ flow, blobs, caller, request, taskId: route.taskId, decision, ...(taskRules === undefined ? {} : { taskRules }), ...(authorize === undefined ? {} : { authorize }) });
 }

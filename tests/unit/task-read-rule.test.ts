@@ -124,6 +124,7 @@ const NEW_READ_NAMES = ["spec", "checks", "changes", "timeline"] as const;
 /** The new reads whose lane has filled the stub: a person admitted is served (200), not told ROUTE_NOT_SERVED. */
 const FILLED_READS: readonly string[] = [
   "spec", // RD-2a
+  "changes", // RD-2b2
 ];
 
 describe("the one read rule: what the decision carries", () => {
