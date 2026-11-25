@@ -2,7 +2,7 @@
 // a company reaches only the repositories its OWN projects name (read from its catalog, never from the request), a system scope is refused, and the client's own rules (tenant binding at
 // every mint, least privilege, no redirects) still hold. The CodeHost and CheckRunner contracts and the GitHub client conformance suite run through the bridge.
 import { generateKeyPairSync } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { orgProjectCatalogKey, projectRevisionKey, type DocumentStore, type JsonValue, type OrgId, type ProjectDefinition } from "@agentx/contracts";
 import { FakeHostModel } from "@agentx/broker/fakes";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
@@ -236,6 +236,28 @@ describe("the core's code host on the broker: the company's catalog", () => {
     expect(pages.length).toBe(2);
     expect((await companyRepositoriesFromStore(async () => paged, { maxPages: 3 })(A)).size).toBe(3);
     expect(MAX_CATALOG_PAGES).toBe(5);
+  });
+
+  it("one project whose current revision cannot be read names no repository and is logged, and every other project of the company still lists (arch rule 9)", async () => {
+    const store = new MemoryDocumentStore();
+    await register(store, A, project("good", ["https://github.com/acme/good"]));
+    await register(store, A, project("also-good", ["https://github.com/acme/also-good"]));
+    // A catalogue row whose current revision does not read (a corrupt record, or a field a later release wrote).
+    await store.put({ item: { ...projectRevisionKey(A, "bad", 1), entityType: "PROJECT", definition: { name: "bad", revision: 1 } } });
+    await store.put({ item: { ...orgProjectCatalogKey(A, "bad"), entityType: "PROJECT_CATALOG", latestRevision: 1 } });
+    // A catalogue that names a revision row that is not there is the same.
+    await store.put({ item: { ...orgProjectCatalogKey(A, "dangling"), entityType: "PROJECT_CATALOG", latestRevision: 4 } });
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((line: unknown) => { lines.push(String(line)); });
+    try {
+      expect([...await companyRepositoriesFromStore(async () => store)(A)].sort()).toEqual(["acme/also-good", "acme/good"]);
+    } finally { spy.mockRestore(); }
+    const events = lines.map((line) => JSON.parse(line) as Record<string, unknown>).filter((entry) => entry["event"] === "project.left_out_unreadable_revision");
+    expect(events.map((entry) => entry["project"]).sort()).toEqual(["bad", "dangling"]);
+    expect(events[0]).toMatchObject({ rule: "project_revision_unreadable", companyId: A });
+    // Only the unreadable project's own repository operations refuse; the bridge still serves the good ones.
+    const provider = companyScopedGitHubProvider((await bridgeWorld()).provider, { repositoriesOf: companyRepositoriesFromStore(async () => store) });
+    expect(await refusal(() => provider.getRepositoryIdentity("https://github.com/acme/bad", GITHUB_ORG_SCOPE))).toMatchObject({ code: "PROJECT_ACCESS_DENIED", message: NOT_A_COMPANY_REPOSITORY });
   });
 
   it("refuses a malformed catalog row, a page that is not one, and a store failure, in fixed words that echo nothing", async () => {
