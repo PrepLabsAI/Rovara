@@ -48,18 +48,18 @@ describe("Lead 4 fallback rulings", () => {
       .toEqual({ items: { s: "verified" }, final: true });
   });
 
-  it("leaves the old three-line window unchanged for comments", async () => {
+  it("a command in a comment is refused wherever the cited line is (there is no line window any more)", async () => {
     expect(await verifyProposalDetailed(readLines(source("# run: npm ci")), proposalOf({ setup: [command("run: npm ci", "ci.yml", 34)] })))
-      .toEqual({ items: { s: "verified" }, final: true });
+      .toEqual({ items: { s: "unverified" }, final: true });
   });
 
   it.each([
     { name: "contiguous lines with normalised whitespace", body: ["run:   npm ci", "  next: npm test"], want: "verified" },
-    { name: "flattened lines", body: ["run: npm ci next: npm test"], want: "unverified" },
-    { name: "a different line break", body: ["run: npm", "ci next: npm test"], want: "unverified" },
+    { name: "the quote's line break read as a space in the file", body: ["run: npm ci next: npm test"], want: "verified" },
+    { name: "a different line break", body: ["run: npm", "ci next: npm test"], want: "verified" },
     { name: "an intervening line", body: ["run: npm ci", "intervening", "next: npm test"], want: "unverified" },
     { name: "reversed lines", body: ["next: npm test", "run: npm ci"], want: "unverified" },
-    { name: "a repeated multiline quote", body: ["run: npm ci", "next: npm test", "run:   npm ci", "next: npm test"], want: "unverified" },
+    { name: "a repeated multiline quote", body: ["run: npm ci", "next: npm test", "run:   npm ci", "next: npm test"], want: "verified" },
     { name: "a comment on the second line", body: ["run: npm ci", "# next: npm test"], quote: "run: npm ci\n# next: npm test", want: "unverified" },
     { name: "a partial command token", body: ["run: pnpm ci", "next: npm test"], quote: "run: pnpm ci\nnext: npm test", want: "unverified" },
   ])("multiline fallback: $name", async ({ body, quote, want }) => {
@@ -67,7 +67,7 @@ describe("Lead 4 fallback rulings", () => {
       .toEqual({ items: { s: want }, final: true });
   });
 
-  it.each([false, true])("keeps non-command items in their strict window even when another item reads the whole file (%s)", async (shared) => {
+  it.each([false, true])("non-command items: the quote anywhere in the file holds, but a name cut out of a longer name in the file (widgets-old, api.example.com for example.com) does not (%s)", async (shared) => {
     const metadata = { confidence: "high", risk: "low" };
     const proposal = proposalOf({
       repositories: [{ id: "r", value: { url: "https://github.com/acme/widgets" }, ...metadata, from: [citation("https://github.com/acme/widgets")] }],
@@ -76,7 +76,7 @@ describe("Lead 4 fallback rulings", () => {
       setup: shared ? [command("run: npm ci")] : [],
     });
     expect(await verifyProposalDetailed(readLines(source("host: api.example.com", "repository: https://github.com/acme/widgets-old", "run: npm ci")), proposal))
-      .toEqual({ items: { r: "unverified", d: "unverified", k: "unverified", ...(shared ? { s: "verified" } : {}) }, final: true });
+      .toEqual({ items: { r: "unverified", d: "unverified", k: "verified", ...(shared ? { s: "verified" } : {}) }, final: true });
   });
 
   it("allows the fallback for tests and check commands too", async () => {
@@ -86,7 +86,7 @@ describe("Lead 4 fallback rulings", () => {
       .toEqual({ items: { s: "verified", c: "verified" }, final: true });
   });
 
-  it.each([false, true])("pins both reads to the cited commit; current commit has the quote = %s", async (present) => {
+  it.each([false, true])("pins the read to the cited commit; current commit has the quote = %s", async (present) => {
     const calls: { repo: string; path: string; commit: string; untilLine?: number }[] = [];
     const read = async (repo: string, path: string, commit: string, options: { untilLine?: number }) => {
       calls.push({ repo, path, commit, ...options });
@@ -97,7 +97,7 @@ describe("Lead 4 fallback rulings", () => {
     expect(await verifyProposalDetailed(read, proposalOf({ setup: [command("run: npm ci")] })))
       .toEqual({ items: { s: present ? "verified" : "unverified" }, final: true });
     expect(calls.map(({ repo, path, commit, untilLine }) => ({ repo, path, commit, untilLine })))
-      .toEqual([{ repo: "demo", path: "ci.yml", commit: SHA, untilLine: 32 }, { repo: "demo", path: "ci.yml", commit: SHA, untilLine: undefined }]);
+      .toEqual([{ repo: "demo", path: "ci.yml", commit: SHA, untilLine: undefined }]);
   });
 
   it.each(["npm", "1234567", "😀😀😀😀"]) ("refuses a trivially short quote %s without reading", async (quote) => {
