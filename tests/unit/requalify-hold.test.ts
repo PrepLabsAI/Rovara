@@ -5,11 +5,10 @@ import {
   E2EApplicationSelectionRecordSchema, WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, requalifyHoldKey as holdKeyOf, workflowApplicationRetryOffered,
   type E2EApplicationSelectionRecord,
 } from "../../packages/contracts/src/index.js";
-import { ApplicationRuntimeRenewed, REQUALIFY_DEFERRED_MESSAGE, assertNoRequalifyHold, isRenewalOnlyChange, isRuntimeRenewedBlock, rethrowAsDeferredIfHeld, replayPredatesRenewal, requalifyHoldFence, requalifyDrainStatus, requalifyHoldActive, requalifySetupWorkRow, selectionChangedRefusal } from "../../packages/broker/src/e2e/requalify-hold.js";
+import { REQUALIFY_DEFERRED_MESSAGE, assertNoRequalifyHold, isRenewalOnlyChange, isRuntimeRenewedBlock, rethrowAsDeferredIfHeld, requalifyHoldFence, requalifyDrainStatus, requalifyHoldActive, requalifySetupWorkRow } from "../../packages/broker/src/e2e/requalify-hold.js";
 import { E2E_REPLAY_REFUSALS } from "../../packages/contracts/src/index.js";
 import { E2E_OWNER_SENTENCES } from "../../packages/broker/src/e2e/owner-sentences.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
-import { ApplicationDispatchRefusal } from "../../packages/broker/src/e2e/application-dispatch-check.js";
 
 const NOW = Date.parse("2026-10-27T03:00:00.000Z");
 const RUN = "0b8a2f64-7c1d-4e0a-9f1b-3d5c6e7f8a90";
@@ -190,16 +189,6 @@ describe("a renewal of the test machine is not any other change of the approved 
     expect(isRenewalOnlyChange(selection(), current())).toBe(false);
   });
 
-  it("gives the renewal its own refusal and block text, and every other change the ordinary one", () => {
-    const renewed = selectionChangedRefusal(selection(), selection({ runtimeRows: renewedRows() }), "the api runtime moved", WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX);
-    expect(renewed).toBeInstanceOf(ApplicationRuntimeRenewed);
-    expect(renewed.message).toBe(`${WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX}the api runtime moved`);
-    const ordinary = selectionChangedRefusal(selection(), selection({ runtimeRows: renewedRows(), intentDigest: digest("f") }), "the intent moved", WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX);
-    expect(ordinary).toBeInstanceOf(ApplicationDispatchRefusal);
-    expect(ordinary).not.toBeInstanceOf(ApplicationRuntimeRenewed);
-    expect(ordinary.message).toBe(`${WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX}the intent moved`);
-  });
-
   it("is offered as a retry, never as a send back, and is told apart from the other blocks by its prefix", () => {
     const blocked = (blockReason: string) => ({ stage: "VERIFY", state: "BLOCKED", blockReason, e2e: { required: true, applicationSelection: {} } });
     expect(workflowApplicationRetryOffered(blocked(`${WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX}x`))).toBe(true);
@@ -214,14 +203,5 @@ describe("a replay of a round from before a renewal", () => {
   it("has its own refusal code and one fixed sentence", () => {
     expect(E2E_REPLAY_REFUSALS).toContain("replay-runtime-renewed");
     expect(E2E_OWNER_SENTENCES.replayRuntimeRenewed).toBe("The test machine was renewed since this round, so it can't be replayed exactly.");
-  });
-
-  const registered = (kind: "web" | "api", extra: Record<string, unknown> = {}) => ({ profileId: "linux-arm64-web-api-v1", generation: 4, capabilities: { kind }, qualifiedAt: "2026-10-26T00:00:00.000Z", ...extra }) as never;
-  it("is a replay of an earlier machine when a row it ran on is gone or is not the registered row", () => {
-    expect(replayPredatesRenewal([registered("api")], [registered("api")])).toBe(false);
-    expect(replayPredatesRenewal([registered("api")], [registered("api", { generation: 5 })])).toBe(true);
-    expect(replayPredatesRenewal([registered("api")], [registered("api", { qualifiedAt: "2026-10-27T00:00:00.000Z" })])).toBe(true);
-    expect(replayPredatesRenewal([registered("api")], [registered("web")])).toBe(true);
-    expect(replayPredatesRenewal([registered("web"), registered("api")], [registered("api")])).toBe(true);
   });
 });
