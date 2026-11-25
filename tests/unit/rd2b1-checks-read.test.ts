@@ -88,9 +88,10 @@ describe("the state of each row (derived from stored facts only)", () => {
   });
 
   it("with no workflow there are no rows and no reviews (an empty answer, never an error); a plan that could not be read says so", () => {
-    expect(view({ workflow: undefined })).toEqual({ taskId: "t1", acceptance: [], rows: [], reviews: [], notTested: [] });
-    expect(view({ workflow: undefined, planNote: "unreadable" }).notTested).toEqual([PLAN_UNREADABLE_WORDS]);
-    expect(view({ workflow: workflowOf({ results: [PASS("unit")] }), planNote: "unreadable" }).notTested).toEqual([PLAN_UNREADABLE_WORDS]);
+    expect(view({ workflow: undefined })).toEqual({ taskId: "t1", acceptance: [], rows: [], reviews: [], notTested: [], notes: [] });
+    expect(view({ workflow: undefined, planNote: "unreadable" }).notes).toEqual([PLAN_UNREADABLE_WORDS]);
+    expect(view({ workflow: undefined, planNote: "unreadable" }).notTested).toEqual([]);
+    expect(view({ workflow: workflowOf({ results: [PASS("unit")] }), planNote: "unreadable" }).notes).toEqual([PLAN_UNREADABLE_WORDS]);
   });
 });
 
@@ -277,8 +278,9 @@ describe("failing tests, links, the scan, reviews and what was not tested", () =
     expect(answer.rows.map((row) => row.id)).toEqual(["unit", "lint", "scan"]);
     expect(view({ workflow: workflowOf({ results: [PASS("unit")] }) }).securityScan).toBeUndefined();
     const reviewOnly = view({ workflow: workflowOf({ required: [], reviewOnly: true }) });
-    expect(reviewOnly.notTested).toEqual([REVIEW_ONLY_WORDS]);
-    expect(view({ workflow: workflowOf({ required: [], reviewOnly: true, noneReason: "Docs only" }) }).notTested).toEqual(["Docs only"]);
+    expect(reviewOnly.notes).toEqual([REVIEW_ONLY_WORDS]);
+    expect(reviewOnly.notTested).toEqual([]);
+    expect(view({ workflow: workflowOf({ required: [], reviewOnly: true, noneReason: "Docs only" }) }).notes).toEqual(["Docs only"]);
   });
 
   it("every text from a repository, a worker or a model is made plain: redacted, one line, inert, cut; a check recorded but not selected is still a row", () => {
@@ -356,11 +358,12 @@ describe("a state never reads better than the stored facts", () => {
 describe("missing parts are said, ids are words, and who may see code", () => {
   it("no approved plan, an approved plan with no structured form and an unreadable pack each add their one fixed sentence", () => {
     const workflow = workflowOf({ results: [PASS("unit")] });
-    expect(view({ workflow, planNote: "unapproved" }).notTested).toEqual([CHECKS_WORDS.planUnapproved]);
-    expect(view({ workflow, planNote: "markdown" }).notTested).toEqual([CHECKS_WORDS.planNotStructured]);
-    expect(view({ workflow, packUnreadable: true }).notTested).toEqual([CHECKS_WORDS.evidenceUnreadable]);
-    expect(view({ workflow: undefined, packUnreadable: true, planNote: "unapproved" }).notTested).toEqual([CHECKS_WORDS.planUnapproved, CHECKS_WORDS.evidenceUnreadable]);
-    expect(unavailableChecksView("t1").notTested).toEqual([CHECKS_WORDS.viewFailed]);
+    expect(view({ workflow, planNote: "unapproved" }).notes).toEqual([CHECKS_WORDS.planUnapproved]);
+    expect(view({ workflow, planNote: "markdown" }).notes).toEqual([CHECKS_WORDS.planNotStructured]);
+    expect(view({ workflow, packUnreadable: true }).notes).toEqual([CHECKS_WORDS.evidenceUnreadable]);
+    expect(view({ workflow: undefined, packUnreadable: true, planNote: "unapproved" }).notes).toEqual([CHECKS_WORDS.planUnapproved, CHECKS_WORDS.evidenceUnreadable]);
+    expect(unavailableChecksView("t1").notes).toEqual([CHECKS_WORDS.viewFailed]);
+    expect(unavailableChecksView("t1").notTested).toEqual([]);
   });
 
   it("a check or scenario id that is a word of the language (toString, constructor, hasOwnProperty) is just a row: no lookup finds a function", () => {
@@ -516,7 +519,7 @@ describe("GET /v1/dev/tasks/{id}/checks on a core task", () => {
       const answer = await read(versions);
       expect(answer.rows.map((row) => row.proves), "no mapping").toEqual([[], []]);
       expect(answer.acceptance).toEqual([]);
-      expect(answer.notTested).toEqual([CHECKS_WORDS.planUnapproved]);
+      expect(answer.notes).toEqual([CHECKS_WORDS.planUnapproved]);
       expect(JSON.stringify(answer)).not.toContain("Health answers 200");
     }
   });
@@ -532,7 +535,7 @@ describe("GET /v1/dev/tasks/{id}/checks on a core task", () => {
     await w.blobs.put(`private/${broken.ownerKey}/${broken.workspaceId}/plan-v1.json`, Buffer.from("{}"), { contentType: "application/json", metadata: {}, retention: "evidence-std" }, { overwrite: true });
     const answer = await w.read(owner, broken.taskId);
     expect(answer?.statusCode).toBe(200);
-    expect((JSON.parse(answer!.body) as { checks: ChecksView }).checks.notTested).toEqual([PLAN_UNREADABLE_WORDS]);
+    expect((JSON.parse(answer!.body) as { checks: ChecksView }).checks.notes).toEqual([PLAN_UNREADABLE_WORDS]);
   });
 
   it("code details follow the read rule's decision: with no live grant proved (a laptop) the states and counts are served and the links are withheld; with it proved the link is there", async () => {
@@ -603,14 +606,14 @@ describe("GET /v1/dev/tasks/{id}/checks on a core task", () => {
     workflow.artifacts.forEach((artifact) => { delete artifact["format"]; });
     await w.fake.store.put({ item: { ...stored, workflow } as never });
     const markdown = await w.read(owner, old.taskId);
-    expect((JSON.parse(markdown!.body) as { checks: ChecksView }).checks.notTested).toEqual([CHECKS_WORDS.planNotStructured]);
+    expect((JSON.parse(markdown!.body) as { checks: ChecksView }).checks.notes).toEqual([CHECKS_WORDS.planNotStructured]);
     expect(markdown!.headers["cache-control"]).toBe("no-store");
     const none = await w.taskOf(owner, FAKE_COMPANY);
     expect((JSON.parse((await w.read(owner, none.taskId))!.body) as { checks: ChecksView }).checks.notTested).toEqual([]);
     const bad = await w.taskOf(owner, FAKE_COMPANY);
     await w.blobs.put(evidencePackKey({ ownerKey: bad.ownerKey, workspaceId: bad.workspaceId, taskId: bad.taskId }, DIGEST), Buffer.from("not a pack"), { contentType: "application/json", metadata: {}, retention: "evidence-std" }, { overwrite: true });
     const unreadable = (JSON.parse((await w.read(owner, bad.taskId))!.body) as { checks: ChecksView }).checks;
-    expect(unreadable.notTested).toEqual([CHECKS_WORDS.evidenceUnreadable]);
+    expect(unreadable.notes).toEqual([CHECKS_WORDS.evidenceUnreadable]);
     expect(unreadable.rows.map((row) => row.state)).toEqual(["passed", "failed"]);
   });
 

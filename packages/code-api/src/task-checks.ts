@@ -48,6 +48,8 @@ export const TaskChecksReadSchema = loose({
     securityScan: loose({ tool: z.string().nullish(), counts: z.record(z.string(), z.number()).nullish(), items: z.array(z.unknown()).nullish() }).nullish(),
     /** What the task did not test, in plain words. */
     notTested: z.array(z.string()).nullish(),
+    /** Notices about the read itself (the checks could not be shown, a part could not be used, no automated check applies), in plain words; never untested items, so a client does not print them as such. */
+    notes: z.array(z.string()).nullish(),
   }).nullish(),
 });
 export type TaskChecksRead = z.infer<typeof TaskChecksReadSchema>;

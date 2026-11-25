@@ -20,7 +20,7 @@ export type CheckState = (typeof CHECK_STATES)[number];
 export type ReviewState = "not_run" | "running" | "passed" | "partial" | "findings" | "findings_accepted" | "unfinished";
 
 /** The most rows, claims, links and lines one answer carries (the stored sources are bounded too; these keep the answer small whatever they hold). */
-export const CHECKS_VIEW_LIMITS = { rows: 100, acceptance: 60, screenshots: 12, notTested: 20, reviewFindings: 20, scanItems: 20, checksPerClaim: 20 } as const;
+export const CHECKS_VIEW_LIMITS = { rows: 100, acceptance: 60, screenshots: 12, notTested: 20, notes: 5, reviewFindings: 20, scanItems: 20, checksPerClaim: 20 } as const;
 
 /** Whether Code serves the files the links name (`/v1/app/tasks/{taskId}/evidence/{sha256}`, RD-2d). While it does not, a link carries no address and says so; RD-2d turns this on in the same change that mounts the route. */
 export const EVIDENCE_FILES_SERVED = false;
@@ -59,7 +59,10 @@ export interface ChecksView {
   rows: CheckRowView[];
   reviews: ReviewRowView[];
   securityScan?: { tool: string; counts: Record<string, number>; items: Array<{ ruleId: string; severity: string; path: string; line: number; message: string }> };
+  /** What the task did not test (the pack's own list), each a thing a person may print as "not tested". */
   notTested: string[];
+  /** Notices about this read itself, never untested items: the checks could not be shown, a part could not be used (the plan, the recorded evidence), or no automated check applies (the policy's own words). */
+  notes: string[];
 }
 
 /** Why there is no plan to read claims from: no version is approved yet, the approved one has no structured form (written before structured plans), or it could not be read. A task with no plan document at all has no note. */
@@ -379,22 +382,27 @@ function scanOf(kept: EvidencePack | undefined, codeDetails: boolean): ChecksVie
   return { tool: words(scan.tool, 60), counts: { ...scan.bySeverity }, items };
 }
 
-function notTestedOf(input: ChecksViewInput, workflow: WorkflowSnapshot, verified: Verified, kept: EvidencePack | undefined): string[] {
+/** What the task did not test: the evidence pack's own list only. A notice about this read is a note (`notesOf`), never an untested item. */
+function notTestedOf(kept: EvidencePack | undefined): string[] {
+  return (kept?.notTested ?? []).slice(0, CHECKS_VIEW_LIMITS.notTested).map((item) => (item.text === "" ? words(item.reason, 100) : `${words(item.text, 200)}: ${words(item.reason, 100)}`));
+}
+
+/** The notices: the review-only sentence (the policy's own text when it has one), then the parts the join could not use. */
+function notesOf(input: ChecksViewInput, workflow: WorkflowSnapshot, verified: Verified): string[] {
   const reviewOnly = verified.kind === "current" && workflow.verification?.reviewOnly === true;
   const reviewOnlyWords = workflow.checkPolicy?.noneReason === undefined ? CHECKS_WORDS.reviewOnly : words(workflow.checkPolicy.noneReason, 300);
-  const packed = (kept?.notTested ?? []).slice(0, CHECKS_VIEW_LIMITS.notTested).map((item) => (item.text === "" ? words(item.reason, 100) : `${words(item.text, 200)}: ${words(item.reason, 100)}`));
-  return [...(reviewOnly ? [reviewOnlyWords] : []), ...packed, ...missingParts(input)].slice(0, CHECKS_VIEW_LIMITS.notTested);
+  return [...(reviewOnly ? [reviewOnlyWords] : []), ...missingParts(input)].slice(0, CHECKS_VIEW_LIMITS.notes);
 }
 
 /** The parts the join could not use, in fixed words (a missing part is said, never silent). */
 const missingParts = (input: ChecksViewInput): string[] => [...(input.planNote === undefined ? [] : [PLAN_NOTE_WORDS[input.planNote]]), ...(input.packUnreadable === true ? [CHECKS_WORDS.evidenceUnreadable] : [])];
 
 /** What a surface gets when the join itself could not be made: no rows, one fixed sentence. */
-export const unavailableChecksView = (taskId: string): ChecksView => ({ taskId, acceptance: [], rows: [], reviews: [], notTested: [CHECKS_WORDS.viewFailed] });
+export const unavailableChecksView = (taskId: string): ChecksView => ({ taskId, acceptance: [], rows: [], reviews: [], notTested: [], notes: [CHECKS_WORDS.viewFailed] });
 
 export function checksViewOf(input: ChecksViewInput): ChecksView {
   const { taskId, workflow, plan } = input;
-  if (workflow === undefined) return { taskId, acceptance: [], rows: [], reviews: [], notTested: missingParts(input) };
+  if (workflow === undefined) return { taskId, acceptance: [], rows: [], reviews: [], notTested: [], notes: missingParts(input) };
   const digest = workflow.candidate?.digest;
   const verified = verifiedOf(workflow);
   const kept = input.pack !== undefined && digest !== undefined && input.pack.candidateDigest === digest ? input.pack : undefined;
@@ -407,6 +415,6 @@ export function checksViewOf(input: ChecksViewInput): ChecksView {
   const rows = rowsOf(context, checksOf(workflow, plan, packed), allScenarios(plan, kept), plan?.checks?.proves);
   return {
     taskId, ...opt("candidateDigest", digest), ...opt("ranOn", ranOnOf(verified)), acceptance: acceptanceOf(plan, rows), rows,
-    reviews: ROLES.map(([role, name]) => reviewRowOf(workflow, role, name, input.codeDetails)), ...opt("securityScan", scanOf(kept, input.codeDetails)), notTested: notTestedOf(input, workflow, verified, kept),
+    reviews: ROLES.map(([role, name]) => reviewRowOf(workflow, role, name, input.codeDetails)), ...opt("securityScan", scanOf(kept, input.codeDetails)), notTested: notTestedOf(kept), notes: notesOf(input, workflow, verified),
   };
 }
