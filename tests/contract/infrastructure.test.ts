@@ -475,7 +475,7 @@ describe("production release pipeline", () => {
   const stagePlan = (): string[] =>
     pipelineProperties().Stages.map((stage) => `${stage.Name}:${stage.Actions.map((action) => `${action.RunOrder}:${action.Name}`).join(",")}`);
 
-  it("starts a V2 pipeline for filtered mainline pushes and for Cloud release tags, with both full clones, beta first and production behind a disabled transition", () => {
+  it("starts a V2 pipeline for filtered mainline pushes and for Cloud release tags, with both full clones, beta first and production behind a disabled transition and its own approval", () => {
     template.hasResourceProperties("AWS::CodePipeline::Pipeline", {
       PipelineType: "V2",
       // #1242: a run waiting at the disabled transition is replaced by a newer one only in SUPERSEDED mode, so a promotion takes beta's newest commit.
@@ -531,7 +531,8 @@ describe("production release pipeline", () => {
     expect(stagePlan()).toEqual([
       "Source:1:GitHub,1:CloudGitHub",
       "Beta:1:CodePreflight,2:Preflight,3:CloudImage,4:CloudGateway,5:GatewayCheck,6:ReleaseBeta,7:CloudWebApp,8:CloudProof",
-      "Production:1:CodePreflight,2:Preflight,3:CloudImage,4:CloudGateway,5:GatewayCheck,6:ReleaseProduction,7:CloudWebApp,8:CloudProof",
+      // PROD-APPROVAL-BOUND: the approval is the Production stage's second action, right after the read-only Code Preflight that closes the gate (release-pipeline-prod-approval.test.ts).
+      "Production:1:CodePreflight,2:ApproveProduction,3:Preflight,4:CloudImage,5:CloudGateway,6:GatewayCheck,7:ReleaseProduction,8:CloudWebApp,9:CloudProof",
     ]);
   });
 
@@ -542,23 +543,25 @@ describe("production release pipeline", () => {
       const orders = stage.Actions.map((action) => action.RunOrder);
       expect(new Set(orders).size, `${name}: no two actions may share a run order`).toBe(orders.length);
       expect(orders).toEqual([...orders].sort((a, b) => a - b));
-      const names = stage.Actions.map((action) => action.Name);
+      // Production holds its own approval right after the Code Preflight (PROD-APPROVAL-BOUND); the Cloud Preflight follows it.
+      const names = stage.Actions.map((action) => action.Name).filter((actionName) => actionName !== "ApproveProduction");
+      expect(stage.Actions.map((action) => action.Name).slice(0, 2)).toEqual(name === "Production" ? ["CodePreflight", "ApproveProduction"] : ["CodePreflight", "Preflight"]);
       expect(names.slice(0, 2)).toEqual(["CodePreflight", "Preflight"]);
       expect(names.indexOf("GatewayCheck")).toBeLessThan(names.indexOf(release));
       expect(names.indexOf("CloudGateway")).toBeLessThan(names.indexOf("GatewayCheck"));
       expect(names.indexOf(release)).toBeLessThan(names.indexOf("CloudWebApp"));
       expect(names.indexOf("CloudWebApp")).toBeLessThan(names.indexOf("CloudProof"));
-      expect(JSON.stringify(stage.Actions[0]!.Configuration.ProjectName)).toContain(`${name}CodePreflight`);
+      expect(JSON.stringify(stage.Actions.find((action) => action.Name === "CodePreflight")!.Configuration.ProjectName)).toContain(`${name}CodePreflight`);
       template.hasResourceProperties("AWS::CodeBuild::Project", { Name: preflightProject });
     }
   });
 
   it("declares the five V2 variables with defaults, so a push or a tag can start a run", () => {
     const variables = pipelineProperties().Variables;
-    expect(variables.map((variable) => [variable.Name, variable.DefaultValue])).toEqual([["CLOUD_REF", "latest"], ["CODE_RELEASE", "run"], ["CLOUD_PROD", "on"], ["PIPELINE_MODE", "release"], ["CODE_ROLLBACK_TARGET", "none"]]);
+    expect(variables.map((variable) => [variable.Name, variable.DefaultValue])).toEqual([["CLOUD_REF", "from-trigger"], ["CODE_RELEASE", "run"], ["CLOUD_PROD", "off"], ["PIPELINE_MODE", "release"], ["CODE_ROLLBACK_TARGET", "none"]]);
     expect(variables[0]!.Description).toContain("older tag is a Cloud rollback");
     expect(variables[1]!.Description).toContain("Preflight may force skip");
-    // CLOUD_PROD is a per-run choice that defaults ON (no default-off switch): the cutover's beta-only run starts the execution with CLOUD_PROD=off.
+    // CLOUD_PROD defaults OFF so no trigger deploys production's Cloud; the run that promotes starts with CLOUD_PROD=on (a per-run choice, not a switch).
     expect(variables[2]!.Description).toContain("not a switch");
     // R2: an adoption run can go through the pipeline; the default is a release run.
     expect(variables[3]!.Description).toContain("adopt only checks");
@@ -602,6 +605,8 @@ describe("production release pipeline", () => {
         expect(variables.CLOUD_REF?.value).toBe("#{variables.CLOUD_REF}");
         expect(variables.CODE_RELEASE?.value).toBe("#{variables.CODE_RELEASE}");
         expect(variables.CLOUD_PROD?.value).toBe("#{variables.CLOUD_PROD}");
+        // Beta's Preflight only (the 1000-character limit): it resolves a CLOUD_REF of from-trigger from the Cloud source's commit; Production's reads the state Beta left.
+        expect(variables.CLOUD_SOURCE_COMMIT?.value).toBe(step === "preflight" && environment === "beta" ? "#{CloudSourceVariables.CommitId}" : undefined);
         expect(variables.PIPELINE_MODE?.value).toBe("#{variables.PIPELINE_MODE}");
         // R3: the account this stage must run in, never a literal: beta's from the BetaAccountId parameter, production's this stack's own account.
         expect(variables.ROVARA_EXPECTED_DEPLOY_ACCOUNT?.value, `${stageName} ${name}`).toBe(environment === "beta" ? "<Ref BetaAccountId>" : "<Ref AWS::AccountId>");
@@ -662,8 +667,9 @@ describe("production release pipeline", () => {
         expect(Object.keys(variables).filter((name) => /^(CODE_CTX|CODE_LIVE_SHA|PIPELINE_SUPERSEDES|CODE_ROLLBACK_TARGET)$/u.test(name)), `${stageName} ${action.Name}`).toEqual(action.Name === "Preflight" ? ["CODE_CTX"] : []);
         if (action.Name === "Preflight") expect(variables.CODE_CTX?.value).toBe(`#{${namespace}.CODE_CTX}`);
       }
-      // The Code Preflight runs first, so its export exists before any Cloud action reads it.
+      // The Code Preflight runs first, so its export exists before any Cloud action reads it (Production's approval, run order 2, comes after it).
       expect(preflight.RunOrder).toBe(1);
+      expect(Math.min(...stage(stageName).Actions.filter((action) => action.Name !== "ApproveProduction" && action !== preflight).map((action) => action.RunOrder))).toBeGreaterThan(preflight.RunOrder);
     }
     // The history is read by both Preflights (read-only, own stage), and the waiting run only by Beta's, read-only on this pipeline.
     for (const [roleMatch, stageName] of [["BetaCodePreflightRole", "beta"], ["ProductionCodePreflightRole", "production"]] as const) {
