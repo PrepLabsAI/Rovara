@@ -1,6 +1,6 @@
 // S1: the task action registry's declarations (pure data and zod, browser-safe: no engine imports). A task action is one move a person may make on a task (approve a plan, retry a step, stop, close, merge, ...). Code holds the
 // list and decides what a person may do now (`broker/src/core/task-actions`); a surface (the web page, Slack) renders what Code offers and sends back a press that names the action, the task and the revision it was shown.
-// Nothing here decides: the words (`ACTION_WORDS`, one place until the message catalog exists), the shapes of an offer, an input and a result, and the button value a card carries.
+// Nothing here decides: the shapes of an offer, an input and a result, and the button value a card carries.
 import { z } from "zod";
 import type { AgentXErrorCode, TaskActionRefusalReason, TaskActionWrites } from "./errors.js";
 
@@ -86,46 +86,7 @@ export type ActionDescription =
   | { status: "refused"; code: AgentXErrorCode; reason: TaskActionRefusalReason }
   | { status: "ok"; label: string; spec: InputSpec; confirm?: ConfirmLines; confirmDigest?: string; binding: ActionBinding };
 
-/**
- * The words, one place. `label` may depend on the step (a retry's label names the step); `done` is the one line a card shows once the move was taken ("Done in Slack: ..." is the surface's). No Slack or web markup.
- */
-export const ACTION_WORDS: Readonly<Record<TaskActionId, { label: string; done: string }>> = {
-  "plan.approve": { label: "Approve", done: "Approved." },
-  "plan.request-changes": { label: "Request changes", done: "Changes requested." },
-  "plan.reject": { label: "Reject", done: "Rejected." },
-  "step.retry": { label: "Retry", done: "Retrying." },
-  "work.send-back": { label: "Send back to coding", done: "Sent back to coding." },
-  "findings.resolve": { label: "Resolve findings", done: "Findings resolved." },
-  "feedback.fix": { label: "Fix the recommended feedback", done: "Fixing the feedback." },
-  "feedback.dismiss": { label: "Dismiss the comments", done: "Comments dismissed; the pull request stays as it is." },
-  "feedback.answer": { label: "Answer in my own words", done: "Answer sent; the feedback is being reviewed again." },
-  "feedback.retry-review": { label: "Retry review", done: "Retrying the feedback review." },
-  "pull-request.keep": { label: "Keep the pull request, the fix changed nothing", done: "Kept the pull request as it is." },
-  "task.close": { label: "Close task", done: "Closing the task." },
-  "task.stop": { label: "Stop", done: "Stopping." },
-  "task.merge": { label: "Merge", done: "Merged." },
-  "task.continue": { label: "Send more instructions", done: "Instructions sent." },
-  "task.review": { label: "Review again", done: "Reviewing again." },
-  "pull-request.open": { label: "Open a pull request", done: "Opening the pull request." },
-  "task.answer": { label: "Answer the questions", done: "Answers sent." },
-  "people.view": { label: "People", done: "" },
-  "people.add": { label: "Add person", done: "Person added." },
-  "people.set-role": { label: "Change role", done: "Role changed." },
-  "people.take-ownership": { label: "Take ownership", done: "You are now the owner." },
-};
-
-/** The retry's label, by the step that stopped. */
-export function stepRetryLabel(stage: string): string {
-  switch (stage) {
-    case "PLAN": case "UNDERSTAND": case "PLAN_CRITIQUE": return "Retry planning";
-    case "IMPLEMENT": return "Retry coding";
-    case "VERIFY": return "Choose checks and retry";
-    case "REVIEW": return "Retry reviews";
-    case "PULL_REQUEST": return "Open the pull request again";
-    case "WAIT_FOR_MERGE": return "Retry the push";
-    default: return ACTION_WORDS["step.retry"].label;
-  }
-}
+// The words of every action (labels, the line a card shows once a move was taken, a retry's label by step) live in `task-words.ts`: the ONE words table of Code.
 
 /** The declared exclusions of the same-set check, each with its reason (nothing is silently left out of a surface). */
 export const TASK_ACTION_NOTES: Readonly<Partial<Record<TaskActionId, string>>> = {
