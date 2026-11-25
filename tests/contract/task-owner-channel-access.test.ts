@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { developerTaskRouteDependencies, type DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import { resolveCoreTaskAccess } from "../../packages/broker/src/developer/task-access.js";
-import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { companyRouteHarness, PERSON, TASK } from "../support/company-route-harness.js";
 
 type Harness = ReturnType<typeof companyRouteHarness>;
@@ -19,7 +19,7 @@ const events = async (h: Harness) => {
 const leave = (h: Harness) => { h.deps.developer.channelMembers = async () => ({ ok: true, memberOf: [] }); };
 const channelsOff = (h: Harness) => h.db.set({ pk: "PROJECT#shared-project", sk: "REV#000000000001", entityType: "PROJECT", definition: { name: "shared-project", revision: 1, developerTasks: { channelMembersMayUse: false } } });
 // D1-2 (DEC 254zzz502): a task row with no core mark is the retired old workflow's and is never listed; only a marked (core) task lists. The own-person path (`events`) still holds an old row through the channel.
-const markCore = (h: Harness) => h.db.set({ ...engineStampKey(TASK), entityType: "TASK_ENGINE", orgId: IMPLICIT_COMPANY_ID, taskId: TASK, coreEngine: { engine: "core", areas: { merge: "core", build: "core", flow: "core" }, flags: "test", stampedAt: "2026-11-14T12:00:00.000Z" } });
+const markCore = (h: Harness) => h.db.set({ ...coreTaskMarkKey(TASK), entityType: "TASK_ENGINE", orgId: IMPLICIT_COMPANY_ID, taskId: TASK, coreEngine: { engine: "core", areas: { merge: "core", build: "core", flow: "core" }, flags: "test", stampedAt: "2026-11-14T12:00:00.000Z" } });
 const withCompanyLayer = (h: Harness) => { h.deps.companies = { companyOf: async () => IMPLICIT_COMPANY_ID }; };
 
 describe("a channel-access starter's own task (company layer)", () => {

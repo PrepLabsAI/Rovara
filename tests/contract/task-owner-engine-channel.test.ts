@@ -7,7 +7,7 @@ import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { createCoreTaskRuleRoutes } from "../../packages/broker/src/aws/core-task-rule-routes.js";
 import { developerTaskRouteDependencies, type DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import { holdsOwnTask } from "../../packages/broker/src/aws/task-readers.js";
-import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { resolveCoreTaskAccess } from "../../packages/broker/src/developer/task-access.js";
 import { companyRouteHarness, PERSON, TASK, TIME } from "../support/company-route-harness.js";
 import { authorizeFor } from "../support/read-rule-authorize.js";
@@ -18,7 +18,7 @@ const principalOf = (personId: string) => ({ companyId: IMPLICIT_COMPANY_ID, per
 const STAMP = { engine: "core", areas: { merge: "core", build: "core", flow: "core" }, flags: "test", stampedAt: TIME };
 
 /** The engine stamp the core's start writes with a task. `areas`/`raw` change it to a mixed or a damaged one. */
-const stamp = (h: Harness, value: unknown = STAMP) => h.db.set({ ...engineStampKey(TASK), entityType: "TASK_ENGINE", orgId: IMPLICIT_COMPANY_ID, taskId: TASK, coreEngine: value });
+const stamp = (h: Harness, value: unknown = STAMP) => h.db.set({ ...coreTaskMarkKey(TASK), entityType: "TASK_ENGINE", orgId: IMPLICIT_COMPANY_ID, taskId: TASK, coreEngine: value });
 const listed = async (h: Harness) => (JSON.parse((await h.read("/v1/dev/tasks")).body) as { tasks: Array<{ taskId: string }> }).tasks.map((t) => t.taskId);
 const taskRow = (h: Harness) => h.db.get(`DEVTASK#${TASK}`, "META") as never;
 /** The own-person path of the page and the core's task routes (the real wiring): 200 as the owner, 404 when the own-task re-check refuses. */
@@ -96,7 +96,7 @@ describe("a NEW-engine task's own person: grant only (a person removed from the 
     for (const stampedFirst of [true, false]) {
       const h = removedFromProjectStillInChannel();
       h.task(OTHER, IMPLICIT_COMPANY_ID); h.db.delete(`TASK_ENGINE#${OTHER}`, "STAMP");
-      h.db.set({ ...engineStampKey(stampedFirst ? TASK : OTHER), entityType: "TASK_ENGINE", orgId: IMPLICIT_COMPANY_ID, taskId: stampedFirst ? TASK : OTHER, coreEngine: STAMP });
+      h.db.set({ ...coreTaskMarkKey(stampedFirst ? TASK : OTHER), entityType: "TASK_ENGINE", orgId: IMPLICIT_COMPANY_ID, taskId: stampedFirst ? TASK : OTHER, coreEngine: STAMP });
       // The person holds no grant here, so the stamped (core) task is not listed either (and the channel hold is not remembered for the project); the unstamped (old) row is never listed.
       expect(await listed(h)).toEqual([]);
       // With the grant back, the core task lists and the old row still does not.
