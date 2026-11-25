@@ -16,7 +16,7 @@ import { startFenceItems } from "../core/task-flow/start-fence.js";
 import { reportStartItems } from "../core/report/task-row.js";
 import { coreTaskMarkFor, coreTaskMarkItem, ensureCoreInUse } from "./core-task-mark.js";
 import type { HumanEditSink } from "../core/merge/seams.js";
-import { CI_MODE_UNREADABLE_WORDS, REQUIRED_CORE_SERVICES, checkedCiReporting, type CheckedCiReporting, type CiReporting } from "./core-wiring-guard.js"; import type { AttentionDeliveryDependencies } from "../core/notify/attention.js"; import type { SessionChange } from "../core/sessions/summary.js";
+import { CI_MODE_UNREADABLE_WORDS, checkedCiReporting, type CheckedCiReporting, type CiReporting } from "./core-wiring-guard.js"; import type { REQUIRED_CORE_SERVICES } from "./core-wiring-guard.js"; import type { AttentionDeliveryDependencies } from "../core/notify/attention.js"; import type { SessionChange } from "../core/sessions/summary.js";
 
 /** A core service a scheduled job runs, per company. */
 export interface CoreService {

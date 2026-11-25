@@ -9,7 +9,7 @@ import { projectMetaKey } from "@agentx/contracts";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import {
-  SETUP_RUN_NOT_ALLOWED, SETUP_RUN_PROJECT_NOT_FOUND, SETUP_RUN_UNAVAILABLE, type HostedSetupRunWiring, type SetupRunStanding,
+  SETUP_RUN_NOT_ALLOWED, SETUP_RUN_PROJECT_NOT_FOUND, type HostedSetupRunWiring, type SetupRunStanding,
 } from "../../packages/broker/src/core-host/setup-run-routes.js";
 import { HOSTED_IDENTITY_PROVIDER } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
