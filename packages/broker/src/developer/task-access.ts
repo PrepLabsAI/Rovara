@@ -6,6 +6,7 @@ import type { DeveloperCaller } from "../aws/developer-routes.js";
 import type { DeveloperTaskRouteDependencies } from "../aws/developer-tasks.js";
 import { resolveTaskPeopleAccess, type TaskRole } from "./task-people.js";
 import { taskKey, taskOwnerKey, type DeveloperTaskRecord } from "./task-records.js";
+import { requireOwnTask } from "../aws/task-readers.js";
 import { ownerOfExistingTask } from "../aws/engine-boundary.js";
 
 export type { TaskRole } from "./task-people.js";
@@ -42,7 +43,7 @@ export interface TaskAccess {
 const TASK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 export type AccessDependencies = Pick<DeveloperTaskRouteDependencies,
-  "documentClient" | "tableName" | "checkAccess" | "channelMember" | "slackTeamId" | "log" | "now" | "taskPeopleConfiguration" | "checkTaskPerson" | "workspaceForTask" | "coreTasks">;
+  "documentClient" | "tableName" | "checkAccess" | "channelMember" | "slackTeamId" | "log" | "now" | "taskPeopleConfiguration" | "checkTaskPerson" | "workspaceForTask" | "coreTasks" | "taskReaderPerson">;
 
 const log = (deps: Pick<DeveloperTaskRouteDependencies, "log">, entry: Record<string, unknown>) =>
   (deps.log ?? ((line) => console.log(JSON.stringify({ component: "broker", ...line }))))(entry);
@@ -104,6 +105,9 @@ async function taskAccessOfRecord(deps: AccessDependencies, caller: DeveloperCal
   const legacyOwners = [taskOwnerKey(task.developerId, task.taskId)];
   const legacyPeopleAction = action === "peopleManage" || action === "takeOwnership";
   if (task.developerId === caller.developerId) {
+    // The stored person (a task with no People list) keeps it only while a LIVE member of the task's company who still holds the project grant (the test a People entry meets and a reader meets):
+    // removed from the project or the company, the task reads as not found for them.
+    await requireOwnTask(deps, task, caller.developerId, notFound);
     if (legacyPeopleAction || (action !== undefined && action !== "read" && action !== "peopleRead" && !taskOpen(task))) throw notFound();
     return { task, role: "owner", ownerActorIds: legacyOwners };
   }

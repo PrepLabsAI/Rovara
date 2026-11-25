@@ -543,7 +543,10 @@ export function hostedTaskAccess(inputs: {
   /** The caller's live access to the task, for the roles asked (owners only for every act; owners, commenters and viewers for a read). Undefined: none. Every check re-reads the live proof. */
   const resolve = (principal: Principal, task: { developerId: string; project: string; taskId?: string }, roles: readonly string[]) => taskAccessOrHidden(async () => {
     if (principal.companyId !== inputs.companyId || await liveMember(principal.personId) === undefined) return undefined;
-    if (task.taskId === undefined || inputs.storage === undefined) return principal.personId === task.developerId ? { revision: undefined, ownerIds: [] as readonly string[] } : undefined;
+    // The task's own stored person (a task with no People list) passes only while they STILL hold the project grant, read now: the very test a People entry meets below. A person removed from the project keeps
+    // their old task as nothing: no read, no act (a project owner or admin takes it over through People, never through this path).
+    const storedPerson = async () => principal.personId === task.developerId && await inputs.projectGrant(principal.personId, task.project, inputs.companyId) ? { revision: undefined, ownerIds: [] as readonly string[] } : undefined;
+    if (task.taskId === undefined || inputs.storage === undefined) return storedPerson();
     const store = await inputs.storage();
     const stored = await store.get({ pk: `DEVTASK#${task.taskId}`, sk: "META" });
     if (stored?.["companyId"] !== inputs.companyId || stored["developerId"] !== task.developerId || stored["project"] !== task.project) return undefined;
@@ -551,7 +554,7 @@ export function hostedTaskAccess(inputs: {
     const people = inputs.people === undefined ? undefined : await resolveTaskPeopleAccess(inputs.people, stored as unknown as DeveloperTaskRecord, principal.personId);
     if (people === undefined) {
       if (await store.get({ pk: `DEVTASK#${task.taskId}`, sk: "PEOPLE" }) !== undefined) return undefined;
-      return principal.personId === task.developerId ? { revision: undefined, ownerIds: [] as readonly string[] } : undefined;
+      return storedPerson();
     }
     if (people.orphaned || !roles.includes(people.role) || !await inputs.projectGrant(principal.personId, task.project, inputs.companyId)) return undefined;
     return { revision: people.peopleRevision, ownerIds: people.ownerActorIds };
@@ -1366,7 +1369,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         authenticateToken: scriptTokenAuthenticator({
           lessonsSwitch: switchValue, now: () => now().getTime(),
           // The token is checked against the SHARED registry's store (every key is company-scoped) BEFORE any company runtime is built: a made-up company id in an unverified header builds nothing.
-          companyOf: async () => { const registry = await app.registry(); return { store: registry.require("storage"), audit: registry.require("audit-sink"), identity: registry.require("identity") }; },
+          companyOf: async (tokenCompany) => { const registry = await app.registry(); return { store: registry.require("storage"), audit: registry.require("audit-sink"), identity: registry.require("identity"),
+            // The creator's project, read live at every use of the token (this company's grant, or an owner's or admin's role): a project they lost stops working for the token.
+            projectGrant: async (personId, project, role) => role === "owner" || role === "admin" || await projectGrant(personId, project, tokenCompany) }; },
         }),
         // Who is told about an unusual amount of reading: the company's owners now (the people port's ownerIds; company admins who are not owners are not told until the port lists them), by the id notices are addressed by. A list that cannot be completed tells nobody (the audit record still says it).
         adminsOf,

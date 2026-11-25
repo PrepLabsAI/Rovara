@@ -15,6 +15,7 @@ import {
   type TaskReadersResponse,
 } from "@agentx/contracts";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
+import { recordInCompany } from "./company-check.js";
 import { taskCompanyId } from "../developer/task-person-identity.js";
 
 export interface TaskReaderPerson {
@@ -103,6 +104,31 @@ export async function readsAsReader(deps: TaskReaderDependencies, task: Develope
     return false;
   }
   return true;
+}
+
+/**
+ * Whether `developerId` is the task's own stored person AND still a live member of the task's company holding the project grant (the test a People entry and a reader meet), read now. A person removed from the
+ * project or the company keeps no hold on their old task through the stored id alone. A read that fails, or no way to ask, is "no".
+ */
+export async function holdsOwnTask(deps: Pick<TaskReaderDependencies, "taskReaderPerson">, task: DeveloperTaskRecord, developerId: string): Promise<boolean> {
+  if (task.developerId !== developerId || deps.taskReaderPerson === undefined) return false;
+  try { return (await deps.taskReaderPerson(developerId, task.project, taskCompanyId(task)))?.projectMember === true; } catch { return false; }
+}
+
+/** The same test as `holdsOwnTask`, as a refusal: the task's own person who no longer holds the project reads as "no such task" (the caller's own words). */
+export async function requireOwnTask(deps: Pick<TaskReaderDependencies, "taskReaderPerson">, task: DeveloperTaskRecord, developerId: string, refusal: () => Error): Promise<void> {
+  if (!await holdsOwnTask(deps, task, developerId)) throw refusal();
+}
+
+/**
+ * Whether a task of the person's own task INDEX lists as theirs: in a company, a task of the caller's, in that company, whose project they still hold (read now, once per project for one page, in `held`).
+ * With no company layer, as it always was (everything the index names).
+ */
+export async function listsAsOwn(deps: Pick<TaskReaderDependencies, "taskReaderPerson"> & { companyId?: string | undefined }, task: DeveloperTaskRecord | undefined, developerId: string, held: Map<string, boolean>): Promise<boolean> {
+  if (deps.companyId === undefined) return true;
+  if (task === undefined || task.developerId !== developerId || !recordInCompany(task, deps.companyId)) return false;
+  if (!held.has(task.project)) held.set(task.project, await holdsOwnTask(deps, task, developerId));
+  return held.get(task.project) === true;
 }
 
 /** `GET …/readers`: the owner's list. The caller is the owner. */

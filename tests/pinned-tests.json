@@ -290,6 +290,24 @@
       "minimumTests": 2,
       "reason": "A1-12 (DEC 254zzz459; DEC 254zzz511): the 30-day review window on the channel link page /review/link/{code} (29 days and 23 hours on it opens and links, at 30 days it is a signed-out page and a confirmation is refused, nothing linked; a revoked sign-in, a revoked person and a session with no review window are signed out at once). It is the proof of authenticateDeveloperSessionId's window that stays when D1-3 deletes Code's own task page and D1 deletes the PR-feedback page. The floor is the file's 2 runnable declarations, and deleting or trimming one is a reviewed edit.",
       "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/journeys/removed-member-read.test.ts",
+      "minimumTests": 3,
+      "reason": "REMOVED-MEMBER-READ (briefs/arch-cleanup/REMOVED-MEMBER-READ-REPRO.md): a person who started a task (no People list) and is then removed from the project, or from the company, is shown nothing of it on any route (task read, events, plan, proof, comments, readers, lists, merge state, Code's task page). The floor is the file's 3 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/journeys/removed-member-acts.test.ts",
+      "minimumTests": 2,
+      "reason": "REMOVED-MEMBER-READ (briefs/arch-cleanup/REMOVED-MEMBER-READ-REPRO.md, acts): a person who started a task and is then removed cannot move it: every act (approve, reject, request changes, close, stop, send back, retry, Merge) on the web and from a chat account that resolves to them is refused as a missing task, and no task action registry entry's who rule lets them in. The floor is the file's 2 runnable declarations (the acts table is looped), and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/journeys/project-grant-recheck.test.ts",
+      "minimumTests": 6,
+      "reason": "PROJECT-GRANT-RECHECK (briefs/arch-cleanup/PROJECT-GRANT-RECHECK-DONE.md): the task's own person (a task with no People list) holds it only while a live company member WITH the project grant. A person removed from the project, or from the company, is refused every read, every act (web, CLI session, Code's page, sessions, every registry action pressed from a chat account) as a missing task, and nothing is started or spent; a current project administrator or company admin still stops and merges the task. The floor is the file's 6 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz459"
     }
   ],
   "pendingRestore": []

@@ -141,3 +141,16 @@ Each mutant was applied singly to the production file in the lane worktree, the 
 | M11 - lessons/load-record.ts `recordLessonLoad` | The use rows are not written. | 2 failed |
 
 Also checked: the lease test's worker clock is passed to the gateway model (`now`). With the test clock placed before the real date, removing that option fails 5 of 6 tests, with it all pass (the same condition as a real clock moving past the fixed test epoch).
+
+
+## PROJECT-GRANT-RECHECK: the stored person holds a task only with the live project grant (2026-11-25)
+
+| Mutant | Change | Killed by | Result |
+| --- | --- | --- | --- |
+| M1, `hostedTaskAccess.resolve` | the stored-person branches skip `inputs.projectGrant` | tests/journeys/project-grant-recheck.test.ts | red (3 of 6) |
+| M2, `taskAccessOfRecord` | the legacy owner skips `holdsOwnTask` | same file (Code's task page rows) | red (1 of 6) |
+| M3, `core-task-rule-routes` | events and readers: `owner = task.developerId === caller` | same file (events, readers) | red (1 of 6) |
+| M4, `sessions/access.ts` | the owner of a task session needs no grant | same file (session stop, tell, close) | red (1 of 6) |
+| M5, `lessons-api.ts` | the off-roster own-task exception is back | tests/unit/core-host-lessons-api.test.ts | red (1 of 57) |
+| M6, `developer-tasks.ts listTasks` | the own list ignores the grant | same file as M1 (task list) | red (1 of 6) |
+| M7, `script-tokens/authenticate.ts` | the token's project is not re-checked live | tests/unit/script-token-project-grant.test.ts | red (3 of 3) |
