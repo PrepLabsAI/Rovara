@@ -1200,3 +1200,27 @@ Measured over tests/contract/company-github-signin.test.ts (33 tests). The mutan
 | --- | --- | --- | --- |
 | M23, `gatewayBedrockCheck` | the answer is read only for the agents' picks (product models read unavailable) | tests/unit/model-gateway-bedrock-check-company-limit.test.ts: "tells the gateway the connection's product models..." | red (1 of 3) |
 | M25, `runProof` | the stale-divergence check is not run | tests/contract/gateway-catch-up-proof.test.ts: "fails on a divergence record that is Cloud's own pinned blob..." | red (1 of 15) |
+
+## RD-2a - the task page's spec read (`GET /v1/dev/tasks/{taskId}/spec`; base RD-2.0 a65c40ce7)
+
+Production guards this lane adds: the task read's own rule in `core-host/task-spec-routes.ts` (`loadReadableTask` before anything is read), and in `core/task-view/spec.ts` the layer states (not written, superseded, unreadable with no older-version fallback, Markdown not served), the approval and gate-decision matching by digest, the comment tally (live, people's, current version only, read tolerantly), the digest waited on only at a gate, the derived decision status (answers of the approval), the design review's open questions, redaction of model text, and the Quick-only "bigger than Quick" reasons. Each mutant was applied singly to a copy of the file and restored; all in `tests/unit/rd2a-spec-read.test.ts`.
+
+| Mutant | Mutation | Killed by (first failing tests) |
+|---|---|---|
+| M1 handler | the task is read without `loadReadableTask` (no access rule) | the real-task cases and the colleague / other-company refusal test |
+| M2 layerOf | an unreadable structured document keeps its derived state | "an unreadable structured document is `unreadable` ..." |
+| M3 stateOf | no `superseded` for a coding plan written before the Full path | "a coding plan written before the task went the Full way is history" |
+| M4 decisionOn | a send-back counts as a gate decision on the plan | "a plan sent back or rejected says so ..." |
+| M5 commentCounts | deleted comments counted | "a Quick plan at its gate ..." (comment counts) |
+| M6 commentCounts | AgentX replies counted | same |
+| M7 layerOf | comments of any version counted | same |
+| M8 specOf | `waitingDocumentDigest` served when the task is not at its gate | "an approved plan ..." |
+| M9 specOf | "bigger than Quick" served in any layer state | "a Quick plan that looks bigger than Quick ..." (approved case) |
+| M10 decisionsOf | any answer override counts as this decision's | "an approved plan ..." (override of another decision) |
+| M11 openQuestionsOf | an answered question stays open | "the design review's open questions ..." |
+| M12 openQuestionsOf | question text not redacted | same |
+| M13 specOf | a Quick task shows all three layers | "a Quick task with no plan yet ..." |
+| M14 decisionOn | any decision of the kind counts, not only the one holding this digest | "a Full task: three layers ..." |
+| M15 layerOf | a Markdown document is read as structured | "a document stored as Markdown ..." |
+
+All 15 killed; the restored tree passes (the new file 15 tests). Evidence applies to this lane's commit; the final-head gate and review belong to 9d.
