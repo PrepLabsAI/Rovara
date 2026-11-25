@@ -1,0 +1,36 @@
+import { beforeAll, expect, it, vi } from "vitest";
+import { denyNetwork } from "./model-gateway-no-network.js";
+import { scope, now } from "./model-gateway-fixture.js";
+import { validClear, type ClearSourceStop } from "../../packages/model-gateway/src/source-stop.js";
+beforeAll(denyNetwork);
+it.each([undefined, "Product", "both", "", null])("operator CLI refuses invalid class %s before any stop read or clear", async (routeClass) => {
+  const { runOperatorClear } = await import("../../packages/model-gateway/src/source-stop-cli.js");
+  const actor = "arn:aws:iam::111111111111:user/operator";
+  const input = { iss: scope.iss, cid: scope.cid, source: "bedrock_byo", routeClass, reason: "Invoice reviewed" } as unknown as ClearSourceStop;
+  const sourceStop = vi.fn(async () => ({ source: "bedrock_byo" as const, stopped: true, stopId: "call:1", stoppedAt: now }));
+  const clearSourceStop = vi.fn(async () => true), preview = vi.fn(), confirm = vi.fn(async () => true);
+  await expect(runOperatorClear(input, { meter: { sourceStop, clearSourceStop }, identity: async () => actor, interactive: true, preview, confirm })).rejects.toThrow("operator clear refused");
+  expect(validClear({ ...input, actor, expectedStopId: "call:1" })).toBe(false);
+  expect(sourceStop).not.toHaveBeenCalled();
+  expect(clearSourceStop).not.toHaveBeenCalled();
+  expect(preview).not.toHaveBeenCalled();
+  expect(confirm).not.toHaveBeenCalled();
+});
+it("operator CLI previews the exact company/source/stop and audits only after human confirmation", async () => {
+  const { runOperatorClear } = await import("../../packages/model-gateway/src/source-stop-cli.js");
+  const events: unknown[] = [];
+  const input = { iss: scope.iss, cid: scope.cid, source: "bedrock_byo" as const, routeClass: "agent" as const, reason: "Invoice reviewed" };
+  const meter = { sourceStop: async () => ({ source: "bedrock_byo" as const, stopped: true, stopId: "call:1", stoppedAt: now, costMicros: 100002, heldMicros: 100 }), clearSourceStop: vi.fn(async (value: unknown) => { events.push(value); return true; }) };
+  const options = { meter, identity: async () => "arn:aws:iam::111111111111:user/operator", interactive: true, preview: (value: unknown) => { events.push(value); }, confirm: async (phrase: string) => { events.push(phrase); return true; } };
+  expect(await runOperatorClear(input, options)).toBe(true);
+  expect(events).toHaveLength(3);
+  expect(events[0]).toMatchObject({ ...input, stopId: "call:1", actor: "arn:aws:iam::111111111111:user/operator", changes: "Clear only this route class stop; preserve spend, caps and in-flight calls." });
+  expect(events[1]).toBe(`CLEAR ${scope.cid} bedrock_byo agent call:1`);
+  expect(events[2]).toMatchObject({ ...input, expectedStopId: "call:1", actor: "arn:aws:iam::111111111111:user/operator" });
+  meter.clearSourceStop.mockClear();
+  expect(await runOperatorClear(input, { ...options, confirm: async () => false })).toBe(false);
+  expect(meter.clearSourceStop).not.toHaveBeenCalled();
+  await expect(runOperatorClear(input, { ...options, interactive: false })).rejects.toThrow();
+  await expect(runOperatorClear(input, { ...options, identity: async () => "arn:aws:sts::111111111111:assumed-role/Gateway/task" })).rejects.toThrow();
+  expect(meter.clearSourceStop).not.toHaveBeenCalled();
+});

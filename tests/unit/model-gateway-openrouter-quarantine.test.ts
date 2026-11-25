@@ -1,0 +1,32 @@
+import { beforeAll, expect, it } from "vitest";
+import { denyNetwork } from "./model-gateway-no-network.js";
+import { claims, caps, scope } from "./model-gateway-fixture.js";
+import { initialCharge, finishCharge } from "../../packages/model-gateway/src/charge-producer.js";
+import { InMemoryMeter } from "../../packages/model-gateway/src/meter.js";
+import { DynamoMeter } from "../../packages/model-gateway/src/dynamo-meter.js";
+import { Dynamo } from "../../packages/model-gateway/src/dynamo.js";
+import { WireDynamo } from "./model-gateway-wire-dynamo.js";
+beforeAll(denyNetwork);
+for (const durable of [false, true]) it(`keeps the source quarantined across tasks, projects, months and process restart (${durable ? "Dynamo" : "memory"})`, async () => {
+ let clock = Date.UTC(2026, 10, 30, 23, 59);
+ const tables = { meter: "meter", ledger: "ledger", markers: "markers" }; const wire = new WireDynamo(Object.values(tables));
+ const create = () => durable ? new DynamoMeter({ db: new Dynamo({ region: "us-west-2", credentials: async () => ({ accessKeyId: "fixture", secretAccessKey: "fixture" }), transport: wire.transport }), tables, now: () => clock }) : new InMemoryMeter(() => clock);
+ let meter = create();
+ const source = { kind: "company_key" as const, id: "src_router", name: "Fixture", provider: "openrouter", connectionRevision: "r1" };
+ const price = { inputMicrosPerMTok: 1_000_000, outputMicrosPerMTok: 2_000_000, estimated: false };
+ const receipt = (tid: string, pid: string, sourceId = source.id) => initialCharge({ ...claims, tid, pid, aud: "rovara-model-gateway", src: "app", pay: { kind: "member", developerId: claims.per } }, { provider: "openrouter", modelId: "vendor/model" }, { source: { ...source, id: sourceId }, billing: "external_provider" }, 50, clock, price);
+ const first = receipt(scope.tid, scope.pid);
+ const held = await meter.reserve({ scope, caps, estimateMicros: 50, routeClass: "agent", charge: { receipt: first, requestFingerprint: "a".repeat(64) } }); expect(held.ok).toBe(true); if (!held.ok) throw new Error("no hold");
+ await meter.settleV2({ reservationId: held.reservation.id, receipt: finishCharge(first, { price, notSent: false, now: clock, reportedCostMicros: 60, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 } }) });
+ clock = Date.UTC(2026, 11, 1);
+ if (durable) meter = create();
+ const nextScope = { ...scope, tid: "task_2", pid: "other" };
+ const next = receipt(nextScope.tid, nextScope.pid);
+ expect(await meter.sourceStop(scope.iss, scope.cid, "openrouter", "agent")).toMatchObject({ stopped: true, costMicros: 60, heldMicros: 50 });
+ expect(await meter.reserve({ scope: nextScope, caps, estimateMicros: 50, routeClass: "agent", charge: { receipt: next, requestFingerprint: "b".repeat(64) } })).toMatchObject({ ok: false, reason: "overrun" });
+ const other = receipt(nextScope.tid, nextScope.pid, "src_other");
+ // F's provider/class stop also survives credential rotation, not just a source-id row.
+ expect(await meter.reserve({ scope: nextScope, caps, estimateMicros: 50, routeClass: "agent", charge: { receipt: other, requestFingerprint: "c".repeat(64) } })).toMatchObject({ ok: false, reason: "overrun" });
+ const unrelated = { ...other, model: { ...other.model, provider: "anthropic" }, source: { ...other.source, provider: "anthropic" } };
+ expect((await meter.reserve({ scope: nextScope, caps, estimateMicros: 50, charge: { receipt: unrelated, requestFingerprint: "d".repeat(64) } })).ok).toBe(true);
+});

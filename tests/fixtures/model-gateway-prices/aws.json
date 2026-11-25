@@ -1,0 +1,180 @@
+{
+  "publicationDate": "2026-11-09T22:43:12Z",
+  "products": {
+    "SKU0": {
+      "attributes": {
+        "model": "Claude Haiku 5.5",
+        "usagetype": "USW2-MP:USW2_input_tokens_standard-Units",
+        "servicename": "Claude Haiku 5.5 (Amazon Bedrock Edition)"
+      }
+    },
+    "SKU1": {
+      "attributes": {
+        "model": "Claude Haiku 5.5",
+        "usagetype": "USW2-MP:USW2_output_tokens_standard-Units",
+        "servicename": "Claude Haiku 5.5 (Amazon Bedrock Edition)"
+      }
+    },
+    "SKU2": {
+      "attributes": {
+        "model": "Claude Haiku 5.5",
+        "usagetype": "USW2-MP:USW2_cache_write_tokens_long_ctx_standard-Units",
+        "servicename": "Claude Haiku 5.5 (Amazon Bedrock Edition)"
+      }
+    },
+    "SKU3": {
+      "attributes": {
+        "model": "Claude Haiku 5.5",
+        "usagetype": "USW2-MP:USW2_output_tokens_long_ctx_standard-Units",
+        "servicename": "Claude Haiku 5.5 (Amazon Bedrock Edition)"
+      }
+    },
+    "SKU4": {
+      "attributes": {
+        "model": "Claude Haiku 5.5",
+        "usagetype": "USW2-MP:USW2_input_tokens_global_standard-Units",
+        "servicename": "Claude Haiku 5.5 (Amazon Bedrock Edition)"
+      }
+    },
+    "SKU5": {
+      "attributes": {
+        "model": "Claude Haiku 5.5",
+        "usagetype": "USW2-MP:USW2_output_tokens_global_standard-Units",
+        "servicename": "Claude Haiku 5.5 (Amazon Bedrock Edition)"
+      }
+    },
+    "SKU6": {
+      "attributes": {
+        "model": "Claude Fable 5.2",
+        "usagetype": "USW2-MP:USW2_input_tokens_standard-Units",
+        "servicename": "Claude Fable 5.2 (Amazon Bedrock Edition)"
+      }
+    },
+    "SKU7": {
+      "attributes": {
+        "model": "Claude Fable 5.2",
+        "usagetype": "USW2-MP:USW2_output_tokens_standard-Units",
+        "servicename": "Claude Fable 5.2 (Amazon Bedrock Edition)"
+      }
+    },
+    "SKU8": {
+      "attributes": {
+        "model": "Claude Fable 5.2",
+        "usagetype": "USW2-MP:USW2_cache_write_tokens_1h_standard-Units",
+        "servicename": "Claude Fable 5.2 (Amazon Bedrock Edition)"
+      }
+    }
+  },
+  "terms": {
+    "OnDemand": {
+      "SKU0": {
+        "SKU0.T": {
+          "priceDimensions": {
+            "SKU0.T.D": {
+              "unit": "1M tokens",
+              "pricePerUnit": {
+                "USD": "0.1100000000"
+              }
+            }
+          }
+        }
+      },
+      "SKU1": {
+        "SKU1.T": {
+          "priceDimensions": {
+            "SKU1.T.D": {
+              "unit": "1M tokens",
+              "pricePerUnit": {
+                "USD": "0.5500000000"
+              }
+            }
+          }
+        }
+      },
+      "SKU2": {
+        "SKU2.T": {
+          "priceDimensions": {
+            "SKU2.T.D": {
+              "unit": "1M tokens",
+              "pricePerUnit": {
+                "USD": "0.6875000000"
+              }
+            }
+          }
+        }
+      },
+      "SKU3": {
+        "SKU3.T": {
+          "priceDimensions": {
+            "SKU3.T.D": {
+              "unit": "1M tokens",
+              "pricePerUnit": {
+                "USD": "2.7500000000"
+              }
+            }
+          }
+        }
+      },
+      "SKU4": {
+        "SKU4.T": {
+          "priceDimensions": {
+            "SKU4.T.D": {
+              "unit": "1M tokens",
+              "pricePerUnit": {
+                "USD": "0.1000000000"
+              }
+            }
+          }
+        }
+      },
+      "SKU5": {
+        "SKU5.T": {
+          "priceDimensions": {
+            "SKU5.T.D": {
+              "unit": "1M tokens",
+              "pricePerUnit": {
+                "USD": "0.5000000000"
+              }
+            }
+          }
+        }
+      },
+      "SKU6": {
+        "SKU6.T": {
+          "priceDimensions": {
+            "SKU6.T.D": {
+              "unit": "1M tokens",
+              "pricePerUnit": {
+                "USD": "8.8000000000"
+              }
+            }
+          }
+        }
+      },
+      "SKU7": {
+        "SKU7.T": {
+          "priceDimensions": {
+            "SKU7.T.D": {
+              "unit": "1M tokens",
+              "pricePerUnit": {
+                "USD": "44.0000000000"
+              }
+            }
+          }
+        }
+      },
+      "SKU8": {
+        "SKU8.T": {
+          "priceDimensions": {
+            "SKU8.T.D": {
+              "unit": "1M tokens",
+              "pricePerUnit": {
+                "USD": "17.6000000000"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

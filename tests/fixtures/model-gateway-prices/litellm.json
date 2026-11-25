@@ -1,0 +1,17 @@
+{
+  "gemini/m": {
+    "litellm_provider": "gemini",
+    "mode": "chat",
+    "input_cost_per_token": 3e-07,
+    "output_cost_per_token": 2.5e-06
+  },
+  "tiered": {
+    "litellm_provider": "anthropic",
+    "mode": "chat",
+    "input_cost_per_token": 1e-06,
+    "output_cost_per_token": 2e-06,
+    "cache_creation_input_token_cost_above_1hr": 7e-06,
+    "input_cost_per_token_priority": 8e-06,
+    "output_cost_per_audio_token_above_200k_tokens": 1.1e-05
+  }
+}

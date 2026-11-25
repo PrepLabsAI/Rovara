@@ -1,0 +1,24 @@
+{
+ "status": 200,
+ "stop": "end_turn",
+ "blocks": [
+  {
+   "type": "text",
+   "text": ""
+  },
+  {
+   "type": "thinking",
+   "thinking": "The ping tool returned \"pong\", which is the expected response.\n",
+   "signature": ""
+  },
+  {
+   "type": "text",
+   "text": "\n\nThe ping tool was called and returned \"pong\" - everything is working correctly!"
+  }
+ ],
+ "usage": {
+  "input": 222,
+  "output": 32
+ },
+ "complete": true
+}

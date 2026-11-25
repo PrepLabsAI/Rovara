@@ -1,0 +1,15 @@
+{
+ "status": 200,
+ "stop": "end_turn",
+ "blocks": [
+  {
+   "type": "text",
+   "text": "I don't have access to a ping tool at the moment. The functionality to call a ping tool isn't currently available in my toolkit.\n\nIs there something else I can help you with instead? I'm here to assist you with answering questions, having conversations, or helping with various other tasks."
+  }
+ ],
+ "usage": {
+  "input": 288,
+  "output": 60
+ },
+ "complete": true
+}
