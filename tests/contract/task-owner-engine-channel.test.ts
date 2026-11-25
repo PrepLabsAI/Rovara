@@ -83,7 +83,10 @@ describe("a NEW-engine task's own person: grant only (a person removed from the 
     const h = removedFromProjectStillInChannel();
     const send = h.db.send.bind(h.db);
     h.deps.documentClient = { send: async (command: Parameters<typeof send>[0]) => { if (String((command as unknown as { input?: { Key?: { pk?: string } } }).input?.Key?.pk).startsWith("TASK_ENGINE#")) throw new Error("table unavailable"); return send(command); } };
-    expect(await listed(h)).toEqual([]);
+    // D1-2 pre-review S2: a failed mark read is never taken for "old" (a row skipped without a word): the list says to try again and shows no task.
+    const answer = JSON.parse((await h.read("/v1/dev/tasks")).body) as Record<string, unknown>;
+    expect(answer).toMatchObject({ error: { code: "RUNTIME_UNAVAILABLE" } });
+    expect(answer).not.toHaveProperty("tasks");
     expect(await ownerRead(h)).toBe(404);
     expect(await rule(h, "events")).toBe(404);
   });
