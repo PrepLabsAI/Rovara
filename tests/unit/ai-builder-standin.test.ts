@@ -410,7 +410,7 @@ describe("a project whose client speaks Vertex AI (L4-EVV; closes G1)", () => {
     expect(evalResultFromArtifact(await check(limited))).toMatchObject({ outcome: "not_run", label: "Not run" });
     expect(limited.cache.records.size).toBe(0);
   }, TIMEOUT);
-  it("the setup draft names the row: provider vertex is confirmed as the vertex row, absent stays gemini, anything else is refused whole", async () => {
+  it("the setup draft names the row: provider vertex is confirmed as the vertex row, bedrock as the bedrock row, absent stays gemini, anything else is refused whole", async () => {
     const base = await world();
     const files = (await readdir(`${base.baseDir}/${CASES_DIR}`)).filter(n => n.endsWith(".json")).sort();
     const questions = await Promise.all(files.map(async file => {
@@ -428,7 +428,10 @@ describe("a project whose client speaks Vertex AI (L4-EVV; closes G1)", () => {
     expect("report" in vertex && vertex.report.suites[0]!.catalogRowId).toBe("vertex");
     const gemini = await produce({ provider: "gemini" });
     expect("report" in gemini && gemini.report.suites[0]!.catalogRowId).toBe("gemini");
-    expect(await produce({ provider: "bedrock" })).toEqual({ refused: "unreadable" });
+    // RF-5: the Bedrock row is a draft provider too (with a Bedrock model id).
+    const bedrock = await produce({ provider: "bedrock", model: "us.anthropic.claude-sonnet-4-6-v1:0", modelVersion: "v1" });
+    expect("report" in bedrock && bedrock.report.suites[0]!.catalogRowId).toBe("bedrock");
+    expect(await produce({ provider: "openai" })).toEqual({ refused: "unreadable" });
     expect(await produce({ provider: "" })).toEqual({ refused: "unreadable" });
   }, TIMEOUT);
 });
