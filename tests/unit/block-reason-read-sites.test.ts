@@ -6,7 +6,7 @@ import { DEVELOPER_TOOLS, nextFor } from "../../packages/mcp/src/tools.js";
 import { routeDeveloperTaskRequest, taskView } from "../../packages/broker/src/aws/developer-tasks.js";
 import { developerTaskView } from "../../packages/broker/src/local/app/task-view.js";
 import { createTaskFactsSource } from "../../packages/broker/src/local/app/facts.js";
-import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { readPrFeedbackView } from "../../packages/broker/src/core-host/pr-feedback-view.js";
 import { readTask, taskViewOf } from "../../packages/broker/src/core/task-flow/reads.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
@@ -77,7 +77,7 @@ describe("the hosted aws task views (taskView and the detailed list)", () => {
     f.deps.actions.operations = vi.fn(async () => [prepare]);
     f.db.set({ ...task, pk: `DEVELOPER#${PRIYA.developerId}`, sk: `TASK#${at}#${task.taskId}`, entityType: "DEVELOPER_TASK_INDEX", status: "RUNNING" });
     // DEC 254zzz502 (D1-2): only a task with the core's mark is listed.
-    f.db.set({ ...engineStampKey(task.taskId), entityType: "TASK_ENGINE", coreEngine: { engine: "core", areas: { merge: "core", build: "core", flow: "core" }, flags: "cc=on", stampedAt: at } });
+    f.db.set({ ...coreTaskMarkKey(task.taskId), entityType: "TASK_ENGINE", coreEngine: { engine: "core", areas: { merge: "core", build: "core", flow: "core" }, flags: "cc=on", stampedAt: at } });
     const response = await routeDeveloperTaskRequest(f.deps, PRIYA, { method: "GET", path: "/v1/dev/tasks", headers: {}, requestId: "00000000-0000-4000-8000-000000000003" }, new URL("https://example.test/v1/dev/tasks?detail=1"));
     const rows = DeveloperTaskDetailedListResponseSchema.parse(response).tasks;
     expect(rows).toHaveLength(1);

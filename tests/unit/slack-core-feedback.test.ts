@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { expect, it, vi } from "vitest";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { coreKeepPullRequests } from "../../packages/broker/src/aws/slack-core-feedback.js";
-import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { NOT_ON_THE_CORE_YET } from "../../packages/broker/src/core-host/dev-routes.js";
 import type { CoreTaskEntry } from "../../packages/broker/src/aws/engine-boundary.js";
 
@@ -11,7 +11,7 @@ const event = { taskId, requestId: randomUUID(), expectedRevision: 9 };
 const caller = { developerId: "a".repeat(64), sessionId: "slack", name: "Owner" };
 function world(core = true) {
   const db = new FakeDynamoDb();
-  if (core) db.set({ ...engineStampKey(taskId), coreEngine: { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "on", stampedAt: "2026-11-22T00:00:00.000Z" } });
+  if (core) db.set({ ...coreTaskMarkKey(taskId), coreEngine: { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "on", stampedAt: "2026-11-22T00:00:00.000Z" } });
   return { documentClient: db, tableName: "state" };
 }
 

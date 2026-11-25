@@ -11,7 +11,7 @@ import { SLACK_RETIRED_BUTTON_CODE, SLACK_RETIRED_BUTTON_WORDS, recordRetiredSla
 import { WORKFLOW_BUTTON_OUT_OF_DATE } from "../../packages/broker/src/developer/workflow-actions.js";
 import { createDeveloperTaskBroker, MAYA } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, call, createBroker, ensureWorkspace, loadSlackBroker, markReady, registerSlackProject, serviceCall } from "../support/slack-broker.js";
-import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const taskId = "11111111-1111-4111-8111-111111111111";
@@ -187,7 +187,7 @@ describe("the oldest engine's workspace routes do not reach a core task's worksp
     // Make it a core task's workspace: its task pointer and the task's mark exist.
     const coreTaskId = randomUUID();
     broker.db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "DEVELOPER_TASK", entityType: "DEVELOPER_TASK_POINTER", taskId: coreTaskId });
-    broker.db.set({ ...engineStampKey(coreTaskId), entityType: "TASK_ENGINE", coreEngine: { engine: "core", areas: { merge: "core", build: "core", flow: "core" }, flags: "cc=on", stampedAt: "2026-11-25T00:00:00.000Z" } });
+    broker.db.set({ ...coreTaskMarkKey(coreTaskId), entityType: "TASK_ENGINE", coreEngine: { engine: "core", areas: { merge: "core", build: "core", flow: "core" }, flags: "cc=on", stampedAt: "2026-11-25T00:00:00.000Z" } });
     const before = broker.db.find(() => true).length;
     const refused = await serviceCall(broker.handler, thread, user, "POST", `/v1/service/workspaces/${workspaceId}/tasks`, { ...body, requestId: randomUUID() });
     expect(refused).toMatchObject({ status: 404, body: { error: { code: "NOT_FOUND" } } });
@@ -201,7 +201,7 @@ describe("a press of a button on a CORE task's card, arriving as the legacy invo
   const world = async () => {
     route.mockClear();
     const w = await createDeveloperTaskBroker({ developerExtra: { coreTasks: { route } } });
-    w.db.set({ ...engineStampKey(taskId), entityType: "TASK_ENGINE", coreEngine: { engine: "core", areas: { merge: "core", build: "core", flow: "core" }, flags: "cc=on", stampedAt: "2026-11-25T00:00:00.000Z" } });
+    w.db.set({ ...coreTaskMarkKey(taskId), entityType: "TASK_ENGINE", coreEngine: { engine: "core", areas: { merge: "core", build: "core", flow: "core" }, flags: "cc=on", stampedAt: "2026-11-25T00:00:00.000Z" } });
     return w;
   };
 

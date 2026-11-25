@@ -3,7 +3,7 @@
 // fake Slack and GitHub, two companies over one wire-level table.
 import { createHash } from "node:crypto";
 import { decodeJwt } from "jose";
-import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { describe, expect, it } from "vitest";
 import { Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
@@ -167,7 +167,7 @@ describe("connecting a second sign-in (DEC 254w)", () => {
     // DEC 254zzz502 (D1-2): a task with no core mark is the retired old workflow's and is not listed ...
     expect(((await w.api("GET", "/v1/dev/tasks", github)).body.tasks as unknown[])).toEqual([]);
     // ... and a task the core started (it carries the mark) is, to the linked person's GitHub session.
-    w.db.set({ ...engineStampKey(taskId), entityType: "TASK_ENGINE", orgId: X, taskId, coreEngine: { engine: "core", areas: { merge: "core", build: "core", flow: "core" }, flags: "cc=on", stampedAt: at } });
+    w.db.set({ ...coreTaskMarkKey(taskId), entityType: "TASK_ENGINE", orgId: X, taskId, coreEngine: { engine: "core", areas: { merge: "core", build: "core", flow: "core" }, flags: "cc=on", stampedAt: at } });
     const listed = await w.api("GET", "/v1/dev/tasks", github);
     expect(listed.status).toBe(200);
     expect((listed.body.tasks as Array<{ taskId: string }>).map((task) => task.taskId)).toEqual([taskId]);

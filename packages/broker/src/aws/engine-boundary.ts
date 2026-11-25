@@ -2,7 +2,7 @@ import type { ActionOffer, TaskMoneyV1 } from "@agentx/contracts";
 import type { TaskActionAnswer, TaskActionInput } from "../core-host/task-action-routes.js";
 import { logWorkspacePointerIntegrity } from "../core/task-flow/workspace-pointer.js";
 // Core boundary (D1-2c; was the engine boundary of migration plan v3.2 lane E2, step 6 part): every AWS entry point that reads or acts on an EXISTING task asks whether the task is the core's, by the
-// task's stored mark (its stamp item, core-host/engine-stamp.ts), never by a switch.
+// task's stored mark (core-host/core-task-mark.ts), never by a switch.
 //
 //   - A task with the mark is the core's. The developer task routes hand it to the core's own handlers (`CoreTaskEntry`, the core host's dev routes: company-aware, they check the caller's
 //     company on every read). Nothing on the AWS side reads its record, its workspace or its operations. Without a core entry on this install, or for an operation the core does not serve,
@@ -16,7 +16,7 @@ import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { AgentXErrorCodeSchema, OrgIdSchema, agentXError, type ActorRef, type ConversationRef, type DeveloperSignInMethod } from "@agentx/contracts";
 import { workspaceKey, taskPointerKey as scopedTaskPointerKey } from "../core/task-flow/keys.js";
 import { setupCheckRecordKey } from "../core/setup-agent/check.js";
-import { engineStampKey, stampOf, type EngineStamp } from "../core-host/engine-stamp.js";
+import { coreTaskMarkKey, coreTaskMarkOf, type CoreTaskMark } from "../core-host/core-task-mark.js";
 import { type DeployedCaller } from "../core-host/dev-routes.js";
 import { answerTaskRoute } from "../core-host/task-route-answer.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
@@ -70,7 +70,7 @@ function remember(table: EngineStateTable, name: string, core: boolean): void {
 }
 
 async function readItem(table: EngineStateTable, key: { pk: string; sk: string }): Promise<Record<string, unknown> | undefined> {
-  // A strongly consistent read: a stamp is written in the same transaction as its task, so once the task is seen its stamp is too.
+  // A strongly consistent read: a mark is written in the same transaction as its task, so once the task is seen its mark is too.
   const response = await table.documentClient.send(new GetCommand({ TableName: table.tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> };
   return response.Item;
 }
@@ -84,12 +84,12 @@ export class EngineStampUnreadableError extends Error {
  * The task's mark (undefined: none, which is no core task's). A read that fails throws, and so does a mark item that is there but cannot be read as one: only the core's start writes that
  * item, so it is never taken for "not the core's".
  */
-export async function readTaskStamp(table: EngineStateTable, taskId: string): Promise<EngineStamp | undefined> {
-  const item = await readItem(table, engineStampKey(taskId));
+export async function readCoreTaskMark(table: EngineStateTable, taskId: string): Promise<CoreTaskMark | undefined> {
+  const item = await readItem(table, coreTaskMarkKey(taskId));
   if (item === undefined) return undefined;
-  const stamp = stampOf(item);
-  if (stamp === undefined) throw new EngineStampUnreadableError();
-  return stamp;
+  const mark = coreTaskMarkOf(item);
+  if (mark === undefined) throw new EngineStampUnreadableError();
+  return mark;
 }
 
 /**
@@ -102,7 +102,7 @@ export async function isCoreTask(table: EngineStateTable, taskId: string): Promi
   // A kept verdict is fixed (a `false` one is kept only by `isCoreTaskThatExists`).
   const known = remembered(table).get(key);
   if (known !== undefined) return known;
-  const core = await readTaskStamp(table, taskId) !== undefined;
+  const core = await readCoreTaskMark(table, taskId) !== undefined;
   if (core) remember(table, key, core);
   return core;
 }
@@ -112,7 +112,7 @@ export async function isCoreTaskThatExists(table: EngineStateTable, taskId: stri
   const key = `task:${taskId}`;
   const known = remembered(table).get(key);
   if (known !== undefined) return known;
-  const core = await readTaskStamp(table, taskId) !== undefined;
+  const core = await readCoreTaskMark(table, taskId) !== undefined;
   remember(table, key, core);
   return core;
 }
@@ -374,8 +374,7 @@ export async function serveCoreTaskRoute(entry: CoreTaskEntry | undefined, reque
 
 
 /**
- * The developer start, through the core where the switch sends this caller's company (lane E2 step 6). `undefined`: the old start answers it (no core entry on this install, a company the
- * switch does not send to the core, or a person with no member company). Otherwise the core's answer, as the developer routes return it.
+ * The developer start, through the core (lane E2 step 6). `undefined`: the old start answers it (no core entry on this install, or a person with no member company). Otherwise the core's answer, as the developer routes return it.
  */
 export async function startOnCore(entry: CoreTaskEntry | undefined, request: BrokerRequest, caller: CoreEntryCaller): Promise<{ value: unknown } | undefined> {
   if (entry === undefined || !isStart(request)) return undefined;

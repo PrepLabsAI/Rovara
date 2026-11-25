@@ -304,21 +304,6 @@ describe("hosted wiki build controls: the rest of each control", () => {
     }
   });
 
-  it("refuses a build, a continue and a refresh before writing anything when the company's new tasks are not on the core; stop, the switch and delete still work", async () => {
-    const { world, person, call, app, starter } = await buildWorld();
-    vi.spyOn(app, "engineForNewTask").mockReturnValue("workflow");
-    const owner = person("p-owner", FAKE_COMPANY, "owner");
-    for (const tail of ["", "/continue", "/refresh"]) {
-      const answer = await call(post(WB("payments", tail), { requestId: id() }), owner);
-      expect(answer.status, tail).toBe(503);
-      expect(answer.body).toEqual({ error: { code: "RUNTIME_UNAVAILABLE", message: WIKI_CONTROLS_WORDS.unavailable } });
-    }
-    expect(starter.started).toHaveLength(0);
-    expect(await readWikiBuildPointer(world.store, FAKE_COMPANY, "payments")).toBeUndefined();
-    expect((await call(post(WB("payments", "/agents"), { requestId: id(), on: true }), owner)).status).toBe(200);
-    expect((await call(get(WB("payments")), owner)).status).toBe(200);
-  });
-
   it("says 'not set up in this deployment' for Build when no starter is wired, and the other controls still work", async () => {
     const { world, person, call } = await buildWorld({ withStarter: false });
     const owner = person("p-owner", FAKE_COMPANY, "owner");

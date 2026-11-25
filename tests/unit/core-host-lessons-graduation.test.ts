@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentXError, LessonViewSchema, companyScoped, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type OrgRole, type ProjectDefinition, type ProjectRole } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { CORE_ENGINE_ON, buildCoreRegistry, createCoreRuntime } from "../../packages/broker/src/core-host/index.js";
+import { buildCoreRegistry, createCoreRuntime } from "../../packages/broker/src/core-host/index.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, CORE_LESSONS_VARIABLE, type CoreLessons } from "../../packages/broker/src/core-host/lessons.js";
 import { createLessonsApi, isLessonsApiPath, NO_SUCH_PROJECT, type LessonsApiCaller, type LessonsApiCompany, type LessonsApiOptions } from "../../packages/broker/src/core-host/lessons-api.js";
 import type { HostedLessonPeople } from "../../packages/broker/src/lessons/hosted-people.js";
@@ -64,7 +64,7 @@ async function setUp(env: NodeJS.ProcessEnv = { [CORE_LESSONS_VARIABLE]: "on" })
   for (const companyId of [A, B]) {
     await registerProject(world, companyId);
     const runtime = createCoreRuntime({
-      registry, companyId, flags: CORE_ENGINE_ON, callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
+      registry, companyId, callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
       repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined,
     });
     const built = createCoreLessons({ flow: runtime.flow, registry, companyId, lessonsSwitch, people, hostFor: async (id) => lessons.get(id)?.host, now: () => world.clock.now });

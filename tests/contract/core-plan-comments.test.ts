@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { decideWorkflow, submitPlanCritique, WorkflowSnapshotSchema, type JsonValue, type WorkerInvocation } from "@agentx/contracts";
 import { createCoreTaskRuleRoutes } from "../../packages/broker/src/aws/core-task-rule-routes.js";
-import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { createHarness } from "../support/task-flow-harness.js";
 import { dispatchRowKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
@@ -21,7 +21,7 @@ function corePage() {
   h.deps.companyId = COMPANY;
   const key = { pk: `DEVTASK#${h.taskId}`, sk: "META" };
   h.db.set({ ...h.db.get(key.pk, key.sk)!, companyId: COMPANY });
-  h.db.set({ ...engineStampKey(h.taskId), coreEngine: { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "all", stampedAt: new Date().toISOString() } });
+  h.db.set({ ...coreTaskMarkKey(h.taskId), coreEngine: { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "all", stampedAt: new Date().toISOString() } });
   const input = () => ({ requestId: randomUUID(), document: "plan" as const, version: 1, target: { kind: "claim" as const, id: "2.1" }, text: "Place this above.", ask: false });
   return { ...h, input, row: () => h.db.get(key.pk, key.sk)!, rows: () => JSON.stringify(h.db.find(() => true)) };
 }

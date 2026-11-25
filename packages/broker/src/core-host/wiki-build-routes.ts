@@ -32,7 +32,7 @@ import {
 } from "../core/wiki-build/controls.js";
 import type { WikiBuildStarter } from "../core/wiki-build/run.js";
 import type { WikiBuildStarterInput } from "../core/wiki-build/starter.js";
-import { ensureCoreInUse } from "./engine-stamp.js";
+import { ensureCoreInUse } from "./core-task-mark.js";
 import type { SetupRunBasis, SetupRunStanding } from "./setup-run-routes.js";
 import { hostOf, wikiMapServiceOf, type HostedWikiMapWiring } from "./wiki-map-routes.js";
 
@@ -71,8 +71,6 @@ export interface HostedWikiBuildInput {
   wiring: HostedWikiBuildWiring;
   /** The audit sink for this request (the dev routes' `auditFor`, else the runtime's). */
   audit: AuditSink;
-  /** Whether the switch sends this company's NEW tasks to the core. False: a build, a continue and a refresh are refused. */
-  startsNewTasks: boolean;
   now: () => number;
   log?: ((entry: Record<string, unknown>) => void) | undefined;
 }
@@ -194,8 +192,6 @@ export async function routeHostedWikiBuild(input: HostedWikiBuildInput): Promise
     // Every change: only a person who manages the project's wiki (the control re-reads the standing too).
     if (!isManage(standing)) throw agentXError("FORBIDDEN", WIKI_CONTROLS_WORDS.notAllowed);
     const raw = bodyOf(input.request);
-    // A build, a continue and a refresh start a task: only where this company's new tasks run on the core. Nothing is written otherwise.
-    if ((tail === undefined || tail === "continue" || tail === "refresh") && !input.startsNewTasks) throw agentXError("RUNTIME_UNAVAILABLE", WIKI_CONTROLS_WORDS.unavailable);
     if (tail === "refresh") freshMap = true;
     if (tail === undefined) { const done = await startWikiControl(controls, personId, project, raw); return json(done.status, done.view); }
     if (tail === "continue") { const done = await continueWikiControl(controls, personId, project, raw); return json(done.status, done.view); }

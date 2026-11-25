@@ -5,7 +5,7 @@ import { vi, type Mock } from "vitest";
 import { change, type CodeHost, type ReadBudget, type DocumentKey, type WorkflowFeedbackFindingsDecisionRequest, type ChangeRequestFeedback, type WorkflowFeedbackReviewReport } from "@agentx/contracts";
 import { host, ORG, OWNER_ID } from "./service-host.js";
 import { TASK_ID } from "./merge-world.js";
-import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { linkedChangeRequestKey } from "../../packages/broker/src/core/proof/revert/linked-change-requests.js";
 import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
 
@@ -44,7 +44,7 @@ export async function feedbackWorld(options: Parameters<typeof host>[0] = {}): P
     workspaceProject: "web", workspaceCreatedAt: task.createdAt, createdAt: task.createdAt, updatedAt: task.createdAt } });
   await w.h.store.put({ item: { pk: `WORKSPACE#${task.workspaceId}`, sk: "DEVELOPER_TASK", entityType: "DEVELOPER_TASK_POINTER", taskId: TASK_ID } });
   const home = (await w.world.host.repository("web", 1, "app", ORG))!;
-  await w.h.store.put({ item: { ...engineStampKey(TASK_ID), entityType: "TASK_ENGINE", orgId: ORG, taskId: TASK_ID,
+  await w.h.store.put({ item: { ...coreTaskMarkKey(TASK_ID), entityType: "TASK_ENGINE", orgId: ORG, taskId: TASK_ID,
     coreEngine: { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "on", stampedAt: new Date(w.clock.ms).toISOString() } } });
   const link = linkedChangeRequestKey("github", home.url, "1")!;
   await w.h.store.update({ key: link, ops: [change.set("candidateDigest", task.workflow!.candidate!.digest), change.set("workspaceId", task.workspaceId)] });

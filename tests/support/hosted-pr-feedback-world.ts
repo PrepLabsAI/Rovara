@@ -4,7 +4,6 @@ import type { Admission } from "@agentx/contracts";
 import type { BrokerResponse } from "../../packages/broker/src/handler.js";
 import type { CoreRuntime } from "../../packages/broker/src/core-host/core-runtime.js";
 import { vi, type MockInstance } from "vitest";
-import { CORE_ENGINE_ON } from "../../packages/broker/src/core-host/flags.js";
 import type { CoreHostApp } from "../../packages/broker/src/core-host/app.js";
 import { createCoreDevRoutes, type CoreDevWiring, type CoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { reviewedFeedbackWorld, type ReviewedFeedbackWorld } from "./pr-feedback-world.js";
@@ -26,7 +25,7 @@ export async function hostedFeedbackWorld(status: "COMPLETE" | "BLOCKED" = "COMP
   w.h.deps.taskCapUsd = async () => 10;
   w.h.deps.taskSpendUsd = async () => 0;
   const runtime = { companyId: w.h.deps.companyId, flow: w.h.flow, services: {} };
-  const app: CoreHostApp = { flags: CORE_ENGINE_ON, engineForNewTask: () => "core", runtimeFor: async () => runtime, registry: async () => w.registry, handleScheduledJob: async () => undefined, relayOutbox: async () => [] };
+  const app: CoreHostApp = { runtimeFor: async () => runtime, registry: async () => w.registry, handleScheduledJob: async () => undefined, relayOutbox: async () => [] };
   const caller: DeployedCaller = { principal: w.h.owner.principal, client: "cli" };
   const membership = { companyId: runtime.companyId, role: "member" as const };
   if (missing === "ownerActing") delete w.h.deps.access.ownerActing;

@@ -1,6 +1,6 @@
 import { GetCommand, QueryCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { OrgIdSchema, companyScoped } from "@agentx/contracts";
-import { CORE_IN_USE_PARTITION } from "../core-host/engine-stamp.js";
+import { CORE_IN_USE_PARTITION } from "../core-host/core-task-mark.js";
 import { STALE_RUN_SWEEP_AGE_MS } from "@agentx/verifier";
 import {
   INDEX_EXPIRY_ATTRIBUTE, REQUALIFY_PROFILE_ID, RequalifyHoldSchema, TERMINAL_OPERATION_STATUSES, WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX, WORKSPACE_SESSION_STATE_INDEX,

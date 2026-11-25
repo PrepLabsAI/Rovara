@@ -21,7 +21,7 @@ import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { createCoreHostApp, engineStampKey, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
+import { createCoreHostApp, coreTaskMarkKey, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { coreTaskEntryFrom, type CoreTaskEntry } from "../../packages/broker/src/aws/engine-boundary.js";
 import { accessRetryRoute } from "../../packages/broker/src/aws/core-access-retry.js";
@@ -132,12 +132,12 @@ async function worldFor(variant: Variant) {
   const coreTasks: CoreTaskEntry = { ...inner, route: accessRetryRoute(inner, { caller: deployedCallerOf, flowFor: async (companyId) => (await app.runtimeFor(companyId)).flow.deps }) };
   const harness = await createDeveloperTaskBroker(variant.caller === "no-core-entry" ? {} : { developerExtra: { coreTasks } });
   const rows = [
-    ...await partition(world, `DEVTASK#${task.taskId}`), ...await partition(world, engineStampKey(task.taskId).pk), ...await partition(world, `DEVELOPER#${developerIdOf(owner)}`),
+    ...await partition(world, `DEVTASK#${task.taskId}`), ...await partition(world, coreTaskMarkKey(task.taskId).pk), ...await partition(world, `DEVELOPER#${developerIdOf(owner)}`),
     ...await partition(world, `WORKSPACE#${task.workspaceId}`),
   ];
   for (const row of rows) harness.db.set(JSON.parse(JSON.stringify(row)) as Record<string, unknown> & { pk: string; sk: string });
   // The owner of an OLD task: the same rows, but nothing marks the task as the core's.
-  if (variant.caller === "old-task-owner") harness.db.delete(engineStampKey(task.taskId).pk, engineStampKey(task.taskId).sk);
+  if (variant.caller === "old-task-owner") harness.db.delete(coreTaskMarkKey(task.taskId).pk, coreTaskMarkKey(task.taskId).sk);
   return { harness, task, who: (variant.caller === "stranger" || variant.caller === "stranger-script-token" ? OMAR : MAYA) };
 }
 

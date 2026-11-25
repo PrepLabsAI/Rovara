@@ -13,7 +13,7 @@ const inputs = (extra: Partial<BrokerCoreRootInputs> = {}): BrokerCoreRootInputs
 // The registry is only asked for its store by the money stop (core-money-stop, merged with L3 in the batch of 2026-11-16); nothing here reads it.
 // Batch 14: the upkeep parts (#959) also look up the optional realtime adapter by name; none is registered here.
 const registry = { require: () => ({}), names: () => [], get: () => undefined } as unknown as AdapterRegistry;
-const runtimeOptions = () => (captured.options as CoreHostAppOptions).runtime(registry, A, {} as never);
+const runtimeOptions = () => (captured.options as CoreHostAppOptions).runtime(registry, A);
 const task = (orgId: string) => ({ orgId, project: "web" }) as never;
 
 it("passes the runtime's checked CI reader into the company service builder", () => {
@@ -68,7 +68,7 @@ it("the deployed root composes the base feedback handler before its first job or
   w.h.deps.taskSpendUsd = async () => 0;
   createBrokerCoreRoot(inputs({ services: () => ({}) }));
   expect(servesPrFeedbackDecisions(w.h.deps)).toBe(false);
-  (captured.options as CoreHostAppOptions).runtime(registry, w.h.deps.companyId, {} as never).services!(w.h.flow, { ciMode: async () => "sandbox_only" });
+  (captured.options as CoreHostAppOptions).runtime(registry, w.h.deps.companyId).services!(w.h.flow, { ciMode: async () => "sandbox_only" });
   expect(servesPrFeedbackDecisions(w.h.deps)).toBe(true);
   expect(hostedPrFeedbackRoutes(w.h.deps)).toBeTypeOf("function");
 });
@@ -89,7 +89,7 @@ it.each(["unserved", "served", "unreadable"])("the deployed root Merge wiring us
   const routes = vi.spyOn(devRoutesModule, "createCoreDevRoutes");
   createBrokerCoreRoot(inputs({ services: () => ({}), now: () => new Date(w.clock.ms) }));
   const options = routes.mock.calls.at(-1)![0];
-  (captured.options as CoreHostAppOptions).runtime(w.registry, w.h.deps.companyId, {} as never).services!(w.h.flow, { ciMode: async () => "sandbox_only" });
+  (captured.options as CoreHostAppOptions).runtime(w.registry, w.h.deps.companyId).services!(w.h.flow, { ciMode: async () => "sandbox_only" });
   const wiring = await options.wiring({ companyId: w.h.deps.companyId, flow: w.h.flow, services: {}, ciReporting: { honest: true, ciMode: async () => "sandbox_only" } });
   expect(wiring.prFeedback).toBe(hostedPrFeedbackRoutes(w.h.deps));
   if (state === "unreadable") w.read.mockRejectedValue(new Error("unreadable"));

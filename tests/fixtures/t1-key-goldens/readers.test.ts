@@ -4,8 +4,7 @@ import { companyScoped } from "@agentx/contracts";
 import { createBroker, loadSlackBroker } from "../../support/slack-broker.js";
 import { createHarness } from "../../support/task-flow-harness.js";
 import { workspaceOperations } from "../../../packages/broker/src/core/task-flow/reads.js";
-import { stampForNewTask, stampItem } from "../../../packages/broker/src/core-host/engine-stamp.js";
-import { CORE_ENGINE_ON } from "../../../packages/broker/src/core-host/flags.js";
+import { coreTaskMarkFor, coreTaskMarkItem } from "../../../packages/broker/src/core-host/core-task-mark.js";
 import type { DeveloperTaskActions } from "../../../packages/broker/src/aws/developer-task-actions.js";
 import { requireOperation } from "../../../packages/broker/src/aws/cancellation.js";
 import { requalifyDrainStatus } from "../../../packages/broker/src/e2e/requalify-hold.js";
@@ -26,8 +25,8 @@ describe("T1 Part 0 AWS reader boundary", () => {
     });
     const [operation] = await workspaceOperations(h.deps, started.task.workspaceId);
     expect(operation).toBeDefined();
-    const stamp = stampItem(h.deps.companyId, started.task.taskId,
-      stampForNewTask(CORE_ENGINE_ON, h.deps.companyId, h.deps.now!()));
+    const stamp = coreTaskMarkItem(h.deps.companyId, started.task.taskId,
+      coreTaskMarkFor(h.deps.now!()));
     const prefix = `ORG#${operation!.companyId}#`;
     // Keep the legacy fixture explicit after T1 changes the core's default key constructors.
     const rows = (await h.store.query({ pk: operation!.pk })).items.map(row => ({

@@ -13,7 +13,7 @@ import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { writeInvolvedRow } from "../../packages/broker/src/core/task-flow/involved.js";
-import { createCoreHostApp, engineStampKey, stampOf, type CoreHostApp, type EngineStamp } from "../../packages/broker/src/core-host/index.js";
+import { createCoreHostApp, coreTaskMarkKey, coreTaskMarkOf, type CoreHostApp, type CoreTaskMark } from "../../packages/broker/src/core-host/index.js";
 import { NOT_ON_THE_CORE_YET, createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { TASK_ENTRY_OPERATIONS, coreAnswerValue, coreTaskEntryFrom, isCoreTask, isCoreWorkspace, taskEntryOperation, type CoreTaskEntry } from "../../packages/broker/src/aws/engine-boundary.js";
 import { workspaceOwner } from "../../packages/broker/src/aws/admin-reads.js";
@@ -30,7 +30,7 @@ const PROJECT: ProjectDefinition = {
 // Switch blocker honest-ci (#680): a deployment hands in the project's own CI mode reader.
 const HONEST_CI = { honest: true as const, ciMode: () => "their_ci_fix" as const };
 const SERVICES = () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } });
-const STAMP = (areas: EngineStamp["areas"]): EngineStamp => ({ engine: areas.flow, areas, flags: "cc=on", stampedAt: "2026-11-15T00:00:00.000Z" });
+const STAMP = (areas: CoreTaskMark["areas"]): CoreTaskMark => ({ engine: areas.flow, areas, flags: "cc=on", stampedAt: "2026-11-15T00:00:00.000Z" });
 const CORE = STAMP({ merge: "core", build: "core", flow: "core" });
 
 beforeAll(async () => { await loadSlackBroker(); });
@@ -52,9 +52,9 @@ describe("the owner of each operation, for every stamp", () => {
     const db = new FakeDynamoDb();
     const table = { documentClient: db, tableName: "state" };
     const [none, core, areasWorkflow] = [randomUUID(), randomUUID(), randomUUID()];
-    db.set({ ...engineStampKey(core), coreEngine: CORE });
+    db.set({ ...coreTaskMarkKey(core), coreEngine: CORE });
     // No start writes any mark but the core's; a mark of another shape that reads as one is still the mark, so it is the core's.
-    db.set({ ...engineStampKey(areasWorkflow), coreEngine: STAMP({ merge: "workflow", build: "workflow", flow: "workflow" }) });
+    db.set({ ...coreTaskMarkKey(areasWorkflow), coreEngine: STAMP({ merge: "workflow", build: "workflow", flow: "workflow" }) });
     expect(await isCoreTask(table, none)).toBe(false);
     expect(await isCoreTask(table, core)).toBe(true);
     expect(await isCoreTask(table, areasWorkflow)).toBe(true);
@@ -68,7 +68,7 @@ describe("reading the stamp", () => {
   it("a stamp item that is there but cannot be read as one is an error (only the core writes it), and so is a read that fails; neither is ever not the core's", async () => {
     const db = new FakeDynamoDb();
     const taskId = randomUUID();
-    db.set({ ...engineStampKey(taskId), coreEngine: { engine: "core", areas: { flow: "core", build: "core" }, flags: "x", stampedAt: "y" } });
+    db.set({ ...coreTaskMarkKey(taskId), coreEngine: { engine: "core", areas: { flow: "core", build: "core" }, flags: "x", stampedAt: "y" } });
     await expect(isCoreTask(table(db), taskId)).rejects.toThrow("a task's engine stamp could not be read");
     const failing = new FakeDynamoDb();
     failing.injectFault({ command: "GetCommand", error: { name: "ProvisionedThroughputExceededException" } });
@@ -82,7 +82,7 @@ describe("reading the stamp", () => {
     db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId, companyId: FAKE_COMPANY });
     // A legacy task pointer must never be a fallback for a company discovery pointer.
     db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "DEVELOPER_TASK", taskId });
-    db.set({ ...engineStampKey(taskId), coreEngine: CORE });
+    db.set({ ...coreTaskMarkKey(taskId), coreEngine: CORE });
     await expect(isCoreWorkspace(table(db), workspaceId)).rejects.toMatchObject({ code: "NOT_FOUND", message: "NOT_FOUND: workspace unavailable" });
     expect(integrity.mock.calls).toEqual([[{ component: "broker", event: "workspace.pointer_integrity" }]]);
     integrity.mockClear();
@@ -183,7 +183,7 @@ async function coreWorld(options: { access?: TaskFlowDeps["access"]; withoutRead
   const coreTasks: CoreTaskEntry = options.newTasksOnWorkflow !== true ? entry : { route: async (request, caller) => (request.method === "POST" && request.path.split("?")[0] === "/v1/dev/tasks" ? undefined : await entry.route(request, caller)) };
   const harness = await createDeveloperTaskBroker(options.wired === false ? {} : { developerExtra: { coreTasks } });
   const rows = [
-    ...await partition(world, `DEVTASK#${task.taskId}`), ...await partition(world, engineStampKey(task.taskId).pk),
+    ...await partition(world, `DEVTASK#${task.taskId}`), ...await partition(world, coreTaskMarkKey(task.taskId).pk),
     ...await partition(world, workspacePartition(FAKE_COMPANY, task.workspaceId)), ...await partition(world, `DEVELOPER#${developerIdOf(owner)}`),
     ...await partition(world, `WORKSPACE#${task.workspaceId}`),
   ];
@@ -604,7 +604,7 @@ describe("a task's start on the AWS developer route (lane E2 step 6)", () => {
     const started = await dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Add a /ready endpoint", workflow: true, workflowPath: "QUICK" });
     expect(started.status).toBe(200);
     const taskId = (started.body.task as { taskId: string }).taskId;
-    expect(stampOf(await world.store.get(engineStampKey(taskId)))).toMatchObject({ engine: "core" });
+    expect(coreTaskMarkOf(await world.store.get(coreTaskMarkKey(taskId)))).toMatchObject({ engine: "core" });
     expect(db.get(`DEVTASK#${taskId}`, "META")).toBeUndefined();
   });
 

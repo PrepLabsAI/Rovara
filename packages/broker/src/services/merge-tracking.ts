@@ -39,7 +39,7 @@ import type { SummaryCheckSource } from "../core/merge/summary-check.js";
 import { createPullRequestVerdictSource } from "../core/build-step/pull-request-verdict.js";
 import type { CodeMilestones, CodeSettingsReader, HumanEditSink, MergeTask, SessionTimeline } from "../core/merge/seams.js";
 import { readMergeTracking, recoveryRowKey, workflowUpdateItem } from "../core/merge/store.js";
-import { engineStampKey } from "../core-host/engine-stamp.js";
+import { coreTaskMarkKey } from "../core-host/core-task-mark.js";
 import { sessionBindingsOf } from "../core/sessions/bindings.js";
 import { sessionEventItem } from "../core/sessions/store.js";
 import { verifyPublishedChanges } from "../core/build-step/changed-files.js";
@@ -289,7 +289,7 @@ export function createMergeTrackingService(options: MergeTrackingServiceOptions)
   const loadTask = async (taskId: string): Promise<(MergeTask & { orgId: OrgId }) | undefined> => {
     // D1-2 (ruling g): a task with no core mark is the retired old workflow's. It reads as absent here, so the sweep, the observation and the hooks never touch its row (no read of GitHub, no
     // settle, no delete): its WORKFLOW_MERGE_RECOVERY row stays exactly as it is.
-    if (await store.get(engineStampKey(taskId)) === undefined) return undefined;
+    if (await store.get(coreTaskMarkKey(taskId)) === undefined) return undefined;
     const record = await readTask(flow, taskId);
     return record === undefined ? undefined : mergeTaskOf(record, companyId);
   };

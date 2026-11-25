@@ -68,7 +68,7 @@ import { costUsdOf } from "../core/cost/ledger.js";
 import { estimatePathOf, recordRunCost, runCostInputOf } from "../core/cost/estimate.js";
 import { withSharedMergeRecovery, policyCiReporting } from "./core-job-services.js";
 import type { CoreServiceWiring, CoreRuntimeOptions, CoreService, CoreServiceName } from "../core-host/core-runtime.js";
-import type { CiReporting } from "../core-host/switch-blockers.js";
+import type { CiReporting } from "../core-host/core-wiring-guard.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../core-host/dev-routes.js";
 import { SETUP_RUN_NOT_ALLOWED, type SetupRunStanding } from "../core-host/setup-run-routes.js";
 import { createHostedSetupApproval } from "../core-host/setup-approval.js";
@@ -322,11 +322,11 @@ export interface BrokerCoreRootInputs {
 
 export interface BrokerCoreRoot {
   readonly app: CoreHostApp;
-  /** The developer task routes' core entry. Undefined while the switch is off: the routes never reach the core. */
+  /** The developer task routes' core entry. Undefined only where the install has no core wired (a test or a self-hosted layout without it): the routes then never reach the core. */
   readonly coreTasks: CoreTaskEntry | undefined;
   /**
    * Lane L12: the core's own /v1/app/* routes for the broker's HTTP API (sessions, decision cards, how we work, script tokens and person erase), over the same caller mapping as
-   * `coreTasks` (company and role from membership). Undefined while the switch is off: the developer API then answers every /v1/app/* path "route not found" and reads nothing.
+   * `coreTasks` (company and role from membership). Undefined only where the install has no core wired: the developer API then answers every /v1/app/* path "route not found" and reads nothing.
    */
   readonly coreApp: CoreAppEntry | undefined;
   /**
@@ -349,8 +349,8 @@ export interface BrokerCoreRoot {
   /** L2-4: the tracker intake per company (aws/hosted-intake.ts). Undefined while the switch is off, its settings are unreadable, or Linear is not wired. */
   readonly intake: HostedIntake | undefined;
   /**
-   * Guided onboarding PR 16: whether archiving a project of this company takes effect, i.e. the switch sends the company's new tasks to the core engine (the only engine that reads the
-   * archived state). Absent while the switch is off: the archive route then refuses an archive.
+   * Guided onboarding PR 16: whether archiving a project of this company takes effect, i.e. the company's tasks run on the core engine (the only engine that reads the
+   * archived state). Present wherever the core is wired (it holds for every company: D1); absent: the archive route refuses an archive.
    */
   readonly projectArchiveTakesEffect?: (companyId: string) => boolean;
   /**
@@ -1470,7 +1470,6 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const intake = settingsBlocked || linearIntake === undefined ? undefined : createHostedIntake({
     connections: linearIntake.connections, fenceKey: intakeFenceKeyOf(inputs.callbackSigningKey), now: () => now().getTime(), log,
     companyFor: async (companyId) => {
-      if (app.engineForNewTask(companyId) !== "core") return undefined;
       const runtime = await app.runtimeFor(companyId);
       const registry = await app.registry();
       const milestones = milestonesByCompany.get(companyId);
@@ -1678,7 +1677,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     adminNotice,
     ...buildSwitchApis(),
     intake,
-    ...(coreApp === undefined ? {} : { projectArchiveTakesEffect: (companyId: string) => app.engineForNewTask(companyId) === "core" }),
+    ...(coreApp === undefined ? {} : { projectArchiveTakesEffect: () => true }),
     ...buildPolicyHookAccessor(hookSettings, hookProblem, inputs.policyHookInstall),
     async personErase(request, caller) {
       if (settingsBlocked && (request.path.split("?")[0] ?? "").startsWith("/v1/app/people/")) return callbackAnswer(503, "CORE_SWITCH_BLOCKED", CORE_SETTINGS_REFUSAL_WORDS);

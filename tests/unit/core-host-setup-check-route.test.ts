@@ -138,14 +138,7 @@ describe("hosted Re-check setup: who may do what", () => {
     expect(checkEvents(world)).toEqual([]);
   });
 
-  it("refuses a start in fixed words, writing nothing, when the company's new tasks are not on the core, but needs no model gateway (the check uses no model)", async () => {
-    const off = await setupWorld();
-    vi.spyOn(off.app, "engineForNewTask").mockReturnValue("workflow");
-    const caller = off.person("p-owner", FAKE_COMPANY, "owner");
-    const refused = await off.call(post(CHECK, { requestId: randomUUID() }), caller);
-    expect(refused.status).toBe(503);
-    expect(refused.body).toEqual({ error: { code: "RUNTIME_UNAVAILABLE", message: SETUP_RUN_UNAVAILABLE } });
-    expect(await markOf(off.world, FAKE_COMPANY)).toBeUndefined();
+  it("needs no model gateway to start a check (the check uses no model)", async () => {
     const noGateway = await setupWorld({ gateway: false });
     const owner = noGateway.person("p-owner", FAKE_COMPANY, "owner");
     expect((await noGateway.call(post(CHECK, { requestId: randomUUID() }), owner)).status).toBe(202);

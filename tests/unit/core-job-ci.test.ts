@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createRowsPolicySource, type PolicySource } from "@agentx/contracts";
 import { policyCiReporting } from "../../packages/broker/src/aws/core-job-services.js";
-import { CI_MODE_UNREADABLE_WORDS } from "../../packages/broker/src/core-host/switch-blockers.js";
+import { CI_MODE_UNREADABLE_WORDS } from "../../packages/broker/src/core-host/core-wiring-guard.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa", B = "org_bbbbbbbbbbbbbbbbbbbb";
 const task = (orgId = A) => ({ orgId, project: "web" }) as never;

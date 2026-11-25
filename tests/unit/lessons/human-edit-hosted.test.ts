@@ -7,7 +7,7 @@ import { orgProjectCatalogKey, projectRevisionKey, type CommitIdentity, type Ide
 import { createOwnerTaskAccess } from "../../../packages/broker/src/core/task-flow/access.js";
 import { taskKey } from "../../../packages/broker/src/core/task-flow/keys.js";
 import { localOwnerPrincipal } from "../../../packages/broker/src/ports/policy-defaults.js";
-import { CORE_ENGINE_ON, buildCoreRegistry, createCoreRuntime, type CoreRuntime } from "../../../packages/broker/src/core-host/index.js";
+import { buildCoreRegistry, createCoreRuntime, type CoreRuntime } from "../../../packages/broker/src/core-host/index.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, CORE_LESSONS_VARIABLE, type CoreLessons } from "../../../packages/broker/src/core-host/lessons.js";
 import type { HumanEditPush } from "../../../packages/broker/src/core/merge/seams.js";
 import type { HostedLessonPeople } from "../../../packages/broker/src/lessons/hosted-people.js";
@@ -70,7 +70,7 @@ async function setup(over: { learning?: boolean; people?: { roster?: readonly st
     await fake.store.put({ item: { ...projectRevisionKey(companyId, DEFINITION.name, DEFINITION.revision), entityType: "PROJECT", definition: JSON.parse(JSON.stringify(DEFINITION)) as JsonValue } });
     await fake.store.put({ item: { ...orgProjectCatalogKey(companyId, DEFINITION.name), entityType: "PROJECT_CATALOG", latestRevision: DEFINITION.revision } });
     const runtime = createCoreRuntime({
-      registry, companyId, flags: CORE_ENGINE_ON, callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
+      registry, companyId, callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
       repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(fake.clock.now), log: () => undefined,
     });
     const lessons = createCoreLessons({

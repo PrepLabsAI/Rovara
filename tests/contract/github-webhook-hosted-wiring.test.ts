@@ -8,7 +8,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID, prHeadKey, projectRevisionKey } from "@agentx/contracts";
 import { GithubInstallationBindings } from "../../packages/broker/src/aws/github-credentials.js";
 import { LINKED_CHANGE_REQUEST_ENTITY, linkedChangeRequestKey } from "../../packages/broker/src/core/proof/revert/linked-change-requests.js";
-import { stampItem } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { coreTaskMarkItem } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { recoveryRowKey, taskRecordKey } from "../../packages/broker/src/core/merge/store.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { createBroker, loadSlackBroker } from "../support/slack-broker.js";
@@ -35,7 +35,7 @@ async function hostedWorld(options: WorldOptions = {}) {
   if (options.bindInstallation !== false) await bindings.claim(options.bindInstallation ?? ORG, BOUND, "acct-a", "operator");
   // A core task (stamped core) with its neutral change-request link, head row, pinned repository and tracking row: what the core flow writes when it publishes.
   db.set({ ...taskRecordKey(TASK), companyId: ORG, project: "demo", startingRevision: 1, workflow: { stage: "WAIT_FOR_MERGE", pullRequests: [{ repositoryId: "demo", number: 7, url: PR_URL, candidateDigest: DIGEST }] } });
-  db.set(stampItem(ORG, TASK, { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "fixture", stampedAt: "2026-11-22T00:00:00.000Z" }).item);
+  db.set(coreTaskMarkItem(ORG, TASK, { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "fixture", stampedAt: "2026-11-22T00:00:00.000Z" }).item);
   db.set({ ...linkedChangeRequestKey("github", REPO_URL, "7")!, entityType: LINKED_CHANGE_REQUEST_ENTITY, hostKind: "github", repositoryKey: "example/demo", changeRequestId: "7", repositoryId: "demo",
     number: 7, url: PR_URL, taskId: TASK, workspaceId: "workspace", candidateDigest: DIGEST, createdAt: "2026-11-22T00:00:00.000Z" });
   db.set({ ...projectRevisionKey(ORG, "demo", 1), definition: { repositories: [{ name: "demo", url: `${REPO_URL}.git` }] } });

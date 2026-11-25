@@ -17,7 +17,7 @@ import type { TaskMoneyV1 } from "@agentx/contracts";
 //   - sessions (`/v1/app/sessions...`): a session's read (the task view with its evidence), the understanding answers (`POST .../answers`), stop, retry, follow;
 //   - a task's read (`GET /v1/dev/tasks/<id>`), whose view carries the evidence kept for its checked code;
 //   - a task's proof index (`GET /v1/dev/tasks/<id>/evidence`, Cloud's Proof tab): the task read's own rule, then the items the proof page shows for the current code and its failing tests (at most ten);
-//   - a task's START (`POST /v1/dev/tasks`), for a member of a company (`engineForNewTask`, always the core). A person with no member company
+//   - a task's START (`POST /v1/dev/tasks`), for a member of a company (always the core). A person with no member company
 //     gets `undefined`: the old broker starts the task exactly as before (lane E2 step 6; until the spec 056 workflow is removed, #1274). A membership read that fails refuses (the sign-in refusal), never falls back;
 //   - decision cards (`/v1/app/decisions`): the list, through the deployment's sources (each checks the caller's live authority). Acting on a card (approve, reject, request changes,
 //     evidence-opened) needs the signed-in person's live authority, checked by the performer (DEC 254zzz73: there is no step-up);
@@ -730,8 +730,6 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
       const companyId = membership.companyId;
       // The principal the identity point vouched for must be of the member company (checked before anything is built for it); the task flow checks it again on every task read.
       if (caller.principal.companyId !== companyId) return unauthenticated();
-      // A start goes to the core where the setting sends this company's NEW tasks there (every member company since #1275).
-      if (starting && options.app.engineForNewTask(companyId) !== "core") return undefined;
       // Answering the agent is never a script token's either, and reads like a missing task for the same reason.
       if (caller.scriptToken !== undefined && TASK_ANSWERS.test(path)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
       // A script token reaches task reads or the two scoped wiki reads; never sessions, decisions, playbooks or token management.
@@ -750,7 +748,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           return json(200, await listInvolvedTasks(target.runtime.flow.deps, taskCaller, involvedListOptions(new URLSearchParams(request.path.split("?")[1] ?? ""))));
         }
         if (starting) {
-          // The core's own start (it parses the request, checks the person may start on the project, holds the admission and writes the engine stamp in one transaction). A retry with the
+          // The core's own start (it parses the request, checks the person may start on the project, holds the admission and writes the core mark in one transaction). A retry with the
           // same request id answers the first task. The answer is the developer task view, as the old start's.
           const started = await target.runtime.flow.start({ ...taskCaller, origin: caller.client === undefined ? "cli" : "app" }, bodyOf(request));
           const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, started.task.taskId);
@@ -874,7 +872,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           return await (isSetupCheckPath(path, request.method) ? routeHostedSetupCheck : routeHostedSetupRun)({
             request, path, principal: caller.principal, client: caller.client, webApp: caller.webApp === true, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.setupRun,
             audit: auditOf(target, caller),
-            startsNewTasks: options.app.engineForNewTask(companyId) === "core", now: () => nowOf(target),
+            now: () => nowOf(target),
           });
         }
         if (isWikiMapPath(path, request.method)) {
@@ -973,7 +971,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           return await routeHostedWikiBuild({
             request, path, principal: caller.principal, client: caller.client, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.wikiBuild,
             audit: auditOf(target, caller),
-            startsNewTasks: options.app.engineForNewTask(companyId) === "core", now: () => nowOf(target), log: options.log,
+            now: () => nowOf(target), log: options.log,
           });
         }
         if (isStartSuggestPath(path, request.method)) {

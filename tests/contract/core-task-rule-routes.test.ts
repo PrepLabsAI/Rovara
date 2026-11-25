@@ -11,7 +11,7 @@ import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { appendTaskLog } from "../../packages/broker/src/core/task-log/store.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { createCoreHostApp, engineStampKey, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
+import { createCoreHostApp, coreTaskMarkKey, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { NOT_ON_THE_CORE_YET, createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { coreTaskEntryFrom, type CoreTaskEntry } from "../../packages/broker/src/aws/engine-boundary.js";
 import { createCoreTaskRuleRoutes } from "../../packages/broker/src/aws/core-task-rule-routes.js";
@@ -90,7 +90,7 @@ async function ruleWorld(options: { rules?: boolean } = {}) {
   const harness = await createDeveloperTaskBroker({ developerExtra: { coreTasks } });
   late.harness = harness;
   const db = harness.db;
-  for (const row of [...await partition(world, `DEVTASK#${task.taskId}`), ...await partition(world, engineStampKey(task.taskId).pk)]) db.set(JSON.parse(JSON.stringify(row)) as Record<string, unknown> & { pk: string; sk: string });
+  for (const row of [...await partition(world, `DEVTASK#${task.taskId}`), ...await partition(world, coreTaskMarkKey(task.taskId).pk)]) db.set(JSON.parse(JSON.stringify(row)) as Record<string, unknown> & { pk: string; sk: string });
   for (const who of [TESS, SAM]) {
     db.set({ pk: `SESSION#${who.sessionId}`, sk: "META", sessionId: who.sessionId, developerId: who.developerId, amr: who.provider, startedAt: new Date(Date.now() - 60_000).toISOString(), endsAt: Math.floor(Date.now() / 1000) + 604_800 });
     db.set({ pk: `DEVELOPER#${who.developerId}`, sk: "META", developerId: who.developerId, provider: who.provider, displayName: who.name, firstSignInAt: "x", lastSignInAt: "x", revoked: false });

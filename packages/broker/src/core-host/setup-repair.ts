@@ -24,7 +24,7 @@ import { startIdempotencyKey } from "../core/task-flow/keys.js";
 import { startTask } from "../core/task-flow/start.js";
 import { upkeepAutomationSwitch } from "../core/upkeep/wiring.js";
 import { upkeepIsOn } from "../core/upkeep/settings.js";
-import { ensureCoreInUse } from "./engine-stamp.js";
+import { ensureCoreInUse } from "./core-task-mark.js";
 import { companyProjects } from "./lessons.js";
 import { hostedUnattendedTasks } from "./wiki-refresh.js";
 

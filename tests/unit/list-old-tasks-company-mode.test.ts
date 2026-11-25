@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { boundedCompanyReads } from "../../packages/broker/src/aws/company-check.js";
 import { agentXError } from "@agentx/contracts";
 import { routeDeveloperTaskRequest } from "../../packages/broker/src/aws/developer-tasks.js";
-import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const COMPANY = "org_aaaaaaaaaaaaaaaaaaaa";
@@ -17,7 +17,7 @@ function seed(db: FakeDynamoDb, taskId: string, at: string, core: boolean, paddi
   const meta = { pk: `DEVTASK#${taskId}`, sk: "META", entityType: "DEVELOPER_TASK", taskId, developerId: DEV, companyId: COMPANY, title: core ? "Core" : "Old", project: "payments", createdAt: at, updatedAt: at, shared: false };
   db.set(padding === 0 ? meta : { ...meta, notes: "x".repeat(padding) });
   db.set({ ...meta, pk: `DEVELOPER#${DEV}`, sk: `TASK#${at}#${taskId}`, entityType: "DEVELOPER_TASK_INDEX", status: "CLOSED" });
-  if (core) db.set({ ...engineStampKey(taskId), entityType: "TASK_ENGINE", coreEngine: { engine: "core", areas: { merge: "core", build: "core", flow: "core" }, flags: "cc=on", stampedAt: at } });
+  if (core) db.set({ ...coreTaskMarkKey(taskId), entityType: "TASK_ENGINE", coreEngine: { engine: "core", areas: { merge: "core", build: "core", flow: "core" }, flags: "cc=on", stampedAt: at } });
 }
 const list = (db: { send(command: unknown): Promise<unknown> }, query: string) => routeDeveloperTaskRequest({ documentClient: db, tableName: "state", companyId: COMPANY, developer: {}, taskReaderPerson: HOLDS_PROJECT } as never, caller,
   { method: "GET", path: `/v1/dev/tasks${query}`, headers: {} } as never, new URL(`/v1/dev/tasks${query}`, "https://agentx.invalid")) as Promise<{ tasks: Array<{ taskId: string }>; nextCursor?: string }>;

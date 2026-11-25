@@ -1,10 +1,10 @@
-// Engine host (lane E2): the switch blockers. A blocker is a REQUIRED check the root runs before it hands out a company's runtime with an area on. The first one is honest CI: the core always
-// reports honest CI states (unreadable, required_missing; "none" is never read as passing), so the deployment must hand in the project's own CI mode reader, the one its merge tracking and its
-// task readers use. Without it the switch is refused for the merge area, never run on a default mode.
+// Engine host (lane E2; renamed in D1 from the switch blockers): the wiring guard. A check is REQUIRED: the root runs it before it hands out a company's runtime. The first one is honest CI: the core
+// always reports honest CI states (unreadable, required_missing; "none" is never read as passing), so the deployment must hand in the project's own CI mode reader, the one its merge tracking and
+// its task readers use. Without it the runtime is refused, never run on a default mode. The second is that every required service is wired.
 import { describe, expect, it } from "vitest";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import {
-  CORE_SWITCH_BLOCKERS, CoreSwitchBlockedError, CI_MODE_UNREADABLE_WORDS, SWITCH_BLOCKED_WORDS, checkedCiReporting, createCoreHostApp, type CoreHostApp, type CoreService, type CoreServiceName, type CoreServiceWiring,
+  CORE_WIRING_CHECKS, CoreWiringIncompleteError, CI_MODE_UNREADABLE_WORDS, WIRING_INCOMPLETE_WORDS, REQUIRED_CORE_SERVICES, coreWiringGaps, checkedCiReporting, createCoreHostApp, type CoreHostApp, type CoreService, type CoreServiceName, type CoreServiceWiring,
 } from "../../packages/broker/src/core-host/index.js";
 import type { TaskFlow } from "../../packages/broker/src/core/task-flow/flow.js";
 import type { ProjectCiMode, TrackedTask } from "../../packages/broker/src/core/merge/index.js";
@@ -37,19 +37,19 @@ async function rejectionOf(promise: Promise<unknown>): Promise<Error> {
 }
 const honest = (...given: unknown[]) => { const mode = given.length === 0 ? "their_ci_fix" : given[0]; return { honest: true, ciMode: () => mode }; };
 
-describe("the switch blockers list", () => {
-  it("names honest CI as a required blocker of the merge area, in fixed plain words with an owner", () => {
-    const blocker = CORE_SWITCH_BLOCKERS.find((entry) => entry.id === "honest-ci");
-    expect(blocker).toMatchObject({ id: "honest-ci", area: "merge" });
+describe("the wiring checks list", () => {
+  it("names honest CI as a required check, in fixed plain words with an owner", () => {
+    const blocker = CORE_WIRING_CHECKS.find((entry) => entry.id === "honest-ci");
+    expect(blocker).toMatchObject({ id: "honest-ci" });
     expect(blocker?.words).toMatch(/CI/u);
     expect(blocker?.owner.length).toBeGreaterThan(0);
-    expect(new Set(CORE_SWITCH_BLOCKERS.map((entry) => entry.id)).size).toBe(CORE_SWITCH_BLOCKERS.length);
+    expect(new Set(CORE_WIRING_CHECKS.map((entry) => entry.id)).size).toBe(CORE_WIRING_CHECKS.length);
   });
 });
 
 describe("a dispatch-only root", () => {
   const ON = {} as NodeJS.ProcessEnv;
-  it("is not asked for honest CI (it runs no merge tracking), while an ordinary root with the merge area on is refused", async () => {
+  it("is not asked for honest CI (it runs no merge tracking), while an ordinary root is refused", async () => {
     const world = createFakeWorld();
     const dispatchOnly = createCoreHostApp({
       modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now, dispatchOnly: true, servedCompanies: async () => [],
@@ -57,7 +57,7 @@ describe("a dispatch-only root", () => {
     });
     expect((await dispatchOnly.runtimeFor(FAKE_COMPANY)).companyId).toBe(FAKE_COMPANY);
     const ordinary = appOver(createFakeWorld(), ON, undefined);
-    expect(await rejectionOf(ordinary.runtimeFor(FAKE_COMPANY))).toBeInstanceOf(CoreSwitchBlockedError);
+    expect(await rejectionOf(ordinary.runtimeFor(FAKE_COMPANY))).toBeInstanceOf(CoreWiringIncompleteError);
   });
 });
 
@@ -93,20 +93,20 @@ describe("checkedCiReporting: validated at run time, not only by the type", () =
   });
 });
 
-describe("the root refuses a company's runtime while a blocker stands", () => {
-  it("merge on and no CI reporting wired: refused with the blocker's id and fixed words", async () => {
+describe("the root refuses a company's runtime while a wiring check stands", () => {
+  it("no CI reporting wired: refused with the blocker's id and fixed words", async () => {
     const app = appOver(createFakeWorld(), {}, undefined);
-    const error = await rejectionOf(app.runtimeFor(FAKE_COMPANY)) as CoreSwitchBlockedError;
-    expect(error).toBeInstanceOf(CoreSwitchBlockedError);
-    expect(error.name).toBe("CoreSwitchBlockedError");
+    const error = await rejectionOf(app.runtimeFor(FAKE_COMPANY)) as CoreWiringIncompleteError;
+    expect(error).toBeInstanceOf(CoreWiringIncompleteError);
+    expect(error.name).toBe("CoreWiringIncompleteError");
     expect(error.blockers).toEqual(["honest-ci"]);
-    expect(error.message).toContain(SWITCH_BLOCKED_WORDS);
+    expect(error.message).toContain(WIRING_INCOMPLETE_WORDS);
     expect(error.message).toContain("honest-ci");
   });
 
   it.each([["honest false", { honest: false, ciMode: () => "sandbox_only" }], ["honest as text", { honest: "true", ciMode: () => "sandbox_only" }], ["ciMode not a function", { honest: true, ciMode: SECRET }]])("refused when the wiring is %s, and the error names nothing it was given", async (_name, given) => {
     const error = await rejectionOf(appOver(createFakeWorld(), {}, given).runtimeFor(FAKE_COMPANY));
-    expect(error).toBeInstanceOf(CoreSwitchBlockedError);
+    expect(error).toBeInstanceOf(CoreWiringIncompleteError);
     expect(error.message).not.toContain("SECRET");
   });
 
@@ -115,9 +115,27 @@ describe("the root refuses a company's runtime while a blocker stands", () => {
     const app = appOver(createFakeWorld(), {}, { honest: false, ciMode: () => "sandbox_only" }, {
       services: (_flow, wiring) => { seen.push(wiring.ciMode); return ALL_SERVICES(); },
     });
-    await expect(app.runtimeFor(FAKE_COMPANY)).rejects.toBeInstanceOf(CoreSwitchBlockedError);
+    await expect(app.runtimeFor(FAKE_COMPANY)).rejects.toBeInstanceOf(CoreWiringIncompleteError);
     expect(seen).toHaveLength(1);
     expect(typeof seen[0]).toBe("function");
     await expect(seen[0]!(TASK)).rejects.toThrow(CI_MODE_UNREADABLE_WORDS);
+  });
+});
+
+describe("coreWiringGaps", () => {
+  const wired = Object.fromEntries(REQUIRED_CORE_SERVICES.map((name) => [name, { pass: async () => ({}) }]));
+  const reporting = checkedCiReporting(honest())!;
+  it("names every required service that is not wired, and honest CI when no valid reader is held", () => {
+    expect(coreWiringGaps({ services: wired, ciReporting: reporting })).toEqual({ services: [], blockers: [] });
+    expect(coreWiringGaps({ services: {}, ciReporting: undefined })).toEqual({ services: [...REQUIRED_CORE_SERVICES], blockers: ["honest-ci"] });
+    for (const name of REQUIRED_CORE_SERVICES) {
+      const { [name]: _left, ...rest } = wired;
+      expect(coreWiringGaps({ services: rest, ciReporting: reporting })).toEqual({ services: [name], blockers: [] });
+    }
+  });
+
+  it("asks for honest CI and for merge tracking whatever else is wired: nothing is conditional on an area any more", () => {
+    expect(coreWiringGaps({ services: { "merge-tracking": undefined, "session-sweep": wired["session-sweep"] }, ciReporting: reporting }).services).toContain("merge-tracking");
+    expect(coreWiringGaps({ services: wired }).blockers).toEqual(["honest-ci"]);
   });
 });

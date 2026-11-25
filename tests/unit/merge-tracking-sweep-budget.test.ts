@@ -3,7 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { HostRateLimitError, change, type ReadBudget } from "@agentx/contracts";
 import { host, ORG } from "../support/service-host.js";
 import { TASK_ID } from "../support/merge-world.js";
-import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { recoveryRowKey } from "../../packages/broker/src/core/merge/store.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { fixedCodeSettings } from "../../packages/broker/src/core/merge/defaults.js";
@@ -67,7 +67,7 @@ async function world(options: { pollMs?: number; drift?: boolean } = {}) {
       const workflow = JSON.parse(JSON.stringify(meta["workflow"])) as { taskId: string };
       await w.h.store.put({ item: { ...meta, ...taskKey(id), taskId: id, workflow: { ...workflow, taskId: id } } });
       // The sweep reads only tasks that carry the core's mark (D1-2).
-      await w.h.store.put({ item: { ...(await w.h.store.get(engineStampKey(TASK_ID)))!, ...engineStampKey(id), taskId: id } });
+      await w.h.store.put({ item: { ...(await w.h.store.get(coreTaskMarkKey(TASK_ID)))!, ...coreTaskMarkKey(id), taskId: id } });
       await w.h.store.put({ item: { ...recoveryRowKey(id), entityType: "WORKFLOW_MERGE_RECOVERY", kind: "tracking", taskId: id, nextAttemptAt: 0 } });
       added.push(id);
     }
@@ -187,7 +187,7 @@ it("reads at most DUE_CANDIDATES_MAX owned due rows before it picks, and still t
 it("leaves an old task's row alone: no mark, the same company, an open pull request: nothing is observed, nothing is written, the row stays", async () => {
   const w = await world();
   const [old, marked] = await w.addTasks(2);
-  await w.h.store.delete({ key: engineStampKey(old!) });
+  await w.h.store.delete({ key: coreTaskMarkKey(old!) });
   const before = JSON.stringify(await w.row(old!));
   const seen: string[] = [];
   hooks.current.reconcile = async (taskId) => { seen.push(taskId); return { kind: "OBSERVED" }; };

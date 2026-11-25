@@ -8,7 +8,7 @@ import { IMPLICIT_COMPANY_ID, SLACK_CHANNEL as SLACK, sharedTaskKey } from "@age
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { issueChannelLinkCode, redeemChannelLinkCode } from "../../packages/broker/src/core/channel/links.js";
 import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
-import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 import type { CoreEntryCaller, CoreTaskEntry } from "../../packages/broker/src/aws/engine-boundary.js";
 import type { ChatThreadInput, ChatThreadInputResult } from "../../packages/broker/src/core-host/chat-thread-input.js";
 import { bindSlackChannelInCompany, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
@@ -55,7 +55,7 @@ async function world(options: { entry?: "none" | "no-thread-input"; stamp?: bool
     // DEC 254zzz95: `installTeam`: SLACK_TEAM is the install's own team (its legacy view), as on staging.
     ...(options.installTeam === true ? { slackWorkspaceLegacyTeamId: SLACK_TEAM } : {}),
     developer: { ...h.brokerInput.developer!, slackTeamId: options.installTeam === true ? SLACK_TEAM : "T0OTHER000", ...(options.entry === "none" ? {} : { coreTasks: entry }) } } as never);
-  if (options.stamp !== false) h.db.set({ ...engineStampKey(TASK), coreEngine: CORE });
+  if (options.stamp !== false) h.db.set({ ...coreTaskMarkKey(TASK), coreEngine: CORE });
   if (options.guard !== null) {
     h.db.set({
       ...sharedTaskKey(thread), entityType: "SHARED_TASK", taskId: TASK, workspaceId: randomUUID(), ownerKey: taskOwnerKey(PERSON, TASK), developerId: PERSON, developerName: "Rovara member", project: "payments",

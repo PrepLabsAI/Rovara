@@ -11,7 +11,7 @@ import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/
 import { createPriceTableMetering, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { FakeHostModel } from "@agentx/broker/fakes";
-import { CoreRegistryError, buildCoreRegistry, createCoreHostApp, engineStampKey, stampOf, type CoreAdapterModule } from "../../packages/broker/src/core-host/index.js";
+import { CoreRegistryError, buildCoreRegistry, createCoreHostApp, coreTaskMarkKey, coreTaskMarkOf, type CoreAdapterModule } from "../../packages/broker/src/core-host/index.js";
 import { CORE_EXPIRY_COLLISIONS, KEPT_FOR_GOOD_ON_AWS, KEPT_ON_SEPARATE_KEYS, appliesCodeRetention, codeRetentionStore, retentionFor, withCodeRetention } from "../../packages/broker/src/core-host/retention.js";
 import { COMPANY_SECRET_PATHS, CORE_DISPATCH_QUEUE, OWED_POINTS, codeAdapterModules, owedPoints, stateTableIndexes, type CodeModuleDeps } from "../../packages/broker/src/core-host/code-modules.js";
 import { FakeDynamoDb } from "../support/ports/dynamodb-fake.js";
@@ -88,7 +88,7 @@ describe("Code's AWS adapter modules", () => {
     const runtime = await app.runtimeFor(FAKE_COMPANY);
     const owner = { principal: localOwnerPrincipal({ companyId: FAKE_COMPANY }), origin: "app" as const, client: "test" };
     const { task } = await runtime.flow.start(owner, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
-    expect(stampOf(await store.get(engineStampKey(task.taskId)))).toMatchObject({ engine: "core" });
+    expect(coreTaskMarkOf(await store.get(coreTaskMarkKey(task.taskId)))).toMatchObject({ engine: "core" });
     expect((await runtime.flow.list(owner)).tasks.map((row) => row.taskId)).toEqual([task.taskId]);
     // Idempotent start: the same request id answers the same task, never a second one.
     const requestId = randomUUID();

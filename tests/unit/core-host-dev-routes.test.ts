@@ -19,7 +19,7 @@ import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createScriptToken, readScriptToken } from "../../packages/broker/src/core/script-tokens/index.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
-import { createCoreHostApp, engineStampKey, stampOf, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
+import { createCoreHostApp, coreTaskMarkKey, coreTaskMarkOf, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { INVOLVED_UNAVAILABLE, NOT_FOR_SCRIPT_TOKENS, NOT_ON_THE_CORE_YET, SESSION_CAP_UNREADABLE, SIGN_IN_AGAIN, createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { taskScreenRoute } from "../../packages/broker/src/core-host/task-screen-routes.js";
 import { involvedRowKey, writeInvolvedRow } from "../../packages/broker/src/core/task-flow/involved.js";
@@ -796,7 +796,7 @@ describe("a task's start on the deployed API (lane E2 step 6)", () => {
     const answer = await routes.route(post("/v1/dev/tasks", body), own);
     expect(answer?.statusCode).toBe(200);
     const task = (JSON.parse(answer!.body) as { task: { taskId: string } }).task;
-    expect(stampOf(await world.store.get(engineStampKey(task.taskId)))).toMatchObject({ engine: "core" });
+    expect(coreTaskMarkOf(await world.store.get(coreTaskMarkKey(task.taskId)))).toMatchObject({ engine: "core" });
     // The same request id answers the first task.
     const again = await routes.route(post("/v1/dev/tasks", body), own);
     expect((JSON.parse(again!.body) as { task: { taskId: string } }).task.taskId).toBe(task.taskId);

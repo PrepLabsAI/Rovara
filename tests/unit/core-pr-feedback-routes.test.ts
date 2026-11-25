@@ -30,7 +30,7 @@ import { reviewedFeedbackWorld } from "../support/pr-feedback-world.js";
 import { dispatchPartition, dispatchRowKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { readTask, workspaceOperations } from "../../packages/broker/src/core/task-flow/reads.js";
 import { toDocument } from "../../packages/broker/src/core/task-flow/records.js";
-import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { blockWorkflow, WORKFLOW_BLOCK_REASONS, WORKFLOW_KEEP_PULL_REQUESTS_NOTE } from "@agentx/contracts";
 import { decidePrFeedback } from "../../packages/broker/src/core/pr-feedback/decide.js";
 
@@ -64,7 +64,7 @@ it.each(["feedback-decision", "feedback-retry", "keep-pull-requests"])("mounted 
   for (const kind of ["wrong-owner", "stale", "retired"] as const) {
     const w = await reviewedFeedbackWorld(route === "feedback-retry" ? "BLOCKED" : "COMPLETE");
     if (kind === "wrong-owner") w.h.deps.access.ownerActing = async () => undefined;
-    if (kind === "retired") await w.h.store.delete({ key: engineStampKey(w.task.taskId) });
+    if (kind === "retired") await w.h.store.delete({ key: coreTaskMarkKey(w.task.taskId) });
     const body = route === "feedback-decision" ? { ...w.request, decision: "DISMISS", selectedFindingIds: [], ownerNote: WORKFLOW_KEEP_PULL_REQUESTS_NOTE, expectedRevision: w.request.expectedRevision - (kind === "stale" ? 1 : 0) }
       : route === "feedback-retry" ? { reviewDigest: kind === "stale" ? "0".repeat(64) : w.request.reviewDigest }
       : { requestId: w.request.requestId, expectedRevision: w.task.workflow!.revision - (kind === "stale" ? 1 : 0) };
@@ -488,8 +488,8 @@ it.each(["no-workflow", "no-feedback", "no-decision", "retired", "corrupt-stamp"
   if (kind === "no-workflow") delete w.task.workflow;
   if (kind === "no-feedback") delete w.task.workflow!.feedbackReview;
   if (kind === "no-decision") w.task.workflow!.feedbackReview!.status = "APPROVED";
-  if (kind === "retired") await w.h.store.delete({ key: engineStampKey(w.task.taskId) });
-  if (kind === "corrupt-stamp") await w.h.store.put({ item: { ...engineStampKey(w.task.taskId), entityType: "TASK_ENGINE", orgId: w.h.deps.companyId, taskId: w.task.taskId, coreEngine: { engine: "core" } } });
+  if (kind === "retired") await w.h.store.delete({ key: coreTaskMarkKey(w.task.taskId) });
+  if (kind === "corrupt-stamp") await w.h.store.put({ item: { ...coreTaskMarkKey(w.task.taskId), entityType: "TASK_ENGINE", orgId: w.h.deps.companyId, taskId: w.task.taskId, coreEngine: { engine: "core" } } });
   await w.h.store.put({ item: toDocument(w.task) });
   const get = vi.spyOn(w.h.deps.feedbackArtifacts!, "get");
   expect((await w.send("GET", "/workflow/feedback"))?.statusCode).toBe(404);
@@ -507,7 +507,7 @@ it("complete hosted feedback selects the company-scoped active operation and ign
   w.membership.companyId = companyId;
   w.caller.principal.companyId = companyId;
   await w.h.store.put({ item: toDocument(w.task) });
-  const stamp = (await w.h.store.get(engineStampKey(w.task.taskId)))!;
+  const stamp = (await w.h.store.get(coreTaskMarkKey(w.task.taskId)))!;
   await w.h.store.put({ item: { ...stamp, orgId: companyId } });
   const original = (await w.h.store.get({ pk: `WORKSPACE#${w.task.workspaceId}`, sk: "META" }))!;
   await w.h.store.put({ item: { ...original, ...workspaceKey(companyId, w.task.workspaceId), companyId, orgId: companyId, activeOperationId: w.operation.id } });

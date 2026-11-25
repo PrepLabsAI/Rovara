@@ -1,8 +1,8 @@
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { AgentXError, StartDeveloperTaskRequestSchema, agentXError } from "@agentx/contracts";
 import type { AdaptedHttpRequest } from "./lambda.js";
-import { readTaskStamp } from "./engine-boundary.js";
-import { engineStampKey } from "../core-host/engine-stamp.js";
+import { readCoreTaskMark } from "./engine-boundary.js";
+import { coreTaskMarkKey } from "../core-host/core-task-mark.js";
 import { readStartRequest, startReadNotFound, startReadUnavailable } from "../core/task-flow/start-request-read.js";
 import { resolveTaskPeopleReadAccess } from "../developer/task-people.js";
 import type { DeveloperCaller, DeveloperRouteDependencies } from "./developer-routes.js";
@@ -22,13 +22,13 @@ export async function taskStartRequestRoute(deps: DeveloperRouteDependencies, re
   try {
     return await readStartRequest({ get, company, check: () => context.check(), now: () => deps.now(),
       coreStamp: async (taskId, companyId) => {
-        // readTaskStamp's existing payload parser plus the persisted stamp's key/company provenance.
+        // readCoreTaskMark's existing payload parser plus the persisted stamp's key/company provenance.
         let raw: unknown;
-        const stamp = await readTaskStamp({ tableName: deps.tableName, documentClient: { send: async command => {
+        const stamp = await readCoreTaskMark({ tableName: deps.tableName, documentClient: { send: async command => {
           const response = await context.client.send(command) as { Item?: unknown }; raw = response.Item; return response;
         } } }, taskId);
         const item = raw as Record<string, unknown> | undefined;
-        const key = engineStampKey(taskId);
+        const key = coreTaskMarkKey(taskId);
         if (stamp === undefined || stamp.areas.flow !== "core" || item?.pk !== key.pk || item.sk !== key.sk || item.entityType !== "TASK_ENGINE"
           || item.taskId !== taskId || item.orgId !== companyId || !Number.isFinite(Date.parse(stamp.stampedAt))) throw startReadUnavailable();
         return raw;

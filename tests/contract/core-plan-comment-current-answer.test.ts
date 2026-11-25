@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { sharedTaskKey } from "@agentx/contracts";
 import { workflowTaskAnswerContext } from "../../packages/broker/src/aws/developer-tasks.js";
 import { createCoreTaskRuleRoutes } from "../../packages/broker/src/aws/core-task-rule-routes.js";
-import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { pageTask, pagePlan, PRIYA } from "../support/page-tasks.js";
 
 async function question() {
@@ -15,7 +15,7 @@ async function question() {
   const task = h.db.get(key.pk, key.sk)!;
   h.db.set({ ...task, companyId: "org_corehost00000000000a" });
   h.deps.companyId = "org_corehost00000000000a";
-  h.db.set({ ...engineStampKey(h.taskId), coreEngine: { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "all", stampedAt: new Date().toISOString() } });
+  h.db.set({ ...coreTaskMarkKey(h.taskId), coreEngine: { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "all", stampedAt: new Date().toISOString() } });
   const share = task["share"] as { teamId: string; channelId: string; threadTs: string };
   const thread = { teamId: share.teamId, channelId: share.channelId, threadTs: share.threadTs };
   h.db.set({ ...sharedTaskKey(thread), taskId: h.taskId, workflowThread: true });

@@ -8,7 +8,7 @@ import { operationKey, taskPointerKey, workspaceKey } from "../../packages/broke
 import { toDocument } from "../../packages/broker/src/core/task-flow/records.js";
 import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
 import { handleTaskRoute } from "../../packages/broker/src/core/task-flow/routes.js";
-import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { PRIYA, pageTask } from "../support/page-tasks.js";
 import { COMPANY, createHarness, newRequestId } from "../support/task-flow-harness.js";
 
@@ -76,13 +76,13 @@ describe("single task producer and detail=1 parity", () => {
 
   it.each(["", "detail=true", "detail=0"])("keeps the ordinary list unchanged for %s", async (query) => {
     const f = legacyFixture();
-    f.db.set({ ...engineStampKey(f.taskId), coreEngine: { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "cc=on", stampedAt: at } });
+    f.db.set({ ...coreTaskMarkKey(f.taskId), coreEngine: { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "cc=on", stampedAt: at } });
     expect((await f.list(query)).tasks[0]).not.toHaveProperty("startupReason");
   });
 
   it("core detail reads the same authorized task route and never workflow workspace facts", async () => {
     const f = legacyFixture();
-    f.db.set({ ...engineStampKey(f.taskId), coreEngine: { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "cc=on", stampedAt: at } });
+    f.db.set({ ...coreTaskMarkKey(f.taskId), coreEngine: { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "cc=on", stampedAt: at } });
     const route = vi.fn(async () => ({ statusCode: 200, headers: {}, body: JSON.stringify({ task: { taskId: f.taskId, startupReason: "own-machine-starting" } }) }));
     f.deps.coreTasks = { route };
     expect(DeveloperTaskDetailedListResponseSchema.parse(await f.list()).tasks[0]?.startupReason).toBe("own-machine-starting");
@@ -111,7 +111,7 @@ describe("single task producer and detail=1 parity", () => {
     const f = legacyFixture();
     const pk = `DEVELOPER#${PRIYA.developerId}`, sk = `TASK#${at}#${f.taskId}`;
     f.db.set({ ...f.db.get(pk, sk)!, status });
-    f.db.set({ ...engineStampKey(f.taskId), coreEngine: { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "all", stampedAt: at } });
+    f.db.set({ ...coreTaskMarkKey(f.taskId), coreEngine: { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "all", stampedAt: at } });
     const route = vi.fn(async () => ({ statusCode: 200, headers: {}, body: JSON.stringify({ task: { taskId: f.taskId, startupReason: "own-machine-starting" } }) }));
     f.deps.coreTasks = { route };
     const row = DeveloperTaskDetailedListResponseSchema.parse(await f.list()).tasks[0]!;

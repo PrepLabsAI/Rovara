@@ -7,7 +7,7 @@ import { adaptHttpApiEvent } from "../../packages/broker/src/aws/lambda.js";
 import { handleGithubWebhookRoute, GITHUB_WEBHOOK_MAX_BYTES } from "../../packages/broker/src/aws/github-webhook-route.js";
 import { GITHUB_DELIVERY_TTL_SECONDS, GITHUB_WEBHOOK_PER_MINUTE, hintTrackingRow, resetGithubWebhookWindows } from "../../packages/broker/src/aws/github-core-webhooks.js";
 import { GithubInstallationBindings } from "../../packages/broker/src/aws/github-credentials.js";
-import { stampItem } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { coreTaskMarkItem } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { recoveryRowKey, taskRecordKey } from "../../packages/broker/src/core/merge/store.js";
 import { githubWorkflowPullRequestKey } from "../../packages/broker/src/developer/task-records.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -39,7 +39,7 @@ function seed(db: FakeDynamoDb, input: Seed): void {
     workflow: { stage: "WAIT_FOR_MERGE", pullRequests: [{ repositoryId: "demo", number: input.number, url, candidateDigest: DIGEST }] } });
   // D1-2c: a task of the retired workflow engine carries no mark at all; only a core task has the stamp item.
   if (input.engine === "workflow") db.delete(`TASK_ENGINE#${input.taskId}`, "STAMP");
-  if (input.engine === "core") db.set(stampItem(input.company, input.taskId, { engine: input.engine, areas: { flow: input.engine, build: input.engine, merge: input.engine }, flags: "fixture", stampedAt: "2026-11-22T00:00:00.000Z" }).item);
+  if (input.engine === "core") db.set(coreTaskMarkItem(input.company, input.taskId, { engine: input.engine, areas: { flow: input.engine, build: input.engine, merge: input.engine }, flags: "fixture", stampedAt: "2026-11-22T00:00:00.000Z" }).item);
   db.set({ ...githubWorkflowPullRequestKey(repo, input.number), entityType: "GITHUB_WORKFLOW_PR", repositoryFullName: repo, repositoryId: "demo", number: input.number, url, taskId: input.taskId, workspaceId: "workspace", candidateDigest: DIGEST });
   db.set({ ...projectRevisionKey(input.company, "demo", 1), definition: { repositories: [{ name: "demo", url: `https://github.com/${input.pinned ?? repo}.git` }] } });
   if (input.sha !== undefined) db.set({ ...prHeadKey(input.company, repo, input.sha), entityType: "PR_HEAD", orgId: input.company, taskId: input.taskId, repositoryId: "demo", number: input.number });

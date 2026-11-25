@@ -2,7 +2,7 @@ import { artifactObjectKey } from "../../packages/broker/src/services/callbacks.
 import { createHash } from "node:crypto";
 import { world as reviewWorld, toRound, nextJob, taskOf, NOW } from "../support/design-review-flow-world.js";
 import { COMPANY, SIGNING_KEY } from "../support/task-flow-harness.js";
-import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { allocateSlotBudgets } from "../../packages/broker/src/core/design-review/slot-keys.js";
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -120,7 +120,7 @@ describe("hosted context routes through API priority, outer broker and real comp
     // The core hands over at DISPATCHING; its event callback does not rewrite this to RUNNING.
     expect(round.operation.status).toBe("DISPATCHING");
     const w = await setup(true, { store: review.h.store, clock: review.h.clock, signingKey: SIGNING_KEY, companyId: COMPANY, developerId: (await taskOf(review)).developerId });
-    await review.h.store.put({ item: { ...engineStampKey(review.taskId), coreEngine: { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "on", stampedAt: NOW } } });
+    await review.h.store.put({ item: { ...coreTaskMarkKey(review.taskId), coreEngine: { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "on", stampedAt: NOW } } });
     await review.h.store.put({ item: { pk: `WORKSPACE#${review.workspaceId}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId: review.workspaceId, companyId: COMPANY } });
     const opKey = operationKey(COMPANY, review.workspaceId, round.operation.id);
     await review.h.store.put({ item: { ...(await review.h.store.get(opKey))!, requester: { personId: "a".repeat(64) } } });
