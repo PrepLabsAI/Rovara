@@ -6,8 +6,9 @@
 //     is for exactly the commits the job was queued for, and the result is held to them again by `recordBuild`;
 //   - `savedEnvBuild` carries the approved environment, the repository the push login will be for and the key's inputs, and NO credential: the stored dispatch (outbox, queue) never holds the lease token;
 //   - one start per job (a marker row written only if absent), so a retried trigger does not make a second workspace.
-// What the dispatcher does with a job's preparation (`payload.savedEnvBuild` present): before it delivers, it calls `leaseForDispatch(deps, ids, operationId)` and puts the token it gets in
-// `savedEnvBuild.leaseToken` of the invocation it sends (never in what it stores); a worker that does not list `PREPARE_SAVED_ENV_BUILD_FEATURE` is refused the job (the dispatch says `requires`).
+// What the dispatcher does with a job's preparation (`payload.savedEnvBuild` present): before it delivers, it asks the registry for that job's token (`savedEnvLease`, saved-env-dispatch-lease.ts: `leaseForDispatch` for the
+// stored job id and this operation) and puts the token it gets in `savedEnvBuild.leaseToken` of the invocation it sends (never in what it stores); a worker that does not list `PREPARE_SAVED_ENV_BUILD_FEATURE` is
+// refused the job (the dispatch says `requires`), and a job whose lease cannot be handed over is not delivered at all.
 // Fails closed: no approver, a moved approved environment, a repository the job has no commit for, or no build inputs (the base image and secret names, from the install) start nothing, and the job's lease runs out.
 import { randomUUID } from "node:crypto";
 import {

@@ -46,6 +46,7 @@ import { dispatcherStoredAgentModelChoice } from "../../core-host/stored-agent-m
 import { createCompanyTaskSpend } from "../../core-host/company-task-spend.js";
 import { createUnreportedRunSettler } from "../../core-host/unreported-run-settle.js";
 import { createTaskTestEnvironment } from "../../core/test-env/seam.js";
+import { savedEnvDispatchLeaseFor } from "../../core/test-env/saved-env-dispatch-lease.js";
 import { hostedServiceCatalog } from "../hosted-test-services.js";
 import { createWikiForStep } from "../../core/wiki/agent-context.js";
 import { wikiBuildEndedHook } from "../../core/wiki-build/wiring.js";
@@ -331,6 +332,9 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
         artifacts: createCompanyArtifactReader({ blobs: registry.require("object-storage"), store: registry.require("storage"), companyId, refused: (reason) => inputs.log({ event: "dispatch.artifact_read_refused", companyId, reason }) }),
         // DEC 254zm: a coding or verification step is told the plan of the test environment its task pinned (the company's own records; the owner starter list is the catalog while test services are switched on).
         testEnvironment: createTaskTestEnvironment({ store: registry.require("storage"), now: () => now().getTime(), env, serviceCatalog: hostedServiceCatalog(env) }, { orgId: companyId }),
+        // Saved project images: a rebuild's preparation is delivered with its job's lease token, asked for here, for this company and the job the broker stored (core/test-env/saved-env-dispatch-lease.ts).
+        // Switch off: no seam, and a rebuild's preparation is not delivered.
+        ...savedEnvLeaseOption(registry, companyId, env, now),
       };
       return {
       callbackSigningKey,
@@ -367,6 +371,12 @@ export function coreDispatchQueueArn(env: NodeJS.ProcessEnv): string | undefined
   return required(env[CORE_DISPATCH_QUEUE_ARN_VARIABLE]);
 }
 
+
+/** The dispatcher's lease seam for one company's runtime, or nothing while the install's saved-environments switch is off. */
+function savedEnvLeaseOption(registry: AdapterRegistry, companyId: OrgId, env: NodeJS.ProcessEnv, now: () => Date): Pick<RegistryTaskFlowOptions, "savedEnvLease"> | Record<string, never> {
+  const savedEnvLease = savedEnvDispatchLeaseFor({ companyId, store: registry.require("storage"), ...(registry.names("audit-sink").length === 0 ? {} : { audit: registry.require("audit-sink") }), env, now: () => now().getTime() });
+  return savedEnvLease === undefined ? {} : { savedEnvLease };
+}
 
 /** SPEND-UNREPORTED-RUN: the spend reader's `settle` for a company, or nothing where this dispatcher has no money stop to settle with. */
 function unreportedSettle(inputs: Pick<DispatcherCoreInputs, "moneyStop" | "log">, registry: AdapterRegistry, companyId: OrgId, now: () => Date): { settle?: (taskId: string) => Promise<void> } {
