@@ -56,8 +56,8 @@ describe("plan comment parity on core", () => {
       const path = `/v1/dev/tasks/${h.taskId}/comments`;
       const call = async (method: string, body?: unknown) => {
         try {
-          return await routes.route({ request: { method, path, headers: {}, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }, path, person: { developerId, name: "Reader" }, companyId: COMPANY as never, task: h.row(), store: { query: async () => ({ items: [] }) },
-            authorize: authorizeFor(routes, { companyId: COMPANY as never, principal: principalOf(developerId), task: h.row() }) });
+          return await routes.route({ request: { method, path, headers: {}, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }, path, person: { developerId, name: "Reader" }, companyId: COMPANY, task: h.row(), store: { query: async () => ({ items: [] }) },
+            authorize: authorizeFor(routes, { companyId: COMPANY, principal: principalOf(developerId), task: h.row() }) });
         } catch (error) { return { statusCode: 404, body: JSON.stringify({ error: { code: (error as { code?: string }).code } }) }; }
       };
       const before = h.rows();
