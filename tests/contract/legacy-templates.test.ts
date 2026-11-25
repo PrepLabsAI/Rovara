@@ -14,6 +14,7 @@ import { withoutWorkerCallbackAlarm } from "../support/worker-callback-alarm-tem
 import { withoutWorkerEcrScope } from "../support/worker-ecr-scope-template.js";
 import { withoutPublicApiUrl } from "../support/public-api-url-template.js";
 import { withoutLinearWebhookRoute } from "../support/linear-webhook-route-template.js";
+import { withoutCoreOutboxStreamRelay } from "../support/core-outbox-stream-relay-template.js";
 
 skipLambdaBundling();
 // CODE-PUBLIC-URL (2026-11-24): the legacy control plane's external URL bases that now go through the public address helper, counted so a URL that bypasses the helper moves it.
@@ -58,13 +59,17 @@ describe("legacy production templates", () => {
     if (stack.stackName === "AgentXControlPlane") {
       it("removing only Batch F additions preserves code/next's AgentXControlPlane template", () => {
         // DEC 254zzz488: the Linear webhook route (asserted and taken out, outermost) is the only change to the pins below besides the public-URL, lessons and RETAIN additions.
-        const beforeBatchF = withoutLinearWebhookRoute(withoutWebhookSecretLane(withoutBatchFAdditions(withoutLegacyRuntimeBoundary(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(normalizedTemplate(stack))), { named: false, sites: PUBLIC_API_SITES })), LEGACY))))));
+        const beforeBatchF = withoutLinearWebhookRoute(withoutWebhookSecretLane(withoutBatchFAdditions(withoutLegacyRuntimeBoundary(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(withoutCoreOutboxStreamRelay(normalizedTemplate(stack)))), { named: false, sites: PUBLIC_API_SITES })), LEGACY))))));
         expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("d9bfc520cf02657c1b6be9b16b821e910504a1599cb3652d7405f9c6509b4048");
       }, 120_000);
     }
     it(`${stack.stackName} is unchanged`, () => {
       // DEC 254zzz432: the alarm is taken out first, so every pin below holds as recorded (checked to be exactly one resource). DEC 254zzz488: so is the Linear webhook route.
-      const withLinearWebhook = stack.stackName === "AgentXControlPlane" ? withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(normalizedTemplate(stack), LEGACY)) : normalizedTemplate(stack);
+      const withRelay = stack.stackName === "AgentXControlPlane" ? withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(normalizedTemplate(stack), LEGACY)) : normalizedTemplate(stack);
+      // CORE-RUN-STOP-RELAY (G1, 2026-11-25): the control plane's full pin with the packed `rl=on` (broker and dispatcher) in is below; Rule D: with exactly that taken out (withoutCoreOutboxStreamRelay,
+      // tests/support/core-outbox-stream-relay-template.ts) the Linear pin after it holds, and so does everything after that.
+      if (stack.stackName === "AgentXControlPlane") expect(createHash("sha256").update(JSON.stringify(withRelay)).digest("hex"), "AgentXControlPlane with the outbox stream relay setting").toBe("4694a39b8c5b725db0c958bce9b8a402d2835927e28a7b6d9306393084aa2e8e");
+      const withLinearWebhook = stack.stackName === "AgentXControlPlane" ? withoutCoreOutboxStreamRelay(structuredClone(withRelay)) : withRelay;
       // LINEAR-WEBHOOKS (DEC 254zzz488) + guard, rebased onto the public-URL pin (Rule D): the control plane's full pin with the Linear route, its throttle and its alarm in is below; with exactly those taken out
       // (withoutLinearWebhookRoute, asserted field by field in tests/support/linear-webhook-route-template.ts) the public-URL pin in BOUNDED_STACK_PINS holds, and so does everything after it.
       if (stack.stackName === "AgentXControlPlane") expect(createHash("sha256").update(JSON.stringify(withLinearWebhook)).digest("hex"), "AgentXControlPlane with the Linear webhook route and guard").toBe("0289bd3ba0946910de212803417858a45d644de73820d91496c208304cd2964a");

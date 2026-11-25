@@ -17,6 +17,8 @@ import {
   SERVICE_ROLE_SERVICES, coreAttentionEmailFunctionName, coreDispatchDeadLetterName, coreDispatchQueueName,
 } from "@agentx/contracts";
 import { CORE_ANSWERS_MODEL_MAX_LENGTH, CORE_ANSWERS_MODEL_PATTERN, CORE_ANSWERS_MODEL_VARIABLE, CORE_CLAUDE_AGENT_MODEL, CORE_LEARNING_MODEL_MAX_LENGTH, CORE_LEARNING_MODEL_PATTERN, CORE_LEARNING_MODEL_VARIABLE, isCoreLearningModelId } from "@agentx/contracts";
+import { CORE_OUTBOX_STREAM_RELAY_ON, CORE_OUTBOX_STREAM_RELAY_VARIABLE } from "@agentx/contracts";
+import { runStopWiredFrom } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { CORE_BROKER_QUEUE_ACTIONS, CORE_DISPATCHER_QUEUE_ACTIONS, CORE_DISPATCH_DEAD_LETTERS_ALARM } from "../../infra/lib/core-engine.js";
@@ -26,7 +28,7 @@ import { CORE_JOBS, CORE_SCHEDULE_SOURCE } from "../../packages/broker/src/core-
 import { configKey } from "../../packages/cli/src/config/keys.js";
 import { OPERATOR_PARAMETERS } from "../../packages/cli/src/deploy/parameters.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
-import { unpackedBrokerVariables } from "../support/broker-environment-template.js";
+import { packedPiecesOf, unpackedBrokerVariables } from "../support/broker-environment-template.js";
 import { withoutBrokerMemberConditionCheck } from "../support/broker-member-condition-check-template.js";
 import { withoutWebhookSecretLane } from "../support/webhook-secret-template.js";
 import { withoutLinearWebhookRoute } from "../support/linear-webhook-route-template.js";
@@ -54,12 +56,9 @@ const dispatcher = resources(named, "AWS::Lambda::Function").find(([id]) => /^Di
 const dispatcherVariables = (dispatcher[1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
 const dispatcherRoleId = ((dispatcher[1].Properties.Role as { "Fn::GetAtt": [string, string] })["Fn::GetAtt"])[0];
 
-/** A packed AGENTX_SETTINGS (Fn::Join of `code=` and value pieces) as code -> piece. */
+/** A packed AGENTX_SETTINGS (Fn::Join of `code=` and value pieces) as code -> piece (an intrinsic, or a literal such as `rl=on`, which CDK merges into the string beside it). */
 function packedSettings(variables: Record<string, unknown>): Map<string, unknown> {
-  const parts = (variables.AGENTX_SETTINGS as { "Fn::Join": [string, unknown[]] })["Fn::Join"][1];
-  const pieces = new Map<string, unknown>();
-  for (let index = 0; index < parts.length; index += 2) pieces.set(/^,?([a-z]{2})=$/u.exec(String(parts[index]))![1]!, parts[index + 1]);
-  return pieces;
+  return packedPiecesOf(variables.AGENTX_SETTINGS);
 }
 
 // Core switch-on blocker (2026-11-17): the model gateway's host and the agent model, kept across upgrades (tests/contract/core-gateway-settings.test.ts has the CLI and the broker's read).
@@ -649,7 +648,9 @@ describe("L1a broker environment derivation", () => {
     // LESSONS-PORT-FIX (DEC 254zzz473): the dispatcher's DEVELOPER_SIGNIN_TABLE_NAME variable and its DispatcherLessonsPeople policy are asserted and taken out first (withoutDispatcherLessonsPeople), so every pin below holds as recorded.
     // CODE-PUBLIC-URL (2026-11-24): the PublicApiUrl parameter, condition, URL-base Fn::Ifs and packed host are asserted and taken out too (withoutPublicApiUrl, after the two above), so every pin below holds as recorded.
     // RETAIN (arch ruling 2026-11-24): Retain on the control plane's five keys, channel state table and adapter secret is asserted and put back to Delete first (withoutRetainPolicies, innermost), so they hold too.
-    const beforeFirstGateway = withoutLinearWebhookRoute(withoutWebhookSecretLane(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(structuredClone(legacy.toJSON()))), { named: false }) as Json & { Outputs: Record<string, unknown> }), stuckStoppingInstall()))));
+    // CORE-RUN-STOP-RELAY (G1): every pin below except the first of the last two was recorded without the relay setting, so each starts from the template with exactly that taken out (Rule D).
+    const relayless = () => withoutCoreOutboxStreamRelay(structuredClone(legacy.toJSON()));
+    const beforeFirstGateway = withoutLinearWebhookRoute(withoutWebhookSecretLane(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(relayless())), { named: false }) as Json & { Outputs: Record<string, unknown> }), stuckStoppingInstall()))));
     expect(beforeFirstGateway.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
     delete beforeFirstGateway.Outputs.ModelRunPriceVersion;
     expect(digest(beforeFirstGateway), "legacy without the first-gateway output retains the upstream member-check pin").toBe("fef96cf61a67a412e6d99ef4bf9567f05dd1a518d02471de8dede006a78bbc1e");
@@ -660,14 +661,17 @@ describe("L1a broker environment derivation", () => {
     delete withoutCapabilityRoutes.Resources.ContextToolsListRoute;
     delete withoutCapabilityRoutes.Resources.DesignReviewPacketRoute;
     expect(digest(withoutCapabilityRoutes), "legacy with the two capability routes taken out").toBe("b304960b2db5e8cd2ccdb7cc84fc45b58f13e8eff4e8e6810cde809f190fc82b");
-    expect(digest(withoutLinearWebhookRoute(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(structuredClone(legacy.toJSON()))), { named: false })), stuckStoppingInstall()))))).toBe("50f67718e9973dd22b4699e0155c3e29fd34c86016f3ce28e7c531517b43668c");
+    expect(digest(withoutLinearWebhookRoute(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(relayless())), { named: false })), stuckStoppingInstall()))))).toBe("50f67718e9973dd22b4699e0155c3e29fd34c86016f3ce28e7c531517b43668c");
     // RETAIN (Rule D, arch ruling 2026-11-24): every pin above was taken with the nine policies put back (withoutRetainPolicies, innermost); the same template with them in (Retain on the five keys, the channel table and
     // the adapter secret) has its own pin.
-    expect(digest(withoutLinearWebhookRoute(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(structuredClone(legacy.toJSON())), { named: false })), stuckStoppingInstall()))))).toBe("1dc517571d37ee73d023698fc668b384827e553a058e7241c3b95bdda97b64e3");
+    expect(digest(withoutLinearWebhookRoute(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(relayless()), { named: false })), stuckStoppingInstall()))))).toBe("1dc517571d37ee73d023698fc668b384827e553a058e7241c3b95bdda97b64e3");
     // CODE-PUBLIC-URL (Rule D, 2026-11-24): the same template with exactly the PublicApiUrl additions in (and the RETAIN policies in) has its own pin; with them taken out the pin above holds.
     // LINEAR-WEBHOOKS + guard (Rule D, rebased onto the public-URL pin): the same template with the Linear route, its throttle and its alarm in has its own pin; with exactly those taken out the pin after it (3175a57d...) holds.
-    expect(digest(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutDispatcherLessonsPeople(structuredClone(legacy.toJSON()))), stuckStoppingInstall())))).toBe("6694babb0383fdcefffed780d3da49ae296a9706ce9b4d8db102f467aa602d8f");
-    expect(digest(withoutLinearWebhookRoute(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutDispatcherLessonsPeople(structuredClone(legacy.toJSON()))), stuckStoppingInstall()))))).toBe("3175a57d79eae0299da08518af571baed1e639d1daf44eae307e94037bc8faa8");
+    // CORE-RUN-STOP-RELAY (G1, 2026-11-25): the same template with the packed `rl=on` on the broker and the dispatcher in has its own pin; Rule D: with exactly that taken out (withoutCoreOutboxStreamRelay) the pin after it (6694babb...) holds.
+    const withRelay = withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutDispatcherLessonsPeople(structuredClone(legacy.toJSON()))), stuckStoppingInstall()));
+    expect(digest(withRelay), "legacy with the outbox stream relay setting").toBe("177bca4c6b9eb5b7291f114c5253a536a8c038aeedbf2743bcc084b79189ee1c");
+    expect(digest(withoutCoreOutboxStreamRelay(structuredClone(withRelay))), "legacy minus only the outbox stream relay setting").toBe("6694babb0383fdcefffed780d3da49ae296a9706ce9b4d8db102f467aa602d8f");
+    expect(digest(withoutLinearWebhookRoute(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutDispatcherLessonsPeople(relayless())), stuckStoppingInstall()))))).toBe("3175a57d79eae0299da08518af571baed1e639d1daf44eae307e94037bc8faa8");
   });
 });
 import { createHash } from "node:crypto";
@@ -677,6 +681,7 @@ import { withoutDispatcherLessonsPeople } from "../support/dispatcher-lessons-pe
 import { withoutRetainPolicies } from "../support/retain-policies-template.js";
 import { withoutPublicApiUrl } from "../support/public-api-url-template.js";
 import { withoutWorkerCallbackAlarm } from "../support/worker-callback-alarm-template.js";
+import { withoutCoreOutboxStreamRelay } from "../support/core-outbox-stream-relay-template.js";
 
 
 it("exposes only the exact core model-access GET without an authorizer on named installs", () => {
@@ -737,5 +742,67 @@ describe("the test service images setting (stack parameter TestServiceImages)", 
     expect(key.parse("mirrored")).toBe("mirrored");
     expect(key.parse("none")).toBe("none");
     for (const bad of ["Mirrored", "yes", "1", ""]) expect(() => key.parse(bad), bad).toThrow();
+  });
+});
+
+// CORE-RUN-STOP-RELAY (G1, 2026-11-25): the hosted admission declares `enforcesCost: true` (so work with no one present, such as the setup re-check, the nightly upkeep and the wiki refresh, may start) only where
+// ROVARA_CORE_OUTBOX_STREAM_RELAY is exactly `on` (core-host/hosted-modules.ts `runStopWiredFrom`). The infrastructure sets it, packed as `rl`, on BOTH the broker and the dispatcher, and only because the whole path
+// that stops a run at its cap is in the same template: the cancel is staged in the outbox, relayed at once, by the State stream (the developer task notifier invokes the broker) and by the 1-minute backstop schedule,
+// and the dispatcher, the queue's one consumer, delivers it to the worker. If any piece below goes missing this test fails, so the setting never outlives the relay.
+describe("the outbox stream relay setting (core run stop, rl)", () => {
+  for (const [label, template] of [["named", named], ["legacy (production)", legacy]] as const) {
+    describe(label, () => {
+      const parsed = template.toJSON() as Json;
+      const byPrefix = (type: string, prefix: string) => resources(template, type).filter(([id]) => id.startsWith(prefix));
+      const fnVariables = (pattern: RegExp) => (resources(template, "AWS::Lambda::Function").find(([id]) => pattern.test(id))![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+
+      it("is exactly `on` for the broker and the dispatcher, packed (never a variable of its own), and reads as the admission's switch", () => {
+        for (const [name, variables] of [["broker", fnVariables(/^Broker[0-9A-F]{8}$/u)], ["dispatcher", fnVariables(/^Dispatcher[0-9A-F]{8}$/u)]] as const) {
+          expect(packedSettings(variables).get("rl"), name).toBe(CORE_OUTBOX_STREAM_RELAY_ON);
+          expect(variables, name).not.toHaveProperty(CORE_OUTBOX_STREAM_RELAY_VARIABLE);
+          const read = unpackedBrokerVariables(variables, parsed);
+          expect(read[CORE_OUTBOX_STREAM_RELAY_VARIABLE], name).toBe("on");
+          expect(runStopWiredFrom(read as NodeJS.ProcessEnv), name).toBe(true);
+        }
+      });
+
+      it("is declared only with the relay it stands for: the State stream filter and the notifier's invoke of the broker", () => {
+        const brokerId = resources(template, "AWS::Lambda::Function").find(([id]) => /^Broker[0-9A-F]{8}$/u.test(id))![0];
+        const notifier = byPrefix("AWS::Lambda::Function", "DeveloperTaskNotifierFunction").find(([id]) => /^DeveloperTaskNotifierFunction[0-9A-F]{8}$/u.test(id))![1];
+        expect((notifier.Properties.Environment as { Variables: Record<string, unknown> }).Variables.BROKER_FUNCTION_NAME).toEqual({ Ref: brokerId });
+        const policy = byPrefix("AWS::IAM::Policy", "DeveloperTaskNotifierFunctionServiceRoleDefaultPolicy")[0]![1];
+        expect((policy.Properties.PolicyDocument as { Statement: Statement[] }).Statement.filter((entry) => entry.Sid === "RelayCoreOutboxToBroker")).toEqual([
+          { Sid: "RelayCoreOutboxToBroker", Effect: "Allow", Action: "lambda:InvokeFunction", Resource: { "Fn::GetAtt": [brokerId, "Arn"] } },
+        ]);
+        const mapping = byPrefix("AWS::Lambda::EventSourceMapping", "DeveloperTaskNotifierStateStreamMapping")[0]![1];
+        expect(mapping.Properties.StartingPosition).toBe("LATEST");
+        expect(mapping.Properties.FunctionResponseTypes).toEqual(["ReportBatchItemFailures"]);
+        expect((mapping.Properties.FilterCriteria as { Filters: Array<{ Pattern: string }> }).Filters.map(({ Pattern }) => JSON.parse(Pattern) as unknown))
+          .toContainEqual({ eventName: ["INSERT"], dynamodb: { NewImage: { entityType: { S: ["OUTBOX"] }, pk: { S: [{ prefix: "ORG#" }] }, outboxState: { S: [{ exists: true }] } } } });
+        expect(mapping.Properties.Enabled).not.toBe(false);
+      });
+
+      it("is declared only with the fallback and the delivery: the enabled 1-minute backstop schedule, the broker's send to the core queue and the dispatcher's mapping on it", () => {
+        const brokerId = resources(template, "AWS::Lambda::Function").find(([id]) => /^Broker[0-9A-F]{8}$/u.test(id))![0];
+        // The 1-minute schedules the stop leans on: the outbox backstop (a cancel the stream missed), run-watch (`spendStopOverdue`: a worker that never answers its cancel is ended CANCELLED, its hold kept) and
+        // dispatch-sweep (the recovery sweep over due dispatch rows). Deleting or disabling any one fails here.
+        for (const [prefix, job] of [["CoreEngineJobsJobOutboxRelayBackstop", "outbox-relay-backstop"], ["CoreEngineJobsJobRunWatch", "run-watch"], ["CoreEngineJobsJobDispatchSweep", "dispatch-sweep"]] as const) {
+          const schedule = byPrefix("AWS::Scheduler::Schedule", prefix);
+          expect(schedule, job).toHaveLength(1);
+          expect(schedule[0]![1].Properties, job).toMatchObject({ ScheduleExpression: "rate(1 minute)", State: "ENABLED", Target: { Arn: { "Fn::GetAtt": [brokerId, "Arn"] }, Input: JSON.stringify({ source: CORE_JOB_EVENT_SOURCE, job }) } });
+        }
+        const queuePolicies = byPrefix("AWS::SQS::QueuePolicy", "CoreEngineJobs").map(([, policy]) => JSON.stringify(policy.Properties.PolicyDocument));
+        expect(queuePolicies.some((document) => document.includes("BrokerUsesCoreDispatchQueue") && document.includes("sqs:SendMessage"))).toBe(true);
+        const dispatcherMapping = byPrefix("AWS::Lambda::EventSourceMapping", "CoreEngineJobsDispatcherMapping")[0]![1];
+        expect(dispatcherMapping.Properties.Enabled).toBe(true);
+        expect(dispatcherMapping.Properties.FunctionResponseTypes).toEqual(["ReportBatchItemFailures"]);
+      });
+    });
+  }
+
+  it("is not an operator choice: no stack parameter, no config key, one constant for both functions", () => {
+    expect(Object.keys(json.Parameters).filter((name) => /outbox|relay/iu.test(name))).toEqual([]);
+    expect(OPERATOR_PARAMETERS["control-plane"].filter((name) => /outbox|relay/iu.test(name))).toEqual([]);
+    expect(CORE_OUTBOX_STREAM_RELAY_ON).toBe("on");
   });
 });
