@@ -442,6 +442,8 @@ export * from "./runner.js";
 
 
 export * from "./task-status.js";
+export * from "./task-words.js";
+export * from "./task-standing.js";
 export * from "./notification-prefs.js";
 export * from "./work-event.js";
 export * from "./work-event-node.js";
