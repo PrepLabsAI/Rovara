@@ -1391,3 +1391,12 @@ Guards added: customer text stripped of control, direction and invisible charact
 | M44 checks.ts words | the not-approved sentence empty | "no approved plan, an approved plan with no structured form ..." and the route test |
 
 All 44 killed; the restored tree passes. Evidence applies to the round-2 commit (parent 1d7edd14f); the final-head gate and review belong to 9d.
+
+## RD-2b1 on the read rule (rebased onto 49080fbea, 2026-11-25)
+
+The checks handler reads `context.decision.task` and `decision.codeDetails` (the mount asked `decideTaskRead`); the local `mayReadCodeDetails` and `loadReadableTask` are gone. The old mutants "handler without the read rule" and "code details always true" are now covered by the rule's own table (tests/unit/task-read-rule.test.ts: 18 x 14 on the real routes, the checks cells; the golden) and by the laptop test in tests/unit/rd2b1-checks-read.test.ts (no live grant proved: links withheld). Two new mutants for the TO-DOs, each applied alone, both killed:
+
+| Mutant | Mutation | Killed by |
+|---|---|---|
+| N1 | the notices are also put into `notTested` (the old behaviour) | rd2b1-checks-read "the security scan, what was not tested, and the review-only words" (the review-only sentence must be a note and `notTested` empty) |
+| N2 | the after-pull-request wording is never chosen (`pullRequests` ignored) | task-words "says only that the checks follow once the pull request is open (a fix round)" |
