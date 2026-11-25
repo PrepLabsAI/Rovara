@@ -308,6 +308,12 @@
       "minimumTests": 6,
       "reason": "PROJECT-GRANT-RECHECK (briefs/arch-cleanup/PROJECT-GRANT-RECHECK-DONE.md): the task's own person (a task with no People list) holds it only while a live company member WITH the project grant. A person removed from the project, or from the company, is refused every read, every act (web, CLI session, Code's page, sessions, every registry action pressed from a chat account) as a missing task, and nothing is started or spent; a current project administrator or company admin still stops and merges the task. The floor is the file's 6 runnable declarations, and deleting or trimming one is a reviewed edit.",
       "decision": "DEC 254zzz459"
+    },
+    {
+      "path": "tests/contract/task-owner-channel-access.test.ts",
+      "minimumTests": 9,
+      "reason": "PROJECT-GRANT-RECHECK (briefs/arch-cleanup/PROJECT-GRANT-RECHECK-DONE.md, channel-access starters): the task's own person holds it by the SAME live test the start meets (checkProjectAccess): a grant, or fresh bound-channel membership while the project lets channel members use it and the person is Slack-linked. A channel-access starter lists and owns their task; one who left the channel, whose project turned channel use off, whose Slack is unreachable or who has no Slack link loses it; a grant removed while still in the channel keeps it; neither access gives nothing. The floor is the file's 9 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz459"
     }
   ],
   "pendingRestore": []

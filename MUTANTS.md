@@ -154,3 +154,14 @@ Also checked: the lease test's worker clock is passed to the gateway model (`now
 | M5, `lessons-api.ts` | the off-roster own-task exception is back | tests/unit/core-host-lessons-api.test.ts | red (1 of 57) |
 | M6, `developer-tasks.ts listTasks` | the own list ignores the grant | same file as M1 (task list) | red (1 of 6) |
 | M7, `script-tokens/authenticate.ts` | the token's project is not re-checked live | tests/unit/script-token-project-grant.test.ts | red (3 of 3) |
+
+## PROJECT-GRANT-RECHECK, channel-access starters (2026-11-25)
+
+All killed by tests/contract/task-owner-channel-access.test.ts (9 tests).
+
+| Mutant | Change | Result |
+| --- | --- | --- |
+| C1, `taskReaderPerson` own-task answer | a person with no grant is `mayStart` with no `checkProjectAccess` call | red (6 of 9: leave, channel use off, Slack down, no Slack link, grant-removed-then-leaves, neither) |
+| C2, `taskReaderPerson` own-task answer | a failed or refused start check answers `mayStart: true` (fail open) | red (6 of 9) |
+| C3, `taskReaderPerson` own-task answer | the start check is asked as a fixed Slack user, not the person's own link | red (1 of 9: no Slack link) |
+| C4, `holdsOwnTask` | reads `projectMember` only (the first hotfix) | red (3 of 9: the red commit) |

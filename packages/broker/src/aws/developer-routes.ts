@@ -1479,20 +1479,32 @@ function memberActions(deps: DeveloperRouteDependencies) {
   };
 }
 
-/** Spec 067: a registered, not removed person, with their name and whether they hold a grant on `project`. */
-async function taskReaderPerson(deps: DeveloperRouteDependencies, developerId: string, project: string, taskCompany?: string): Promise<{ name: string; projectMember: boolean } | undefined> {
-  const person = await getSignIn<Pick<DeveloperRecord, "revoked" | "displayName">>(deps, `DEVELOPER#${developerId}`);
+/**
+ * Spec 067: a registered, not removed person, with their name and whether they hold a grant on `project`. With `ownTask` (the task's own person asking whether they still hold their task) it also
+ * answers `mayStart`: the SAME live test the task start meets, `checkProjectAccess`: the grant, or fresh bound-channel membership while the project lets channel members use it and the person is
+ * Slack-linked. Read now, nothing kept; a read that fails (Slack unreachable, a refusal) is "no", as at the start. A reader never gets it (a reader needs the grant itself).
+ */
+async function taskReaderPerson(deps: DeveloperRouteDependencies, developerId: string, project: string, taskCompany?: string, options?: { ownTask?: true }): Promise<{ name: string; projectMember: boolean; mayStart?: boolean } | undefined> {
+  const person = await getSignIn<Pick<DeveloperRecord, "revoked" | "displayName" | "slackUserId">>(deps, `DEVELOPER#${developerId}`);
   if (person === undefined || person.revoked === true) return undefined;
   const name = person.displayName ?? "Unknown";
+  const answer = async (held: boolean) => {
+    if (options?.ownTask !== true) return { name, projectMember: held };
+    if (held) return { name, projectMember: held, mayStart: true };
+    try {
+      await checkProjectAccess(deps, { developerId, ...(person.slackUserId === undefined ? {} : { slackUserId: person.slackUserId }) }, project);
+      return { name, projectMember: held, mayStart: true };
+    } catch { return { name, projectMember: held, mayStart: false }; }
+  };
   // DEC 254zzz80 / 254zzz98 (review L2): a reader of a task must be a LIVE member of the TASK's company, and their grant is read where that company keeps it (beside its
   // revision): never in the reader's own other company, so a share never says whether a person of another company holds a grant there. No live company: no grant.
   // With no company layer at all, nothing here is company-scoped: the legacy grant, byte for byte as before.
-  if ((deps.companies ?? deps.developer.companies) === undefined) return { name, projectMember: await projectGrant(memberActions(deps), project, developerId, undefined) !== undefined };
+  if ((deps.companies ?? deps.developer.companies) === undefined) return answer(await projectGrant(memberActions(deps), project, developerId, undefined) !== undefined);
   let company: string | undefined;
   try { company = await liveNamedCompany(deps, developerId); } catch { return { name, projectMember: false }; }
   const owning = taskCompany === undefined ? company : namedCompany(taskCompany);
   if (owning !== company) return { name, projectMember: false };
-  return { name, projectMember: await projectGrant(memberActions(deps), project, developerId, owning) !== undefined };
+  return answer(await projectGrant(memberActions(deps), project, developerId, owning) !== undefined);
 }
 
 const CLIENT_PROJECT = /^\/v1\/dev\/client\/projects\/([^/]+)$/;
@@ -2223,7 +2235,7 @@ export function developerTaskRouteDependencies(
         throw error;
       }
     },
-    taskReaderPerson: (developerId, project, taskCompany) => taskReaderPerson(deps, developerId, project, taskCompany),
+    taskReaderPerson: (developerId, project, taskCompany, options) => taskReaderPerson(deps, developerId, project, taskCompany, options),
     ...(!companySlackMode(deps) ? {} : { workspaceForTask: taskWorkspace, workspaceForProject }),
     channelMember: async (slackUserId, channelId, workspace) => {
       if (companySlackMode(deps) && (workspace === undefined || await callerWorkspace(deps, caller, { companyId: workspace.companyId }, workspace.teamId) === undefined)) throw new SlackWorkspaceRefused();
