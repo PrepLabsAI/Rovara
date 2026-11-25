@@ -150,6 +150,12 @@ Runbook notes for a rollback:
 - Production rolls back only to a commit Production itself released: it checks Production's own history, so a
   commit that only Beta released is refused at Production's Preflight (after Beta has already rolled back; do not
   approve the transition then).
+- Rolling Code back to a commit before `3ce46251e` (the dispatch rule for an owner-only People list) parks every
+  task that has a People record. A People record is created the first time someone opens a task's People view, so
+  any hosted task may have one. The older dispatcher has no owner-only, no-checker branch. Treat such a rollback as
+  one that strands those tasks, and move forward again to a commit that has `3ce46251e` as soon as the reason for the
+  rollback allows. A staging proof is still owed: start a hosted task, open People, and check the next step
+  dispatches.
 
 A Cloud rollback run (`CLOUD_REF` set to an older tag) forces `CODE_RELEASE=skip` unless it also names a Code
 rollback target.

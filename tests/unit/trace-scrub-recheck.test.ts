@@ -37,6 +37,15 @@ describe("every query value goes, whatever its length, whatever the carrier (P1-
     expect(blankQueryText("https://user:pw@host/p")).toBe("https://host/p");
     expect(blankQueryText("a#anchor")).toBe("a#anchor");
   });
+  it("PC-N2: blanks a bare token after ? or # (no key), and a ;jsessionid value, and keeps a short anchor", () => {
+    const jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.c2lnbmF0dXJl";
+    expect(blankQueryText(`https://app.test/cb#${jwt}`)).toBe(`https://app.test/cb#${TRACE_BLANKED}`);
+    expect(blankQueryText("/reset?0a1b2c3d4e5f6a7b8c9d")).toBe(`/reset?${TRACE_BLANKED}`);
+    expect(blankQueryText("/app;jsessionid=ABCDEF0123456789/home")).toBe(`/app;jsessionid=${TRACE_BLANKED}`.concat("/home"));
+    expect(blankQueryText("/app;JSESSIONID=ABCDEF0123456789?x=1")).toBe(`/app;JSESSIONID=${TRACE_BLANKED}?x=${TRACE_BLANKED}`);
+    expect(blankQueryText(blankQueryText(`/app;jsessionid=ABCDEF0123456789#${jwt}`))).toBe(blankQueryText(`/app;jsessionid=ABCDEF0123456789#${jwt}`));
+    expect(blankQueryText("is this it? yes #buy")).toBe("is this it? yes #buy");
+  });
 });
 
 describe("harvest reads the shapes real apps use (P5, P6, P9)", () => {
