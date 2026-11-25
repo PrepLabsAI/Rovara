@@ -34,7 +34,9 @@ export const SAVED_ENV_PURGE_PAGE = 200;
 /** The most index pages one poll read looks through. */
 const POLL_PAGES_MAX = 5;
 
-const rowKey = (orgId: string, projectId: string): DocumentKey => ({ pk: orgPk(OrgIdSchema.parse(orgId)), sk: `SAVED_ENV#${projectId}` });
+/** The registry row of a project (the one `commit` writes). Exported so a start's transaction can hold the row to the version it read (`saved-env-run.ts`) without writing a new field on it. */
+export const savedEnvRowKey = (orgId: string, projectId: string): DocumentKey => ({ pk: orgPk(OrgIdSchema.parse(orgId)), sk: `SAVED_ENV#${projectId}` });
+const rowKey = savedEnvRowKey;
 const dueKey = (time: number): string => String(Math.max(0, Math.trunc(time))).padStart(15, "0");
 const unavailable = () => agentXError("RUNTIME_UNAVAILABLE", "Saved project images could not be read.");
 
