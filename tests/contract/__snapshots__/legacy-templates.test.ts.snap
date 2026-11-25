@@ -16291,6 +16291,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
     "shell": "bash",
     "variables": {
       "PIPELINE_MODE": "release",
+      "CODE_ROLLBACK_TARGET": "none",
       "AWS_CLI_VERSION": "2.36.47",
       "GITLEAKS_VERSION": "8.30.1",
       "GITLEAKS_SHA256": "<asset-hash>",
@@ -16299,7 +16300,10 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                   "Ref": "PortGuardNamesParameterName",
                 },
                 ""
-    }
+    },
+    "exported-variables": [
+      "CODE_CTX"
+    ]
   },
   "phases": {
     "install": {
@@ -16320,7 +16324,8 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
     },
     "pre_build": {
       "commands": [
-        "case \\"$PIPELINE_MODE\\" in release|adopt) echo \\"NOTE: pipeline mode is $PIPELINE_MODE\\" ;; *) echo \\"PIPELINE_MODE must be release or adopt, got: $PIPELINE_MODE\\" >&2; exit 1;; esac"
+        "case \\"$PIPELINE_MODE\\" in release|adopt|rollback) echo \\"NOTE: pipeline mode is $PIPELINE_MODE\\" ;; *) echo \\"PIPELINE_MODE must be release, adopt or rollback, got: $PIPELINE_MODE\\" >&2; exit 1;; esac",
+        "if [ \\"$PIPELINE_MODE\\" = rollback ] && [ \\"$CODE_ROLLBACK_TARGET\\" != none ]; then [[ \\"$CODE_ROLLBACK_TARGET\\" =~ ^[0-9a-f]{40}$ ]] || { echo \\"CODE_ROLLBACK_TARGET must be a full 40-character commit id, or none, got: $CODE_ROLLBACK_TARGET\\" >&2; exit 1; }; echo \\"NOTE: Code rollback target is $CODE_ROLLBACK_TARGET\\"; elif [ \\"$PIPELINE_MODE\\" != rollback ] && [ \\"$CODE_ROLLBACK_TARGET\\" != none ]; then echo \\"CODE_ROLLBACK_TARGET is only for PIPELINE_MODE=rollback; got $CODE_ROLLBACK_TARGET in mode $PIPELINE_MODE\\" >&2; exit 1; fi"
       ]
     },
     "build": {
@@ -16328,6 +16333,17 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
         "RELEASED_SHA=\\"$(aws ssm get-parameter --name /agentx/release/code-released/beta --query Parameter.Value --output text)\\" || { echo \\"port-guard: the last released Code commit could not be read; refusing to run the release\\" >&2; exit 2; }",
         "[[ \\"$RELEASED_SHA\\" =~ ^[0-9a-f]{40}$ ]] || { echo \\"port-guard: the last released Code commit is not recorded; refusing to run the release\\" >&2; exit 2; }",
         "git cat-file -e \\"$RELEASED_SHA^{commit}\\" || { echo \\"port-guard: the last released Code commit is not in this clone; refusing to run the release\\" >&2; exit 2; }",
+        "SUPERSEDES_EXEC=none; SUPERSEDES_SHA=none",
+        "WAITING_EXEC=\\"$(aws codepipeline get-pipeline-state --name AgentXProductionRelease --query 'stageStates[?stageName==\`Production\`].inboundExecution.pipelineExecutionId | [0]' --output text)\\" || { echo \\"WARN: the execution waiting for Production could not be read; the summary will not name it\\" >&2; WAITING_EXEC=; }",
+        "if [[ \\"$WAITING_EXEC\\" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] && [ \\"$WAITING_EXEC\\" != \\"\${EXEC_ID:-}\\" ]; then WAITING_SHA=\\"$(aws codepipeline get-pipeline-execution --pipeline-name AgentXProductionRelease --pipeline-execution-id \\"$WAITING_EXEC\\" --query 'pipelineExecution.artifactRevisions[?name==\`Source\`].revisionId | [0]' --output text)\\" || WAITING_SHA=; [[ \\"$WAITING_SHA\\" =~ ^[0-9a-f]{40}$ ]] || WAITING_SHA=none; SUPERSEDES_EXEC=\\"$WAITING_EXEC\\"; SUPERSEDES_SHA=\\"$WAITING_SHA\\"; echo \\"NOTE: this run replaces the execution $WAITING_EXEC, which is waiting for Production\\"; fi",
+        "export CODE_CTX=\\"live:$RELEASED_SHA,target:$CODE_ROLLBACK_TARGET,supersedes:$SUPERSEDES_EXEC,supersedesSha:$SUPERSEDES_SHA\\"",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { HIST_VALUE=\\"$(aws ssm get-parameter --name /agentx/release/code-history/beta --query Parameter.Value --output text)\\" || { echo \\"port-guard: the Code release history could not be read; refusing to run the release\\" >&2; exit 2; }; }",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { HIST_FLAT=\\"$(printf '%s' \\"$HIST_VALUE\\" | tr -d ' \\\\t\\\\r\\\\n')\\"; HIST_RE='^\\\\[(\\"[0-9a-f]{40}\\"(,\\"[0-9a-f]{40}\\")*)?\\\\]$'; [[ \\"$HIST_FLAT\\" =~ $HIST_RE ]] || { echo \\"port-guard: the Code release history is not a list of commits; refusing to run the release\\" >&2; exit 2; }; }",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { [[ \\"$HIST_FLAT\\" == *\\"\\\\\\"$CODE_ROLLBACK_TARGET\\\\\\"\\"* ]] || { echo \\"port-guard: the rollback target is not in this stage's Code release history; refusing to run the release\\" >&2; exit 2; }; }",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { [ \\"$CODE_ROLLBACK_TARGET\\" != \\"$RELEASED_SHA\\" ] || { echo \\"port-guard: the rollback target is the commit already released; refusing to run the release\\" >&2; exit 2; }; }",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { git cat-file -e \\"$CODE_ROLLBACK_TARGET^{commit}\\" || { echo \\"port-guard: the rollback target is not in this clone; refusing to run the release\\" >&2; exit 2; }; }",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { git merge-base --is-ancestor \\"$CODE_ROLLBACK_TARGET\\" \\"$RELEASED_SHA\\" || { echo \\"port-guard: the rollback target is not older than the last released commit; refusing to run the release\\" >&2; exit 2; }; }",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || git checkout -q --detach \\"$RELEASED_SHA\\"",
         "git merge-base --is-ancestor \\"$RELEASED_SHA\\" HEAD || { echo \\"port-guard: the last released Code commit is not an ancestor of this commit; refusing to run the release\\" >&2; exit 2; }",
         "[ \\"$(git rev-parse HEAD)\\" = \\"$RELEASED_SHA\\" ] || [ \\"$(git rev-list --parents -n 1 HEAD | wc -w | tr -d ' ')\\" -le 3 ] || { echo \\"port-guard: this commit is an octopus merge ($(( $(git rev-list --parents -n 1 HEAD | wc -w) - 1 )) parents), which the release does not accept. Re-land the change as a normal two-parent merge or as one squash.\\" >&2; exit 2; }",
         "[ \\"$(git rev-parse HEAD)\\" = \\"$RELEASED_SHA\\" ] || [ \\"$(git rev-list --parents -n 1 HEAD | wc -w | tr -d ' ')\\" = 3 ] || [ \\"$(git rev-parse HEAD^1)\\" = \\"$RELEASED_SHA\\" ] || { echo \\"port-guard: this landing has $(git rev-list --count \\"$RELEASED_SHA..HEAD\\") commits on the last released commit that were not merged as one change, so this run does not release them. The next normal merge (a merge commit on top of them) releases them, scanned whole; or re-land the change as one squash or one merge.\\" >&2; exit 2; }",
@@ -16336,7 +16352,9 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
         "cd /tmp/port-guard-trusted",
         "set +x",
         "test -n \\"$PORT_GUARD_NAMES_PARAMETER\\" || { echo \\"port-guard: PORT_GUARD_NAMES_PARAMETER is not set; refusing to run without the private name list\\" >&2; exit 2; }",
-        "node scripts/port-guard-pipeline.ts --range HEAD..release-tip --allow-guard-edits"
+        "node scripts/port-guard-pipeline.ts --range HEAD..release-tip --allow-guard-edits",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || git update-ref refs/heads/rollback-target \\"$CODE_ROLLBACK_TARGET\\"",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || node scripts/port-guard-pipeline.ts --range rollback-target..release-tip --allow-guard-edits"
       ]
     }
   }
@@ -16522,6 +16540,51 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
               "Sid": "ReadReleasedCode",
             },
             {
+              "Action": "ssm:GetParameter",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ssm:us-east-1:",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":parameter/agentx/release/code-history/beta",
+                  ],
+                ],
+              },
+              "Sid": "ReadCodeHistory",
+            },
+            {
+              "Action": [
+                "codepipeline:GetPipelineState",
+                "codepipeline:GetPipelineExecution",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":codepipeline:us-east-1:",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":AgentXProductionRelease",
+                  ],
+                ],
+              },
+              "Sid": "ReadWaitingRun",
+            },
+            {
               "Action": [
                 "codeconnections:UseConnection",
                 "codestar-connections:UseConnection",
@@ -16628,6 +16691,8 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
     "variables": {
       "NODE_OPTIONS": "--max-old-space-size=8192",
       "CODE_RELEASE": "run",
+      "PIPELINE_MODE": "release",
+      "CODE_ROLLBACK_TARGET": "none",
       "AWS_CLI_VERSION": "2.36.47",
       "GITLEAKS_VERSION": "8.30.1",
       "GITLEAKS_SHA256": "<asset-hash>",
@@ -16647,6 +16712,15 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
       "commands": [
         "case \\"$CODE_RELEASE\\" in run|skip) ;; *) echo \\"CODE_RELEASE must be run or skip, got: $CODE_RELEASE\\" >&2; exit 1;; esac",
         "[ \\"$CODE_RELEASE\\" != skip ] || echo \\"CODE_RELEASE=skip: this run releases Cloud only; Code is not built or deployed\\"",
+        "case \\"$PIPELINE_MODE\\" in release|adopt|rollback) ;; *) echo \\"PIPELINE_MODE must be release, adopt or rollback, got: $PIPELINE_MODE\\" >&2; exit 1;; esac",
+        "if [ \\"$PIPELINE_MODE\\" = rollback ] && [ \\"$CODE_ROLLBACK_TARGET\\" != none ]; then [[ \\"$CODE_ROLLBACK_TARGET\\" =~ ^[0-9a-f]{40}$ ]] || { echo \\"CODE_ROLLBACK_TARGET must be a full 40-character commit id, or none, got: $CODE_ROLLBACK_TARGET\\" >&2; exit 1; }; echo \\"NOTE: Code rollback target is $CODE_ROLLBACK_TARGET\\"; elif [ \\"$PIPELINE_MODE\\" != rollback ] && [ \\"$CODE_ROLLBACK_TARGET\\" != none ]; then echo \\"CODE_ROLLBACK_TARGET is only for PIPELINE_MODE=rollback; got $CODE_ROLLBACK_TARGET in mode $PIPELINE_MODE\\" >&2; exit 1; fi",
+        "if [ \\"$PIPELINE_MODE\\" = rollback ]; then if [ \\"$CODE_ROLLBACK_TARGET\\" = none ]; then [ \\"$CODE_RELEASE\\" = skip ] || { echo \\"a rollback run with no Code rollback target does not release Code, but CODE_RELEASE is $CODE_RELEASE\\" >&2; exit 1; }; else [ \\"$CODE_RELEASE\\" = run ] || { echo \\"a Code rollback target was given but CODE_RELEASE is $CODE_RELEASE, so Code would not be rolled back\\" >&2; exit 1; }; fi; fi",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { HIST_VALUE=\\"$(aws ssm get-parameter --name /agentx/release/code-history/beta --query Parameter.Value --output text)\\" || { echo \\"the Code release history could not be read; Code is not rolled back\\" >&2; exit 1; }; }",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { HIST_FLAT=\\"$(printf '%s' \\"$HIST_VALUE\\" | tr -d ' \\\\t\\\\r\\\\n')\\"; HIST_RE='^\\\\[(\\"[0-9a-f]{40}\\"(,\\"[0-9a-f]{40}\\")*)?\\\\]$'; [[ \\"$HIST_FLAT\\" =~ $HIST_RE ]] || { echo \\"the Code release history is not a list of commits; Code is not rolled back\\" >&2; exit 1; }; }",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { [[ \\"$HIST_FLAT\\" == *\\"\\\\\\"$CODE_ROLLBACK_TARGET\\\\\\"\\"* ]] || { echo \\"the rollback target is not in this stage's Code release history; Code is not rolled back\\" >&2; exit 1; }; }",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { git cat-file -e \\"$CODE_ROLLBACK_TARGET^{commit}\\" || { echo \\"the rollback target is not in this clone; Code is not rolled back\\" >&2; exit 1; }; }",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { git merge-base --is-ancestor \\"$CODE_ROLLBACK_TARGET\\" HEAD || { echo \\"the rollback target is not an ancestor of this run's commit; Code is not rolled back\\" >&2; exit 1; }; }",
+        "[ \\"$CODE_RELEASE\\" = skip ] || { [ \\"$PIPELINE_MODE\\" != rollback ] || [ \\"$CODE_ROLLBACK_TARGET\\" = none ] || git checkout -q --detach \\"$CODE_ROLLBACK_TARGET\\"; }",
         "[ \\"$CODE_RELEASE\\" = skip ] || { node_version=\\"$(cat .node-version)\\"; }",
         "[ \\"$CODE_RELEASE\\" = skip ] || { node_archive=\\"node-v\${node_version}-linux-arm64.tar.xz\\"; }",
         "[ \\"$CODE_RELEASE\\" = skip ] || { curl -fsSL -o \\"/tmp/\${node_archive}\\" \\"https://nodejs.org/dist/v\${node_version}/\${node_archive}\\"; }",
@@ -16668,7 +16742,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
     },
     "build": {
       "commands": [
-        "if [ \\"$CODE_RELEASE\\" = skip ]; then mkdir -p cdk.out && printf '{\\"codeRelease\\":\\"skip\\"}\\\\n' > cdk.out/agentx-production-release.json; else if node scripts/release-ci-proof.ts --repository PrepLabsAI/Rovara --github-app-stack AgentXControlPlane --region \\"$AWS_REGION\\"; then RELEASE_CHECKS=--skip-checks; else RELEASE_CHECKS=; fi; mkdir -p ~/.aws && printf '[profile agentx-beta]\\\\nrole_arn = %s\\\\ncredential_source = EcsContainer\\\\nrole_session_name = beta-release\\\\nregion = %s\\\\n' \\"$BETA_RELEASE_ROLE_ARN\\" \\"$AWS_REGION\\" >> ~/.aws/config && aws sts get-caller-identity --profile agentx-beta && npm run release:prod -- --region \\"$AWS_REGION\\" --profile agentx-beta --reuse-unchanged-worker --require-existing-foundation $RELEASE_CHECKS && { RELEASED_SOURCE=\\"$CODEBUILD_RESOLVED_SOURCE_VERSION\\"; [[ \\"$RELEASED_SOURCE\\" =~ ^[0-9a-f]{40}$ ]] || { echo \\"the source version of this build is not a commit id; the release is not recorded\\" >&2; exit 1; }; aws ssm put-parameter --name /agentx/release/code-released/beta --type String --overwrite --value \\"$RELEASED_SOURCE\\"; }; fi"
+        "if [ \\"$CODE_RELEASE\\" = skip ]; then mkdir -p cdk.out && printf '{\\"codeRelease\\":\\"skip\\"}\\\\n' > cdk.out/agentx-production-release.json; else if node scripts/release-ci-proof.ts --repository PrepLabsAI/Rovara --github-app-stack AgentXControlPlane --region \\"$AWS_REGION\\"; then RELEASE_CHECKS=--skip-checks; else RELEASE_CHECKS=; fi; mkdir -p ~/.aws && printf '[profile agentx-beta]\\\\nrole_arn = %s\\\\ncredential_source = EcsContainer\\\\nrole_session_name = beta-release\\\\nregion = %s\\\\n' \\"$BETA_RELEASE_ROLE_ARN\\" \\"$AWS_REGION\\" >> ~/.aws/config && aws sts get-caller-identity --profile agentx-beta && npm run release:prod -- --region \\"$AWS_REGION\\" --profile agentx-beta --reuse-unchanged-worker --require-existing-foundation $RELEASE_CHECKS && { if [ \\"$PIPELINE_MODE\\" = rollback ] && [ \\"$CODE_ROLLBACK_TARGET\\" != none ]; then RELEASED_SOURCE=\\"$CODE_ROLLBACK_TARGET\\"; else RELEASED_SOURCE=\\"$CODEBUILD_RESOLVED_SOURCE_VERSION\\"; fi; [[ \\"$RELEASED_SOURCE\\" =~ ^[0-9a-f]{40}$ ]] || { echo \\"the source version of this build is not a commit id; the release is not recorded\\" >&2; exit 1; }; HIST_ERR=\\"$(mktemp)\\" && { HIST_OLD=\\"$(aws ssm get-parameter --name /agentx/release/code-history/beta --query Parameter.Value --output text 2>\\"$HIST_ERR\\")\\" || { grep -q ParameterNotFound \\"$HIST_ERR\\" && HIST_OLD=; } || { cat \\"$HIST_ERR\\" >&2; false; }; } && HIST_NEW=\\"$({ printf '%s\\\\n' \\"$RELEASED_SOURCE\\"; printf '%s\\\\n' \\"$HIST_OLD\\" | { grep -oE '\\"[0-9a-f]{40}\\"' || true; } | tr -d '\\"'; } | awk '!seen[$0]++' | head -n 10 | awk 'BEGIN{printf \\"[\\"} {printf \\"%s\\\\\\"%s\\\\\\"\\", (NR>1?\\",\\":\\"\\"), $0} END{printf \\"]\\"}')\\" && aws ssm put-parameter --name /agentx/release/code-history/beta --type String --overwrite --value \\"$HIST_NEW\\" && aws ssm put-parameter --name /agentx/release/code-released/beta --type String --overwrite --value \\"$RELEASED_SOURCE\\"; }; fi"
       ]
     }
   },
@@ -16925,6 +16999,30 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                 ],
               },
               "Sid": "RecordReleasedCode",
+            },
+            {
+              "Action": [
+                "ssm:GetParameter",
+                "ssm:PutParameter",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ssm:us-east-1:",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":parameter/agentx/release/code-history/beta",
+                  ],
+                ],
+              },
+              "Sid": "RecordCodeHistory",
             },
             {
               "Action": "sts:AssumeRole",
@@ -17740,7 +17838,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                   "Version": "1",
                 },
                 "Configuration": {
-                  "EnvironmentVariables": "[{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"}]",
+                  "EnvironmentVariables": "[{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"CODE_ROLLBACK_TARGET","type":"PLAINTEXT","value":"#{variables.CODE_ROLLBACK_TARGET}"},{"name":"EXEC_ID","type":"PLAINTEXT","value":"#{codepipeline.PipelineExecutionId}"}]",
                   "ProjectName": {
                     "Ref": "BetaCodePreflightC8CDD16D",
                   },
@@ -17751,6 +17849,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                   },
                 ],
                 "Name": "CodePreflight",
+                "Namespace": "BetaCodePreflight",
                 "RoleArn": {
                   "Fn::GetAtt": [
                     "PipelineBetaCodePreflightCodePipelineActionRoleE9AA1EF6",
@@ -17771,7 +17870,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Fn::Join": [
                       "",
                       [
-                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"beta"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"preflight"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
+                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"beta"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"preflight"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"CODE_CTX","type":"PLAINTEXT","value":"#{BetaCodePreflight.CODE_CTX}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
                         {
                           "Ref": "BetaAccountId",
                         },
@@ -17965,7 +18064,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                   "Version": "1",
                 },
                 "Configuration": {
-                  "EnvironmentVariables": "[{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{BetaPreflight.CODE_RELEASE_EFFECTIVE}"}]",
+                  "EnvironmentVariables": "[{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{BetaPreflight.CODE_RELEASE_EFFECTIVE}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"CODE_ROLLBACK_TARGET","type":"PLAINTEXT","value":"#{variables.CODE_ROLLBACK_TARGET}"}]",
                   "ProjectName": {
                     "Ref": "BetaReleaseBuild11A90FDF",
                   },
@@ -18102,7 +18201,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                   "Version": "1",
                 },
                 "Configuration": {
-                  "EnvironmentVariables": "[{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"}]",
+                  "EnvironmentVariables": "[{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"CODE_ROLLBACK_TARGET","type":"PLAINTEXT","value":"#{variables.CODE_ROLLBACK_TARGET}"}]",
                   "ProjectName": {
                     "Ref": "ProductionCodePreflight8A80CA9E",
                   },
@@ -18113,6 +18212,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                   },
                 ],
                 "Name": "CodePreflight",
+                "Namespace": "ProductionCodePreflight",
                 "RoleArn": {
                   "Fn::GetAtt": [
                     "PipelineProductionCodePreflightCodePipelineActionRoleB8F8D739",
@@ -18133,7 +18233,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Fn::Join": [
                       "",
                       [
-                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"production"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"preflight"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"BetaCloudProofState"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
+                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"production"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"preflight"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"BetaCloudProofState"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"CODE_CTX","type":"PLAINTEXT","value":"#{ProductionCodePreflight.CODE_CTX}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
                         {
                           "Ref": "AWS::AccountId",
                         },
@@ -18330,7 +18430,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                   "Version": "1",
                 },
                 "Configuration": {
-                  "EnvironmentVariables": "[{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{ProductionPreflight.CODE_RELEASE_EFFECTIVE}"}]",
+                  "EnvironmentVariables": "[{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{ProductionPreflight.CODE_RELEASE_EFFECTIVE}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"CODE_ROLLBACK_TARGET","type":"PLAINTEXT","value":"#{variables.CODE_ROLLBACK_TARGET}"}]",
                   "ProjectName": {
                     "Ref": "ReleaseBuild2D3CBBB5",
                   },
@@ -18520,8 +18620,13 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
           },
           {
             "DefaultValue": "release",
-            "Description": "release deploys; adopt only checks that Cloud as deployed is what the pipeline would deploy, and changes nothing. Run adopt once per environment before the first release run",
+            "Description": "release deploys; adopt only checks and changes nothing (run it once per environment first); rollback deploys an earlier released Code commit (CODE_ROLLBACK_TARGET) and/or an older Cloud tag",
             "Name": "PIPELINE_MODE",
+          },
+          {
+            "DefaultValue": "none",
+            "Description": "With PIPELINE_MODE=rollback: the 40-character Code commit to deploy; it must be in the stage release history. none leaves Code alone; any other mode requires none",
+            "Name": "CODE_ROLLBACK_TARGET",
           },
         ],
       },
@@ -19315,6 +19420,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
     "shell": "bash",
     "variables": {
       "PIPELINE_MODE": "release",
+      "CODE_ROLLBACK_TARGET": "none",
       "AWS_CLI_VERSION": "2.36.47",
       "GITLEAKS_VERSION": "8.30.1",
       "GITLEAKS_SHA256": "<asset-hash>",
@@ -19323,7 +19429,10 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                   "Ref": "PortGuardNamesParameterName",
                 },
                 ""
-    }
+    },
+    "exported-variables": [
+      "CODE_CTX"
+    ]
   },
   "phases": {
     "install": {
@@ -19345,7 +19454,8 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
     },
     "pre_build": {
       "commands": [
-        "case \\"$PIPELINE_MODE\\" in release|adopt) echo \\"NOTE: pipeline mode is $PIPELINE_MODE\\" ;; *) echo \\"PIPELINE_MODE must be release or adopt, got: $PIPELINE_MODE\\" >&2; exit 1;; esac"
+        "case \\"$PIPELINE_MODE\\" in release|adopt|rollback) echo \\"NOTE: pipeline mode is $PIPELINE_MODE\\" ;; *) echo \\"PIPELINE_MODE must be release, adopt or rollback, got: $PIPELINE_MODE\\" >&2; exit 1;; esac",
+        "if [ \\"$PIPELINE_MODE\\" = rollback ] && [ \\"$CODE_ROLLBACK_TARGET\\" != none ]; then [[ \\"$CODE_ROLLBACK_TARGET\\" =~ ^[0-9a-f]{40}$ ]] || { echo \\"CODE_ROLLBACK_TARGET must be a full 40-character commit id, or none, got: $CODE_ROLLBACK_TARGET\\" >&2; exit 1; }; echo \\"NOTE: Code rollback target is $CODE_ROLLBACK_TARGET\\"; elif [ \\"$PIPELINE_MODE\\" != rollback ] && [ \\"$CODE_ROLLBACK_TARGET\\" != none ]; then echo \\"CODE_ROLLBACK_TARGET is only for PIPELINE_MODE=rollback; got $CODE_ROLLBACK_TARGET in mode $PIPELINE_MODE\\" >&2; exit 1; fi"
       ]
     },
     "build": {
@@ -19353,6 +19463,15 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
         "RELEASED_SHA=\\"$(aws ssm get-parameter --name /agentx/release/code-released/production --query Parameter.Value --output text)\\" || { echo \\"port-guard: the last released Code commit could not be read; refusing to run the release\\" >&2; exit 2; }",
         "[[ \\"$RELEASED_SHA\\" =~ ^[0-9a-f]{40}$ ]] || { echo \\"port-guard: the last released Code commit is not recorded; refusing to run the release\\" >&2; exit 2; }",
         "git cat-file -e \\"$RELEASED_SHA^{commit}\\" || { echo \\"port-guard: the last released Code commit is not in this clone; refusing to run the release\\" >&2; exit 2; }",
+        "SUPERSEDES_EXEC=none; SUPERSEDES_SHA=none",
+        "export CODE_CTX=\\"live:$RELEASED_SHA,target:$CODE_ROLLBACK_TARGET,supersedes:$SUPERSEDES_EXEC,supersedesSha:$SUPERSEDES_SHA\\"",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { HIST_VALUE=\\"$(aws ssm get-parameter --name /agentx/release/code-history/production --query Parameter.Value --output text)\\" || { echo \\"port-guard: the Code release history could not be read; refusing to run the release\\" >&2; exit 2; }; }",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { HIST_FLAT=\\"$(printf '%s' \\"$HIST_VALUE\\" | tr -d ' \\\\t\\\\r\\\\n')\\"; HIST_RE='^\\\\[(\\"[0-9a-f]{40}\\"(,\\"[0-9a-f]{40}\\")*)?\\\\]$'; [[ \\"$HIST_FLAT\\" =~ $HIST_RE ]] || { echo \\"port-guard: the Code release history is not a list of commits; refusing to run the release\\" >&2; exit 2; }; }",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { [[ \\"$HIST_FLAT\\" == *\\"\\\\\\"$CODE_ROLLBACK_TARGET\\\\\\"\\"* ]] || { echo \\"port-guard: the rollback target is not in this stage's Code release history; refusing to run the release\\" >&2; exit 2; }; }",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { [ \\"$CODE_ROLLBACK_TARGET\\" != \\"$RELEASED_SHA\\" ] || { echo \\"port-guard: the rollback target is the commit already released; refusing to run the release\\" >&2; exit 2; }; }",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { git cat-file -e \\"$CODE_ROLLBACK_TARGET^{commit}\\" || { echo \\"port-guard: the rollback target is not in this clone; refusing to run the release\\" >&2; exit 2; }; }",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { git merge-base --is-ancestor \\"$CODE_ROLLBACK_TARGET\\" \\"$RELEASED_SHA\\" || { echo \\"port-guard: the rollback target is not older than the last released commit; refusing to run the release\\" >&2; exit 2; }; }",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || git checkout -q --detach \\"$RELEASED_SHA\\"",
         "git merge-base --is-ancestor \\"$RELEASED_SHA\\" HEAD || { echo \\"port-guard: the last released Code commit is not an ancestor of this commit; refusing to run the release\\" >&2; exit 2; }",
         "[ \\"$(git rev-parse HEAD)\\" = \\"$RELEASED_SHA\\" ] || [ \\"$(git rev-list --parents -n 1 HEAD | wc -w | tr -d ' ')\\" -le 3 ] || { echo \\"port-guard: this commit is an octopus merge ($(( $(git rev-list --parents -n 1 HEAD | wc -w) - 1 )) parents), which the release does not accept. Re-land the change as a normal two-parent merge or as one squash.\\" >&2; exit 2; }",
         "[ \\"$(git rev-parse HEAD)\\" = \\"$RELEASED_SHA\\" ] || [ \\"$(git rev-list --parents -n 1 HEAD | wc -w | tr -d ' ')\\" = 3 ] || [ \\"$(git rev-parse HEAD^1)\\" = \\"$RELEASED_SHA\\" ] || { echo \\"port-guard: this landing has $(git rev-list --count \\"$RELEASED_SHA..HEAD\\") commits on the last released commit that were not merged as one change, so this run does not release them. The next normal merge (a merge commit on top of them) releases them, scanned whole; or re-land the change as one squash or one merge.\\" >&2; exit 2; }",
@@ -19361,7 +19480,9 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
         "cd /tmp/port-guard-trusted",
         "set +x",
         "test -n \\"$PORT_GUARD_NAMES_PARAMETER\\" || { echo \\"port-guard: PORT_GUARD_NAMES_PARAMETER is not set; refusing to run without the private name list\\" >&2; exit 2; }",
-        "node scripts/port-guard-pipeline.ts --range HEAD..release-tip --allow-guard-edits"
+        "node scripts/port-guard-pipeline.ts --range HEAD..release-tip --allow-guard-edits",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || git update-ref refs/heads/rollback-target \\"$CODE_ROLLBACK_TARGET\\"",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || node scripts/port-guard-pipeline.ts --range rollback-target..release-tip --allow-guard-edits"
       ]
     }
   }
@@ -19586,6 +19707,27 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
               "Sid": "ReadReleasedCode",
             },
             {
+              "Action": "ssm:GetParameter",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ssm:us-east-1:",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":parameter/agentx/release/code-history/production",
+                  ],
+                ],
+              },
+              "Sid": "ReadCodeHistory",
+            },
+            {
               "Action": [
                 "codeconnections:UseConnection",
                 "codestar-connections:UseConnection",
@@ -19688,6 +19830,8 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
     "variables": {
       "NODE_OPTIONS": "--max-old-space-size=8192",
       "CODE_RELEASE": "run",
+      "PIPELINE_MODE": "release",
+      "CODE_ROLLBACK_TARGET": "none",
       "AWS_CLI_VERSION": "2.36.47",
       "GITLEAKS_VERSION": "8.30.1",
       "GITLEAKS_SHA256": "<asset-hash>"
@@ -19698,6 +19842,15 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
       "commands": [
         "case \\"$CODE_RELEASE\\" in run|skip) ;; *) echo \\"CODE_RELEASE must be run or skip, got: $CODE_RELEASE\\" >&2; exit 1;; esac",
         "[ \\"$CODE_RELEASE\\" != skip ] || echo \\"CODE_RELEASE=skip: this run releases Cloud only; Code is not built or deployed\\"",
+        "case \\"$PIPELINE_MODE\\" in release|adopt|rollback) ;; *) echo \\"PIPELINE_MODE must be release, adopt or rollback, got: $PIPELINE_MODE\\" >&2; exit 1;; esac",
+        "if [ \\"$PIPELINE_MODE\\" = rollback ] && [ \\"$CODE_ROLLBACK_TARGET\\" != none ]; then [[ \\"$CODE_ROLLBACK_TARGET\\" =~ ^[0-9a-f]{40}$ ]] || { echo \\"CODE_ROLLBACK_TARGET must be a full 40-character commit id, or none, got: $CODE_ROLLBACK_TARGET\\" >&2; exit 1; }; echo \\"NOTE: Code rollback target is $CODE_ROLLBACK_TARGET\\"; elif [ \\"$PIPELINE_MODE\\" != rollback ] && [ \\"$CODE_ROLLBACK_TARGET\\" != none ]; then echo \\"CODE_ROLLBACK_TARGET is only for PIPELINE_MODE=rollback; got $CODE_ROLLBACK_TARGET in mode $PIPELINE_MODE\\" >&2; exit 1; fi",
+        "if [ \\"$PIPELINE_MODE\\" = rollback ]; then if [ \\"$CODE_ROLLBACK_TARGET\\" = none ]; then [ \\"$CODE_RELEASE\\" = skip ] || { echo \\"a rollback run with no Code rollback target does not release Code, but CODE_RELEASE is $CODE_RELEASE\\" >&2; exit 1; }; else [ \\"$CODE_RELEASE\\" = run ] || { echo \\"a Code rollback target was given but CODE_RELEASE is $CODE_RELEASE, so Code would not be rolled back\\" >&2; exit 1; }; fi; fi",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { HIST_VALUE=\\"$(aws ssm get-parameter --name /agentx/release/code-history/production --query Parameter.Value --output text)\\" || { echo \\"the Code release history could not be read; Code is not rolled back\\" >&2; exit 1; }; }",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { HIST_FLAT=\\"$(printf '%s' \\"$HIST_VALUE\\" | tr -d ' \\\\t\\\\r\\\\n')\\"; HIST_RE='^\\\\[(\\"[0-9a-f]{40}\\"(,\\"[0-9a-f]{40}\\")*)?\\\\]$'; [[ \\"$HIST_FLAT\\" =~ $HIST_RE ]] || { echo \\"the Code release history is not a list of commits; Code is not rolled back\\" >&2; exit 1; }; }",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { [[ \\"$HIST_FLAT\\" == *\\"\\\\\\"$CODE_ROLLBACK_TARGET\\\\\\"\\"* ]] || { echo \\"the rollback target is not in this stage's Code release history; Code is not rolled back\\" >&2; exit 1; }; }",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { git cat-file -e \\"$CODE_ROLLBACK_TARGET^{commit}\\" || { echo \\"the rollback target is not in this clone; Code is not rolled back\\" >&2; exit 1; }; }",
+        "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { git merge-base --is-ancestor \\"$CODE_ROLLBACK_TARGET\\" HEAD || { echo \\"the rollback target is not an ancestor of this run's commit; Code is not rolled back\\" >&2; exit 1; }; }",
+        "[ \\"$CODE_RELEASE\\" = skip ] || { [ \\"$PIPELINE_MODE\\" != rollback ] || [ \\"$CODE_ROLLBACK_TARGET\\" = none ] || git checkout -q --detach \\"$CODE_ROLLBACK_TARGET\\"; }",
         "[ \\"$CODE_RELEASE\\" = skip ] || { node_version=\\"$(cat .node-version)\\"; }",
         "[ \\"$CODE_RELEASE\\" = skip ] || { node_archive=\\"node-v\${node_version}-linux-arm64.tar.xz\\"; }",
         "[ \\"$CODE_RELEASE\\" = skip ] || { curl -fsSL -o \\"/tmp/\${node_archive}\\" \\"https://nodejs.org/dist/v\${node_version}/\${node_archive}\\"; }",
@@ -19719,7 +19872,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
     },
     "build": {
       "commands": [
-        "if [ \\"$CODE_RELEASE\\" = skip ]; then mkdir -p cdk.out && printf '{\\"codeRelease\\":\\"skip\\"}\\\\n' > cdk.out/agentx-production-release.json; else if node scripts/release-ci-proof.ts --repository PrepLabsAI/Rovara --github-app-stack AgentXControlPlane --region \\"$AWS_REGION\\"; then RELEASE_CHECKS=--skip-checks; else RELEASE_CHECKS=; fi; npm run release:prod -- --region \\"$AWS_REGION\\" --reuse-unchanged-worker --require-existing-foundation $RELEASE_CHECKS && { RELEASED_SOURCE=\\"$CODEBUILD_RESOLVED_SOURCE_VERSION\\"; [[ \\"$RELEASED_SOURCE\\" =~ ^[0-9a-f]{40}$ ]] || { echo \\"the source version of this build is not a commit id; the release is not recorded\\" >&2; exit 1; }; aws ssm put-parameter --name /agentx/release/code-released/production --type String --overwrite --value \\"$RELEASED_SOURCE\\"; }; fi"
+        "if [ \\"$CODE_RELEASE\\" = skip ]; then mkdir -p cdk.out && printf '{\\"codeRelease\\":\\"skip\\"}\\\\n' > cdk.out/agentx-production-release.json; else if node scripts/release-ci-proof.ts --repository PrepLabsAI/Rovara --github-app-stack AgentXControlPlane --region \\"$AWS_REGION\\"; then RELEASE_CHECKS=--skip-checks; else RELEASE_CHECKS=; fi; npm run release:prod -- --region \\"$AWS_REGION\\" --reuse-unchanged-worker --require-existing-foundation $RELEASE_CHECKS && { if [ \\"$PIPELINE_MODE\\" = rollback ] && [ \\"$CODE_ROLLBACK_TARGET\\" != none ]; then RELEASED_SOURCE=\\"$CODE_ROLLBACK_TARGET\\"; else RELEASED_SOURCE=\\"$CODEBUILD_RESOLVED_SOURCE_VERSION\\"; fi; [[ \\"$RELEASED_SOURCE\\" =~ ^[0-9a-f]{40}$ ]] || { echo \\"the source version of this build is not a commit id; the release is not recorded\\" >&2; exit 1; }; HIST_ERR=\\"$(mktemp)\\" && { HIST_OLD=\\"$(aws ssm get-parameter --name /agentx/release/code-history/production --query Parameter.Value --output text 2>\\"$HIST_ERR\\")\\" || { grep -q ParameterNotFound \\"$HIST_ERR\\" && HIST_OLD=; } || { cat \\"$HIST_ERR\\" >&2; false; }; } && HIST_NEW=\\"$({ printf '%s\\\\n' \\"$RELEASED_SOURCE\\"; printf '%s\\\\n' \\"$HIST_OLD\\" | { grep -oE '\\"[0-9a-f]{40}\\"' || true; } | tr -d '\\"'; } | awk '!seen[$0]++' | head -n 10 | awk 'BEGIN{printf \\"[\\"} {printf \\"%s\\\\\\"%s\\\\\\"\\", (NR>1?\\",\\":\\"\\"), $0} END{printf \\"]\\"}')\\" && aws ssm put-parameter --name /agentx/release/code-history/production --type String --overwrite --value \\"$HIST_NEW\\" && aws ssm put-parameter --name /agentx/release/code-released/production --type String --overwrite --value \\"$RELEASED_SOURCE\\"; }; fi"
       ]
     }
   },
@@ -20062,6 +20215,30 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                 ],
               },
               "Sid": "RecordReleasedCode",
+            },
+            {
+              "Action": [
+                "ssm:GetParameter",
+                "ssm:PutParameter",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ssm:us-east-1:",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":parameter/agentx/release/code-history/production",
+                  ],
+                ],
+              },
+              "Sid": "RecordCodeHistory",
             },
             {
               "Action": [

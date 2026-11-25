@@ -70,7 +70,8 @@ you start a run by hand):
 | `CLOUD_REF` | `latest` | The Cloud release tag to deploy; `latest` is the newest tag on the Cloud trunk. An older tag is a Cloud rollback and forces `CODE_RELEASE=skip` |
 | `CODE_RELEASE` | `run` | `skip` releases Cloud only; the commit's Code waits for a later run. Preflight may force `skip`, never `run` |
 | `CLOUD_PROD` | `on` | `off` leaves production's Cloud as it is for this run |
-| `PIPELINE_MODE` | `release` | `adopt` only checks that Cloud as deployed is what the pipeline would deploy and changes nothing; run it once per environment before the first `release` run (the stage tool refuses a release run in an environment it never adopted) |
+| `PIPELINE_MODE` | `release` | `adopt` only checks that Cloud as deployed is what the pipeline would deploy and changes nothing; run it once per environment before the first `release` run (the stage tool refuses a release run in an environment it never adopted). `rollback` deploys an earlier released Code commit (`CODE_ROLLBACK_TARGET`) and/or an older Cloud tag (`CLOUD_REF`) |
+| `CODE_ROLLBACK_TARGET` | `none` | With `PIPELINE_MODE=rollback`: the full 40-character Code commit to deploy. It must be in the stage's release history (below). `none` leaves Code as it is. Any other mode requires `none` |
 
 A `skip` run replaces a waiting promotion like any other run, so Preflight says which Code commit
 it leaves unpromoted.
@@ -102,10 +103,56 @@ commit, and a run with no new Code are accepted. Seed each record once, by hand,
 (`aws ssm put-parameter --type String --name <parameter> --value <40-hex sha>`): until then the first run
 refuses. The repository's merge settings are not what protects this step; the check is.
 
-A Code rollback is refused through the pipeline, by design: the port guard step requires the last released
-commit to be an ancestor of the commit being released, so a run of an older Code commit stops there. A
-Cloud rollback run (`CLOUD_REF` set to an older tag) forces `CODE_RELEASE=skip`. After the cutover, rolling
-Code back is the hand path (the release runbook above), never a pipeline run.
+Each release also keeps a short history of what the stage released: an SSM String beside the record
+(`/agentx/release/code-history/beta` or `/production`), a JSON list of the last 10 commits, newest first. The
+same braced step that records the commit writes it (the history first, the record last, nothing for a failed
+release or a `skip` run), with the same writer rule: only the stage's release build role may write it, and only
+its own. A missing or garbled list does not stop a forward release: the next one starts a new list from what is
+valid. A list it cannot read for any other reason stops the build before anything is written.
+
+**Rolling Code back** is a pipeline run with `PIPELINE_MODE=rollback` and `CODE_ROLLBACK_TARGET=<40-hex sha>`.
+The Code Preflight refuses it, exit 2, before the worktree exists and before any guard runs, unless the stage's
+history is readable and lists the target, the target is not the commit already released, is in the clone, and is
+older than (an ancestor of) the released commit. A history that is missing or garbled refuses a rollback (it
+never reads as "any commit"). The guard that runs while the private name list is on disk is still the CURRENT
+released commit's, over the range target..released; nothing from the target, or from the commit that started the
+run, runs then. The release build then checks the target out, releases it, and on success records it as the
+released commit and moves it to the head of the history. The run goes through the same gates as any other
+(Preflight, the protected-resource gate, the rollback floors, drift) and, for Production, the same approval at the
+transition. A rollback needs `CODE_RELEASE=run` (a Cloud-side `skip` with a target stops the Code build: Code
+would not move) and `PIPELINE_MODE=rollback` with target `none` is a Cloud-only rollback (`CODE_RELEASE=skip`).
+The next forward run is judged from the rolled-back commit: every commit since is scanned again, whole; a
+squash that sits on a later commit than the rolled-back one is refused as a linear landing until a merge commit
+lands.
+
+The release build repeats the history and ancestor checks on the target before it checks anything out (its role
+can read the history too): the history lists the target, and the target is in the clone and an ancestor of the
+run's commit. So a build that reaches it some other way still cannot deploy a commit that was never released.
+
+The Code Preflight exports ONE value, `CODE_CTX`, to that stage's Cloud Preflight action only (CodePipeline caps
+an action's configuration value at 1000 characters, and the Cloud actions are close to it; every action keeps at
+least 100 characters of headroom, which a test checks). It has no quotes and four parts:
+`live:<40hex>,target:<40hex|none>,supersedes:<execution id|none>,supersedesSha:<40hex|none>`: the stage's released
+commit (the stage tool's rollback pin), the rollback target, and, from Beta's Preflight, the execution waiting in
+front of Production that this run replaces with the Code commit it holds, for the promotion summary. Production's
+Preflight always says `none` for the last two (the stage tool keeps Beta's). The waiting-run lookup is best
+effort: a lookup that fails prints a warning and leaves both `none`.
+
+Runbook notes for a rollback:
+
+- The history starts at the first release after the pipeline goes live, so the first rollback needs two finished
+  releases, or a hand-seeded history: `aws ssm put-parameter --type String --name <history parameter> --value
+  '["<40-hex live sha>"]'` in the release account (an admin act; it only widens the targets to the commit that is
+  live now).
+- After a rollback, land the next fix as a merge commit (the merge queue does): the next forward run is judged from
+  the rolled-back commit, and a squash that does not sit directly on it is refused as a linear landing until a
+  merge commit lands.
+- Production rolls back only to a commit Production itself released: it checks Production's own history, so a
+  commit that only Beta released is refused at Production's Preflight (after Beta has already rolled back; do not
+  approve the transition then).
+
+A Cloud rollback run (`CLOUD_REF` set to an older tag) forces `CODE_RELEASE=skip` unless it also names a Code
+rollback target.
 
 There is no other adoption switch: nothing named `ROVARA_ADOPT_*` is a pipeline variable or an action
 input. `PIPELINE_MODE` is the only one, and every Preflight prints the mode as a note.

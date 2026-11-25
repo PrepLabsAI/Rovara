@@ -227,7 +227,9 @@ describe("L1 follow-up R4: the Code release records the commit it released, only
       expect(lines.at(-1)).toBe(`aws ssm put-parameter --name ${CODE_RELEASED_PARAMETER[stage]} --type String --overwrite --value ${tip}`);
       expect(lines.findIndex((line) => line.startsWith("npm run release:prod"))).toBeLessThan(lines.length - 1);
       expect(lines.at(-1)).not.toContain("--profile");
-      expect(lines.filter((line) => line.includes("put-parameter"))).toHaveLength(1);
+      // The record is written once; the release history (L9b) is the only other write, and comes before it.
+      expect(lines.filter((line) => line.includes(`put-parameter --name ${CODE_RELEASED_PARAMETER[stage]} `))).toHaveLength(1);
+      expect(lines.filter((line) => line.includes("put-parameter"))).toHaveLength(2);
     });
 
     it(`${name}: records CodeBuild's own source version, not what is checked out when the release ends`, () => {

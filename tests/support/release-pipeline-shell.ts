@@ -26,7 +26,26 @@ export const fakeBin = (dir: string, log: string, names: readonly string[]): str
     const body = name === "node"
       ? `#!/bin/bash\necho "node $*" >> "${log}"\nhead -1 "$1"\n`
       : name === "aws"
-        ? `#!/bin/bash\necho "aws $*" >> "${log}"\n[ -z "$FAKE_AWS_FAIL" ] || exit 254\necho "$FAKE_RELEASED_SHA"\n`
+        ? [
+            "#!/bin/bash",
+            `echo "aws $*" >> "${log}"`,
+            // The release history parameter (a read or a write): FAKE_HISTORY is its value; FAKE_HISTORY_MISSING answers like a parameter that does not exist, FAKE_HISTORY_FAIL like any other failure.
+            'if [[ "$*" == *code-history* && "$*" == *get-parameter* ]]; then',
+            '  [ -z "$FAKE_HISTORY_FAIL" ] || { echo "An error occurred (AccessDeniedException)" >&2; exit 254; }',
+            '  [ -z "$FAKE_HISTORY_MISSING" ] || { echo "An error occurred (ParameterNotFound)" >&2; exit 254; }',
+            '  echo "$FAKE_HISTORY"; exit 0',
+            "fi",
+            // The waiting execution lookups (Beta's Preflight): FAKE_WAITING_EXEC, FAKE_WAITING_SHA; FAKE_CODEPIPELINE_FAIL fails both.
+            'if [[ "$1" == codepipeline ]]; then',
+            '  [ -z "$FAKE_CODEPIPELINE_FAIL" ] || exit 254',
+            '  [[ "$2" == get-pipeline-state ]] && echo "${FAKE_WAITING_EXEC:-None}"',
+            '  [[ "$2" == get-pipeline-execution ]] && echo "${FAKE_WAITING_SHA:-None}"',
+            "  exit 0",
+            "fi",
+            '[ -z "$FAKE_AWS_FAIL" ] || exit 254',
+            'echo "$FAKE_RELEASED_SHA"',
+            "",
+          ].join("\n")
         : `#!/bin/bash\necho "${name} $*" >> "${log}"\n`;
     writeFileSync(join(bin, name), body);
     chmodSync(join(bin, name), 0o755);
@@ -47,11 +66,14 @@ export const commitFile = (repo: string, path: string, content: string, message:
 };
 
 /** The Code Preflight's build phase, as the buildspec has it, with only the worktree directory moved into the test's scratch. */
-export const preflightBuild = (trustedDir: string): string[] => {
+export const preflightBuild = (trustedDir: string, closesGate = false): string[] => {
   // BuildSpec.fromObject keeps the object as `spec` (toBuildSpec() returns a lazy token outside a stack).
-  const spec = (codePreflightBuildSpec(false, "/test/names", "/test/released") as unknown as { spec: { phases: { build: { commands: string[] } } } }).spec;
-  return spec.phases.build.commands.map((command) => command.replaceAll("/tmp/port-guard-trusted", trustedDir));
+  const spec = (codePreflightBuildSpec(closesGate, "/test/names", "/test/released", "/test/code-history") as unknown as { spec: { phases: { build: { commands: string[] } } } }).spec;
+  // CodeBuild stops a phase at its first failing command; the shell does so only with errexit.
+  return ["set -e", ...spec.phases.build.commands.map((command) => command.replaceAll("/tmp/port-guard-trusted", trustedDir))];
 };
+/** The buildspecs' own variable defaults (a CodeBuild build has them before its first command); a test's env overrides them. */
+export const BUILDSPEC_DEFAULTS = { PIPELINE_MODE: "release", CODE_ROLLBACK_TARGET: "none" } as const;
 export const runShell = (cwd: string, commands: readonly string[], env: Record<string, string>) =>
-  spawnSync("bash", ["-c", commands.join("\n")], { cwd, encoding: "utf8", env: { ...process.env, ...env } });
+  spawnSync("bash", ["-c", commands.join("\n")], { cwd, encoding: "utf8", env: { ...process.env, ...BUILDSPEC_DEFAULTS, ...env } });
 

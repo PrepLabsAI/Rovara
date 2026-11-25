@@ -73,9 +73,27 @@ export const CLOUD_PREFLIGHT_EXPORT_CODE_RELEASE = "CODE_RELEASE_EFFECTIVE";
 export const PIPELINE_VARIABLE_CLOUD_REF = "CLOUD_REF";
 export const PIPELINE_VARIABLE_CODE_RELEASE = "CODE_RELEASE";
 export const PIPELINE_VARIABLE_CLOUD_PROD = "CLOUD_PROD";
-/** `release` (the default) or `adopt`: an adoption run changes nothing (the stage CLI maps it to its adoption mode, and refuses a release run in an environment it never adopted). */
+/**
+ * `release` (the default), `adopt` or `rollback`. An adoption run changes nothing (the stage CLI maps it to its adoption mode, and refuses a release run in an environment it
+ * never adopted). A rollback run deploys an EARLIER released Code commit, named by CODE_ROLLBACK_TARGET, or (target `none`) rolls Cloud back and leaves Code alone.
+ */
 export const PIPELINE_VARIABLE_MODE = "PIPELINE_MODE";
 export const PIPELINE_MODE_DEFAULT = "release";
+/**
+ * The Code commit a rollback run deploys: a full 40-hex sha that must be in the stage's release history (CODE_HISTORY_PARAMETER), checked by the Code Preflight before any guard
+ * runs. `none` (a variable's default may not be empty) means no Code rollback; any other mode refuses a target. Not a switch: a per-run parameter that does nothing in a release run.
+ */
+export const PIPELINE_VARIABLE_ROLLBACK_TARGET = "CODE_ROLLBACK_TARGET";
+export const ROLLBACK_TARGET_NONE = "none";
+/**
+ * What each stage's Code Preflight exports, as ONE short value with no quotes, to that stage's Cloud PREFLIGHT action only (CodePipeline caps an action's configuration value at 1000
+ * characters and the Cloud actions' environment is already near it; the stage CLI carries the parts to its later steps in its state artifact):
+ *   live:<40hex>,target:<40hex|none>,supersedes:<execution uuid|none>,supersedesSha:<40hex|none>
+ * live = the commit the stage has released (the rollback pin); target = CODE_ROLLBACK_TARGET; supersedes and supersedesSha = the execution waiting in front of Production that this run
+ * replaces and the Code commit it holds (Beta's Preflight looks; Production's always says none, the stage CLI keeps Beta's). Every part is checked before it is written, so nothing needs quoting.
+ */
+export const CODE_CONTEXT_VARIABLE = "CODE_CTX";
+export const CODE_PREFLIGHT_NAMESPACE = { beta: "BetaCodePreflight", production: "ProductionCodePreflight" } as const;
 /** The account each stage's Cloud actions must be running in; the stage CLI refuses anything else (exit 3). Never written as a literal here: Beta's comes from BetaAccountId, Production's is this stack's own account. */
 export const CLOUD_EXPECTED_ACCOUNT_VARIABLE = "ROVARA_EXPECTED_DEPLOY_ACCOUNT";
 /**
@@ -87,6 +105,16 @@ export const CODE_RELEASED_PARAMETER = {
   beta: "/agentx/release/code-released/beta",
   production: "/agentx/release/code-released/production",
 } as const;
+/**
+ * The bounded history of what each stage released: a JSON list of the last CODE_HISTORY_LIMIT Code shas, newest first, an SSM String beside the released record. Written by the
+ * SAME finished-release step as the record (one braced group, first, so a failed release writes neither), with the same IAM writer rule; read tolerantly when written (a missing or
+ * garbled list starts a fresh one) and strictly by a rollback (a missing or garbled list refuses). A rollback may only target a sha in it.
+ */
+export const CODE_HISTORY_PARAMETER = {
+  beta: "/agentx/release/code-history/beta",
+  production: "/agentx/release/code-history/production",
+} as const;
+export const CODE_HISTORY_LIMIT = 10;
 /** CLOUD_REF's default: the newest vX.Y.Z tag on the Cloud trunk (a variable's default may not be empty). */
 export const CLOUD_REF_LATEST = "latest";
 /** The tags that start a run: `v1.2.3` yes, `v1.2.3-rc1` no. */
@@ -204,9 +232,10 @@ export class ReleasePipelineStack extends Stack {
       description: "Runs npm run release:prod for AgentX mainline commits",
       ...releaseProjectSettings(logGroup),
       buildSpec: releaseBuildSpec({
+        historyParameter: CODE_HISTORY_PARAMETER.production,
         // The gate it came through is closed by the production Code Preflight, first thing in the Production stage (before Preflight's gates), not here.
         release: 'npm run release:prod -- --region "$AWS_REGION" --reuse-unchanged-worker --require-existing-foundation $RELEASE_CHECKS',
-        afterRelease: [recordReleasedCode(CODE_RELEASED_PARAMETER.production)],
+        afterRelease: [recordReleasedCode(CODE_RELEASED_PARAMETER.production, CODE_HISTORY_PARAMETER.production)],
       }),
     });
 
@@ -224,6 +253,7 @@ export class ReleasePipelineStack extends Stack {
       role: betaRole,
       ...releaseProjectSettings(logGroup),
       buildSpec: releaseBuildSpec({
+        historyParameter: CODE_HISTORY_PARAMETER.beta,
         variables: { BETA_RELEASE_ROLE_ARN: betaReleaseRoleArn },
         beforeRelease: [
           "mkdir -p ~/.aws",
@@ -231,7 +261,7 @@ export class ReleasePipelineStack extends Stack {
           `aws sts get-caller-identity --profile ${AGENTX_BETA_PROFILE}`,
         ],
         release: `npm run release:prod -- --region "$AWS_REGION" --profile ${AGENTX_BETA_PROFILE} --reuse-unchanged-worker --require-existing-foundation $RELEASE_CHECKS`,
-        afterRelease: [recordReleasedCode(CODE_RELEASED_PARAMETER.beta)],
+        afterRelease: [recordReleasedCode(CODE_RELEASED_PARAMETER.beta, CODE_HISTORY_PARAMETER.beta)],
       }),
     });
 
@@ -287,6 +317,9 @@ export class ReleasePipelineStack extends Stack {
     for (const policy of policies) project.addToRolePolicy(policy);
     const releasedCodeArn = (stage: "beta" | "production"): string => scoped("ssm", `parameter${CODE_RELEASED_PARAMETER[stage]}`);
     project.addToRolePolicy(new iam.PolicyStatement({ sid: "RecordReleasedCode", actions: ["ssm:PutParameter"], resources: [releasedCodeArn("production")] }));
+    // The release history beside it: read to prepend, written by the same step (same writer rule: this role only, that one parameter).
+    const codeHistoryArn = (stage: "beta" | "production"): string => scoped("ssm", `parameter${CODE_HISTORY_PARAMETER[stage]}`);
+    project.addToRolePolicy(new iam.PolicyStatement({ sid: "RecordCodeHistory", actions: ["ssm:GetParameter", "ssm:PutParameter"], resources: [codeHistoryArn("production")] }));
     // The Code half of Preflight (L14 and #1242). The private name list is an SSM SecureString in this account: the stack takes its NAME and the key's ARN as
     // parameters, with no default, so a deploy without them fails rather than building a step that cannot load the list.
     const portGuardNames = portGuardNamesParameter(this);
@@ -308,7 +341,12 @@ export class ReleasePipelineStack extends Stack {
         concurrentBuildLimit: 1,
         timeout: Duration.minutes(30),
         logging: { cloudWatch: { logGroup } },
-        buildSpec: codePreflightBuildSpec(closesGate, portGuardNames.valueAsString, closesGate ? CODE_RELEASED_PARAMETER.production : CODE_RELEASED_PARAMETER.beta),
+        buildSpec: codePreflightBuildSpec(
+          closesGate,
+          portGuardNames.valueAsString,
+          closesGate ? CODE_RELEASED_PARAMETER.production : CODE_RELEASED_PARAMETER.beta,
+          closesGate ? CODE_HISTORY_PARAMETER.production : CODE_HISTORY_PARAMETER.beta,
+        ),
       });
       if (closesGate) {
         preflight.addToRolePolicy(new iam.PolicyStatement({
@@ -330,6 +368,20 @@ export class ReleasePipelineStack extends Stack {
         actions: ["ssm:GetParameter"],
         resources: [releasedCodeArn(closesGate ? "production" : "beta")],
       }));
+      // The stage's release history, read-only: a rollback may only target a commit in it.
+      preflight.addToRolePolicy(new iam.PolicyStatement({
+        sid: "ReadCodeHistory",
+        actions: ["ssm:GetParameter"],
+        resources: [codeHistoryArn(closesGate ? "production" : "beta")],
+      }));
+      if (!closesGate) {
+        // Beta's Preflight names the execution waiting in front of Production (the one this run supersedes) for the promotion summary: read-only, this pipeline only.
+        preflight.addToRolePolicy(new iam.PolicyStatement({
+          sid: "ReadWaitingRun",
+          actions: ["codepipeline:GetPipelineState", "codepipeline:GetPipelineExecution"],
+          resources: [pipelineArn],
+        }));
+      }
       // The action's input is the Code clone, which the project reads through the repository's connection.
       preflight.addToRolePolicy(useConnection);
       return preflight;
@@ -342,6 +394,7 @@ export class ReleasePipelineStack extends Stack {
     }
     betaProject.addToRolePolicy(useConnection);
     betaProject.addToRolePolicy(new iam.PolicyStatement({ sid: "RecordReleasedCode", actions: ["ssm:PutParameter"], resources: [releasedCodeArn("beta")] }));
+    betaProject.addToRolePolicy(new iam.PolicyStatement({ sid: "RecordCodeHistory", actions: ["ssm:GetParameter", "ssm:PutParameter"], resources: [codeHistoryArn("beta")] }));
     betaProject.addToRolePolicy(new iam.PolicyStatement({
       sid: "AssumeBetaReleaseRole",
       actions: ["sts:AssumeRole"],
@@ -407,9 +460,17 @@ export class ReleasePipelineStack extends Stack {
     const pipelineMode = new codepipeline.Variable({
       variableName: PIPELINE_VARIABLE_MODE,
       defaultValue: PIPELINE_MODE_DEFAULT,
-      description: "release deploys; adopt only checks that Cloud as deployed is what the pipeline would deploy, and changes nothing. Run adopt once per environment before the first release run",
+      description: "release deploys; adopt only checks and changes nothing (run it once per environment first); rollback deploys an earlier released Code commit (CODE_ROLLBACK_TARGET) and/or an older Cloud tag",
     });
-    const modeVariable = { [PIPELINE_VARIABLE_MODE]: { value: pipelineMode.reference() } };
+    const rollbackTarget = new codepipeline.Variable({
+      variableName: PIPELINE_VARIABLE_ROLLBACK_TARGET,
+      defaultValue: ROLLBACK_TARGET_NONE,
+      description: "With PIPELINE_MODE=rollback: the 40-character Code commit to deploy; it must be in the stage release history. none leaves Code alone; any other mode requires none",
+    });
+    const modeVariable = {
+      [PIPELINE_VARIABLE_MODE]: { value: pipelineMode.reference() },
+      [PIPELINE_VARIABLE_ROLLBACK_TARGET]: { value: rollbackTarget.reference() },
+    };
     const betaPreflightNamespace = "BetaPreflight";
     const productionPreflightNamespace = "ProductionPreflight";
     /**
@@ -442,6 +503,8 @@ export class ReleasePipelineStack extends Stack {
             [PIPELINE_VARIABLE_CODE_RELEASE]: { value: codeRelease.reference() },
             [PIPELINE_VARIABLE_CLOUD_PROD]: { value: cloudProd.reference() },
             [PIPELINE_VARIABLE_MODE]: { value: pipelineMode.reference() },
+            // Only the Cloud Preflight gets the Code context of its stage (see CODE_CONTEXT_VARIABLE); the later steps read it from the stage CLI's state.
+            ...(spec.step === "preflight" ? { [CODE_CONTEXT_VARIABLE]: { value: `#{${CODE_PREFLIGHT_NAMESPACE[environment]}.${CODE_CONTEXT_VARIABLE}}` } } : {}),
             [CLOUD_EXPECTED_ACCOUNT_VARIABLE]: { value: environment === "beta" ? betaAccountId.valueAsString : this.account },
             EXEC_ID: { value: "#{codepipeline.PipelineExecutionId}" },
             CODE_SHA: { value: source.variables.commitId },
@@ -457,7 +520,11 @@ export class ReleasePipelineStack extends Stack {
         runOrder,
         input: sourceOutput,
         outputs: [output],
-        environmentVariables: { CODE_RELEASE: { value: `#{${preflightNamespace}.${CLOUD_PREFLIGHT_EXPORT_CODE_RELEASE}}` } },
+        environmentVariables: {
+          CODE_RELEASE: { value: `#{${preflightNamespace}.${CLOUD_PREFLIGHT_EXPORT_CODE_RELEASE}}` },
+          [PIPELINE_VARIABLE_MODE]: { value: pipelineMode.reference() },
+          [PIPELINE_VARIABLE_ROLLBACK_TARGET]: { value: rollbackTarget.reference() },
+        },
       });
     /** A stage: the Code Preflight, then the Cloud steps up to the gateway check, the Code release, then web and app. The state chain runs through the Cloud steps only. */
     const stageActions = (
@@ -483,7 +550,14 @@ export class ReleasePipelineStack extends Stack {
     };
     const beta = stageActions(
       "beta",
-      new actions.CodeBuildAction({ actionName: "CodePreflight", project: betaPreflightProject, runOrder: 1, input: sourceOutput, environmentVariables: modeVariable }),
+      new actions.CodeBuildAction({
+        actionName: "CodePreflight",
+        project: betaPreflightProject,
+        runOrder: 1,
+        input: sourceOutput,
+        variablesNamespace: CODE_PREFLIGHT_NAMESPACE.beta,
+        environmentVariables: { ...modeVariable, EXEC_ID: { value: "#{codepipeline.PipelineExecutionId}" } },
+      }),
       (runOrder) => codeAction("ReleaseBeta", betaProject, runOrder, betaPreflightNamespace, betaOutput),
       undefined,
     );
@@ -491,7 +565,7 @@ export class ReleasePipelineStack extends Stack {
     new codepipeline.Pipeline(this, "Pipeline", {
       pipelineName: AGENTX_RELEASE_PIPELINE_NAME,
       pipelineType: codepipeline.PipelineType.V2,
-      variables: [cloudRef, codeRelease, cloudProd, pipelineMode],
+      variables: [cloudRef, codeRelease, cloudProd, pipelineMode, rollbackTarget],
       // #1242: every merge goes to beta; production takes beta's newest commit only when someone enables the transition into Production.
       // A run waiting in front of a disabled transition is replaced by a newer one only in SUPERSEDED mode, which is what makes one promotion carry
       // every merge since the last. (QUEUED, #114, kept each merge apart; two merges that land while beta is deploying now go to beta together.)
@@ -518,7 +592,14 @@ export class ReleasePipelineStack extends Stack {
           // Its Cloud counterpart then reads the beta run's final state.
           actions: stageActions(
             "production",
-            new actions.CodeBuildAction({ actionName: "CodePreflight", project: productionPreflightProject, runOrder: 1, input: sourceOutput, environmentVariables: modeVariable }),
+            new actions.CodeBuildAction({
+              actionName: "CodePreflight",
+              project: productionPreflightProject,
+              runOrder: 1,
+              input: sourceOutput,
+              variablesNamespace: CODE_PREFLIGHT_NAMESPACE.production,
+              environmentVariables: modeVariable,
+            }),
             (runOrder) => codeAction("ReleaseProduction", project, runOrder, productionPreflightNamespace, releaseOutput),
             beta.last,
           ).actions,
@@ -557,10 +638,25 @@ export class ReleasePipelineStack extends Stack {
  * before anything is recorded. Written with the build's own credentials, never the beta profile.
  */
 export const RECORD_SOURCE_CHECK =
-  'RELEASED_SOURCE="$CODEBUILD_RESOLVED_SOURCE_VERSION"; [[ "$RELEASED_SOURCE" =~ ^[0-9a-f]{40}$ ]] || { echo "the source version of this build is not a commit id; the release is not recorded" >&2; exit 1; }';
-function recordReleasedCode(parameter: string): string {
-  // One group, so the `&&` chain it ends gates all of it: a failed release records nothing.
-  return `{ ${RECORD_SOURCE_CHECK}; aws ssm put-parameter --name ${parameter} --type String --overwrite --value "$RELEASED_SOURCE"; }`;
+  'if [ "$PIPELINE_MODE" = rollback ] && [ "$CODE_ROLLBACK_TARGET" != none ]; then RELEASED_SOURCE="$CODE_ROLLBACK_TARGET"; else RELEASED_SOURCE="$CODEBUILD_RESOLVED_SOURCE_VERSION"; fi; ' +
+  '[[ "$RELEASED_SOURCE" =~ ^[0-9a-f]{40}$ ]] || { echo "the source version of this build is not a commit id; the release is not recorded" >&2; exit 1; }';
+/**
+ * The release history: prepend the released commit to the stage's list, drop repeats, keep the first CODE_HISTORY_LIMIT, write it back. The old list is read tolerantly: only the
+ * quoted 40-hex entries are taken, whatever else the value holds, and a missing parameter starts a new list; any OTHER read failure stops the build (it would otherwise overwrite
+ * a list it could not read). Same commit as the record ($RELEASED_SOURCE).
+ */
+export function codeHistoryWrite(parameter: string): string {
+  return [
+    'HIST_ERR="$(mktemp)"',
+    `{ HIST_OLD="$(aws ssm get-parameter --name ${parameter} --query Parameter.Value --output text 2>"$HIST_ERR")" || { grep -q ParameterNotFound "$HIST_ERR" && HIST_OLD=; } || { cat "$HIST_ERR" >&2; false; }; }`,
+    `HIST_NEW="$({ printf '%s\\n' "$RELEASED_SOURCE"; printf '%s\\n' "$HIST_OLD" | { grep -oE '"[0-9a-f]{40}"' || true; } | tr -d '"'; } | awk '!seen[$0]++' | head -n ${CODE_HISTORY_LIMIT} | awk 'BEGIN{printf "["} {printf "%s\\"%s\\"", (NR>1?",":""), $0} END{printf "]"}')"`,
+    `aws ssm put-parameter --name ${parameter} --type String --overwrite --value "$HIST_NEW"`,
+  ].join(" && ");
+}
+function recordReleasedCode(parameter: string, historyParameter: string): string {
+  // One group, so the `&&` chain it ends gates all of it: a failed release records nothing, neither the history nor the record. The history goes first and the record stays the
+  // last command: a history written and a record not (a failure in between) names a commit that really was released, which a rollback may use and the next run's range simply covers.
+  return `{ ${RECORD_SOURCE_CHECK}; ${codeHistoryWrite(historyParameter)} && aws ssm put-parameter --name ${parameter} --type String --overwrite --value "$RELEASED_SOURCE"; }`;
 }
 
 /** Why the transition into Production is disabled; also the reason the production release gives when it closes it again. */
@@ -614,15 +710,27 @@ export const RELEASE_TOOL_INSTALL_COMMANDS: readonly string[] = [
  * (exit 2, nothing runs) unless the released commit is recorded, is in this clone, and is an ancestor of this commit, and this commit is the released commit itself
  * (a Cloud tag run with no new Code), a merge commit, or a single commit directly on it; a linear multi-commit landing is refused. The repository's merge settings
  * (rebase merges off, merge queue group size 1) stay the controller's call.
+ *
+ * A ROLLBACK run (PIPELINE_MODE=rollback with a CODE_ROLLBACK_TARGET) is judged the same way with the roles reversed: the guard that runs is still the CURRENT released commit's (the
+ * worktree is the released commit, nothing from the target or from this run's commit runs while the list is on disk), over target..released. Before anything runs, the step refuses
+ * (exit 2) unless the stage's release history is readable and lists the target, the target is not the released commit itself, is in this clone, and is an ancestor of the released commit.
+ * The checks on this run's own commit (ancestor, merge shape) do not apply to a rollback, so the clone is moved to the released commit and they pass trivially.
+ *
+ * It exports ONE variable, CODE_CTX (see CODE_CONTEXT_VARIABLE): the released commit (the stage CLI's rollback pin), the rollback target and, from Beta's Preflight, the execution
+ * waiting in front of Production that this run replaces, for the promotion summary.
  */
-export function codePreflightBuildSpec(closesGate: boolean, namesParameter: string, releasedParameter: string): codebuild.BuildSpec {
+export function codePreflightBuildSpec(closesGate: boolean, namesParameter: string, releasedParameter: string, historyParameter: string): codebuild.BuildSpec {
   const refuse = (why: string): string => `{ echo "port-guard: ${why}; refusing to run the release" >&2; exit 2; }`;
+  const target = `$${PIPELINE_VARIABLE_ROLLBACK_TARGET}`;
+  const rollbackOnly = `[ "${target}" = ${ROLLBACK_TARGET_NONE} ] ||`;
+  const rollbackGuard = portGuardStepCommands(["--range", `${PORT_GUARD_ROLLBACK_REF}..${PORT_GUARD_TIP_REF}`, "--allow-guard-edits"]).filter((command) => command.startsWith("node "));
   return codebuild.BuildSpec.fromObject({
     version: "0.2",
     env: {
       shell: "bash",
-      // PIPELINE_MODE: the pipeline's action sets it; `release` is only the value of a build started by hand.
-      variables: { PIPELINE_MODE: PIPELINE_MODE_DEFAULT, ...RELEASE_TOOL_VARIABLES, ...portGuardStepVariables(namesParameter) },
+      // PIPELINE_MODE and CODE_ROLLBACK_TARGET: the pipeline's action sets them; release and none are only the values of a build started by hand.
+      variables: { PIPELINE_MODE: PIPELINE_MODE_DEFAULT, [PIPELINE_VARIABLE_ROLLBACK_TARGET]: ROLLBACK_TARGET_NONE, ...RELEASE_TOOL_VARIABLES, ...portGuardStepVariables(namesParameter) },
+      "exported-variables": [CODE_CONTEXT_VARIABLE],
     },
     phases: {
       install: {
@@ -635,13 +743,23 @@ export function codePreflightBuildSpec(closesGate: boolean, namesParameter: stri
       },
       // The run says which mode it is in (a note in the log), and a value that is neither release nor adopt stops here. The only adoption switch is this variable:
       // the pipeline has no other override (nothing named ROVARA_ADOPT_* is a variable or an action input), so nobody who can start an execution can bypass a gate.
-      pre_build: { commands: [PIPELINE_MODE_NOTE] },
+      pre_build: { commands: [PIPELINE_MODE_NOTE, ROLLBACK_TARGET_CHECK] },
       build: {
         commands: [
           // The previously released commit, from the record the Code release writes after each finished release.
           `RELEASED_SHA="$(aws ssm get-parameter --name ${releasedParameter} --query Parameter.Value --output text)" || ${refuse("the last released Code commit could not be read")}`,
           `[[ "$RELEASED_SHA" =~ ^[0-9a-f]{40}$ ]] || ${refuse("the last released Code commit is not recorded")}`,
           `git cat-file -e "$RELEASED_SHA^{commit}" || ${refuse("the last released Code commit is not in this clone")}`,
+          // What the stage's Cloud Preflight gets: one quote-free value (the target was checked in pre_build, the others just above and in the supersession lookup).
+          ...supersedesCommands(!closesGate),
+          `export ${CODE_CONTEXT_VARIABLE}="live:$RELEASED_SHA,target:${target},supersedes:$SUPERSEDES_EXEC,supersedesSha:$SUPERSEDES_SHA"`,
+          // A rollback: the target must be in the stage's history and older than the released commit, or nothing runs. Then this clone moves to the released commit, so the
+          // checks below (which are about this run's own commit) pass without applying to a commit that is not being released.
+          ...rollbackTargetInHistory(historyParameter, refuse).map((body) => `${rollbackOnly} { ${body}; }`),
+          `${rollbackOnly} { [ "${target}" != "$RELEASED_SHA" ] || ${refuse("the rollback target is the commit already released")}; }`,
+          `${rollbackOnly} { git cat-file -e "${target}^{commit}" || ${refuse("the rollback target is not in this clone")}; }`,
+          `${rollbackOnly} { git merge-base --is-ancestor "${target}" "$RELEASED_SHA" || ${refuse("the rollback target is not older than the last released commit")}; }`,
+          `${rollbackOnly} git checkout -q --detach "$RELEASED_SHA"`,
           `git merge-base --is-ancestor "$RELEASED_SHA" HEAD || ${refuse("the last released Code commit is not an ancestor of this commit")}`,
           `[ "$(git rev-parse HEAD)" = "$RELEASED_SHA" ] || [ "$(git rev-list --parents -n 1 HEAD | wc -w | tr -d ' ')" -le 3 ] || ${OCTOPUS_REFUSAL}`,
           `[ "$(git rev-parse HEAD)" = "$RELEASED_SHA" ] || [ "$(git rev-list --parents -n 1 HEAD | wc -w | tr -d ' ')" = 3 ] || [ "$(git rev-parse HEAD^1)" = "$RELEASED_SHA" ] || ${LINEAR_LANDING_REFUSAL}`,
@@ -649,13 +767,57 @@ export function codePreflightBuildSpec(closesGate: boolean, namesParameter: stri
           `git worktree add --detach ${PORT_GUARD_TRUSTED_DIRECTORY} "$RELEASED_SHA"`,
           `cd ${PORT_GUARD_TRUSTED_DIRECTORY}`,
           ...portGuardStepCommands(["--range", `HEAD..${PORT_GUARD_TIP_REF}`, "--allow-guard-edits"]),
+          // A rollback adds the second range: what the rollback takes away, judged by the same released guard (the range above is empty then: the clone sits on the released commit).
+          `${rollbackOnly} git update-ref refs/heads/${PORT_GUARD_ROLLBACK_REF} "${target}"`,
+          ...rollbackGuard.map((command) => `${rollbackOnly} ${command}`),
         ],
       },
     },
   });
 }
 export const PIPELINE_MODE_NOTE =
-  'case "$PIPELINE_MODE" in release|adopt) echo "NOTE: pipeline mode is $PIPELINE_MODE" ;; *) echo "PIPELINE_MODE must be release or adopt, got: $PIPELINE_MODE" >&2; exit 1;; esac';
+  'case "$PIPELINE_MODE" in release|adopt|rollback) echo "NOTE: pipeline mode is $PIPELINE_MODE" ;; *) echo "PIPELINE_MODE must be release, adopt or rollback, got: $PIPELINE_MODE" >&2; exit 1;; esac';
+/** The target and the mode agree: a target is a full commit id and only rollback takes one (an unknown or misplaced value stops the build at its first command). */
+export const ROLLBACK_TARGET_CHECK =
+  'if [ "$PIPELINE_MODE" = rollback ] && [ "$CODE_ROLLBACK_TARGET" != none ]; then ' +
+  '[[ "$CODE_ROLLBACK_TARGET" =~ ^[0-9a-f]{40}$ ]] || { echo "CODE_ROLLBACK_TARGET must be a full 40-character commit id, or none, got: $CODE_ROLLBACK_TARGET" >&2; exit 1; }; ' +
+  'echo "NOTE: Code rollback target is $CODE_ROLLBACK_TARGET"; ' +
+  'elif [ "$PIPELINE_MODE" != rollback ] && [ "$CODE_ROLLBACK_TARGET" != none ]; then ' +
+  'echo "CODE_ROLLBACK_TARGET is only for PIPELINE_MODE=rollback; got $CODE_ROLLBACK_TARGET in mode $PIPELINE_MODE" >&2; exit 1; fi';
+/**
+ * Beta's Preflight: the execution waiting in front of Production (the one a newer run replaces in SUPERSEDED mode) and the Code commit it holds, for the promotion summary. It is
+ * information for the approver, so a lookup that fails prints a warning and leaves both as `none` rather than stopping every release; the values are checked before they are used.
+ * Production's Preflight does not look (`lookup` false): both stay `none` and the stage CLI keeps Beta's. The shapes of get-pipeline-state (stageStates[].inboundExecution) and
+ * get-pipeline-execution (artifactRevisions[].revisionId by artifact name) are not proven against AWS.
+ */
+export function supersedesCommands(lookup: boolean): string[] {
+  const stateQuery = `'stageStates[?stageName==\`${AGENTX_PRODUCTION_STAGE}\`].inboundExecution.pipelineExecutionId | [0]'`;
+  const revisionQuery = "'pipelineExecution.artifactRevisions[?name==`Source`].revisionId | [0]'";
+  const uuid = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
+  const none = "SUPERSEDES_EXEC=none; SUPERSEDES_SHA=none";
+  if (!lookup) return [none];
+  return [
+    none,
+    `WAITING_EXEC="$(aws codepipeline get-pipeline-state --name ${AGENTX_RELEASE_PIPELINE_NAME} --query ${stateQuery} --output text)" || { echo "WARN: the execution waiting for Production could not be read; the summary will not name it" >&2; WAITING_EXEC=; }`,
+    `if [[ "$WAITING_EXEC" =~ ${uuid} ]] && [ "$WAITING_EXEC" != "\${EXEC_ID:-}" ]; then ` +
+      `WAITING_SHA="$(aws codepipeline get-pipeline-execution --pipeline-name ${AGENTX_RELEASE_PIPELINE_NAME} --pipeline-execution-id "$WAITING_EXEC" --query ${revisionQuery} --output text)" || WAITING_SHA=; ` +
+      `[[ "$WAITING_SHA" =~ ^[0-9a-f]{40}$ ]] || WAITING_SHA=none; ` +
+      `SUPERSEDES_EXEC="$WAITING_EXEC"; SUPERSEDES_SHA="$WAITING_SHA"; ` +
+      `echo "NOTE: this run replaces the execution $WAITING_EXEC, which is waiting for Production"; fi`,
+  ];
+}
+/**
+ * The first three rollback checks, shared by the Code Preflight and the Code release build (each reads the stage's history with its own role): the history is readable, is a strict
+ * JSON list of 40-hex strings (whitespace is ignored; anything else refuses), and lists $CODE_ROLLBACK_TARGET. Each is the body of a `{ ...; }` group; `fail` writes the refusal.
+ */
+export function rollbackTargetInHistory(historyParameter: string, fail: (why: string) => string): string[] {
+  const target = `$${PIPELINE_VARIABLE_ROLLBACK_TARGET}`;
+  return [
+    `HIST_VALUE="$(aws ssm get-parameter --name ${historyParameter} --query Parameter.Value --output text)" || ${fail("the Code release history could not be read")}`,
+    `HIST_FLAT="$(printf '%s' "$HIST_VALUE" | tr -d ' \\t\\r\\n')"; HIST_RE='^\\[("[0-9a-f]{40}"(,"[0-9a-f]{40}")*)?\\]$'; [[ "$HIST_FLAT" =~ $HIST_RE ]] || ${fail("the Code release history is not a list of commits")}`,
+    `[[ "$HIST_FLAT" == *"\\"${target}\\""* ]] || ${fail("the rollback target is not in this stage's Code release history")}`,
+  ];
+}
 /**
  * What a LINEAR landing (several commits on the released commit, none a merge: a rebase merge, or a merge queue group landed without merge commits) gets. Nothing makes the
  * commits in between one reviewed change, so this run does not release them. The next normal merge (a merge commit on top of them) is released with them, and scanned whole.
@@ -666,9 +828,12 @@ export const LINEAR_LANDING_REFUSAL =
 export const OCTOPUS_REFUSAL =
   '{ echo "port-guard: this commit is an octopus merge ($(( $(git rev-list --parents -n 1 HEAD | wc -w) - 1 )) parents), which the release does not accept. Re-land the change as a normal two-parent merge or as one squash." >&2; exit 2; }';
 const PORT_GUARD_TIP_REF = "release-tip";
+const PORT_GUARD_ROLLBACK_REF = "rollback-target";
 const PORT_GUARD_TRUSTED_DIRECTORY = "/tmp/port-guard-trusted";
 
 interface ReleaseBuildSpec {
+  /** This stage's release history parameter (the rollback checks read it). */
+  historyParameter: string;
   variables?: Record<string, string>;
   /** Commands after CI's proof, before the release. */
   beforeRelease?: string[];
@@ -682,6 +847,29 @@ const CODE_RELEASE_IS_SKIP = '[ "$CODE_RELEASE" = skip ]';
 /** The value reaches the build from this stage's Preflight, or from the buildspec's own default for a hand-started build; anything else is refused, never read as `run`. */
 export const CODE_RELEASE_CHECK =
   'case "$CODE_RELEASE" in run|skip) ;; *) echo "CODE_RELEASE must be run or skip, got: $CODE_RELEASE" >&2; exit 1;; esac';
+/**
+ * The Code release agrees with the run's mode, or stops at its first commands: the mode and target are valid together (ROLLBACK_TARGET_CHECK), a rollback with a target must
+ * release (a Cloud-side `skip` would leave Code where it is while the operator asked for it to move), and a rollback with no target must not (it would release this run's commit).
+ * These run for a skipped build too. Then the build repeats the Preflight's own checks on the target before it checks anything out (it reads the same history with its own role): the
+ * history lists the target, and the target is in the clone and an ancestor of this run's commit (the build cannot read the released record, and every released commit is an ancestor of
+ * mainline's tip). The Preflight is the gate; this is the second look, so a release build started some other way still cannot deploy a commit that was never released.
+ */
+export const rollbackReleaseChecks = (historyParameter: string): string[] => {
+  const fail = (why: string): string => `{ echo "${why}; Code is not rolled back" >&2; exit 1; }`;
+  const target = `$${PIPELINE_VARIABLE_ROLLBACK_TARGET}`;
+  return [
+    ...ROLLBACK_MODE_CHECKS,
+    ...rollbackTargetInHistory(historyParameter, fail).map((body) => `[ "${target}" = ${ROLLBACK_TARGET_NONE} ] || { ${body}; }`),
+    `[ "${target}" = ${ROLLBACK_TARGET_NONE} ] || { git cat-file -e "${target}^{commit}" || ${fail("the rollback target is not in this clone")}; }`,
+    `[ "${target}" = ${ROLLBACK_TARGET_NONE} ] || { git merge-base --is-ancestor "${target}" HEAD || ${fail("the rollback target is not an ancestor of this run's commit")}; }`,
+  ];
+};
+const ROLLBACK_MODE_CHECKS: readonly string[] = [
+  'case "$PIPELINE_MODE" in release|adopt|rollback) ;; *) echo "PIPELINE_MODE must be release, adopt or rollback, got: $PIPELINE_MODE" >&2; exit 1;; esac',
+  ROLLBACK_TARGET_CHECK,
+  'if [ "$PIPELINE_MODE" = rollback ]; then if [ "$CODE_ROLLBACK_TARGET" = none ]; then [ "$CODE_RELEASE" = skip ] || { echo "a rollback run with no Code rollback target does not release Code, but CODE_RELEASE is $CODE_RELEASE" >&2; exit 1; }; ' +
+    'else [ "$CODE_RELEASE" = run ] || { echo "a Code rollback target was given but CODE_RELEASE is $CODE_RELEASE, so Code would not be rolled back" >&2; exit 1; }; fi; fi',
+];
 const codeReleaseGuarded = (command: string): string => `${CODE_RELEASE_IS_SKIP} || { ${command}; }`;
 /** What a skipped build writes where the release manifest would be, so the stage's artifact still exists. */
 const SKIPPED_MANIFEST = "mkdir -p cdk.out && printf '{\"codeRelease\":\"skip\"}\\n' > cdk.out/agentx-production-release.json";
@@ -699,7 +887,15 @@ function releaseBuildSpec(spec: ReleaseBuildSpec): codebuild.BuildSpec {
       // #1118: the release's typecheck (tsc -b) needs about 4 GB of heap since mainline took code/next; Node's default limit on this
       // 16 GB build machine is lower, and tsc died with "JavaScript heap out of memory". 8 GB leaves the tests' own processes room.
       // CODE_RELEASE: the pipeline's action sets it from Preflight; `run` is only the value of a build started by hand.
-      variables: { NODE_OPTIONS: "--max-old-space-size=8192", CODE_RELEASE: "run", ...RELEASE_TOOL_VARIABLES, ...spec.variables },
+      // PIPELINE_MODE and CODE_ROLLBACK_TARGET likewise: the pipeline's action sets them, the defaults are a release.
+      variables: {
+        NODE_OPTIONS: "--max-old-space-size=8192",
+        CODE_RELEASE: "run",
+        PIPELINE_MODE: PIPELINE_MODE_DEFAULT,
+        [PIPELINE_VARIABLE_ROLLBACK_TARGET]: ROLLBACK_TARGET_NONE,
+        ...RELEASE_TOOL_VARIABLES,
+        ...spec.variables,
+      },
     },
     phases: {
       install: {
@@ -707,6 +903,9 @@ function releaseBuildSpec(spec: ReleaseBuildSpec): codebuild.BuildSpec {
         commands: [
           CODE_RELEASE_CHECK,
           '[ "$CODE_RELEASE" != skip ] || echo "CODE_RELEASE=skip: this run releases Cloud only; Code is not built or deployed"',
+          ...rollbackReleaseChecks(spec.historyParameter),
+          // A Code rollback deploys the target: it becomes the checkout before anything is installed or built (the tools install from its own .node-version).
+          codeReleaseGuarded('[ "$PIPELINE_MODE" != rollback ] || [ "$CODE_ROLLBACK_TARGET" = none ] || git checkout -q --detach "$CODE_ROLLBACK_TARGET"'),
           ...RELEASE_TOOL_INSTALL_COMMANDS.map(codeReleaseGuarded),
         ],
       },

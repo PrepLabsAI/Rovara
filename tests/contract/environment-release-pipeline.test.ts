@@ -883,4 +883,10 @@ function regionPattern(): string {
 // L1 follow-up 3 (pin before it: 5e6b0f2ca31c79736bae0a0f6595d926ce124d0608aeb5cc53285493b569aae0): BetaCodePreflight and ProductionCodePreflight only (the buildspec: the refusal of a linear landing says how many commits and what to do). Nothing else.
 // L1 follow-up 4 (pin before it: e0570793a770024be7c9ae931556aeaff5fe8c8159e165a9120c1e8966f17b3f): ReleaseBuild and BetaReleaseBuild (the record is CODEBUILD_RESOLVED_SOURCE_VERSION, checked to be 40 hex, in one braced group), BetaCodePreflight and
 // ProductionCodePreflight (the linear-landing message says only what happened; an octopus merge has its own check and message). Nothing else; no policy, parameter or Pipeline change.
-const PRODUCTION_PIPELINE_TEMPLATE_SHA256 = "63e95810236c96b19bd43940c2ac70d57ea2b7c55a6bfe5f5c001c2777b7703d";
+// L9b (2026-11-24; pin before it, L1 final: 63e95810236c96b19bd43940c2ac70d57ea2b7c55a6bfe5f5c001c2777b7703d; the first L9b pin f6c558b4... was replaced after the review's 1000-character finding): a Code rollback through the pipeline.
+// Changed, and only these (nothing added or removed; no parameter or output change): ReleaseBuild and BetaReleaseBuild (the buildspecs: the release history is written first in the same braced step as the record; the mode,
+// target and history/ancestor checks; a rollback checks the target out before anything is installed and records it), ReleaseBuildRoleDefaultPolicy and BetaReleaseBuildRoleDefaultPolicy (one RecordCodeHistory
+// ssm:GetParameter and ssm:PutParameter statement each, on that stage's history parameter), BetaCodePreflight and ProductionCodePreflight (the buildspec: the rollback checks and the second guard range, one exported
+// CODE_CTX), their role default policies (a ReadCodeHistory ssm:GetParameter statement each; Beta's also ReadWaitingRun, codepipeline:GetPipelineState and GetPipelineExecution on this pipeline) and Pipeline (a fifth
+// variable CODE_ROLLBACK_TARGET, a namespace on the two CodePreflight actions, PIPELINE_MODE and CODE_ROLLBACK_TARGET on the Code release actions, and CODE_CTX on the two Cloud Preflight actions only).
+const PRODUCTION_PIPELINE_TEMPLATE_SHA256 = "291ca54736e9e0f05f06fcbed1c04e118baea14d90ab4e5867786548eb1cdc80";
