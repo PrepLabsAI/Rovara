@@ -133,6 +133,9 @@ describe("check 2: the stack parameters and the settings may not grow", () => {
   const now = growth.currentCounts(root);
   const baseline = growth.readBaseline(root);
   const sum = (counts: Record<string, number>) => Object.values(counts).reduce((total, count) => total + count, 0);
+  // The planted examples below add to (or remove from) whatever the tree and the baseline already differ by, so none of them hard-codes today's totals: they count only what each one plants.
+  const already = growth.compareToBaseline(now, baseline);
+  // Decision lines of the baseline rows added after E1-0: brokerSettings coreOutboxStreamRelay = "G1 / Opus money PASS 4f7ef0856" (CORE-RUN-STOP-RELAY, #1446).
 
   it("passes on today's tree: nothing above the baseline", () => {
     expect(growth.compareToBaseline(now, baseline).raised).toEqual([]);
@@ -167,9 +170,10 @@ describe("check 2: the stack parameters and the settings may not grow", () => {
     const tree = plant({ "infra/lib/new-thing.ts": 'const p = new CfnParameter(this, "BrandNewSwitch", { type: "String", default: "off" });\n' });
     const planted = { ...now, stackParameters: { ...now.stackParameters, ...growth.scanStackParameters(tree) } };
     const { raised } = growth.compareToBaseline(planted, baseline);
-    expect(raised).toHaveLength(1);
-    expect(raised[0]).toContain("infra/lib/new-thing.ts::BrandNewSwitch");
-    expect(raised[0]).toContain("rule 2");
+    expect(raised).toHaveLength(already.raised.length + 1);
+    const planted1 = raised.filter((line) => line.includes("infra/lib/new-thing.ts::BrandNewSwitch"));
+    expect(planted1).toHaveLength(1);
+    expect(planted1[0]).toContain("rule 2");
   });
 
   it("fails a second declaration of a parameter the baseline holds once", () => {
@@ -181,7 +185,7 @@ describe("check 2: the stack parameters and the settings may not grow", () => {
   it("fails a new broker setting, a new config key and a new kept-on-upgrade parameter, each by name", () => {
     const planted = { ...now, brokerSettings: [...now.brokerSettings, "freshSetting"], configKeys: [...now.configKeys, "fresh.key"], operatorParameters: [...now.operatorParameters, "runtime:FreshParameter"] };
     const { raised } = growth.compareToBaseline(planted, baseline);
-    expect(raised).toHaveLength(3);
+    expect(raised).toHaveLength(already.raised.length + 3);
     expect(raised.join("\n")).toContain("brokerSettings: freshSetting");
     expect(raised.join("\n")).toContain("configKeys: fresh.key");
     expect(raised.join("\n")).toContain("operatorParameters: runtime:FreshParameter");
@@ -192,9 +196,9 @@ describe("check 2: the stack parameters and the settings may not grow", () => {
     delete fewer.stackParameters["infra/lib/access.ts::OperatorPrincipalArn"];
     const { raised, lowered } = growth.compareToBaseline(fewer, baseline);
     expect(raised).toEqual([]);
-    expect(lowered).toHaveLength(2);
+    expect(lowered).toHaveLength(already.lowered.length + 2);
     const shrunk = growth.shrunkBaseline(fewer, baseline);
-    expect(shrunk.brokerSettings).toEqual(baseline.brokerSettings.slice(1));
+    expect(shrunk.brokerSettings).toEqual(baseline.brokerSettings.filter((name) => fewer.brokerSettings.includes(name)));
     expect(shrunk.stackParameters["infra/lib/access.ts::OperatorPrincipalArn"]).toBeUndefined();
     const grown = growth.shrunkBaseline({ ...now, configKeys: [...now.configKeys, "fresh.key"] }, baseline);
     expect(grown.configKeys).not.toContain("fresh.key");
