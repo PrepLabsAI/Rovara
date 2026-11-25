@@ -92,6 +92,8 @@ export const REASON_WORDS = {
   waitSlack: "Rovara is waiting for Slack to answer the access check",
   stoppedFinished: "the run finished and nothing is running; the work is kept",
   unavailable: "Status unavailable",
+  // SPEND-UNREPORTED-RUN case (iii): a run that sent no usage report and could not be measured otherwise is counted at what admission held for it, marked as an estimate until the exact figure is in.
+  spendEstimated: "Part of this task's spend is an estimate until the exact figure is in",
 } as const;
 
 /** The reason and next lines of the person-free status (the old K4 sentences, moved here: one place). `nextOthers` is what anyone who is not the one needed reads. */
@@ -113,7 +115,13 @@ export const STATUS_LINES = {
   planning: { next: "You review the plan when it is ready." },
   building: { next: "Checks and a pull request follow." },
   checking: { next: "A pull request is opened once the checks pass." },
+  // SPEND-UNREPORTED-RUN item 3: what a decision card says when the task's spend cannot be read yet (the stable code is `spend_unreadable`, in `DECISION_REFUSAL_REASONS`): the real reason and what happens next,
+  // never "This isn't ready to be decided yet". Rovara settles an ended run that sent no usage report by itself, so the next step is waiting, not an action.
+  spendUnreadable: { reason: "Rovara could not read this task's spend yet", next: "Rovara settles the spend on its own. Try again in a little while." },
 } as const;
+
+/** The one sentence a card refusal for the spend that could not be read says: the reason, then what happens next. Served by every surface that refuses on it (the decision card and, from F2-B, the task standing). */
+export const spendUnreadableWords = (): string => `${STATUS_LINES.spendUnreadable.reason}, so it cannot start more work on this task. ${STATUS_LINES.spendUnreadable.next}`;
 
 /** "<sentence> (round 2 of 3)". */
 export const roundWords = (sentence: string, round: number, max: number): string => `${sentence} (round ${String(round)} of ${String(max)})`;

@@ -44,7 +44,7 @@ export interface LoadedSubject {
 
 /** A subject refused the decision for a reason of its own (the transition is not allowed, the outcome is not offered). Never carries a secret. */
 export class SubjectRefusal extends Error {
-  constructor(readonly code: "invalid_outcome" | "not_the_approver" | "invalid", message: string) {
+  constructor(readonly code: "invalid_outcome" | "not_the_approver" | "invalid" | "spend_unreadable", message: string) {
     super(message);
     this.name = "SubjectRefusal";
   }
@@ -104,7 +104,9 @@ export interface DecisionAttempt {
 export type GateRefusalReason =
   | "unsupported" | "invalid" | "not_found" | "not_waiting" | "stale" | "expired"
   | "method_not_allowed" | "not_approved" | "self_approval_not_allowed" | "needs_more_approvers"
-  | "proof_already_used" | "request_id_reused" | "not_the_approver" | "invalid_outcome" | "sign_in_not_fresh" | "link_gone";
+  | "proof_already_used" | "request_id_reused" | "not_the_approver" | "invalid_outcome" | "sign_in_not_fresh" | "link_gone"
+  /** SPEND-UNREPORTED-RUN item 3: approving would start paid work and the task's spend cannot be read yet. A stable code of its own, so a card says the real reason and not "isn't ready". */
+  | "spend_unreadable";
 
 export interface ApprovalRecord {
   requestId: string;
