@@ -1,0 +1,41 @@
+{
+  "source": "PrepLabsAI/Rovara packages/contracts/src/agent-model-choice.ts (OfferedAgentModels, PR #771); docs/architecture/agent-model-choice.md",
+  "route": {
+    "method": "GET",
+    "path": "/v1/service/companies/<companyId>/offered-models"
+  },
+  "response": {
+    "version": 1,
+    "models": "1 to 64 entries, each { model, price? , identity? }; slash IDs require exact identity; legacy names have no identity",
+    "modelNamePattern": "^(?:[A-Za-z0-9][A-Za-z0-9._:-]{0,127}|[a-z0-9][a-z0-9._-]{0,62}\\/[a-z0-9][a-z0-9._-]{0,62})$",
+    "modelsMax": 64,
+    "identity": {
+      "provider": "openrouter",
+      "sourceId": "connected source id",
+      "connectionRevision": "connected credential revision",
+      "modelId": "exact vendor/model, equal to model; no auto/free variants"
+    }
+  },
+  "serviceToken": {
+    "typ": "rovara-service+jwt",
+    "aud": "rovara-model-gateway-offered-models",
+    "alg": "RS256",
+    "lifetime": 60,
+    "key": "the install's task key (JWKS member rovara_purpose = task)",
+    "header": [
+      "alg",
+      "typ",
+      "kid"
+    ],
+    "claims": [
+      "iss",
+      "aud",
+      "jti",
+      "iat",
+      "nbf",
+      "exp",
+      "cid"
+    ],
+    "nbf": "iat - 30"
+  }
+}

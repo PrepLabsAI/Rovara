@@ -11,6 +11,7 @@
     "infra"
   ],
   "scripts": {
+    "gateway:image": "tsx scripts/model-gateway-image.ts",
     "build": "tsc -b",
     "clean": "tsc -b --clean",
     "lint": "node scripts/lint-shards.ts",

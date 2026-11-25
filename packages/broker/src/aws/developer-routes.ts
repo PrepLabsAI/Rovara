@@ -63,9 +63,6 @@ import {
   DEVELOPER_WORKSPACES_PER_PROJECT,
   WORKSPACE_PROJECT_INDEX,
   WorkspaceInstanceSchema,
-  TaskPersonProofResponseSchema,
-  TaskChannelPeopleResponseSchema,
-  TaskPeopleDisplayReadResponseSchema,
   agentXError,
   developerTaskPolicy,
   workspaceProjectIndexValue,
@@ -88,7 +85,6 @@ import {
   type SetDisplayNameRequest,
   type SetDisplayNameResponse,
   type SetMyNameResponse,
-  type SlackAuthCheckRequest,
   type SlackAuthCheckResponse,
   type SlackChannelBinding,
   type SlackUserByEmailRequest,
@@ -101,18 +97,13 @@ import {
   type TaskPeopleDisplayReadResponse,
   SLACK_CHANNEL, channelBindingPartition, channelBindingSortPrefix,
   ActorRefSchema, COMPANY_AUDIT_RECORDS_PATH, COMPANY_EVENTS_PATH,
-  SignInClientViewSchema,
   AccessCheckRequestSchema,
   AccessCheckResponseSchema,
   SignInClientIdSchema,
   SignInClientRecordSchema,
   signInClientKey,
   type AccessCheckResponse,
-  type ListSignInClientsRequest,
-  type PutSignInClientRequest,
-  type RemoveSignInClientRequest,
   type SignInClientRecord,
-  type SignInClientView,
 } from "@agentx/contracts";
 import { createChannelLinkWeb } from "./channel-link-web.js";
 import { listDeveloperLinks, previewLinkCode, redeemLinkCode, removeLink, type ChannelLinkDependencies } from "./channel-links.js";
@@ -152,6 +143,25 @@ import { coreAnswerValue, type CoreTaskEntry } from "./engine-boundary.js";
 import type { CoreAppEntry } from "./core-app-routes.js";
 import type { BrokerResponse } from "../handler.js"; import { profileDisplayName } from "../developer/github-profile.js";
 import type { CompanyImportRegistry } from "./company-import-forwarding.js"; import { routeSignInLinks, type SignInLinkForward } from "./sign-in-link-routes.js";
+import {
+  createChannelByNameForwarder,
+  createChannelInfoForwarder,
+  createChannelMembersForwarder,
+  createDeveloperKeysForwarder,
+  createEndDeveloperSessionsForwarder,
+  createSetDisplayNameForwarder,
+  createSignInClientsForwarder,
+  createSlackAuthCheckForwarder,
+  createSlackUserByEmailForwarder,
+  createTaskChannelPeopleForwarder,
+  createTaskPeopleDisplayReadForwarder,
+  createTaskPersonProofForwarder,
+  invokeIdentityLambda,
+  SLACK_UNAVAILABLE,
+  type ChannelMembersInvokeResult,
+  type SignInClientRegistry,
+} from "./slack-identity-lambda.js";
+export type { ChannelMembersInvokeResult, SignInClientRegistry };
 
 export interface DeveloperApiConfiguration {
   /** Host-owned company rules configuration; absence preserves today's policy. */
@@ -296,195 +306,47 @@ export interface DeveloperCaller {
   webApp?: true;
 }
 
-/** What the broker needs from a Lambda invoke; `@aws-sdk/client-lambda`'s InvokeCommand output fits. */
-export interface ChannelMembersInvokeResult { FunctionError?: string | undefined; Payload?: Uint8Array | undefined }
-
 /** One structured log line. Only event names, reasons and error names: never payloads or secrets. */
 function logDeveloperEvent(entry: Record<string, string | number>): void {
   console.log(JSON.stringify({ component: "broker", ...entry }));
 }
 const errorName = (error: unknown) => (error instanceof Error ? error.name : "UnknownError");
-const SLACK_UNAVAILABLE = { ok: false, error: "slack_unavailable" } as const;
-/** A Slack or DeveloperIdentity error code: the only error text that may reach a log or an answer (R9). */
-const SLACK_ERROR_CODE = /^[a-z_]{1,64}$/;
-type IdentityRefusal = typeof SLACK_UNAVAILABLE | { ok: false; error: "invalid_request" };
-
-/**
- * One direct invoke of the DeveloperIdentity function, which holds the Slack token (the broker
- * never reads the Slack secret). `readReply` returns the good answer from the decoded reply, or
- * undefined. Every failure fails closed as slack_unavailable with one `<event>_failed` log line;
- * an invalid_request reply is a broker bug, logged as `<event>_invalid_request`. Lines carry only
- * the reason, error name, FunctionError or reply error, never a payload.
- */
-async function identityInvoke<T>(
-  invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>,
-  request: ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest
-    | PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest | SetDisplayNameRequest | CompanyPreapprovalRequest | CompanySelfCreateRequest | CompanyInviteRequest,
-  readReply: (reply: Record<string, unknown>) => T | undefined,
-  event: string,
-): Promise<T | IdentityRefusal> {
-  const failed = (entry: Record<string, string>) => {
-    logDeveloperEvent({ event: `${event}_failed`, ...entry });
-    return SLACK_UNAVAILABLE;
-  };
-  let response: ChannelMembersInvokeResult;
-  try {
-    response = await invoke(Buffer.from(JSON.stringify(request)));
-  } catch (error) {
-    return failed({ reason: "invoke_error", error: errorName(error) });
-  }
-  if (response.FunctionError !== undefined) return failed({ reason: "function_error", functionError: response.FunctionError });
-  if (response.Payload === undefined) return failed({ reason: "empty_reply" });
-  let decoded: unknown;
-  try {
-    decoded = JSON.parse(Buffer.from(response.Payload).toString("utf8"));
-  } catch {
-    return failed({ reason: "unreadable_reply" });
-  }
-  const reply = typeof decoded === "object" && decoded !== null ? decoded as Record<string, unknown> : {};
-  const good = readReply(reply);
-  if (good !== undefined) return good;
-  if (reply.ok === false && reply.error === "invalid_request") {
-    logDeveloperEvent({ event: `${event}_invalid_request`, reason: "the identity function refused the broker's request; this is a broker bug" });
-    return { ok: false, error: "invalid_request" };
-  }
-  // Only a code-shaped reply error (such as token_revoked) is logged; never free text.
-  return failed({ reason: "reply_error", error: reply.ok === false && typeof reply.error === "string" && SLACK_ERROR_CODE.test(reply.error) ? reply.error : "malformed_reply" });
-}
 
 /** The broker's channel-members check (FR-013) through the DeveloperIdentity function. */
 export function channelMembersThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: ChannelMembersRequest) => Promise<ChannelMembersResponse> {
-  return (request) => identityInvoke(invoke, request, (reply) => (reply.ok === true && Array.isArray(reply.memberOf)
-    ? { ok: true as const, memberOf: reply.memberOf.filter((entry): entry is string => typeof entry === "string") }
-    : undefined), "developer.channel_members");
+  return createChannelMembersForwarder(invoke, logDeveloperEvent);
 }
-
 /** C0: one fresh proof through DeveloperIdentity. Any old or malformed reply fails closed. */
 export function taskPersonProofThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: TaskPersonProofRequest) => Promise<TaskPersonProofResponse> {
-  return (request) => identityInvoke(invoke, request, (reply): TaskPersonProofResponse | undefined => {
-    const parsed = TaskPersonProofResponseSchema.safeParse(reply);
-    if (!parsed.success) return undefined;
-    if (!parsed.data.ok) return parsed.data.error === "ineligible" ? parsed.data : undefined;
-    const requested = new Set(request.channelIds);
-    const memberOf = parsed.data.memberOf;
-    if (parsed.data.user.id !== request.slackUserId || new Set(memberOf).size !== memberOf.length || memberOf.some((channelId) => !requested.has(channelId))) return undefined;
-    return parsed.data;
-  }, "developer.task_person_proof");
+  return createTaskPersonProofForwarder(invoke, logDeveloperEvent);
 }
-
 /** E: complete fresh channel identities through DeveloperIdentity. Partial or malformed replies fail closed. */
 export function taskChannelPeopleThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: TaskChannelPeopleRequest) => Promise<TaskChannelPeopleResponse> {
-  return (request) => identityInvoke(invoke, request, (reply): TaskChannelPeopleResponse | undefined => {
-    const parsed = TaskChannelPeopleResponseSchema.safeParse(reply);
-    if (!parsed.success) return undefined;
-    if (!parsed.data.ok) return parsed.data.error === "capacity_exceeded" ? parsed.data : undefined;
-    const requested = new Set(request.channelIds);
-    if (new Set(parsed.data.users.map((user) => user.id)).size !== parsed.data.users.length
-      || parsed.data.users.some((user) => new Set(user.memberOf).size !== user.memberOf.length || user.memberOf.some((channelId) => !requested.has(channelId)))) return undefined;
-    return parsed.data;
-  }, "developer.task_channel_people");
+  return createTaskChannelPeopleForwarder(invoke, logDeveloperEvent);
 }
-
 /** E: strict metered display transport. Any missing or malformed usage seals the caller's admission. */
 export function taskPeopleDisplayReadThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: TaskPeopleDisplayReadRequest) => Promise<TaskPeopleDisplayReadResponse> {
-  return async (request) => {
-    const failed = (reason: string): never => {
-      logDeveloperEvent({ event: "developer.task_people_display_read_failed", reason });
-      throw agentXError("SLACK_UNAVAILABLE", "the complete task People directory is unavailable");
-    };
-    let response: ChannelMembersInvokeResult;
-    try { response = await invoke(Buffer.from(JSON.stringify(request))); }
-    catch (error) { return failed(`invoke_${errorName(error)}`); }
-    if (response.FunctionError !== undefined) return failed("function_error");
-    if (response.Payload === undefined) return failed("empty_reply");
-    let decoded: unknown;
-    try { decoded = JSON.parse(Buffer.from(response.Payload).toString("utf8")); }
-    catch { return failed("unreadable_reply"); }
-    const parsed = TaskPeopleDisplayReadResponseSchema.safeParse(decoded);
-    if (!parsed.success || parsed.data.operation !== request.operation
-      || parsed.data.admission.slackCallsUsed > request.admission.slackCallsLimit) return failed("malformed_reply");
-    if (parsed.data.operation === "proof") {
-      const result = parsed.data.result;
-      if (result.ok) {
-        const requested = new Set(request.operation === "proof" ? request.request.channelIds : []);
-        if (request.operation !== "proof" || result.user.id !== request.request.slackUserId
-          || new Set(result.memberOf).size !== result.memberOf.length || result.memberOf.some((id) => !requested.has(id))) return failed("malformed_reply");
-      }
-    } else {
-      const result = parsed.data.result;
-      if (result.ok) {
-        const requested = new Set(request.operation === "directory" ? request.request.channelIds : []);
-        if (request.operation !== "directory" || new Set(result.users.map((user) => user.id)).size !== result.users.length
-          || result.users.some((user) => new Set(user.memberOf).size !== user.memberOf.length || user.memberOf.some((id) => !requested.has(id)))) return failed("malformed_reply");
-      }
-    }
-    return parsed.data;
-  };
+  return createTaskPeopleDisplayReadForwarder(invoke, logDeveloperEvent);
 }
-
-type ChannelEntry = { channelId: string; name: string; isPrivate: boolean };
-const isChannelEntry = (entry: unknown): entry is ChannelEntry => {
-  const candidate = entry as Partial<Record<keyof ChannelEntry, unknown>> | null;
-  return typeof candidate === "object" && candidate !== null && typeof candidate.channelId === "string" && typeof candidate.name === "string" && typeof candidate.isPrivate === "boolean";
-};
-
 /** R10: bound channels' names and privacy through the DeveloperIdentity function; keeps only well-formed entries. */
 export function channelInfoThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: ChannelInfoRequest) => Promise<ChannelInfoResponse> {
-  return (request) => identityInvoke(invoke, request, (reply) => (reply.ok === true && Array.isArray(reply.channels)
-    ? { ok: true as const, channels: reply.channels.filter(isChannelEntry).map(({ channelId, name, isPrivate }) => ({ channelId, name, isPrivate })) }
-    : undefined), "developer.channel_info");
+  return createChannelInfoForwarder(invoke, logDeveloperEvent);
 }
-
 /** A12: who owns a verified email, through DeveloperIdentity; fails closed as slack_unavailable. */
 export function slackUserByEmailThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: SlackUserByEmailRequest) => Promise<SlackUserByEmailResponse> {
-  return (request) => identityInvoke(invoke, request, (reply) => (reply.ok === true
-    ? (typeof reply.userId === "string" ? { ok: true as const, userId: reply.userId } : { ok: true as const })
-    : undefined), "developer.slack_user_by_email");
+  return createSlackUserByEmailForwarder(invoke, logDeveloperEvent);
 }
-
 /** A13: the bot token's auth.test, through DeveloperIdentity. Slack's refusal code passes through. */
 export function slackAuthCheckThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (workspace?: SlackWorkspaceScope) => Promise<SlackAuthCheckResponse> {
-  return async (workspace) => {
-    if (workspace !== undefined && !SlackWorkspaceScopeSchema.safeParse(workspace).success) return { ok: false, error: "slack_unavailable" };
-    let refusal: string | undefined;
-    const answer = await identityInvoke(invoke, { kind: "slack-auth-check", ...(workspace === undefined ? {} : { workspace }) }, (reply) => {
-      if (reply.ok === true && typeof reply.teamId === "string") return { ok: true as const, teamId: reply.teamId };
-      if (reply.ok === false && typeof reply.error === "string" && SLACK_ERROR_CODE.test(reply.error) && reply.error !== "invalid_request") refusal = reply.error;
-      return undefined;
-    }, "developer.slack_auth_check");
-    if (answer.ok) return answer;
-    return { ok: false, error: refusal ?? answer.error };
-  };
+  return createSlackAuthCheckForwarder(invoke, logDeveloperEvent);
 }
-
-/**
- * E9: ends a developer's sessions through DeveloperIdentity. A not_found reply is an answer (the
- * developer never signed in), not a failure, so it is neither logged as one nor turned into
- * unavailable (C15). Every other failure is unavailable.
- */
+/** E9: ends a developer's sessions through DeveloperIdentity. */
 export function endDeveloperSessionsThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: EndDeveloperSessionsRequest) => Promise<EndDeveloperSessionsResponse> {
-  return async (request) => {
-    const answer = await identityInvoke(invoke, request, (reply): EndDeveloperSessionsResponse | undefined => {
-      if (reply.ok === true) return { ok: true };
-      if (reply.ok === false && reply.error === "not_found") return { ok: false, error: "not_found" };
-      return undefined;
-    }, "developer.end_sessions");
-    if (answer.ok || answer.error === "not_found" || answer.error === "invalid_request") return answer;
-    return { ok: false, error: "unavailable" };
-  };
+  return createEndDeveloperSessionsForwarder(invoke, logDeveloperEvent);
 }
-
-/** #634: a person's chosen name, through DeveloperIdentity. not_found and invalid_request are answers; every other failure is unavailable. */
+/** #634: a person's chosen name, through DeveloperIdentity. */
 export function setDisplayNameThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: SetDisplayNameRequest) => Promise<SetDisplayNameResponse> {
-  return async (request) => {
-    const answer = await identityInvoke(invoke, request, (reply): SetDisplayNameResponse | undefined => {
-      if (reply.ok === true && typeof reply.name === "string") return { ok: true, name: reply.name };
-      if (reply.ok === false && (reply.error === "not_found" || reply.error === "invalid_request")) return { ok: false, error: reply.error };
-      return undefined;
-    }, "developer.set_display_name");
-    if (answer.ok || answer.error === "not_found" || answer.error === "invalid_request") return answer;
-    return { ok: false, error: "unavailable" };
-  };
+  return createSetDisplayNameForwarder(invoke, logDeveloperEvent);
 }
 
 /**
@@ -531,8 +393,8 @@ export function companyPreapprovalsThroughLambda(invoke: (payload: Uint8Array) =
   return async (request) => {
     const parsed = CompanyPreapprovalInvoke.safeParse(request);
     if (!parsed.success) return false;
-    const answer = await identityInvoke(invoke, parsed.data, (reply) => reply.ok !== true ? (reply.ok === false ? false : undefined)
-      : reply.expiresAt === undefined ? {} : PreapprovalExpiry.safeParse(reply.expiresAt).success ? { expiresAt: reply.expiresAt as number } : undefined, "developer.company_preapproval");
+    const answer = await invokeIdentityLambda(invoke, parsed.data, (reply) => reply.ok !== true ? (reply.ok === false ? false : undefined)
+      : reply.expiresAt === undefined ? {} : PreapprovalExpiry.safeParse(reply.expiresAt).success ? { expiresAt: reply.expiresAt as number } : undefined, "developer.company_preapproval", logDeveloperEvent);
     return typeof answer === "object" && answer !== null && !("ok" in answer) ? answer : false;
   };
 }
@@ -549,7 +411,7 @@ export function companySelfCreateThroughLambda(invoke: (payload: Uint8Array) => 
   return async (request) => {
     const parsed = CompanySelfCreateInvoke.safeParse(request);
     if (!parsed.success) return { ok: false, error: "unavailable" };
-    const answer = await identityInvoke(invoke, parsed.data, (reply) => { const read = CompanySelfCreateReply.safeParse(reply); return read.success ? read.data : undefined; }, "developer.company_self_create");
+    const answer = await invokeIdentityLambda(invoke, parsed.data, (reply) => { const read = CompanySelfCreateReply.safeParse(reply); return read.success ? read.data : undefined; }, "developer.company_self_create", logDeveloperEvent);
     const read = CompanySelfCreateReply.safeParse(answer);
     return read.success ? read.data : { ok: false, error: "unavailable" };
   };
@@ -580,7 +442,7 @@ export function companyInvitesThroughLambda(invoke: (payload: Uint8Array) => Pro
   const ask = async <T>(request: CompanyInviteRequest, read: (reply: Record<string, unknown>) => T | undefined, notFound?: T): Promise<T> => {
     const parsed = CompanyInviteInvoke.safeParse(request);
     if (!parsed.success) throw agentXError("CONFIG_INVALID", "that invite code change is not one AgentX can make");
-    const answer = await identityInvoke(invoke, parsed.data, (reply) => reply.ok === true ? read(reply) : reply.ok === false && reply.error === "not_found" && notFound !== undefined ? notFound : undefined, "developer.company_invites");
+    const answer = await invokeIdentityLambda(invoke, parsed.data, (reply) => reply.ok === true ? read(reply) : reply.ok === false && reply.error === "not_found" && notFound !== undefined ? notFound : undefined, "developer.company_invites", logDeveloperEvent);
     if (typeof answer === "object" && answer !== null && "ok" in answer && (answer as { ok: unknown }).ok === false) throw unreachable();
     return answer as T;
   };
@@ -596,40 +458,13 @@ export function companyInvitesThroughLambda(invoke: (payload: Uint8Array) => Pro
   };
 }
 
-export interface SignInClientRegistry {
-  /** `keepSecret`: keep the stored client's secret, which only the sign-in server can read. */
-  put(client: SignInClientRecord, options?: { keepSecret?: true; companyId?: string }): Promise<void>;
-  remove(clientId: string, companyId?: string): Promise<boolean>;
-  list(companyId?: string): Promise<SignInClientView[]>;
-}
-
 export function signInClientsThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): SignInClientRegistry {
-  const ask = async <T>(request: PutSignInClientRequest | RemoveSignInClientRequest | ListSignInClientsRequest, read: (reply: Record<string, unknown>) => T | undefined): Promise<T> => {
-    const answer = await identityInvoke(invoke, request, (reply) => (reply.ok === true ? read(reply) : undefined), "developer.sign_in_clients");
-    if (typeof answer === "object" && answer !== null && "ok" in answer && (answer as { ok: unknown }).ok === false) {
-      throw agentXError("RUNTIME_UNAVAILABLE", "AgentX could not reach its sign-in service; try again");
-    }
-    return answer as T;
-  };
-  return {
-    async put(client, options) { await ask({ kind: "put-sign-in-client", client, ...(options?.companyId === undefined ? {} : { companyId: options.companyId }), ...(options?.keepSecret === true ? { keepSecret: true as const } : {}) }, () => true); },
-    remove: (clientId, companyId) => ask({ kind: "remove-sign-in-client", clientId, ...(companyId === undefined ? {} : { companyId }) }, (reply) => reply.removed === true),
-    list: (companyId) => ask({ kind: "list-sign-in-clients", ...(companyId === undefined ? {} : { companyId }) }, (reply) => {
-      const parsed = z.array(SignInClientViewSchema).safeParse(reply.clients);
-      return parsed.success ? parsed.data : undefined;
-    }),
-  };
+  return createSignInClientsForwarder(invoke, logDeveloperEvent);
 }
 
 /** E12 (Q8): a public channel by name through DeveloperIdentity; fails closed as slack_unavailable. */
 export function channelByNameThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: ChannelByNameRequest) => Promise<ChannelByNameResponse> {
-  return (request) => identityInvoke(invoke, request, (reply) => {
-    if (reply.ok !== true) return undefined;
-    const channel = reply.channel as { channelId?: unknown; name?: unknown } | undefined;
-    return typeof channel?.channelId === "string" && typeof channel.name === "string"
-      ? { ok: true as const, channel: { channelId: channel.channelId, name: channel.name } }
-      : { ok: true as const };
-  }, "developer.channel_by_name");
+  return createChannelByNameForwarder(invoke, logDeveloperEvent);
 }
 
 /** The broker's copy of each method's enabled-since cutoff (FR-045), from its environment. */
@@ -643,37 +478,9 @@ export function developerSinceFromEnvironment(env: NodeJS.ProcessEnv): { slack?:
 export const githubSignInFromEnvironment = (env: NodeJS.ProcessEnv): boolean => env.DEVELOPER_SIGNIN_GITHUB === "enabled" && env.COMPANY_SIGNIN === "enabled";
 const methodName = (amr: DeveloperSignInMethod) => (amr === "slack" ? "Slack" : amr === "github" ? "GitHub" : "Company");
 
-/**
- * The sign-in server's public keys, read by invoking the DeveloperIdentity function with its own
- * JWKS route (D17): the broker may not call kms:GetPublicKey, which the key policy keeps to
- * DeveloperIdentity. Any failure throws, and the verifier answers 503 for it.
- */
+/** The sign-in server's public keys, read by invoking DeveloperIdentity's JWKS route (D17). */
 export function developerKeysThroughLambda(invoke: (payload: Uint8Array, options?: { abortSignal: AbortSignal }) => Promise<ChannelMembersInvokeResult>): (read?: ServerKeyRead) => Promise<unknown[]> {
-  const request = { version: "2.0", rawPath: "/v1/auth/.well-known/jwks.json", requestContext: { requestId: "broker-jwks", http: { method: "GET" } } };
-  const failed = (reason: string, entry: Record<string, string> = {}) => {
-    logDeveloperEvent({ event: "developer.jwks_failed", reason, ...entry });
-    return new Error(`the developer sign-in keys could not be read (${reason})`);
-  };
-  const decode = (response: ChannelMembersInvokeResult): unknown[] => {
-    if (response.FunctionError !== undefined) throw failed("function_error", { functionError: response.FunctionError });
-    if (response.Payload === undefined) throw failed("empty_reply");
-    let keys: unknown;
-    try {
-      const reply = JSON.parse(Buffer.from(response.Payload).toString("utf8")) as { statusCode?: unknown; body?: unknown };
-      if (reply.statusCode !== 200 || typeof reply.body !== "string") throw new Error("not 200");
-      keys = (JSON.parse(reply.body) as { keys?: unknown }).keys;
-    } catch { throw failed("unreadable_reply"); }
-    if (!Array.isArray(keys) || keys.length === 0) throw failed("no_keys");
-    return keys as unknown[];
-  };
-  return async (read) => {
-    const work = async () => {
-      try { return await invoke(Buffer.from(JSON.stringify(request)), read === undefined ? undefined : { abortSignal: read.abortSignal }); }
-      catch (error) { throw failed("invoke_error", { error: errorName(error) }); }
-    };
-    const response = read === undefined ? await work() : await read.readCounted(work, response => decode(response).length);
-    return decode(response);
-  };
+  return createDeveloperKeysForwarder(invoke, logDeveloperEvent);
 }
 
 const SIGN_IN_AGAIN = "your AgentX sign-in has ended; run agentx login <url> again";
@@ -1364,6 +1171,46 @@ function clientTokenScopes(client: SignInClientRecord, scope: unknown): ClientSc
   return client.fullAccess === true ? [...CLIENT_SCOPES] : scopesOf(scope).filter((entry) => client.scopes?.includes(entry) === true);
 }
 
+async function verifyClientSessionAndCompany(
+  deps: DeveloperRouteDependencies,
+  client: SignInClientRecord,
+  claims: Record<string, unknown>,
+  amr: "slack" | "oidc" | "github",
+  nowSeconds: number,
+  options: { companyless?: true },
+  refused: () => Error,
+) {
+  const session = await getSignIn<SessionRecord>(deps, `SESSION#${claims.sid as string}`);
+  if (session === undefined || session.clientId !== client.clientId || session.developerId !== claims.sub || session.amr !== amr
+    || session.revokedAt !== undefined || session.endsAt <= nowSeconds || Date.parse(session.startedAt) < Date.parse(client.createdAt)) throw refused();
+  await requireSessionSurvivor(deps, session, refused);
+  let companyId: string | undefined;
+  let companyless = false;
+  try { companyId = await clientCompany(deps, client, session.developerId); }
+  catch (error) {
+    if (options.companyless !== true || !await companylessSession(deps, client, session)) throw error;
+    companyless = true;
+  }
+  const companyDeveloper = companyless ? undefined : await companyOidcSession(deps, session, companyId);
+  if (companyDeveloper === undefined && (deps.developer.methods[amr] !== true || startedBeforeMethodOn(session.startedAt, deps.developer.since?.[amr]))) throw refused();
+  const developer = companyDeveloper ?? await getSignIn<Pick<DeveloperRecord, "sessionsEndedAt">>(deps, `DEVELOPER#${session.developerId}`);
+  if (endedByAdmin(session.startedAt, developer?.sessionsEndedAt)) throw refused();
+  const joinedByInvite = session.joinedByInvite === true && !companyless && companyId !== undefined && (session.companyId ?? IMPLICIT_COMPANY_ID) === companyId;
+  return {
+    client,
+    ...(session.signedInId === undefined ? {} : { signedInId: session.signedInId }),
+    ...(companyId === undefined ? {} : { companyId }),
+    ...(companyless ? { companyless: true as const } : {}),
+    developerId: session.developerId,
+    sessionId: claims.sid as string,
+    amr,
+    administrator: amr === "oidc" && session.administrator === true && !companyless,
+    scopes: clientTokenScopes(client, claims.scope),
+    startedAt: session.startedAt,
+    ...(joinedByInvite ? { joinedByInvite: true as const } : {}),
+  };
+}
+
 /**
  * Spec 063 FR-004, spec 065 FR-003: a registered sign-in client's token, for a live session of its own. The unverified azp
  * only picks which client's audience the token must then verify against. Every refusal is the same 401.
@@ -1372,17 +1219,12 @@ async function authenticateClientToken(deps: DeveloperRouteDependencies, authori
   deps = withSignInReads(deps);
   const refused = () => agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
   let azp: unknown;
-  try {
-    azp = decodeJwt(/^Bearer (\S+)$/.exec(authorization ?? "")?.[1] ?? "").azp;
-  } catch {
-    throw refused();
-  }
+  try { azp = decodeJwt(/^Bearer (\S+)$/.exec(authorization ?? "")?.[1] ?? "").azp; } catch { throw refused(); }
   const client = await signInClientOf(deps, azp);
   if (client === undefined) throw refused();
   let claims: Record<string, unknown>;
-  try {
-    claims = await deps.developer.verifyAccessToken(authorization, client.audience);
-  } catch (error) {
+  try { claims = await deps.developer.verifyAccessToken(authorization, client.audience); }
+  catch (error) {
     if ((error as { code?: unknown }).code === "RUNTIME_UNAVAILABLE") throw error;
     throw refused();
   }
@@ -1390,32 +1232,7 @@ async function authenticateClientToken(deps: DeveloperRouteDependencies, authori
   const amr = claims.amr;
   if ((amr !== "slack" && amr !== "oidc" && amr !== "github") || (deps.developer.methods[amr] !== true && !(deps.companies !== undefined && amr === "oidc"))) throw refused();
   try {
-    const session = await getSignIn<SessionRecord>(deps, `SESSION#${claims.sid}`);
-    if (session === undefined || session.clientId !== client.clientId || session.developerId !== claims.sub || session.amr !== amr
-      || session.revokedAt !== undefined || session.endsAt <= nowSeconds || Date.parse(session.startedAt) < Date.parse(client.createdAt)) throw refused();
-    // As at redeem/refresh: any revoked, unreadable, unlinked or moved hop ends this session's access.
-    await requireSessionSurvivor(deps, session, refused);
-    let companyId: string | undefined;
-    let companyless = false;
-    try { companyId = await clientCompany(deps, client, session.developerId); }
-    catch (error) {
-      // DEC 253z: only a caller that asked for it (the access check, company create) takes a session with no company, and only as `companylessSession` reads it now.
-      if (options.companyless !== true || !await companylessSession(deps, client, session)) throw error;
-      companyless = true;
-    }
-    const companyDeveloper = companyless ? undefined : await companyOidcSession(deps, session, companyId);
-    if (companyDeveloper === undefined && (deps.developer.methods[amr] !== true || startedBeforeMethodOn(session.startedAt, deps.developer.since?.[amr]))) throw refused();
-    const developer = companyDeveloper ?? await getSignIn<Pick<DeveloperRecord, "sessionsEndedAt">>(deps, `DEVELOPER#${session.developerId}`);
-    if (endedByAdmin(session.startedAt, developer?.sessionsEndedAt)) throw refused();
-    // Spec 065 FR-002: only the scopes on the token that the registration still allows. Spec 066: a client with full
-    // access has the person's rights, so every scope.
-    const scopes = clientTokenScopes(client, claims.scope);
-    return {
-      client, ...(session.signedInId === undefined ? {} : { signedInId: session.signedInId }), ...(companyId === undefined ? {} : { companyId }), ...(companyless ? { companyless: true as const } : {}), developerId: session.developerId, sessionId: claims.sid, amr,
-      administrator: amr === "oidc" && session.administrator === true && !companyless, scopes, startedAt: session.startedAt,
-      // DEC 254b (f): what the sign-in server recorded on THIS session at mint, for the company the session is bound to (checked against live membership above).
-      ...(session.joinedByInvite === true && !companyless && companyId !== undefined && (session.companyId ?? IMPLICIT_COMPANY_ID) === companyId ? { joinedByInvite: true as const } : {}),
-    };
+    return await verifyClientSessionAndCompany(deps, client, claims, amr, nowSeconds, options, refused);
   } catch (error) {
     if (deps.companies !== undefined && amr === "oidc") throw refused();
     throw error;
@@ -1561,56 +1378,68 @@ async function projectChannelLinks(deps: DeveloperRouteDependencies, project: st
  * Guided onboarding PR 8: `GET /v1/dev/client/projects/{project}/setup-status` (any member of the project's company) and `PUT .../setup-status/skips` (a company owner or admin, or the project's
  * administrator). The company is the caller's live membership; another company's project, an unknown one and an unreadable name all answer "project not found". See project-setup-status.ts.
  */
+async function loadClientSetupStatusProject(
+  deps: DeveloperRouteDependencies,
+  scopeClient: DeveloperRouteDependencies["documentClient"],
+  personId: string,
+  rawProject: string,
+  companyId: string | undefined,
+): Promise<{ project: string; revision: number; definition: { revision: number; repositories?: unknown; readiness?: unknown }; noAutomatedTests?: unknown }> {
+  let project: string;
+  try { project = decodeURIComponent(rawProject); } catch { throw agentXError("NOT_FOUND", "project not found"); }
+  if (!AgentXNameSchema.safeParse(project).success) throw agentXError("NOT_FOUND", "project not found");
+  const named = namedCompany(companyId);
+  const row = named !== undefined
+    ? await namedCompanyLatestRevisionRow(scopeClient, deps.tableName, named, project) as { definition?: { revision?: unknown; repositories?: unknown; readiness?: unknown }; noAutomatedTests?: unknown } | undefined
+    : (await scopeClient.send(new QueryCommand({
+      TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
+      ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
+    })) as { Items?: Array<{ definition?: { revision?: unknown; repositories?: unknown; readiness?: unknown }; noAutomatedTests?: unknown }> }).Items?.[0];
+  const definition = row?.definition;
+  if ((named === undefined ? !recordInCompany(row, companyId) : row === undefined) || definition === undefined || typeof definition.revision !== "number") {
+    throw agentXError("NOT_FOUND", "project not found");
+  }
+  if (companyId === undefined) {
+    const access = await projectsAPersonUses({ ...deps, documentClient: scopeClient }, personId, undefined);
+    if (access === undefined) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
+    if (!access.projects.some((entry) => entry.name === project)) throw agentXError("NOT_FOUND", "project not found");
+  }
+  return { project, revision: definition.revision, definition: { revision: definition.revision, repositories: definition.repositories, readiness: definition.readiness }, noAutomatedTests: row?.noAutomatedTests };
+}
+
 async function routeClientSetupStatus(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, rawProject: string, change: "/skips" | "/eval-none" | undefined, route: DevRoute): Promise<unknown> {
   const person = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
   requireRouteScope(route, person);
   const profile = await getSignIn<Pick<DeveloperRecord, "revoked">>(deps, `DEVELOPER#${person.developerId}`);
   if (profile === undefined || profile.revoked === true) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
-  let project: string;
-  try { project = decodeURIComponent(rawProject); } catch { throw agentXError("NOT_FOUND", "project not found"); }
-  if (!AgentXNameSchema.safeParse(project).success) throw agentXError("NOT_FOUND", "project not found");
   const scope = boundedCompanyReads(deps.documentClient, deps.now);
   const companyId = await resolveCompany(deps.companies, person.developerId);
-  // DEC 254zzz80: a named company's revision from its own partition; the legacy row keeps its stored-company check.
-  const named = namedCompany(companyId);
-  const row = named !== undefined ? await namedCompanyLatestRevisionRow(scope.client, deps.tableName, named, project) as { definition?: { revision?: unknown; repositories?: unknown; readiness?: unknown }; noAutomatedTests?: unknown } | undefined
-    : (await scope.client.send(new QueryCommand({
-      TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
-      ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, ScanIndexForward: false, Limit: 1, ConsistentRead: true,
-    })) as { Items?: Array<{ definition?: { revision?: unknown; repositories?: unknown; readiness?: unknown }; noAutomatedTests?: unknown }> }).Items?.[0];
-  const definition = row?.definition;
-  if ((named === undefined ? !recordInCompany(row, companyId) : row === undefined) || definition === undefined || typeof definition.revision !== "number") throw agentXError("NOT_FOUND", "project not found");
-  // With no company layer there is no company to belong to: the person must be one who may use the project.
-  if (companyId === undefined) {
-    const access = await projectsAPersonUses({ ...deps, documentClient: scope.client }, person.developerId, undefined);
-    if (access === undefined) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
-    if (!access.projects.some((entry) => entry.name === project)) throw agentXError("NOT_FOUND", "project not found");
-  }
+  const loaded = await loadClientSetupStatusProject(deps, scope.client, person.developerId, rawProject, companyId);
   const membership = companyId === undefined ? undefined : await deps.companies?.membershipOf?.(person.developerId);
   const role = membership !== undefined && membership.companyId === companyId ? membership.role : undefined;
-  const own = await projectGrant({ ...memberActions(deps), documentClient: scope.client }, project, person.developerId, namedCompany(companyId));
+  const own = await projectGrant({ ...memberActions(deps), documentClient: scope.client }, loaded.project, person.developerId, namedCompany(companyId));
   const projectAdmin = own?.role === "administrator";
-  const companyAdmin = companyId === undefined ? person.administrator : role === "admin" || role === "owner";
+  const mayChange = projectAdmin || (companyId === undefined ? person.administrator : role === "admin" || role === "owner");
   const effectiveCompany = companyId ?? IMPLICIT_COMPANY_ID;
   if (change === "/eval-none") {
     if (request.method !== "PUT") throw agentXError("NOT_FOUND", "route not found");
-    const changed = await putEvalNone({ documentClient: scope.client, tableName: deps.tableName, now: deps.now, companyId: effectiveCompany, project, revision: definition.revision, personId: person.developerId, mayChange: projectAdmin || companyAdmin, body: () => jsonBody(request) });
+    const changed = await putEvalNone({ documentClient: scope.client, tableName: deps.tableName, now: deps.now, companyId: effectiveCompany, project: loaded.project, revision: loaded.revision, personId: person.developerId, mayChange, body: () => jsonBody(request) });
     scope.check();
-    logDeveloperEvent({ event: "client.project_setup_eval_none_changed", clientId: person.client.clientId, by: person.developerId, project, noEvals: changed.noEvals ? "true" : "false", ...(companyId === undefined ? {} : { companyId }) });
+    logDeveloperEvent({ event: "client.project_setup_eval_none_changed", clientId: person.client.clientId, by: person.developerId, project: loaded.project, noEvals: changed.noEvals ? "true" : "false", ...(companyId === undefined ? {} : { companyId }) });
     return changed;
   }
   if (change === "/skips") {
     if (request.method !== "PUT") throw agentXError("NOT_FOUND", "route not found");
-    const changed = await putSkip({ documentClient: scope.client, tableName: deps.tableName, now: deps.now, companyId: effectiveCompany, project, personId: person.developerId, mayChange: projectAdmin || companyAdmin, body: () => jsonBody(request) });
+    const changed = await putSkip({ documentClient: scope.client, tableName: deps.tableName, now: deps.now, companyId: effectiveCompany, project: loaded.project, personId: person.developerId, mayChange, body: () => jsonBody(request) });
     scope.check();
-    logDeveloperEvent({ event: "client.project_setup_skip_changed", clientId: person.client.clientId, by: person.developerId, project, row: changed.row, skipped: changed.skipped ? "true" : "false", ...(companyId === undefined ? {} : { companyId }) });
+    logDeveloperEvent({ event: "client.project_setup_skip_changed", clientId: person.client.clientId, by: person.developerId, project: loaded.project, row: changed.row, skipped: changed.skipped ? "true" : "false", ...(companyId === undefined ? {} : { companyId }) });
     return changed;
   }
   if (request.method !== "GET") throw agentXError("NOT_FOUND", "route not found");
   const status = await readProjectSetupStatus({
-    documentClient: scope.client, tableName: deps.tableName, now: deps.now, companyId: effectiveCompany, project, definition: { revision: definition.revision, repositories: definition.repositories, readiness: definition.readiness }, noAutomatedTests: row?.noAutomatedTests,
+    documentClient: scope.client, tableName: deps.tableName, now: deps.now, companyId: effectiveCompany, project: loaded.project, definition: loaded.definition, noAutomatedTests: loaded.noAutomatedTests,
     viewer: { companyRole: role ?? null, projectAdmin },
-    readers: { channels: () => projectChannelLinks({ ...deps, documentClient: scope.client }, project, companyId), ...linearTeamReader(deps, companyId, project) },
+    readers: { channels: () => projectChannelLinks({ ...deps, documentClient: scope.client }, loaded.project, companyId), ...linearTeamReader(deps, companyId, loaded.project) },
   });
   scope.check();
   return status;
@@ -1700,86 +1529,164 @@ async function companyManagesProject(deps: DeveloperRouteDependencies, caller: {
   return row !== undefined && recordInCompany(row, membership.companyId);
 }
 
+async function routeClientCompanyAudit(
+  deps: DeveloperRouteDependencies,
+  request: AdaptedHttpRequest,
+  url: URL,
+  route: DevRoute,
+): Promise<unknown> {
+  const reader = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
+  requireRouteScope(route, reader);
+  if (deps.companyReads === undefined) throw agentXError("NOT_FOUND", "route not found");
+  const person = await getSignIn<Pick<DeveloperRecord, "revoked">>(deps, `DEVELOPER#${reader.developerId}`);
+  if (person === undefined || person.revoked === true) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
+  const resolveCompanyFn = deps.companyReads.companyOf;
+  const personName = deps.companyReads.personName ?? (async (developerId: string, companyId: string) => {
+    if (resolveCompanyFn !== undefined && (await resolveCompanyFn(developerId)) !== companyId) return undefined;
+    return (await getSignIn<Pick<DeveloperRecord, "displayName">>(deps, `DEVELOPER#${developerId}`))?.displayName;
+  });
+  return routeCompanyReads({ ...deps.companyReads, personName }, { developerId: reader.developerId, administrator: reader.administrator, companyId: reader.companyId }, url, deps.now());
+}
+
+async function routeClientProjectCreation(
+  deps: DeveloperRouteDependencies,
+  request: AdaptedHttpRequest,
+  url: URL,
+  route: DevRoute,
+): Promise<unknown> {
+  const creator = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
+  requireRouteScope(route, creator);
+  if (!creator.administrator && !await companyMayCreateProjects(deps, creator)) throw agentXError("FORBIDDEN", "only a Rovara administrator can create a project");
+  const naming: [] | [ClientProjectNaming] = creator.administrator ? [] : [{ perCompany: true }];
+  if (url.pathname === CLIENT_REPOSITORY_CHOICES && request.method === "GET") {
+    if (deps.clientRepositoryChoices === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
+    const query = RepositoryChoicesQuerySchema.safeParse(Object.fromEntries(url.searchParams));
+    if (!query.success || new Set(url.searchParams.keys()).size !== [...url.searchParams.keys()].length) {
+      throw agentXError("CONFIG_INVALID", "invalid repository search: use q, limit (1 to 100) and after, once each");
+    }
+    return await deps.clientRepositoryChoices(creator.developerId, query.data) satisfies ClientRepositoryChoicesResponse;
+  }
+  if (url.pathname === CLIENT_PROJECTS_BULK && request.method === "POST") {
+    if (deps.createClientProjectsBulk === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
+    const parsed = BulkCreateClientProjectsRequestSchema.safeParse(jsonBody(request));
+    if (!parsed.success) throw agentXError("CONFIG_INVALID", `invalid projects: ${parsed.error.issues[0]?.path.join(".") || "request"}: ${parsed.error.issues[0]?.message ?? "invalid"}`);
+    const answer = await deps.createClientProjectsBulk(creator.developerId, parsed.data, ...naming);
+    logDeveloperEvent({
+      event: "client.projects_bulk_created", clientId: creator.client.clientId, by: creator.developerId,
+      ...(creator.companyId === undefined ? {} : { companyId: creator.companyId }), asked: parsed.data.repositories.length,
+      created: answer.results.filter((row) => row.outcome === "created").length,
+    });
+    return answer satisfies BulkCreateClientProjectsResponse;
+  }
+  if (!(url.pathname === "/v1/dev/client/projects" && request.method === "POST")) {
+    if (deps.clientRepositories === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
+    return { installations: await deps.clientRepositories(creator.developerId) } satisfies ClientRepositoriesResponse;
+  }
+  return routeClientCreateProjectBody(deps, request, creator, naming);
+}
+
+async function routeClientCreateProjectBody(
+  deps: DeveloperRouteDependencies,
+  request: AdaptedHttpRequest,
+  creator: Awaited<ReturnType<typeof authenticateClientToken>>,
+  naming: [] | [ClientProjectNaming],
+): Promise<unknown> {
+  const body = jsonBody(request);
+  if (body !== null && typeof body === "object" && Object.prototype.hasOwnProperty.call(body, "repositories")) {
+    if (deps.createClientProjects === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
+    const many = CreateClientProjectsRequestSchema.safeParse(body);
+    if (!many.success) throw agentXError("CONFIG_INVALID", `invalid project: ${many.error.issues[0]?.path.join(".") || "request"}: ${many.error.issues[0]?.message ?? "invalid"}`);
+    const created = await deps.createClientProjects(creator.developerId, many.data, ...naming);
+    logDeveloperEvent({
+      event: "client.project_created", clientId: creator.client.clientId, by: creator.developerId, project: created.name, repositories: many.data.repositories.length,
+      ...(creator.companyId === undefined ? {} : { companyId: creator.companyId }),
+    });
+    return readClientProject(deps, creator.developerId, created.name, namedCompany(created.companyId) ?? creator.companyId);
+  }
+  if (deps.createClientProject === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
+  const parsed = CreateClientProjectRequestSchema.safeParse(body);
+  if (!parsed.success) throw agentXError("CONFIG_INVALID", `invalid project: ${parsed.error.issues[0]?.path.join(".") || "request"}: ${parsed.error.issues[0]?.message ?? "invalid"}`);
+  const created = await deps.createClientProject(creator.developerId, parsed.data, ...naming);
+  console.log(JSON.stringify({ component: "broker", event: "client.project_created", clientId: creator.client.clientId, by: creator.developerId, project: created.name }));
+  return readClientProject(deps, creator.developerId, created.name, namedCompany(created.companyId) ?? creator.companyId);
+}
+
+async function routeClientProjectMembers(
+  deps: DeveloperRouteDependencies,
+  request: AdaptedHttpRequest,
+  rawProject: string,
+  rawTarget: string | undefined,
+  route: DevRoute,
+): Promise<unknown> {
+  const caller = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
+  requireRouteScope(route, caller);
+  const person = await getSignIn<Pick<DeveloperRecord, "revoked" | "displayName">>(deps, `DEVELOPER#${caller.developerId}`);
+  if (person === undefined || person.revoked === true) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
+  const project = decodeURIComponent(rawProject);
+  if (!AgentXNameSchema.safeParse(project).success) throw agentXError("NOT_FOUND", "project not found");
+  const actions = memberActions(deps);
+  const grantCompany = await liveNamedCompany(deps, caller.developerId);
+  const namedCaller = namedCompany(caller.companyId);
+  const latest = namedCaller !== undefined
+    ? await namedCompanyLatestRevisionRow(deps.documentClient, deps.tableName, namedCaller, project)
+    : ((await deps.documentClient.send(new QueryCommand({
+      TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
+      ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, Limit: 1, ScanIndexForward: false, ConsistentRead: true,
+    }))) as { Items?: unknown[] }).Items?.[0];
+  if (caller.companyId !== undefined && (latest === undefined || (namedCaller === undefined && !recordInCompany(latest, caller.companyId)))) throw agentXError("NOT_FOUND", "project not found");
+  const own = await projectGrant(actions, project, caller.developerId, grantCompany);
+  if (!caller.administrator && own?.role !== "administrator" && !await companyManagesProject(deps, caller, project)) throw agentXError("FORBIDDEN", CLIENT_MEMBERS_NOT_ALLOWED);
+  if (latest === undefined) throw agentXError("NOT_FOUND", `project ${project} is not registered`);
+  return executeClientProjectMembersChange(deps, actions, caller, project, grantCompany, request.method, rawTarget);
+}
+
+async function executeClientProjectMembersChange(
+  deps: DeveloperRouteDependencies,
+  actions: ReturnType<typeof memberActions>,
+  caller: Awaited<ReturnType<typeof authenticateClientToken>>,
+  project: string,
+  grantCompany: string | undefined,
+  method: string,
+  rawTarget: string | undefined,
+): Promise<unknown> {
+  const by = { issuer: `sign-in-client:${caller.client.clientId}`, subject: caller.developerId };
+  if (method === "GET" && rawTarget === undefined) {
+    const listed = await listProjectMembers(actions, project, grantCompany);
+    const named = await Promise.all(listed.map(async (member) => ({
+      ...member,
+      name: profileDisplayName((await getSignIn<Pick<DeveloperRecord, "displayName" | "provider" | "subject">>(deps, `DEVELOPER#${member.developerId}`)) ?? {}) ?? "Unknown",
+    })));
+    return { project, members: named } satisfies ClientProjectMembersResponse;
+  }
+  if (rawTarget === undefined || (method !== "PUT" && method !== "DELETE")) throw agentXError("NOT_FOUND", "route not found");
+  const target = await resolveDeveloper(actions, decodeURIComponent(rawTarget), grantCompany ?? caller.companyId);
+  if (method === "PUT") {
+    const granted = await grantProjectAccess(actions, by, project, target.developerId, grantCompany);
+    console.log(JSON.stringify({ component: "broker", event: "client.project_member_granted", clientId: caller.client.clientId, by: caller.developerId, developerId: target.developerId, project, already: granted.already }));
+    return { project, developerId: target.developerId, outcome: granted.already ? "already_member" : "granted" } satisfies ClientProjectMemberChangeResponse;
+  }
+  const revoked = await revokeProjectAccess(actions, project, target.developerId, grantCompany);
+  console.log(JSON.stringify({ component: "broker", event: "client.project_member_revoked", clientId: caller.client.clientId, by: caller.developerId, developerId: target.developerId, project, revoked: revoked.revoked }));
+  return { project, developerId: target.developerId, outcome: revoked.revoked ? "revoked" : "not_member" } satisfies ClientProjectMemberChangeResponse;
+}
+
 /**
  * Spec 065: a sign-in client acting as the signed-in person, within its scopes and the person's own rights. 065a: a
  * project's members, which only the project's administrators or a Rovara administrator may see and change.
  */
 export async function routeClientRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
-  // DEC 254zzz81: always on (the SIGN_IN_CLIENT_ROUTES switch is gone). Every row checks the client's token, its route scope and the person's live company and role below.
-  // Plan v3.2 lane ID: only a route in the table, and only with its scope.
   const route = devRouteOf(request.method, url.pathname);
   if (route === undefined) throw agentXError("NOT_FOUND", "route not found");
-  // Lanes AU and EV: the company's audit records and events, read as the company administrator of the caller's own company.
-  if (url.pathname === COMPANY_AUDIT_RECORDS_PATH || url.pathname === COMPANY_EVENTS_PATH) {
-    const reader = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
-    requireRouteScope(route, reader);
-    if (deps.companyReads === undefined) throw agentXError("NOT_FOUND", "route not found");
-    const person = await getSignIn<Pick<DeveloperRecord, "revoked">>(deps, `DEVELOPER#${reader.developerId}`);
-    if (person === undefined || person.revoked === true) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
-    // A person's name: the host's lookup, else the sign-in table's display name, shown only for a person of the caller's own company.
-    const resolveCompany = deps.companyReads.companyOf;
-    const personName = deps.companyReads.personName ?? (async (developerId: string, companyId: string) => {
-      if (resolveCompany !== undefined && (await resolveCompany(developerId)) !== companyId) return undefined;
-      return (await getSignIn<Pick<DeveloperRecord, "displayName">>(deps, `DEVELOPER#${developerId}`))?.displayName;
-    });
-    return routeCompanyReads({ ...deps.companyReads, personName }, { developerId: reader.developerId, administrator: reader.administrator, companyId: reader.companyId }, url, deps.now());
-  }
-  // Spec 065b: create a project (projects:create), as a Rovara administrator, from a repository the GitHub App can reach.
-  const creating = url.pathname === "/v1/dev/client/projects" && request.method === "POST";
-  // Guided onboarding PR 6: one project per repository, and the repository picker; the same scope and the same role as creating one.
-  const bulk = url.pathname === CLIENT_PROJECTS_BULK && request.method === "POST";
-  const choosing = url.pathname === CLIENT_REPOSITORY_CHOICES && request.method === "GET";
-  if (creating || bulk || choosing || (url.pathname === "/v1/dev/client/repositories" && request.method === "GET")) {
-    const creator = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
-    requireRouteScope(route, creator);
-    // Guided onboarding PR 19: or a live owner or admin of the caller's own company; the Rovara administrator's path is unchanged and reads nothing more.
-    if (!creator.administrator && !await companyMayCreateProjects(deps, creator)) throw agentXError("FORBIDDEN", "only a Rovara administrator can create a project"); const naming: [] | [ClientProjectNaming] = creator.administrator ? [] : [{ perCompany: true }]; // L2-1: a company's creates use its own names; the administrator's calls are unchanged
-    if (choosing) {
-      if (deps.clientRepositoryChoices === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
-      const query = RepositoryChoicesQuerySchema.safeParse(Object.fromEntries(url.searchParams));
-      if (!query.success || new Set(url.searchParams.keys()).size !== [...url.searchParams.keys()].length) throw agentXError("CONFIG_INVALID", "invalid repository search: use q, limit (1 to 100) and after, once each");
-      return await deps.clientRepositoryChoices(creator.developerId, query.data) satisfies ClientRepositoryChoicesResponse;
-    }
-    if (bulk) {
-      if (deps.createClientProjectsBulk === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
-      const parsed = BulkCreateClientProjectsRequestSchema.safeParse(jsonBody(request));
-      if (!parsed.success) throw agentXError("CONFIG_INVALID", `invalid projects: ${parsed.error.issues[0]?.path.join(".") || "request"}: ${parsed.error.issues[0]?.message ?? "invalid"}`);
-      const answer = await deps.createClientProjectsBulk(creator.developerId, parsed.data, ...naming);
-      logDeveloperEvent({ event: "client.projects_bulk_created", clientId: creator.client.clientId, by: creator.developerId,
-        ...(creator.companyId === undefined ? {} : { companyId: creator.companyId }), asked: parsed.data.repositories.length,
-        created: answer.results.filter((row) => row.outcome === "created").length });
-      return answer satisfies BulkCreateClientProjectsResponse;
-    }
-    if (!creating) {
-      if (deps.clientRepositories === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
-      return { installations: await deps.clientRepositories(creator.developerId) } satisfies ClientRepositoriesResponse;
-    }
-    const body = jsonBody(request);
-    // Guided onboarding PR 6: a body naming `repositories` makes one project of them all; any other body is the single-repository create, as before.
-    if (body !== null && typeof body === "object" && Object.prototype.hasOwnProperty.call(body, "repositories")) {
-      if (deps.createClientProjects === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
-      const many = CreateClientProjectsRequestSchema.safeParse(body);
-      if (!many.success) throw agentXError("CONFIG_INVALID", `invalid project: ${many.error.issues[0]?.path.join(".") || "request"}: ${many.error.issues[0]?.message ?? "invalid"}`);
-      const created = await deps.createClientProjects(creator.developerId, many.data, ...naming);
-      logDeveloperEvent({ event: "client.project_created", clientId: creator.client.clientId, by: creator.developerId, project: created.name, repositories: many.data.repositories.length,
-        ...(creator.companyId === undefined ? {} : { companyId: creator.companyId }) });
-      // DEC 254zzz80: read back where the create wrote: a named company's own partition (the company the create resolved from live membership), else as before.
-      return readClientProject(deps, creator.developerId, created.name, namedCompany(created.companyId) ?? creator.companyId);
-    }
-    if (deps.createClientProject === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
-    const parsed = CreateClientProjectRequestSchema.safeParse(body);
-    if (!parsed.success) throw agentXError("CONFIG_INVALID", `invalid project: ${parsed.error.issues[0]?.path.join(".") || "request"}: ${parsed.error.issues[0]?.message ?? "invalid"}`);
-    const created = await deps.createClientProject(creator.developerId, parsed.data, ...naming);
-    console.log(JSON.stringify({ component: "broker", event: "client.project_created", clientId: creator.client.clientId, by: creator.developerId, project: created.name }));
-    return readClientProject(deps, creator.developerId, created.name, namedCompany(created.companyId) ?? creator.companyId);
-  }
-  // Guided onboarding PR 16 (DEC 254n item 3): a project's archive and restore, preview first (project-lifecycle-routes.ts).
+  if (url.pathname === COMPANY_AUDIT_RECORDS_PATH || url.pathname === COMPANY_EVENTS_PATH) return routeClientCompanyAudit(deps, request, url, route);
+  const isProjectCreation = (url.pathname === "/v1/dev/client/projects" && request.method === "POST")
+    || (url.pathname === CLIENT_PROJECTS_BULK && request.method === "POST")
+    || (url.pathname === CLIENT_REPOSITORY_CHOICES && request.method === "GET")
+    || (url.pathname === "/v1/dev/client/repositories" && request.method === "GET");
+  if (isProjectCreation) return routeClientProjectCreation(deps, request, url, route);
   const lifecycle = CLIENT_LIFECYCLE.exec(url.pathname);
   if (lifecycle !== null) return routeClientLifecycle(deps, request, lifecycle[1]!, lifecycle[2] as LifecycleAction, route);
-  // Lane W: a project's merge rules (contract v0 client.projects.codeSettings), in Code's own CodeSettings shape.
   const settings = CLIENT_CODE_SETTINGS.exec(url.pathname);
   if (settings !== null && (request.method === "GET" || request.method === "PUT")) return routeClientCodeSettings(deps, request, settings[1]!, route);
-  // Guided onboarding PR 8: a project's setup status, and the skipped optional rows.
   const setupStatus = CLIENT_SETUP_STATUS.exec(url.pathname);
   if (setupStatus !== null && (request.method === "GET" || request.method === "PUT")) return routeClientSetupStatus(deps, request, setupStatus[1]!, setupStatus[2] as "/skips" | "/eval-none" | undefined, route);
   const read = CLIENT_PROJECT.exec(url.pathname);
@@ -1792,48 +1699,7 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
   }
   const members = CLIENT_MEMBERS.exec(url.pathname);
   if (members === null) throw agentXError("NOT_FOUND", "route not found");
-  const caller = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
-  requireRouteScope(route, caller);
-  const person = await getSignIn<Pick<DeveloperRecord, "revoked" | "displayName">>(deps, `DEVELOPER#${caller.developerId}`);
-  if (person === undefined || person.revoked === true) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
-  const project = decodeURIComponent(members[1]!);
-  if (!AgentXNameSchema.safeParse(project).success) throw agentXError("NOT_FOUND", "project not found");
-  const actions = memberActions(deps);
-  // DEC 254zzz80: every grant read and write below is in the company of the caller's LIVE membership (a named company's own partition), never a request's.
-  const grantCompany = await liveNamedCompany(deps, caller.developerId);
-  // FR-004: as the person: they administer the project, they are a Rovara administrator, or (DEC 254n item 3, the rule of `lifecycleAccess`) they are a LIVE owner or admin of the company
-  // the project belongs to, grant or not.
-  // DEC 254zzz81 (the routes are always on) with DEC 254zzz80 (one company layout): the project must be the caller's company's, read before any grant counts, so a grant on another
-  // company's project (or the implicit company's) changes nothing and that project answers like a missing one. A named company's project is only its own partition's; otherwise the
-  // legacy rows, which must name the caller's company.
-  const namedCaller = namedCompany(caller.companyId);
-  const latest = namedCaller !== undefined
-    ? await namedCompanyLatestRevisionRow(deps.documentClient, deps.tableName, namedCaller, project)
-    : ((await deps.documentClient.send(new QueryCommand({
-      TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :rev)",
-      ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":rev": "REV#" }, Limit: 1, ScanIndexForward: false, ConsistentRead: true,
-    }))) as { Items?: unknown[] }).Items?.[0];
-  if (caller.companyId !== undefined && (latest === undefined || (namedCaller === undefined && !recordInCompany(latest, caller.companyId)))) throw agentXError("NOT_FOUND", "project not found");
-  const own = await projectGrant(actions, project, caller.developerId, grantCompany);
-  if (!caller.administrator && own?.role !== "administrator" && !await companyManagesProject(deps, caller, project)) throw agentXError("FORBIDDEN", CLIENT_MEMBERS_NOT_ALLOWED);
-  if (latest === undefined) throw agentXError("NOT_FOUND", `project ${project} is not registered`);
-  const by = { issuer: `sign-in-client:${caller.client.clientId}`, subject: caller.developerId };
-  if (request.method === "GET" && members[2] === undefined) {
-    const listed = await listProjectMembers(actions, project, grantCompany);
-    const named = await Promise.all(listed.map(async (member) => ({ ...member, name: profileDisplayName((await getSignIn<Pick<DeveloperRecord, "displayName" | "provider" | "subject">>(deps, `DEVELOPER#${member.developerId}`)) ?? {}) ?? "Unknown" })));
-    return { project, members: named } satisfies ClientProjectMembersResponse;
-  }
-  if (members[2] === undefined || (request.method !== "PUT" && request.method !== "DELETE")) throw agentXError("NOT_FOUND", "route not found");
-  // The target is fenced to the same LIVE company the grant is written in (the built-in company and none: as before, the caller's company).
-  const target = await resolveDeveloper(actions, decodeURIComponent(members[2]), grantCompany ?? caller.companyId);
-  if (request.method === "PUT") {
-    const granted = await grantProjectAccess(actions, by, project, target.developerId, grantCompany);
-    console.log(JSON.stringify({ component: "broker", event: "client.project_member_granted", clientId: caller.client.clientId, by: caller.developerId, developerId: target.developerId, project, already: granted.already }));
-    return { project, developerId: target.developerId, outcome: granted.already ? "already_member" : "granted" } satisfies ClientProjectMemberChangeResponse;
-  }
-  const revoked = await revokeProjectAccess(actions, project, target.developerId, grantCompany);
-  console.log(JSON.stringify({ component: "broker", event: "client.project_member_revoked", clientId: caller.client.clientId, by: caller.developerId, developerId: target.developerId, project, revoked: revoked.revoked }));
-  return { project, developerId: target.developerId, outcome: revoked.revoked ? "revoked" : "not_member" } satisfies ClientProjectMemberChangeResponse;
+  return routeClientProjectMembers(deps, request, members[1]!, members[2], route);
 }
 
 async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperCaller, companyId?: string): Promise<DeveloperProjectsResponse> {
@@ -2552,7 +2418,81 @@ async function knowledgeRoute(deps: DeveloperRouteDependencies, request: Adapted
   return deps.knowledge.answer(wire, { kind: "person", personId: caller.developerId });
 }
 
-export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+function makeSessionAuthenticator(deps: DeveloperRouteDependencies): (sessionId: string) => Promise<DeveloperCaller | undefined> {
+  return async (sessionId) => {
+    try { return await authenticateDeveloperSessionId(deps, sessionId); }
+    catch { return undefined; }
+  };
+}
+
+function routeReviewLinkPage(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  const links = deps.channelLinks;
+  if (links === undefined && deps.channelLinkCodes === undefined) throw agentXError("NOT_FOUND", "channel adapters are not enabled in this deployment");
+  return createChannelLinkWeb({
+    origin: deps.developer.issuer,
+    authenticateSession: makeSessionAuthenticator(deps),
+    preview: (code, personId) => deps.channelLinkCodes === undefined ? previewLinkCode(links!, code) : deps.channelLinkCodes.preview(personId, code),
+    redeem: (developerId, code) => deps.channelLinkCodes === undefined ? redeemLinkCode(links!, developerId, code) : deps.channelLinkCodes.redeem(developerId, code),
+  })(request, url);
+}
+
+function isTaskWebReviewPath(pathname: string): boolean {
+  return TASK_PAGE.test(pathname) || TASK_PEOPLE_CONFIRMATION.test(pathname) || TASK_STATUS.test(pathname) || TASK_PAGE_API_PREFIX.test(pathname);
+}
+
+function routeReviewTaskWeb(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL, authenticateSession: (sessionId: string) => Promise<DeveloperCaller | undefined>): Promise<unknown> {
+  const routeDeps = (caller: DeveloperCaller) => developerTaskRouteDependencies(deps, caller);
+  return createTaskWeb({
+    authenticateSession,
+    getTaskDocumentView: (caller, taskId) => getTaskDocumentView(routeDeps(caller), caller, taskId),
+    getTaskFreshness: (caller, taskId) => getTaskFreshness(routeDeps(caller), caller, taskId),
+    getTaskPeople: (caller, taskId) => getTaskPeople(routeDeps(caller), caller, taskId),
+    getTaskPeopleRequest: (caller, taskId, requestId) => getTaskPeopleProposal(routeDeps(caller), caller, taskId, requestId),
+    getTaskPeopleProposalMetadata: (caller, taskId, requestId) => getTaskPeopleProposalMetadata(routeDeps(caller), caller, taskId, requestId),
+    getTaskPersonName: (caller, taskId, personId) => getTaskPersonPresentationName(routeDeps(caller), taskId, personId),
+    getTaskPeopleCapabilities: (caller, taskId) => getTaskPeopleCapabilities(routeDeps(caller), caller, taskId),
+    api: createTaskWebApi({
+      origin: deps.developer.issuer,
+      authenticateSession,
+      taskState: async (caller, taskId) => getTaskPageState(await commentPageRouteDependencies(deps, caller), caller, taskId),
+      listComments: async (caller, taskId) => listPageComments(await commentPageRouteDependencies(deps, caller), caller, taskId),
+      createComment: async (caller, taskId, input) => createPageComment(await commentPageRouteDependencies(deps, caller), caller, taskId, input),
+      editComment: async (caller, taskId, input) => editPageComment(await commentPageRouteDependencies(deps, caller), caller, taskId, input),
+      deleteComment: async (caller, taskId, input) => deletePageComment(await commentPageRouteDependencies(deps, caller), caller, taskId, input),
+      setSuggestion: async (caller, taskId, input) => setPageSuggestion(await commentPageRouteDependencies(deps, caller), caller, taskId, input),
+      decide: (caller, taskId, input) => decideOnPage(routeDeps(caller), caller, taskId, input),
+      retryApplicationRound: (caller, taskId, input) => retryApplicationRoundOnPage(routeDeps(caller), caller, taskId, input),
+      featureChoices: (caller, taskId) => pageFeatureChoices(routeDeps(caller), caller, taskId),
+      setFeature: (caller, taskId, input) => setPageFeature(routeDeps(caller), caller, taskId, input),
+      readE2EArtifact: (caller, taskId, sha256) => getTaskE2EArtifact(routeDeps(caller), caller, taskId, sha256),
+      getPeople: (caller, taskId) => getTaskPeople(routeDeps(caller), caller, taskId),
+      proposePeopleRole: (caller, taskId, input) => proposeTaskPeopleRoleForPage(routeDeps(caller), caller, taskId, input),
+      proposeOwnership: (caller, taskId, input) => proposeTaskOwnershipForPage(routeDeps(caller), caller, taskId, input),
+      getPeopleRequest: (caller, taskId, requestId) => getTaskPeopleProposal(routeDeps(caller), caller, taskId, requestId),
+      confirmPeopleRequest: (caller, taskId, requestId) => confirmTaskPeopleProposal(routeDeps(caller), caller, taskId, requestId),
+      getPeopleCandidates: (caller, taskId) => getTaskPeopleCandidatesForPage(routeDeps(caller), caller, taskId),
+      addPeople: (caller, taskId, input) => addTaskWebPersonForPage(routeDeps(caller), caller, taskId, input),
+    }),
+  })(request, url);
+}
+
+function routeReviewRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  if (deps.tasks === undefined) throw agentXError("NOT_FOUND", "developer tasks are not set up in this deployment");
+  const authenticateSession = makeSessionAuthenticator(deps);
+  // Task 18: the read-only task page and its "moved on" check; every other /review/ path is the PR-feedback review.
+  // Spec 061 slice 2: the page's JSON API is matched here too, so the PR-feedback page never sees its paths.
+  if (isTaskWebReviewPath(url.pathname)) return routeReviewTaskWeb(deps, request, url, authenticateSession);
+  const web = createFeedbackReviewWeb({
+    origin: new URL(deps.developer.issuer).origin,
+    authenticateSession,
+    getWorkflowFeedbackReview: (caller, taskId) => getWorkflowFeedbackReview(developerTaskRouteDependencies(deps, caller), caller, taskId),
+    submitWorkflowFeedbackDecision: (caller, taskId, input) => submitWorkflowFeedbackDecision(developerTaskRouteDependencies(deps, caller), caller, taskId, input),
+    now: deps.now,
+  });
+  return web(request, url);
+}
+
+function routePreAuthDeveloperPath(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> | undefined {
   if (isServerReadRequest(request.method, url.pathname)) return routeServerRead(deps, request, url);
   if (isCompanyMemberPath(url.pathname)) return companyAdminRoute(deps, request, url);
   if (isGithubConnectPath(url.pathname)) return githubConnectRoute(deps, request, url);
@@ -2560,110 +2500,34 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   if (isSlackChannelLinkPath(url.pathname)) return slackChannelLinkRoute(deps, request, url);
   if (isSlackInstallPath(url.pathname)) return slackInstallRoute(deps, request, url);
   if (isLinearConnectPath(url.pathname)) return linearConnectRoute(deps, request, url);
-  if (isCompanyEngineModelPath(url.pathname)) return companyEngineModelRoute(deps, request, url); if (isCompanyLearningModelPath(url.pathname)) return companyLearningModelRoute(deps, request, url);
+  if (isCompanyEngineModelPath(url.pathname)) return companyEngineModelRoute(deps, request, url);
+  if (isCompanyLearningModelPath(url.pathname)) return companyLearningModelRoute(deps, request, url);
   if (isCompanyEgressPath(url.pathname)) return companyEgressRoute(deps, request, url);
   if (url.pathname === "/v1/dev/company/preapprovals" || url.pathname.startsWith("/v1/dev/company/preapprovals/")) return companyPreapprovalRoute(deps, request, url);
   if (url.pathname === "/v1/dev/company") return companySelfCreateRoute(deps, request, url);
   // Spec 062 FR-031: the page a link_required event links to. Signed in like the task page, but needs no tasks.
-  if (url.pathname.startsWith("/review/link/")) {
-    const links = deps.channelLinks;
-    if (links === undefined && deps.channelLinkCodes === undefined) throw agentXError("NOT_FOUND", "channel adapters are not enabled in this deployment");
-    return createChannelLinkWeb({
-      origin: deps.developer.issuer,
-      authenticateSession: async (sessionId) => {
-        try { return await authenticateDeveloperSessionId(deps, sessionId); }
-        catch { return undefined; }
-      },
-      preview: (code, personId) => deps.channelLinkCodes === undefined ? previewLinkCode(links!, code) : deps.channelLinkCodes.preview(personId, code),
-      redeem: (developerId, code) => deps.channelLinkCodes === undefined ? redeemLinkCode(links!, developerId, code) : deps.channelLinkCodes.redeem(developerId, code),
-    })(request, url);
-  }
-  if (url.pathname.startsWith("/review/")) {
-    if (deps.tasks === undefined) throw agentXError("NOT_FOUND", "developer tasks are not set up in this deployment");
-    const authenticateSession = async (sessionId: string) => {
-      try { return await authenticateDeveloperSessionId(deps, sessionId); }
-      catch { return undefined; }
-    };
-    // Task 18: the read-only task page and its "moved on" check; every other /review/ path is the PR-feedback review.
-    // Spec 061 slice 2: the page's JSON API is matched here too, so the PR-feedback page never sees its paths.
-    if (TASK_PAGE.test(url.pathname) || TASK_PEOPLE_CONFIRMATION.test(url.pathname) || TASK_STATUS.test(url.pathname) || TASK_PAGE_API_PREFIX.test(url.pathname)) {
-      const routeDeps = (caller: DeveloperCaller) => developerTaskRouteDependencies(deps, caller);
-      return createTaskWeb({
-        authenticateSession,
-        getTaskDocumentView: (caller, taskId) => getTaskDocumentView(routeDeps(caller), caller, taskId),
-        getTaskFreshness: (caller, taskId) => getTaskFreshness(routeDeps(caller), caller, taskId),
-        getTaskPeople: (caller, taskId) => getTaskPeople(routeDeps(caller), caller, taskId),
-        getTaskPeopleRequest: (caller, taskId, requestId) => getTaskPeopleProposal(routeDeps(caller), caller, taskId, requestId),
-        getTaskPeopleProposalMetadata: (caller, taskId, requestId) => getTaskPeopleProposalMetadata(routeDeps(caller), caller, taskId, requestId),
-        getTaskPersonName: (caller, taskId, personId) => getTaskPersonPresentationName(routeDeps(caller), taskId, personId),
-        getTaskPeopleCapabilities: (caller, taskId) => getTaskPeopleCapabilities(routeDeps(caller), caller, taskId),
-        api: createTaskWebApi({
-          origin: deps.developer.issuer,
-          authenticateSession,
-          taskState: async (caller, taskId) => getTaskPageState(await commentPageRouteDependencies(deps, caller), caller, taskId),
-          listComments: async (caller, taskId) => listPageComments(await commentPageRouteDependencies(deps, caller), caller, taskId),
-          createComment: async (caller, taskId, input) => createPageComment(await commentPageRouteDependencies(deps, caller), caller, taskId, input),
-          editComment: async (caller, taskId, input) => editPageComment(await commentPageRouteDependencies(deps, caller), caller, taskId, input),
-          deleteComment: async (caller, taskId, input) => deletePageComment(await commentPageRouteDependencies(deps, caller), caller, taskId, input),
-          setSuggestion: async (caller, taskId, input) => setPageSuggestion(await commentPageRouteDependencies(deps, caller), caller, taskId, input),
-          decide: (caller, taskId, input) => decideOnPage(routeDeps(caller), caller, taskId, input),
-          retryApplicationRound: (caller, taskId, input) => retryApplicationRoundOnPage(routeDeps(caller), caller, taskId, input),
-          featureChoices: (caller, taskId) => pageFeatureChoices(routeDeps(caller), caller, taskId),
-          setFeature: (caller, taskId, input) => setPageFeature(routeDeps(caller), caller, taskId, input),
-          readE2EArtifact: (caller, taskId, sha256) => getTaskE2EArtifact(routeDeps(caller), caller, taskId, sha256),
-          getPeople: (caller, taskId) => getTaskPeople(routeDeps(caller), caller, taskId),
-          proposePeopleRole: (caller, taskId, input) => proposeTaskPeopleRoleForPage(routeDeps(caller), caller, taskId, input),
-          proposeOwnership: (caller, taskId, input) => proposeTaskOwnershipForPage(routeDeps(caller), caller, taskId, input),
-          getPeopleRequest: (caller, taskId, requestId) => getTaskPeopleProposal(routeDeps(caller), caller, taskId, requestId),
-          confirmPeopleRequest: (caller, taskId, requestId) => confirmTaskPeopleProposal(routeDeps(caller), caller, taskId, requestId),
-          getPeopleCandidates: (caller, taskId) => getTaskPeopleCandidatesForPage(routeDeps(caller), caller, taskId),
-          addPeople: (caller, taskId, input) => addTaskWebPersonForPage(routeDeps(caller), caller, taskId, input),
-        }),
-      })(request, url);
-    }
-    const web = createFeedbackReviewWeb({
-      origin: new URL(deps.developer.issuer).origin,
-      authenticateSession,
-      getWorkflowFeedbackReview: (caller, taskId) => getWorkflowFeedbackReview(developerTaskRouteDependencies(deps, caller), caller, taskId),
-      submitWorkflowFeedbackDecision: (caller, taskId, input) => submitWorkflowFeedbackDecision(developerTaskRouteDependencies(deps, caller), caller, taskId, input),
-      now: deps.now,
-    });
-    return web(request, url);
-  }
-  // Plan v3.2 lane ID: a method and path with no row in the route table is refused before anyone is authenticated.
-  const route = devRouteOf(request.method, url.pathname);
-  if (route === undefined) throw agentXError("NOT_FOUND", "route not found");
-  // Spec 063 FR-004: a registered service's own route, authenticated as such, never as a Rovara caller.
-  if (request.method === "POST" && url.pathname === "/v1/dev/access") return checkSignInAccess(deps, request);
-  // Spec 065: a registered service acting as its signed-in person, within its scopes.
-  if (url.pathname.startsWith("/v1/dev/client/")) return routeClientRequest(deps, request, url);
-  // L4-AK1H: team knowledge for a tool outside Rovara: a signed-in person, or a script token with the Team knowledge permission. It is answered before the person sign-in below because a script token is not a JWT.
-  if (request.method === "POST" && KNOWLEDGE_API_ROUTES.test(url.pathname)) return knowledgeRoute(deps, request, url, route);
-  // Never request.jwtClaims: no API Gateway authorizer runs on /v1/dev/* (D17).
-  const caller = await authenticateCaller(deps, request.headers.authorization, route);
-  // The preview is read-only; the core resolves live company membership and project access.
-  if (/^\/v1\/dev\/projects\/([^/]+)\/start-estimates$/u.test(url.pathname)) {
-    const core = deps.developer.coreTasks;
-    if (core === undefined) throw agentXError("NOT_FOUND", "Start estimates are not available on this install.");
-    const answer = await core.route({ method: request.method, path: request.path, headers: {}, ...(request.body === undefined ? {} : { body: request.body }), requestId: request.requestId }, caller);
-    if (answer === undefined) throw agentXError("NOT_FOUND", "Start estimates are not available on this install.");
-    return coreAnswerValue(answer);
-  }
-  const machineSize = /^\/v1\/dev\/projects\/([^/]+)\/machine-size$/u.exec(url.pathname);
-  if (machineSize !== null && (request.method === "GET" || request.method === "POST")) return routeMachineSize(deps, caller, request, machineSize[1]!);
-  const settings = /^\/v1\/dev\/projects\/([^/]+)\/settings$/.exec(url.pathname);
-  if (settings !== null) return projectSettingsRoute(deps, caller, request, settings[1]!);
-  if (url.pathname === "/v1/dev/company/settings-compliance") return projectSettingsComplianceRoute(deps, caller, url);
-  if (request.method === "GET" && url.pathname === "/v1/dev/projects") {
-    const scope = deps.companies === undefined ? undefined : boundedCompanyReads(deps.documentClient);
-    const companyId = await resolveCompany(deps.companies, caller.developerId);
-    const result = await listProjects(scope === undefined ? deps : { ...deps, documentClient: scope.client }, caller, companyId);
-    scope?.check();
-    return result;
-  }
-  if (request.method === "GET" && url.pathname === "/v1/dev/workspaces") return listWorkspaces(deps, caller);
-  if (request.method === "PUT" && url.pathname === "/v1/dev/me/name") return setMyName(deps, caller, request);
-  if (/^\/v1\/dev\/(?:me\/sign-ins(?:\/link|\/link\/finish|\/[^/]+)?|company\/members\/[^/]+\/sign-ins(?:\/[^/]+)?)$/.test(url.pathname)) return routeSignInLinks(deps.developer.signInLinks, caller, request, url); // DEC 254w: connected sign-ins (sign-in-link-routes.ts).
+  if (url.pathname.startsWith("/review/link/")) return routeReviewLinkPage(deps, request, url);
+  if (url.pathname.startsWith("/review/")) return routeReviewRequest(deps, request, url);
+  return undefined;
+}
+
+async function routeStartEstimates(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest): Promise<unknown> {
+  const core = deps.developer.coreTasks;
+  if (core === undefined) throw agentXError("NOT_FOUND", "Start estimates are not available on this install.");
+  const answer = await core.route({ method: request.method, path: request.path, headers: {}, ...(request.body === undefined ? {} : { body: request.body }), requestId: request.requestId }, caller);
+  if (answer === undefined) throw agentXError("NOT_FOUND", "Start estimates are not available on this install.");
+  return coreAnswerValue(answer);
+}
+
+async function routeDeveloperProjectsList(deps: DeveloperRouteDependencies, caller: DeveloperCaller): Promise<unknown> {
+  const scope = deps.companies === undefined ? undefined : boundedCompanyReads(deps.documentClient);
+  const companyId = await resolveCompany(deps.companies, caller.developerId);
+  const result = await listProjects(scope === undefined ? deps : { ...deps, documentClient: scope.client }, caller, companyId);
+  scope?.check();
+  return result;
+}
+
+function routeDeveloperLessonsRequest(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> | undefined {
   // Lane LM8: the lessons API answers as the signed-in person; the company comes from their membership, inside it.
   if (LESSONS_API_ROUTES.test(url.pathname) || LESSONS_GRADUATION_ROUTES.test(url.pathname)) {
     if (deps.lessons === undefined) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
@@ -2682,45 +2546,89 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
     if (deps.lessonRepeats === undefined) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
     return deps.lessonRepeats.answer({ method: request.method, path: url.pathname, query: url.searchParams }, { personId: caller.developerId });
   }
-  if (url.pathname === "/v1/dev/tasks" || url.pathname.startsWith("/v1/dev/tasks/")) {
-    if (deps.tasks === undefined) throw agentXError("NOT_FOUND", "developer tasks are not set up in this deployment");
-    const checked = request.method === "GET" && (url.pathname === "/v1/dev/tasks" || /^\/v1\/dev\/tasks\/[^/]+(?:\/(messages|diff|comments|events|readers))?$/.test(url.pathname));
-    const scope = checked && deps.companies !== undefined ? boundedCompanyReads(deps.documentClient) : undefined;
-    // Lane W: a merge press is company-checked too (membership, never a claim).
-    const merging = request.method === "POST" && /^\/v1\/dev\/tasks\/[^/]+\/merge$/.test(url.pathname);
-    const commenting = isTaskCommentPost(request, url);
-    // Reuse this route's live membership for money visibility; never read it again per task.
-    let membership: Awaited<ReturnType<NonNullable<CompanyMembershipReader["membershipOf"]>>>;
-    const companies = deps.companies;
-    const checkedCompanies = companies?.membershipOf === undefined ? companies : {
-      companyOf: async (personId: string) => {
-        membership = await companies.membershipOf!(personId);
-        return membership?.companyId;
-      },
-    };
-    const companyId = checked || merging || commenting ? await resolveCompany(checkedCompanies, caller.developerId) : undefined;
-    const taskDeps = developerTaskRouteDependencies(scope === undefined ? deps : { ...deps, documentClient: scope.client }, caller);
-    if ((checked || merging) && companies !== undefined) {
-      taskDeps.taskMoneyVisible = async (task) => recordInCompany(task, companyId)
-        && (taskOwnerView(task)?.developerId === caller.developerId || membership?.role === "owner" || membership?.role === "admin");
-    }
-    const checkedDeps = scope === undefined ? taskDeps : { ...taskDeps, actions: companyReadActions(taskDeps.actions, scope),
-      ...(taskDeps.workflowE2EPresentation === undefined ? {} : { workflowE2EPresentation: (input: Parameters<NonNullable<DeveloperTaskRouteDependencies["workflowE2EPresentation"]>>[0]) => scope.read(() => taskDeps.workflowE2EPresentation!(input)) }) };
-    const result = await routeDeveloperTaskRequest({
-      ...checkedDeps, ...(companyId === undefined ? {} : { companyId }),
-      ...(merging && deps.taskMerge !== undefined ? { taskMerge: deps.taskMerge } : {}),
-    }, caller, request, url);
-    // Only a completed list page with an explicit continuation may consume an item-bound signal.
-    scope?.check(url.pathname === "/v1/dev/tasks" && result !== null && typeof result === "object" && "nextCursor" in result);
-    return result;
+  return undefined;
+}
+
+function isCheckedTaskRead(request: AdaptedHttpRequest, url: URL): boolean {
+  return request.method === "GET" && (url.pathname === "/v1/dev/tasks" || /^\/v1\/dev\/tasks\/[^/]+(?:\/(messages|diff|comments|events|readers))?$/.test(url.pathname));
+}
+
+function wrapTaskDepsForCompanyReads(taskDeps: DeveloperTaskRouteDependencies, scope: ReturnType<typeof boundedCompanyReads> | undefined): DeveloperTaskRouteDependencies {
+  if (scope === undefined) return taskDeps;
+  return {
+    ...taskDeps,
+    actions: companyReadActions(taskDeps.actions, scope),
+    ...(taskDeps.workflowE2EPresentation === undefined ? {} : { workflowE2EPresentation: (input: Parameters<NonNullable<DeveloperTaskRouteDependencies["workflowE2EPresentation"]>>[0]) => scope.read(() => taskDeps.workflowE2EPresentation!(input)) }),
+  };
+}
+
+async function routeDeveloperTasksRequest(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  if (deps.tasks === undefined) throw agentXError("NOT_FOUND", "developer tasks are not set up in this deployment");
+  const checked = isCheckedTaskRead(request, url);
+  const scope = checked && deps.companies !== undefined ? boundedCompanyReads(deps.documentClient) : undefined;
+  // Lane W: a merge press is company-checked too (membership, never a claim).
+  const merging = request.method === "POST" && /^\/v1\/dev\/tasks\/[^/]+\/merge$/.test(url.pathname);
+  const commenting = isTaskCommentPost(request, url);
+  // Reuse this route's live membership for money visibility; never read it again per task.
+  let membership: Awaited<ReturnType<NonNullable<CompanyMembershipReader["membershipOf"]>>>;
+  const companies = deps.companies;
+  const checkedCompanies = companies?.membershipOf === undefined ? companies : {
+    companyOf: async (personId: string) => {
+      membership = await companies.membershipOf!(personId);
+      return membership?.companyId;
+    },
+  };
+  const companyId = checked || merging || commenting ? await resolveCompany(checkedCompanies, caller.developerId) : undefined;
+  const taskDeps = developerTaskRouteDependencies(scope === undefined ? deps : { ...deps, documentClient: scope.client }, caller);
+  if ((checked || merging) && companies !== undefined) {
+    taskDeps.taskMoneyVisible = async (task) => recordInCompany(task, companyId)
+      && (taskOwnerView(task)?.developerId === caller.developerId || membership?.role === "owner" || membership?.role === "admin");
   }
-  if (url.pathname === CHATGPT_CONNECTION_PATH || url.pathname === `${CHATGPT_CONNECTION_PATH}/finish`) {
-    return routeChatGptConnection(deps, caller, request, url);
-  }
-  if (url.pathname === "/v1/dev/channel-links" || url.pathname.startsWith("/v1/dev/channel-links/")) {
-    return routeOwnChannelLinks(deps, caller, request, url);
-  }
+  const checkedDeps = wrapTaskDepsForCompanyReads(taskDeps, scope);
+  const result = await routeDeveloperTaskRequest({
+    ...checkedDeps, ...(companyId === undefined ? {} : { companyId }),
+    ...(merging && deps.taskMerge !== undefined ? { taskMerge: deps.taskMerge } : {}),
+  }, caller, request, url);
+  // Only a completed list page with an explicit continuation may consume an item-bound signal.
+  scope?.check(url.pathname === "/v1/dev/tasks" && result !== null && typeof result === "object" && "nextCursor" in result);
+  return result;
+}
+
+function routeAuthenticatedDeveloperRequest(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  // The preview is read-only; the core resolves live company membership and project access.
+  if (/^\/v1\/dev\/projects\/([^/]+)\/start-estimates$/u.test(url.pathname)) return routeStartEstimates(deps, caller, request);
+  const machineSize = /^\/v1\/dev\/projects\/([^/]+)\/machine-size$/u.exec(url.pathname);
+  if (machineSize !== null && (request.method === "GET" || request.method === "POST")) return routeMachineSize(deps, caller, request, machineSize[1]!);
+  const settings = /^\/v1\/dev\/projects\/([^/]+)\/settings$/.exec(url.pathname);
+  if (settings !== null) return projectSettingsRoute(deps, caller, request, settings[1]!);
+  if (url.pathname === "/v1/dev/company/settings-compliance") return projectSettingsComplianceRoute(deps, caller, url);
+  if (request.method === "GET" && url.pathname === "/v1/dev/projects") return routeDeveloperProjectsList(deps, caller);
+  if (request.method === "GET" && url.pathname === "/v1/dev/workspaces") return listWorkspaces(deps, caller);
+  if (request.method === "PUT" && url.pathname === "/v1/dev/me/name") return setMyName(deps, caller, request);
+  if (/^\/v1\/dev\/(?:me\/sign-ins(?:\/link|\/link\/finish|\/[^/]+)?|company\/members\/[^/]+\/sign-ins(?:\/[^/]+)?)$/.test(url.pathname)) return routeSignInLinks(deps.developer.signInLinks, caller, request, url); // DEC 254w: connected sign-ins (sign-in-link-routes.ts).
+  const lessonsResponse = routeDeveloperLessonsRequest(deps, caller, request, url);
+  if (lessonsResponse !== undefined) return lessonsResponse;
+  if (url.pathname === "/v1/dev/tasks" || url.pathname.startsWith("/v1/dev/tasks/")) return routeDeveloperTasksRequest(deps, caller, request, url);
+  if (url.pathname === CHATGPT_CONNECTION_PATH || url.pathname === `${CHATGPT_CONNECTION_PATH}/finish`) return routeChatGptConnection(deps, caller, request, url);
+  if (url.pathname === "/v1/dev/channel-links" || url.pathname.startsWith("/v1/dev/channel-links/")) return routeOwnChannelLinks(deps, caller, request, url);
   throw agentXError("NOT_FOUND", "route not found");
+}
+
+export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  const preAuth = routePreAuthDeveloperPath(deps, request, url);
+  if (preAuth !== undefined) return preAuth;
+  // Plan v3.2 lane ID: a method and path with no row in the route table is refused before anyone is authenticated.
+  const route = devRouteOf(request.method, url.pathname);
+  if (route === undefined) throw agentXError("NOT_FOUND", "route not found");
+  // Spec 063 FR-004: a registered service's own route, authenticated as such, never as a Rovara caller.
+  if (request.method === "POST" && url.pathname === "/v1/dev/access") return checkSignInAccess(deps, request);
+  // Spec 065: a registered service acting as its signed-in person, within its scopes.
+  if (url.pathname.startsWith("/v1/dev/client/")) return routeClientRequest(deps, request, url);
+  // L4-AK1H: team knowledge for a tool outside Rovara: a signed-in person, or a script token with the Team knowledge permission. It is answered before the person sign-in below because a script token is not a JWT.
+  if (request.method === "POST" && KNOWLEDGE_API_ROUTES.test(url.pathname)) return knowledgeRoute(deps, request, url, route);
+  // Never request.jwtClaims: no API Gateway authorizer runs on /v1/dev/* (D17).
+  const caller = await authenticateCaller(deps, request.headers.authorization, route);
+  return routeAuthenticatedDeveloperRequest(deps, caller, request, url);
 }
 
 /**

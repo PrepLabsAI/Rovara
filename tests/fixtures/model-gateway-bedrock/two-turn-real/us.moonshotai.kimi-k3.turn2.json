@@ -1,0 +1,20 @@
+{
+ "status": 200,
+ "stop": "end_turn",
+ "blocks": [
+  {
+   "type": "thinking",
+   "thinking": "Now final to user. Since asked call ping tool, report result. Keep concise.",
+   "signature": ""
+  },
+  {
+   "type": "text",
+   "text": "Ping successful: **pong**"
+  }
+ ],
+ "usage": {
+  "input": 242,
+  "output": 39
+ },
+ "complete": true
+}

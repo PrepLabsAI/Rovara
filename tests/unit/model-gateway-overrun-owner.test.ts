@@ -1,0 +1,20 @@
+import { beforeAll, expect, it } from "vitest";
+import { denyNetwork } from "./model-gateway-no-network.js";
+import { InMemoryMeter } from "../../packages/model-gateway/src/meter.js";
+import { DynamoMeter } from "../../packages/model-gateway/src/dynamo-meter.js";
+import { Dynamo } from "../../packages/model-gateway/src/dynamo.js";
+import { WireDynamo } from "./model-gateway-wire-dynamo.js";
+import { caps, scope, now } from "./model-gateway-fixture.js";
+beforeAll(denyNetwork);
+for (const durable of [false, true]) it(`an estimated call's correction cannot clear a subsequent call's cap latch (${durable})`, async () => {
+  const tables = { meter: "meter", ledger: "ledger", markers: "markers" }, wire = new WireDynamo(Object.values(tables));
+  const meter = durable ? new DynamoMeter({ db: new Dynamo({ region: "us-west-2", credentials: async () => ({ accessKeyId: "TEST", secretAccessKey: "not-real" }), transport: wire.transport }), tables, now: () => now }) : new InMemoryMeter(() => now);
+  const low = { ...caps, companyMonth: 20 };
+  const a = await meter.reserve({ scope, caps: low, estimateMicros: 5 });
+  const b = await meter.reserve({ scope: { ...scope, tid: "task_b" }, caps: low, estimateMicros: 5 });
+  if (!a.ok || !b.ok) throw new Error("holds");
+  const estimated = { provider: "anthropic", model: "claude-x", kind: "chat" as const, priceVersion: 1, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }, settledAt: now };
+  await meter.settle(a.reservation, 30, estimated); await meter.settle(b.reservation, 40, estimated);
+  expect(await meter.correct({ callKey: JSON.stringify([scope.iss, scope.cid, a.reservation.id]), realMicros: 5, caps, priceVersion: 2, estimated: false, priceSource: { source: "litellm", fetchedAt: now }, runId: "a", now })).toMatchObject({ status: "corrected" });
+  expect((await meter.read(scope)).find(row => row.item === "company")?.overrun).toBe(true);
+});
