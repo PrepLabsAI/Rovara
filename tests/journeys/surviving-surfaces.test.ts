@@ -71,7 +71,7 @@ describe("A1-12: what journey 15 covered that outlives Code's task page", () => 
     expect(refused(full)).toEqual({ status: 400, code: "CONFIG_INVALID", message: "This thread has 20 replies, the most it can hold." });
     expect(storedComments(w, taskId).filter((row) => row.parentId === root.commentId), "twenty replies stored, the 21st nowhere").toHaveLength(20);
     // Who may comment is the route's own access rule (a colleague without the task is told what a missing task is told) and another company's member is refused by that rule (404) before any limit is touched; the test does not show that a second person has a count of their own.
-    const stranger = await w.proof.probe(() => w.omar("POST", `/v1/dev/tasks/${taskId}/comments`, comment("Let me in.")));
+    const stranger = await w.omar("POST", `/v1/dev/tasks/${taskId}/comments`, comment("Let me in."));
     expect(stranger.status).toBe(404);
     w.proof.assertAllCore();
   }, 240_000);
@@ -98,7 +98,7 @@ describe("A1-12: what journey 15 covered that outlives Code's task page", () => 
       vi.setSystemTime(start + lastGoodDay * DAY_MS + 23 * 3_600_000);
       expect((await read(person)).status, `${shape}: day ${String(lastGoodDay)} and 23 hours on`).toBe(200);
       vi.setSystemTime(start + endDay * DAY_MS);
-      const ended = await w.proof.probe(() => read(person));
+      const ended = await w.proof.signInRefused(() => read(person));
       expect(signInAgain(ended), `${shape}: at day ${String(endDay)}`).toEqual(SIGN_IN_AGAIN);
     }
     vi.setSystemTime(start);
@@ -106,23 +106,23 @@ describe("A1-12: what journey 15 covered that outlives Code's task page", () => 
     // A revoked session (the token endpoint's revoke, an admin ending it): refused at once, and the same person's other session still works (developer-routes.ts:795 `revokedAt`).
     const revoked = writeCliSession(w, MAYA, day(30), { revokedAt: new Date().toISOString(), revokedReason: "admin" });
     const other = writeCliSession(w, MAYA, day(30));
-    expect(signInAgain(await w.proof.probe(() => read(revoked))), "a revoked session").toEqual(SIGN_IN_AGAIN);
+    expect(signInAgain(await w.proof.signInRefused(() => read(revoked))), "a revoked session").toEqual(SIGN_IN_AGAIN);
     expect((await read(other)).status, "the same person's other session").toBe(200);
     // A session of a person who is not the token's (the session belongs to another registered person): refused (developer-routes.ts:795 `developerId`).
     const borrowed = { ...writeCliSession(w, OMAR, day(30)), developerId: MAYA.developerId };
-    expect(signInAgain(await w.proof.probe(() => read(borrowed))), "a session of another person").toEqual(SIGN_IN_AGAIN);
+    expect(signInAgain(await w.proof.signInRefused(() => read(borrowed))), "a session of another person").toEqual(SIGN_IN_AGAIN);
     // A registered client's session never acts as the CLI, whatever token names it (spec 063 FR-003, developer-routes.ts:799).
     const clientSession = writeCliSession(w, MAYA, day(30), { clientId: "tool-app" });
-    expect(signInAgain(await w.proof.probe(() => read(clientSession))), "a client's session on the CLI's door").toEqual(SIGN_IN_AGAIN);
+    expect(signInAgain(await w.proof.signInRefused(() => read(clientSession))), "a client's session on the CLI's door").toEqual(SIGN_IN_AGAIN);
     // A person whose registration is revoked is refused whatever their session says (developer-routes.ts:813), and is let back when it is restored.
     const registration = w.harness.db.get(`DEVELOPER#${MAYA.developerId}`, "META")!;
     w.harness.db.set({ ...registration, revoked: true });
-    expect(signInAgain(await w.proof.probe(() => read(other))), "a revoked person").toEqual(SIGN_IN_AGAIN);
+    expect(signInAgain(await w.proof.signInRefused(() => read(other))), "a revoked person").toEqual(SIGN_IN_AGAIN);
     w.harness.db.set(registration);
     expect((await read(other)).status, "restored").toBe(200);
     // An admin ending the person's sign-ins ends every session that started before it, and says so (developer-routes.ts:814 endedByAdmin).
     w.harness.db.set({ ...registration, sessionsEndedAt: new Date(Date.now() + 1_000).toISOString() });
-    const adminEnded = await w.proof.probe(() => read(other));
+    const adminEnded = await w.proof.signInRefused(() => read(other));
     expect({ status: adminEnded.status, message: (adminEnded.json().error as { message: string }).message }, "an admin ended the sign-in").toEqual({ status: 401, message: "an AgentX admin ended your sign-in; run agentx login <url> again" });
     w.harness.db.set(registration);
     w.proof.assertAllCore();
