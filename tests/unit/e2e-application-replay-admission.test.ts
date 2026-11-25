@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { E2EApplicationPlanIntentSchema, E2E_MODEL_ROUTE_DEFAULT_BUDGETS, canonicalJson, deriveE2EApplicationRuntimeAccountRef, e2eApplicationMetadataSourceRefs, type E2EScenario } from "@agentx/contracts";
 import { decodeE2EApplicationExecutionAdmission, e2eApplicationGroupAgentSteps, e2eApplicationGroupUsesModel, validateE2EApplicationExecutionAdmission } from "@agentx/verifier";
 import { ApplicationDispatchRefusal } from "../../packages/broker/src/e2e/application-dispatch-check.js";
-import { applicationApprovedPlanDigest, buildApplicationExecutionAdmission, buildApplicationReplayAdmission, type ApplicationAdmissionInput, type ApplicationRoundApproval } from "../../packages/broker/src/e2e/application-admission.js";
+import { applicationApprovedPlanDigest, buildApplicationExecutionAdmission, type ApplicationAdmissionInput, type ApplicationRoundApproval } from "../../packages/broker/src/e2e/application-admission.js";
 import { evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
 import { e2eAgentRoutePolicyLimits } from "../../packages/broker/src/e2e/model-route-registry.js";
 import { createRealCandidate, disposeRealCandidates } from "../support/e2e-application-candidate.js";
@@ -78,8 +78,8 @@ async function round() {
   const agentCase = cases.find((item) => item.scenarioId === "owner-agent-csv")!;
   const replayOf = (attempt = 1) => ({ sourceRoundId: randomUUID(), sourceAdmissionSha256: sha("source admission"), sourceEvidenceSha256: sha("source evidence"), attempt,
     sourceCases: cases.map((item) => ({ caseId: item.caseId, assertionOutcomes: item.assertionDigests.map(() => "passed" as const), csvSha256: null })), traces: [recording(agentCase.caseId, 0)] });
-  const replayRound = (options: { approval?: ApplicationRoundApproval; rows?: ReturnType<typeof webApiRow>[]; attempt?: number } = {}) => buildApplicationReplayAdmission({
-    ...inputFor(options.rows ?? rows()), approval: options.approval ?? APPROVAL, replay: replayOf(options.attempt) });
+  const replayRound = (options: { approval?: ApplicationRoundApproval; rows?: ReturnType<typeof webApiRow>[]; attempt?: number } = {}) => buildApplicationExecutionAdmission({
+    ...inputFor(options.rows ?? rows()), planDigest: applicationApprovedPlanDigest(TASK, options.approval ?? APPROVAL), replay: replayOf(options.attempt) });
   return { source, cases, agentCase, candidateOf, replayRound, rows };
 }
 

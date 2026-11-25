@@ -55,7 +55,7 @@ export type ApplicationAdmissionInput = Readonly<{
   /**
    * T7b: set for a grounding round (the proposed plan's must-not-change scenarios on the unchanged code, before the owner is asked, for information only). Like a baseline its snapshot and
    * build source are the base commit's and it runs no model; unlike one it runs exactly the scenarios named, and the admission signs no member for it: the broker binds the purpose by the
-   * plan digest (`groundingPlanDigest`), which `buildApplicationGroundingAdmission` derives and the verifier recomputes.
+   * plan digest (`groundingPlanDigest`), which the verifier recomputes.
    */
   grounding?: { baseCommitSha: string; attempt: number; scenarioIds: readonly string[] };
   /**
@@ -103,17 +103,6 @@ export function applicationApprovedPlanDigest(taskId: string, approval: Applicat
   }));
 }
 
-/** An audit replay's admission: the candidate round's inputs plus the round to replay. The plan identity is derived here, from the approval, never passed in. */
-export type ApplicationReplayAdmissionInput = Omit<ApplicationAdmissionInput, "planDigest" | "replay" | "baseline"> & Readonly<{
-  approval: ApplicationRoundApproval; replay: NonNullable<ApplicationAdmissionInput["replay"]>;
-}>;
-export function buildApplicationReplayAdmission(input: ApplicationReplayAdmissionInput): ApplicationAdmission {
-  const { approval, ...rest } = input;
-  // The round to replay and the attempt are signed by `replay`; they are not part of the plan identity, which every case id is derived from.
-  const planDigest = applicationApprovedPlanDigest(input.taskId, approval);
-  return buildApplicationExecutionAdmission({ ...rest, planDigest });
-}
-
 const refusal = applicationRoundRefusal;
 const failure = (error: unknown) => (error instanceof Error ? error.message : "unreadable input");
 
@@ -146,17 +135,6 @@ export type GroundingPlanBinding = Readonly<{ taskId: string; artifactId: string
 export function groundingPlanDigest(binding: GroundingPlanBinding): string {
   return sha256(canonicalJson({ domain: GROUNDING_PLAN_DIGEST_DOMAIN, taskId: binding.taskId, artifactId: binding.artifactId, artifactSha256: binding.artifactSha256,
     workflowRevision: binding.workflowRevision, baseCommitSha: binding.baseCommitSha, attempt: binding.attempt }));
-}
-
-/** A grounding round's admission: the inputs of a baseline's, the scenarios to keep, and the proposed plan it checks. The plan digest is derived here, never passed in. */
-export type ApplicationGroundingAdmissionInput = Omit<ApplicationAdmissionInput, "planDigest" | "replay" | "baseline" | "grounding"> & Readonly<{
-  grounding: NonNullable<ApplicationAdmissionInput["grounding"]>; planArtifactId: string;
-}>;
-export function buildApplicationGroundingAdmission(input: ApplicationGroundingAdmissionInput): ApplicationAdmission {
-  const { planArtifactId, ...rest } = input;
-  const planDigest = groundingPlanDigest({ taskId: input.taskId, artifactId: planArtifactId, artifactSha256: input.artifact.sha256, workflowRevision: input.workflowRevision,
-    baseCommitSha: input.grounding.baseCommitSha, attempt: input.grounding.attempt });
-  return buildApplicationExecutionAdmission({ ...rest, planDigest });
 }
 
 /** The scenarios of a plan that a baseline round leaves out because they have an `agent` step (Ruling DD), by id and title, at most 64 (the display's bound). */
