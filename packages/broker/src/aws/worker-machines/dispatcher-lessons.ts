@@ -1,6 +1,6 @@
 // L10: a read-only learned input for ONE company's dispatcher runtime. L6 composes this
 // with hostedDispatcherFlow. The workspace record, never the job payload, vouches for scope.
-import { AgentXNameSchema, KNOWLEDGE_CONTEXT_FEATURE, KNOWLEDGE_PULL_MAX_UNITS, KNOWLEDGE_STAGE_PARTS, LEARNED_CONTEXT_FEATURE, OrgIdSchema, agentXError, codeRepositoriesOf, companyScoped, lessonSetKey, type DocumentStore, type OrgId, type StoredDocument } from "@agentx/contracts";
+import { AgentXNameSchema, KNOWLEDGE_CONTEXT_FEATURE, KNOWLEDGE_PULL_MAX_UNITS, KNOWLEDGE_STAGE_PARTS, LEARNED_CONTEXT_FEATURE, ROVARA_SKILLS_FEATURE, OrgIdSchema, agentXError, codeRepositoriesOf, companyScoped, lessonSetKey, type DocumentStore, type OrgId, type RovaraSkillFile, type StoredDocument } from "@agentx/contracts";
 import { z } from "zod";
 import type { GetCommand } from "@aws-sdk/lib-dynamodb";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
@@ -13,6 +13,7 @@ import { documentLearningSettings } from "../../lessons/document-settings.js";
 import { documentLessonVectors } from "../../lessons/document-vectors.js";
 import { createHostedLessonParts, type HostedLessonPeople } from "../../lessons/hosted-people.js";
 import { LESSON_LOAD_DEADLINE_MS } from "../../lessons/host-glue.js";
+import { readHostedLiveSkills } from "./dispatcher-skills.js";
 import { recordLessonLoad } from "../../lessons/load-record.js";
 import { hasStaleCitation, LOAD_MAX_BYTES, LOAD_MAX_LESSONS, selectLessons } from "../../lessons/load.js";
 import { buildKnowledgeContext, deliveryRecordOf, pullable } from "../../lessons/knowledge-brief.js";
@@ -48,6 +49,16 @@ class SignalsSpent extends Error {}
 /** Projects whose signals one dispatcher keeps at once (the oldest is dropped past it). */
 const SIGNALS_KEPT_MAX = 200;
 type Learned = NonNullable<TaskFlowDeps["learned"]>;
+/**
+ * What a step may be given. Lessons: a step of the five lesson modes, for a worker that lists the feature (the plan check's lessons are part of the knowledge briefing: an older worker is sent exactly what it always was).
+ * Rovara skills (SKILLS-TO-WORKERS): plan and build steps only (as `lessons/host-glue.ts` `skillsFor`), for a worker that lists the feature, whether or not the project has any lesson.
+ */
+function partsOfStep(data: { workflowMode?: string | undefined; features: readonly string[] }): { lessons: boolean; skills: boolean } {
+  const mode = data.workflowMode ?? "";
+  const lessons = ["UNDERSTAND", "PLAN", "PLAN_CRITIQUE", "IMPLEMENT", "REVIEW"].includes(mode) && data.features.includes(LEARNED_CONTEXT_FEATURE) && (mode !== "PLAN_CRITIQUE" || data.features.includes(KNOWLEDGE_CONTEXT_FEATURE));
+  return { lessons, skills: (mode === "PLAN" || mode === "IMPLEMENT") && data.features.includes(ROVARA_SKILLS_FEATURE) };
+}
+const withSkills = <T extends object>(answer: T, skills: readonly RovaraSkillFile[]): T & { rovaraSkills?: RovaraSkillFile[] } => skills.length === 0 ? answer : { ...answer, rovaraSkills: [...skills] };
 function refuse(): never { throw agentXError("RUNTIME_UNAVAILABLE", DISPATCHER_LESSONS_UNAVAILABLE); }
 const Request = z.object({ workspaceId: z.uuid(), operationId: z.uuid(), workflowMode: z.enum(["UNDERSTAND", "PLAN", "PLAN_CRITIQUE", "IMPLEMENT", "REVIEW", "CHECKS", "FEEDBACK_REVIEW", "SETUP_DRAFT", "SETUP_AGENT", "WIKI_BUILD", "SPEC_WRITE"]).optional(), features: z.array(z.string().max(100)).max(64) });
 const Task = z.object({ taskId: z.uuid(), workspaceId: z.uuid(), companyId: OrgIdSchema, project: AgentXNameSchema, developerId: z.string().min(1).max(100), title: z.string().max(20_000), requestText: z.string().max(100_000).optional(), startingRevision: z.number().int().positive(), workflow: z.object({ revision: z.number().int().nonnegative() }) });
@@ -105,9 +116,8 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
       if (!Array.isArray(input?.features) || input.features.length > 64) refuse();
       const request = Request.safeParse(input);
       if (!request.success || !OrgIdSchema.safeParse(options.companyId).success) refuse();
-      if (request.data.workflowMode === undefined || !["UNDERSTAND", "PLAN", "PLAN_CRITIQUE", "IMPLEMENT", "REVIEW"].includes(request.data.workflowMode) || !request.data.features.includes(LEARNED_CONTEXT_FEATURE)) return {};
-      // The plan check's lessons are part of the knowledge briefing: an older worker is sent exactly what it always was.
-      if (request.data.workflowMode === "PLAN_CRITIQUE" && !request.data.features.includes(KNOWLEDGE_CONTEXT_FEATURE)) return {};
+      const { lessons: wantsLessons, skills: wantsSkills } = partsOfStep(request.data);
+      if (!wantsLessons && !wantsSkills) return {};
       const memo = new Map<string, Promise<StoredDocument | undefined>>();
       const client = { send: async (command: GetCommand) => {
         const answer = await read(() => options.documentClient.send(command));
@@ -164,8 +174,12 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
         if (resolved.chosenMode === "Off" && await whyLearningOff(settings, company, task.project) === "unreadable") refuse();
         return {};
       }
+      // The project's live skills, from the SAME selector the laptop path uses, for THIS task's own company and project (read from the workspace record and the task above, never from the request). Never throws.
+      const skills = wantsSkills ? await readHostedLiveSkills({ store: options.store, company, project: task.project, alive: () => !stopped && !failed }) : [];
+      check();
+      if (!wantsLessons) return withSkills({}, skills);
       const rawSet = await store.get(lessonSetKey(company, task.project));
-      if (rawSet === undefined) return {};
+      if (rawSet === undefined) return withSkills({}, skills);
       if (rawSet["members"] === null || typeof rawSet["members"] !== "object" || Object.keys(rawSet["members"]).length > DISPATCHER_LESSONS_LIMITS.lessons) refuse();
       const set = SetRecord.safeParse(rawSet);
       if (!set.success) refuse();
@@ -268,10 +282,10 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
           } catch { /* no record: the report of this step is dropped, as it was before */ } finally { if (recordTimer !== undefined) clearTimeout(recordTimer); }
         }
       }
-      return selected.chosen.length === 0 && knowledgeContext === undefined ? {} : {
+      return withSkills(selected.chosen.length === 0 && knowledgeContext === undefined ? {} : {
         ...(selected.chosen.length === 0 ? {} : { learnedContext: { v: 1, setVersion: set.data.setVersion, stage, lessons: selected.chosen } }),
         ...(knowledgeContext === undefined ? {} : { knowledgeContext }),
-      };
+      }, skills);
     };
     try {
       return await Promise.race([run(), new Promise<never>((_resolve, reject) => {
