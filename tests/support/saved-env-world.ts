@@ -26,7 +26,7 @@ export interface WorldOptions {
   /** Calls of the registry to replace (an error to throw, an answer to give). */
   registry?: Partial<ImageRegistry>;
   capabilities?: Partial<ImageRegistry["capabilities"]>;
-  keep?: number; proveHolds?: boolean;
+  proveHolds?: boolean;
 }
 
 export function savedEnvWorld(over: WorldOptions = {}) {
@@ -66,7 +66,6 @@ export function savedEnvWorld(over: WorldOptions = {}) {
     approved: async () => state.approved,
     currentKey: async () => state.key,
     defaultHeads: async () => state.heads,
-    keep: async () => over.keep ?? 3,
     now: () => clock.now,
     random: () => { counter += 1; return `${String(counter).padStart(2, "0")}`.repeat(24); },
   };

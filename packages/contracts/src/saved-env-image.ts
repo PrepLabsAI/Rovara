@@ -10,7 +10,7 @@
 // What an image holds: only `/rovara/seed` (the repositories at the proved commits with their dependency folders and warm caches) and `/rovara/manifest.json`. It is built `FROM scratch`: it holds no
 // operating system, and nothing in it is ever run. The worker copies the seed out of it.
 import { z } from "zod";
-import { SavedEnvManifestSchema, ImageDigestSchema, SAVED_ENV_KEEP_MAX, SAVED_ENV_KEEP_MIN } from "./saved-env.js";
+import { SavedEnvManifestSchema, ImageDigestSchema } from "./saved-env.js";
 import { sha256Hex } from "./web-hash.js";
 
 /** The first segment of every saved-environment repository, and the prefix of the repository creation template. */
@@ -185,18 +185,20 @@ export function savedEnvRepositoryPolicy(input: { pushRoleArn: string; pullRoleA
   };
 }
 
-/** ECR's own count rule keeps this many MORE than the largest `keep` a company may set: it is a backstop, not the rule. The broker's walk decides which images stay (the row names them), and an image pushed but not yet recorded must not push a recorded one out. */
-export const SAVED_ENV_LIFECYCLE_MARGIN = 3;
+/**
+ * ECR's own count rule is a backstop, not the rule: the broker's walk decides which images stay (the row names them), and an image pushed but not yet recorded must not push a recorded one out.
+ * 13 is the value already deployed (it was the largest company `keep`, 10, plus a margin of 3). `keep` is now the constant `SAVED_ENV_KEEP` (2); the backstop is NOT lowered here because that changes the deployed
+ * repository policy (an infra change, a lane of its own).
+ */
+export const SAVED_ENV_LIFECYCLE_BACKSTOP_COUNT = 13;
 
 /**
- * The lifecycle policy: untagged images go after a day, and images beyond `keep` plus a margin go (a BACKSTOP: the broker's walk keeps exactly the images its row names and deletes the rest). Immutable tags make a
+ * The lifecycle policy: untagged images go after a day, and images beyond the backstop count go (the broker's walk keeps exactly the images its row names and deletes the rest). Immutable tags make a
  * tag unmovable. There is NO age rule here: ECR evaluates rules in priority order and a later rule on tagged images never sees what a count rule keeps. The 30 day ceiling is the broker's manage walk (SH24),
  * `SAVED_ENV_IMAGE_CEILING_DAYS`.
  */
-export function savedEnvLifecyclePolicy(keep: number): { rules: Array<Record<string, unknown>> } {
-  z.number().int().min(SAVED_ENV_KEEP_MIN).max(SAVED_ENV_KEEP_MAX).parse(keep);
-  // The backstop is the LARGEST `keep` plus a margin, whatever this company chose: it must never be what decides which images stay.
-  const count = SAVED_ENV_KEEP_MAX + SAVED_ENV_LIFECYCLE_MARGIN;
+export function savedEnvLifecyclePolicy(): { rules: Array<Record<string, unknown>> } {
+  const count = SAVED_ENV_LIFECYCLE_BACKSTOP_COUNT;
   return {
     rules: [
       { rulePriority: 1, description: "Untagged images expire", selection: { tagStatus: "untagged", countType: "sinceImagePushed", countUnit: "days", countNumber: SAVED_ENV_UNTAGGED_DAYS }, action: { type: "expire" } },

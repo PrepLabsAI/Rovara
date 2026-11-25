@@ -19,7 +19,6 @@
 import { Aws, CfnOutput, Duration, Stack, aws_ecr as ecr, aws_iam as iam, type aws_lambda as lambda } from "aws-cdk-lib";
 import { Construct } from "constructs";
 import {
-  SAVED_ENV_KEEP_DEFAULT,
   SAVED_ENV_MANAGE_ACTIONS,
   SAVED_ENV_PULL_ACTIONS,
   SAVED_ENV_PUSH_ACTIONS,
@@ -93,7 +92,7 @@ export class SavedEnvImages extends Construct {
       description: "Rovara saved environment images: immutable tags, AES-256, keep the newest images, data actions for the push and pull roles only",
       imageTagMutability: "IMMUTABLE",
       encryptionConfiguration: { encryptionType: "AES256" },
-      lifecyclePolicy: JSON.stringify(savedEnvLifecyclePolicy(SAVED_ENV_KEEP_DEFAULT)),
+      lifecyclePolicy: JSON.stringify(savedEnvLifecyclePolicy()),
       repositoryPolicy: stack.toJsonString(policy),
     });
     // The repository policy names the roles by ARN, and the template must not be created before they exist.

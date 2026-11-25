@@ -15,10 +15,10 @@ export const SYSTEM_OWNER_NOT_ALLOWED = "Rovara's own runs are not allowed here.
 export const SYSTEM_TASK_PURPOSES: Readonly<Record<string, SystemRunKind>> = { nightly_run: "nightly_check", setup_agent: "repair_draft", wiki_build: "wiki_refresh" };
 
 /**
- * The purposes this phase accepts: the free ones, the wiki refresh (L4-P2) and the repair draft (L4-SR2), the two AI kinds whose money is held (each goes through `startUnattendedRun`: an enforced dollar cap, admission,
+ * The purposes this phase accepts: the free ones that run a TASK (not `saved_env_rebuild`, which is a prepare-only run with no task purpose), the wiki refresh (L4-P2) and the repair draft (L4-SR2), the two AI kinds whose money is held (each goes through `startUnattendedRun`: an enforced dollar cap, admission,
  * and the gateway's upkeep cap on its `nightly` origin). A system owner is not given an AI purpose by a flag alone: each needs the marks below, and a repair draft the project's upkeep switch too.
  */
-export const SYSTEM_RUN_KINDS_LIVE: readonly SystemRunKind[] = [...SYSTEM_RUN_FREE_KINDS, "wiki_refresh", "repair_draft"];
+export const SYSTEM_RUN_KINDS_LIVE: readonly SystemRunKind[] = [...SYSTEM_RUN_FREE_KINDS.filter((kind) => kind !== "saved_env_rebuild"), "wiki_refresh", "repair_draft"];
 
 /**
  * The marks a wiki refresh carries, which a wiki build by anyone else does not (L4-P2, REVIEW-1 L4 of P1: the purpose `wiki_build` alone is not enough, a person's build has it too):
