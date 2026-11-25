@@ -7,7 +7,7 @@ import { signinCompanyWorld } from "../support/signin-company-world.js";
 import { CompanySignInStore } from "../../packages/broker/src/developer/company-membership.js";
 import { CompanyInviteStore } from "../../packages/broker/src/developer/company-invites.js";
 import { companyMayMint } from "../../packages/broker/src/developer/session-mint.js";
-import { isMembershipReadFailure } from "../../packages/broker/src/developer/membership-read.js";
+import { isMembershipReadFailure } from "../../packages/broker/src/core/membership-read.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const failMembershipReadsOnce = (h: { db: { injectFault(fault: { command?: string; match?: (input: Record<string, unknown>) => boolean; error: { name: string; message?: string }; times?: number }): void } }) =>

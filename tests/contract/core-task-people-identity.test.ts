@@ -1,4 +1,5 @@
 import { hostedTaskAccess } from "../../packages/broker/src/aws/core-engine-root.js";
+import { membershipReadFailed } from "../../packages/broker/src/core/membership-read.js";
 import { loadOwnedTask } from "../../packages/broker/src/core/task-flow/reads.js";
 import { guardTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-access.js";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
@@ -97,6 +98,22 @@ describe("People on a task made by real core start", () => {
     await expect(getTaskPeople(w.people, { ...w.webCaller, developerId }, w.task.taskId)).rejects.toMatchObject({ code: display ? "RUNTIME_UNAVAILABLE" : "TASK_ACCESS_DENIED" });
     w.identity.developerRecord = async () => { throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable"); };
     await expect(getTaskPeople(w.people, w.webCaller, w.task.taskId)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
+  });
+
+  it.each(["companyMembership", "projectGrant", "developerRecord"] as const)("MEMBERSHIP-READ-FAILS-SAFE: a task with a People list, the web proof's %s read FAILS: the owner's read is the retryable 503, never 'no such task' or TASK_ACCESS_DENIED; the same read answering 'no' still refuses", async read => {
+    const w = await world();
+    await getTaskPeople(w.people, w.webCaller, w.task.taskId);
+    w.h.deps.access = hostedTaskAccess({ companyId: w.h.deps.companyId, membershipOf: async () => ({ companyId: w.h.deps.companyId, role: "member" }), projectGrant: async () => true, storage: async () => w.h.store, people: w.people });
+    const caller = { principal: { ...w.h.owner.principal, provider: "rovara-sign-in", personId: w.developerId } };
+    await expect(loadOwnedTask(w.h.deps, caller, w.task.taskId), "control: the owner reads").resolves.toBeDefined();
+    const failing = async (): Promise<never> => { throw membershipReadFailed(); };
+    (w.identity as Record<string, unknown>)[read] = failing;
+    await expect(loadOwnedTask(w.h.deps, caller, w.task.taskId)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    await expect(getTaskPeople(w.people, w.webCaller, w.task.taskId)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    // A read that ANSWERS "no" is the refusal, as before.
+    if (read === "companyMembership") (w.identity as Record<string, unknown>)[read] = async () => undefined;
+    if (read === "projectGrant") (w.identity as Record<string, unknown>)[read] = async () => false;
+    if (read !== "developerRecord") await expect(loadOwnedTask(w.h.deps, caller, w.task.taskId)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
   });
 
   it.each(["future-method", "rovara-sign-in", "local-owner", "Cloud", "cloudx", "", null, undefined, 1, {}])("rejects an unsupported concrete sign-in method %s", method => {

@@ -1,7 +1,7 @@
 // journey-gate: removed-member-answer
 // MEMBERSHIP-READ-FAILS-SAFE (was REMOVED-MEMBER-ANSWER, security; briefs/arch-cleanup/REMOVED-MEMBER-ANSWER-FINDINGS.md; plan DECOUPLE-CODE-CLOUD-PLAN.md 9.4): what the hosted core answers
 // a person whose company membership is gone, and what it answers when the membership READ fails for a moment. The rule: "the read says NO membership" ends access as it always did; "the read FAILED" is a retryable 503
-// that serves nothing, ends nothing and is never read as "no such task" or "sign in again" (developer/membership-read.ts). The engine's own 401 `UNAUTHENTICATED` and the no-company words are NOT this lane's (T1a/T1b). Real hosted wiring (the journey world), the web app's own client and a CLI sign-in
+// that serves nothing, ends nothing and is never read as "no such task" or "sign in again" (core/membership-read.ts). The engine's own 401 `UNAUTHENTICATED` and the no-company words are NOT this lane's (T1a/T1b). Real hosted wiring (the journey world), the web app's own client and a CLI sign-in
 // on the same front. A member starts a task and has its screen open (control: every read is 200), then:
 //   (a) is REMOVED FROM THE COMPANY (the membership row is stamped revoked; sessions alive, which is the window between the stamp and the session end): the web client's every route and the access check
 //       answer 401 AUTH_REQUIRED at sign-in, exactly as before the fix;
@@ -129,10 +129,18 @@ describe("a member with a task screen open", () => {
     w.proof.assertAllCore({ callbacks: false });
   }, 400_000);
 
-  it("(c2) PROOF: a session that has ENDED stays ended: whichever membership read fails, the web client's every route answers 401 and a failed read never extends it", async () => {
+  it("(c2) PROOF: a session that has ENDED, was REVOKED or was ended by an admin stays ended: whichever membership read fails, the web client's every route answers 401 and a failed read never extends it", async () => {
     const { w, taskId } = await memberWithTaskOpen();
     const sessionKey = `SESSION#web-app-${MAYA.sessionId}`;
-    w.harness.db.set({ ...w.harness.db.get(sessionKey, "META")!, endsAt: Math.floor(Date.now() / 1000) - 60 });
+    const developerKey = `DEVELOPER#${MAYA.developerId}`;
+    const session = w.harness.db.get(sessionKey, "META")!;
+    const developer = w.harness.db.get(developerKey, "META")!;
+    // `strict`: the session row is checked BEFORE any membership read, so every answer is the 401. An admin's end is checked AFTER the membership read, so a failed read there may answer the retryable 503 first (nothing is served; the retry is the 401).
+    const variants: Array<[string, boolean, () => void]> = [
+      ["past endsAt", true, () => w.harness.db.set({ ...session, endsAt: Math.floor(Date.now() / 1000) - 60 })],
+      ["revokedAt", true, () => w.harness.db.set({ ...session, revokedAt: new Date(Date.now() - 1_000).toISOString(), revokedReason: "admin" })],
+      ["sessionsEndedAt", false, () => w.harness.db.set({ ...developer, sessionsEndedAt: new Date(Date.now() + 5_000).toISOString() })],
+    ];
     const state = { count: 0, failAt: 0 };
     const db = w.harness.db as unknown as { send: (command: { input: Record<string, unknown> }) => Promise<unknown> };
     const original = db.send;
@@ -143,10 +151,14 @@ describe("a member with a task screen open", () => {
     const web: Ask = surfaces(w, refusedBeforeTheCore(w))[0]![1];
     const answered: string[] = [];
     try {
-      for (const r of reads(taskId)) for (let failAt = 0; failAt <= 3; failAt += 1) {
-        state.count = 0; state.failAt = failAt;
-        const a = await web(r.method, r.path, r.body);
-        if (a.status !== 401) answered.push(`${r.route}, read #${String(failAt)} failed -> ${String(a.status)}`);
+      for (const [name, strict, end] of variants) {
+        w.harness.db.set(session); w.harness.db.set(developer);
+        end();
+        for (const r of reads(taskId)) for (let failAt = 0; failAt <= 3; failAt += 1) {
+          state.count = 0; state.failAt = failAt;
+          const a = await web(r.method, r.path, r.body);
+          if (a.status !== 401 && !(!strict && a.status === 503)) answered.push(`${name}: ${r.route}, read #${String(failAt)} failed -> ${String(a.status)}`);
+        }
       }
     } finally { db.send = original; }
     expect(answered).toEqual([]);
