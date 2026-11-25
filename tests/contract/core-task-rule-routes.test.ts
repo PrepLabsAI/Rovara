@@ -112,7 +112,7 @@ async function ruleWorld(options: { rules?: boolean } = {}) {
     return JSON.parse(JSON.stringify(answer).replaceAll(id, task.taskId)) as typeof answer;
   };
   const rows = () => JSON.stringify(db.find((item) => String(item.pk).includes(task.taskId)));
-  return { world, app, db, dev, missing, rows, task, owner, objects: harness.s3.objects };
+  return { world, app, db, dev, missing, rows, task, owner, objects: harness.s3.objects, rules };
 }
 
 describe("readers on a core task (spec 067's rule)", () => {
@@ -286,5 +286,23 @@ describe("DEC 254zzz44 (a): a reader the owner shared a core task with opens it 
     const unwired = await ruleWorld({ rules: false });
     unwired.db.set({ pk: `DEVTASK#${unwired.task.taskId}`, sk: `READER#${TESS.developerId}`, schemaVersion: 1, developerId: TESS.developerId, role: "viewer", grantedBy: MAYA.developerId, grantedAt: "2026-11-15T00:00:00.000Z" });
     expect(await unwired.dev(TESS, "GET", `/v1/dev/tasks/${unwired.task.taskId}`)).toEqual(await unwired.missing(TESS, "GET", ""));
+  });
+});
+
+
+// S1: the People moves of the task action registry, in process (the same People functions the routes call). Where People is not configured the move says so (the same refusal as the route), a task of another company is refused as missing
+// before any People function runs, and nothing is written either way.
+describe("the registry's People moves on a core task (S1)", () => {
+  it("answers as the People routes do where People is not configured, and refuses another company's task as missing; nothing is written", async () => {
+    const h = await ruleWorld();
+    const record = (await h.world.store.get(taskKey(h.task.taskId)))!;
+    const viewer = (who: Developer, task: Record<string, unknown> = record) => ({ person: { developerId: who.developerId, name: who.name }, companyId: FAKE_COMPANY, task });
+    const before = h.rows();
+    await expect(h.rules.people.view(viewer(MAYA))).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    await expect(h.rules.people.takeOwnership({ ...viewer(MAYA), requestId: randomUUID(), expectedPeopleRevision: 1 })).rejects.toBeDefined();
+    const foreign = { ...record, companyId: OTHER };
+    await expect(h.rules.people.view(viewer(MAYA, foreign))).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+    await expect(h.rules.people.takeOwnership({ ...viewer(MAYA, foreign), requestId: randomUUID(), expectedPeopleRevision: 1 })).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+    expect(h.rows()).toBe(before);
   });
 });

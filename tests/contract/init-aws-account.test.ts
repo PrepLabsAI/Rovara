@@ -31,7 +31,7 @@ describe("the AWS profiles on this machine", () => {
     const dir = await home();
     await writeFile(join(dir, ".aws", "config"), [
       "[default]", "region = us-west-2", "",
-      "[profile agentx-admin]", "login_session = arn:aws:iam::944937319445:user/owner", "region = us-east-1", "",
+      "[profile agentx-admin]", "login_session = arn:aws:iam::210987654321:user/owner", "region = us-east-1", "",
       "[profile dev]", "sso_session = acme", "sso_account_id = 111111111111", "sso_role_name = Admin", "",
       "[sso-session acme]", "sso_start_url = https://acme.awsapps.com/start", "",
       "[profile ci]", "role_arn = arn:aws:iam::222222222222:role/ci", "source_profile = default", "",

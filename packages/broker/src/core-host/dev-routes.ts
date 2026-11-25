@@ -49,7 +49,7 @@ import type { TaskMoneyV1 } from "@agentx/contracts";
 //     call with the sign-in refusal; there is no fallback to the install's company.
 //   - A handler the deployment has not wired answers a fixed "not on the core yet" (never a laptop default: the session levels, decision authority and the playbook's code host are the
 //     deployment's).
-import { AgentXError, ON_THE_WEBSITE_MESSAGE, OrgRoleSchema, type DeveloperSignInMethod, SavedEnvPanelSchema, agentXError, orgProjectCatalogKey, type AnswerResponse, type AuditSink, type DocumentStore, type ObjectStorage, type OrgId, type OrgRole, type Principal } from "@agentx/contracts";
+import { AgentXError, ON_THE_WEBSITE_MESSAGE, type TaskPeopleView, OrgRoleSchema, type DeveloperSignInMethod, SavedEnvPanelSchema, agentXError, orgProjectCatalogKey, type AnswerResponse, type AuditSink, type DocumentStore, type ObjectStorage, type OrgId, type OrgRole, type Principal } from "@agentx/contracts";
 import type { TaskCaller } from "../core/task-flow/deps.js";
 import type { TaskRecord } from "../core/task-flow/records.js";
 import { loadOwnedTask, loadReadableTask, readTask, taskViewOf } from "../core/task-flow/reads.js";
@@ -104,6 +104,7 @@ import { isAgentDirectoryPath, routeHostedAgentDirectory } from "./agent-directo
 import { isSystemRunsPath, routeHostedSystemRuns } from "./system-runs-routes.js";
 import { isPackageRegistriesPath, routeHostedPackageRegistries, type HostedPackageRegistriesWiring } from "./package-registries-routes.js";
 import { isHostedMergePath, routeHostedMerge, type HostedMergeWiring } from "./hosted-merge-routes.js";
+import { createTaskActionRoutes, type TaskActionChat } from "./task-action-routes.js";
 import { isTicketUpdatesPath, routeHostedTicketUpdates, type HostedTicketUpdatesWiring } from "./ticket-updates-routes.js";
 
 async function applicationReadProjection(runtime: CoreRuntime, record: TaskRecord, personId: string) {
@@ -257,6 +258,11 @@ export interface CoreDevWiring {
    */
   taskRules?: {
     route(input: { request: BrokerRequest; path: string; person: { developerId: string; name: string }; companyId: OrgId; task: Record<string, unknown>; store: Pick<DocumentStore, "query"> }): Promise<BrokerResponse>;
+    /** S1: the People moves the registry's first cut offers, in process (the same People functions the routes above call): the view, and taking over a task nobody owns (propose, then confirm, each re-read). */
+    people?: {
+      view(input: { person: { developerId: string; name: string }; companyId: OrgId; task: Record<string, unknown> }): Promise<TaskPeopleView>;
+      takeOwnership(input: { person: { developerId: string; name: string }; companyId: OrgId; task: Record<string, unknown>; requestId: string; expectedPeopleRevision: number }): Promise<void>;
+    };
     /** DEC 254zzz44 (a): whether this person is a reader the task's owner shared it with (spec 067) who is still a member of its project, read live. A read that fails is "no". */
     readsAsReader(input: { person: { developerId: string; name: string }; companyId: OrgId; task: Record<string, unknown> }): Promise<boolean>;
   };
@@ -281,6 +287,8 @@ export interface CoreDevRoutesOptions {
   /** The company's wiring, built once per company (a build that fails is tried again on the next request, as the runtime is). */
   wiring(runtime: CoreRuntime): CoreDevWiring | Promise<CoreDevWiring>;
   log?: (entry: Record<string, unknown>) => void;
+  /** S1: the chat the registry's presses come from (the chat seam, the install's proof key, the company's approval gate). Absent: the registry takes no chat press. */
+  chat?: TaskActionChat | undefined;
 }
 
 /**
@@ -493,6 +501,10 @@ export interface CoreDevRoutes {
    * missing id, a read that fails): the row then carries no round. Nothing is returned from the task here, so the list builds the round from the task record it already read.
    */
   taskReadable(caller: DeployedCaller, taskId: string): Promise<boolean>;
+  /** S1: what one task offers this person now (the task action registry), in process; `undefined` where the deployment does not serve the owner's moves for the person's company. */
+  taskActions: ReturnType<typeof createTaskActionRoutes>["taskActions"];
+  /** S1: a chat press of a task action, or the describe of one, judged again by the registry as the person the chat account is linked to. */
+  taskAction: ReturnType<typeof createTaskActionRoutes>["taskAction"];
 }
 
 function taskCallerOf(caller: DeployedCaller): TaskCaller {
@@ -564,7 +576,13 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
     return found;
   };
 
+  const taskActionRoutes = createTaskActionRoutes({
+    companyOf: (caller) => options.companyOf(caller), chat: options.chat, now: () => Date.now(), ...(options.log === undefined ? {} : { log: options.log }),
+    mount: async (companyId) => { const target = await mount(companyId); return { runtime: target.runtime, wiring: target.wiring }; },
+  });
   return {
+    taskActions: (caller, taskId) => taskActionRoutes.taskActions(caller, taskId),
+    taskAction: (caller, input) => taskActionRoutes.taskAction(caller, input),
     async answerForSlackThread(input) {
       if (!ORG_ID.test(input.companyId)) return undefined;
       const target = await mount(input.companyId);

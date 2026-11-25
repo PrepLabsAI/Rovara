@@ -121,11 +121,11 @@ async function requireRoomUnderCap(options: TaskActionsOptions, task: TaskRecord
   try {
     cap = await options.roundCap(task);
   } catch {
-    throw agentXError("BUDGET_EXCEEDED", SPEND_UNKNOWN);
+    throw agentXError("BUDGET_EXCEEDED", SPEND_UNKNOWN, { reason: "over_limit", writes: "none" });
   }
   if (cap === undefined) return;
-  if (cap.spentUsd === undefined || !Number.isFinite(cap.spentUsd) || !Number.isFinite(cap.limitUsd)) throw agentXError("BUDGET_EXCEEDED", SPEND_UNKNOWN);
+  if (cap.spentUsd === undefined || !Number.isFinite(cap.spentUsd) || !Number.isFinite(cap.limitUsd)) throw agentXError("BUDGET_EXCEEDED", SPEND_UNKNOWN, { reason: "over_limit", writes: "none" });
   if (cap.spentUsd >= cap.limitUsd) {
-    throw agentXError("BUDGET_EXCEEDED", "This task has used its run limit, so Rovara will not start more work on it. Start a new task.");
+    throw agentXError("BUDGET_EXCEEDED", "This task has used its run limit, so Rovara will not start more work on it. Start a new task.", { reason: "over_limit", writes: "none" });
   }
 }

@@ -39,7 +39,7 @@ export async function sendBackToCoding(deps: TaskFlowDeps, options: TaskActionsO
   }
   if (waitingForSpend(workflow)) throw agentXError("CONFIG_INVALID", WAITING_FOR_SPEND);
   if (request.expectedRevision === undefined) throw agentXError("CONFIG_INVALID", SEND_BACK_NEEDS_REVISION);
-  if (request.expectedRevision !== workflow.revision) throw agentXError("CHANGE_STALE", SEND_BACK_OUT_OF_DATE);
+  if (request.expectedRevision !== workflow.revision) throw agentXError("CHANGE_STALE", SEND_BACK_OUT_OF_DATE, { reason: "stale", writes: "none" });
   if (!workflowSendBackOffered(workflow)) throw agentXError("CONFIG_INVALID", NO_SEND_BACK_FOR_NOW);
   const workspace = await readWorkspace(deps, task.workspaceId);
   if (workspace === undefined || workspace.status === "CLOSED") throw agentXError("CONFIG_INVALID", CLOSED_TASK);

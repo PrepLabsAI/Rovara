@@ -9,7 +9,7 @@ import { taskSessionId } from "../../packages/broker/src/core/sessions/create.js
 import { workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
 import { createFakeWorld, FAKE_COMPANY } from "../support/core-host-fakes.js";
 
-async function world(milestones?: boolean | (() => boolean)) {
+async function world(milestones?: boolean | (() => boolean), taskActions?: { buttons?: number; capability?: boolean; offered?: { plan?: boolean; merge?: boolean; people?: boolean } }) {
   const fake = createFakeWorld();
   const taskId = randomUUID();
   const sessionId = taskSessionId(taskId);
@@ -17,14 +17,14 @@ async function world(milestones?: boolean | (() => boolean)) {
   let member = true;
   let company: string = FAKE_COMPANY;
   let fails = false;
-  const adapter: ChannelAdapter = { capabilities: { threads: true, buttons: 5, edits: true, maxTextLength: 40000, proactive: true }, projects: [], stepUp: [],
+  const adapter: ChannelAdapter = { capabilities: { threads: true, buttons: taskActions?.buttons ?? 5, edits: true, maxTextLength: 40000, proactive: true, ...(taskActions?.capability === true ? { taskActions: true } : {}) }, projects: [], stepUp: [],
     async deliver(event) { if (fails) throw new Error("offline"); events.push(event); } };
   const workflow = { ...createWorkflowSnapshot({ taskId, ownerId: "a".repeat(64), now: new Date(fake.clock.now).toISOString(), definitionVersion: "1.1.0" }), stage: "IMPLEMENT", state: "RUNNING", revision: 5 } as WorkflowSnapshot;
   const put = async (value: WorkflowSnapshot) => fake.store.put({ item: JSON.parse(JSON.stringify({ ...taskKey(taskId), entityType: "DEVELOPER_TASK", taskId, companyId: FAKE_COMPANY, orgId: FAKE_COMPANY, sessionId, workflow: value })) as StoredDocument });
   await put(workflow);
   await recordTaskThread({ store: fake.store, orgId: FAKE_COMPANY, now: () => fake.clock.now }, { sessionId, personId: "dev-a", actor: { channel: SLACK_CHANNEL, tenant: "T0123456789", userId: "U0123456789" }, conversation: { channel: SLACK_CHANNEL, tenant: "T0123456789", space: "C0123456789", thread: "1700000000.000001" } });
   const threads = hostedSlackThreads({ workspaces: { requireCompany: async () => FAKE_COMPANY, tokenForCompany: async () => undefined } });
-  const refresh = workflowThreadRefresh({ messageOf: (message) => threads.messageOf!(message), store: fake.store, companyId: FAKE_COMPANY, now: () => fake.clock.now, ...(milestones === undefined ? {} : { milestones }),
+  const refresh = workflowThreadRefresh({ messageOf: (message) => threads.messageOf!(message), store: fake.store, companyId: FAKE_COMPANY, now: () => fake.clock.now, ...(milestones === undefined ? {} : { milestones }), ...(taskActions?.offered === undefined ? {} : { taskActions: taskActions.offered }),
     taskUrl: () => "https://app.example/app/sessions/" + sessionId, registry: { get: (() => adapter) as never }, companyOf: async () => company, isMember: async () => member });
   return { fake, workflow, put, events, refresh: () => refresh(FAKE_COMPANY, sessionId, taskId), member: (value: boolean) => { member = value; }, company: (value: string) => { company = value; }, fails: (value: boolean) => { fails = value; } };
 }
@@ -102,4 +102,51 @@ it.each(["The plan couldn't be read.", "the plan couldn't be read"])("an unreada
   const event = w.events[0]!;
   if (event.type !== "message") throw new Error("not a workflow notice");
   expect(event.data.text).toContain("the claims or decisions did not match the required format");
+});
+
+// S1: where the thread's adapter takes the registry's presses (and the host serves the registry), the notice carries what the task offers now as buttons; public, so a button holds only the task, the revision and a layout hint.
+describe("task action buttons on a workflow notice (S1)", () => {
+  const buttonsOf = (event: ChannelEvent): Array<{ type: string; actionId?: string; label: string; value?: string; style?: string; url?: string }> => {
+    if (event.type !== "message") throw new Error("not a notice");
+    return (event.data.parts ?? []).flatMap((part) => (part.type === "actions" ? part.actions : [])) as never;
+  };
+  const blocked = async (stage: "IMPLEMENT" | "VERIFY" | "PULL_REQUEST", options: Parameters<typeof world>[1]) => {
+    const w = await world(undefined, options);
+    await w.put({ ...w.workflow, stage, state: "BLOCKED" as const, blockReason: "the step stopped" });
+    await w.refresh();
+    return w;
+  };
+
+  it("offers the retry for the step that stopped, with a link to the task last, and a value that carries no label, right or price", async () => {
+    const w = await blocked("IMPLEMENT", { capability: true, buttons: 10, offered: { plan: true, merge: true, people: true } });
+    const buttons = buttonsOf(w.events[0]!);
+    expect(buttons.map((button) => button.actionId)).toEqual(expect.arrayContaining(["rovara_task:step.retry", "rovara_task:task.close", "rovara_task:people.view"]));
+    expect(buttons.at(-1)).toMatchObject({ type: "link", label: "Open the task" });
+    const retry = buttons.find((button) => button.actionId === "rovara_task:step.retry")!;
+    expect(retry.label).toBe("Retry coding");
+    // A retry of coding needs no form: one press. (Only the task and the revision it was shown.)
+    expect(Object.keys(JSON.parse(retry.value!) as object).sort()).toEqual(["r", "t"]);
+    const close = buttons.find((button) => button.actionId === "rovara_task:task.close")!;
+    expect(close).toMatchObject({ style: "danger" });
+    expect(JSON.parse(close.value!)).toMatchObject({ n: 1 });
+    expect(buttons.some((button) => button.actionId === "rovara_task:people.take-ownership")).toBe(false);
+  });
+
+  it("offers nothing the adapter did not declare and the host does not serve, and keeps to the adapter's button count with the link still there", async () => {
+    const laptop = await blocked("IMPLEMENT", { capability: false, offered: { plan: true, merge: true, people: true } });
+    expect(buttonsOf(laptop.events[0]!)).toEqual([]);
+    const unwired = await blocked("IMPLEMENT", { capability: true });
+    expect(buttonsOf(unwired.events[0]!)).toEqual([]);
+    const small = await blocked("IMPLEMENT", { capability: true, buttons: 2, offered: { plan: true, merge: true, people: true } });
+    const few = buttonsOf(small.events[0]!);
+    expect(few).toHaveLength(2);
+    expect(few.at(-1)).toMatchObject({ type: "link" });
+  });
+
+  it("offers the checks choice for blocked checks and the retry of the pull request for a blocked publication", async () => {
+    const verify = await blocked("VERIFY", { capability: true, buttons: 10, offered: { people: false } });
+    expect(buttonsOf(verify.events[0]!).find((button) => button.actionId === "rovara_task:step.retry")?.label).toBe("Choose checks and retry");
+    const publish = await blocked("PULL_REQUEST", { capability: true, buttons: 10, offered: { people: false } });
+    expect(buttonsOf(publish.events[0]!).some((button) => button.actionId === "rovara_task:step.retry")).toBe(true);
+  });
 });

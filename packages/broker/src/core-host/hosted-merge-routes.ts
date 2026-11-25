@@ -103,7 +103,7 @@ function bodyOf(request: BrokerRequest): unknown {
   try { return JSON.parse(request.body) as unknown; } catch { throw agentXError("CONFIG_INVALID", HOSTED_MERGE_WORDS.body); }
 }
 
-type Basis = "task-owner" | "company-admin" | "project-admin";
+export type Basis = "task-owner" | "company-admin" | "project-admin";
 
 /**
  * Who the caller is to the task: `may` (with the basis), or a reader who may not merge (`may` undefined); anyone else reads "no such task". The task must be of the caller's OWN company (membership's), checked
@@ -158,8 +158,8 @@ const resultKey = (companyId: OrgId, taskId: string, requestId: string): Documen
 
 const DoneSchema = z.object({ personId: z.string(), status: z.literal("MERGED"), pullRequests: z.array(z.object({ repositoryId: z.string(), number: z.number().int() }).strict()).max(MAX_PULL_REQUESTS) });
 
-async function press(input: HostedMergeInput, wiring: HostedMergeWiring, taskId: string, basis: Basis): Promise<BrokerResponse> {
-  const parsed = MergeBodySchema.safeParse(bodyOf(input.request));
+async function press(input: HostedMergeInput, wiring: HostedMergeWiring, taskId: string, basis: Basis, body: unknown = bodyOf(input.request)): Promise<BrokerResponse> {
+  const parsed = MergeBodySchema.safeParse(body);
   if (!parsed.success) throw agentXError("CONFIG_INVALID", HOSTED_MERGE_WORDS.body);
   const { requestId, expectedHeads, risk } = parsed.data;
   const { companyId, principal, flow } = input;
@@ -244,4 +244,16 @@ export async function routeHostedMerge(input: HostedMergeInput): Promise<BrokerR
     input.log?.({ event: "hosted_merge.failed", error: error instanceof Error ? error.name : "unknown" });
     return errorAnswer(agentXError("RUNTIME_UNAVAILABLE", HOSTED_MERGE_WORDS.unavailable));
   }
+}
+
+/**
+ * S1 (owner DEC 254zzz477): the same merge, pressed by a person in Slack with a confirm dialog (the registry's `task.merge`, judged and bound to the heads and risk the confirm showed). The WHERE rule above (the website's own client) is
+ * the web route's; here the surface is bound by the registry's entry point and the confirm digest, and everything else (WHO, the lock, one answer per request id, the audit before the merge, the merge core's gates) is this file's, unchanged.
+ */
+export const hostedMergeStanding = standingOf;
+export const hostedMergeReadiness = readinessView;
+export { openPullRequestsOf as hostedMergeOpenPullRequests };
+export async function hostedMergePressAsPerson(input: HostedMergeInput, wiring: HostedMergeWiring, taskId: string, basis: Basis, body: { requestId: string; expectedHeads: Array<{ repositoryId: string; number: number; headSha: string }>; risk: "low" | "medium" | "high" }): Promise<void> {
+  const answer = await press(input, wiring, taskId, basis, body);
+  void answer;
 }

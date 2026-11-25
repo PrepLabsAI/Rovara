@@ -72,7 +72,7 @@ export async function stopTaskOnRequest(deps: TaskFlowDeps, caller: StopCaller, 
   // The task is read and the caller judged before the body, so someone who may not see the task learns nothing from what they sent.
   const standing = await stopStandingOf(deps, caller, task);
   if (standing === undefined || task === undefined) throw taskNotFound();
-  if (standing.authority === "reader") throw agentXError("FORBIDDEN", STOP_NOT_YOURS);
+  if (standing.authority === "reader") throw agentXError("FORBIDDEN", STOP_NOT_YOURS, { reason: "not_yours", writes: "none" });
   const authority: StopAuthority = standing.authority;
   const request = parseBody(DeveloperTaskActionRequestSchema, body());
   const workspace = await readWorkspace(deps, task.workspaceId);

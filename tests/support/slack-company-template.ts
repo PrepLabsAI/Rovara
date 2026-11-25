@@ -26,7 +26,7 @@ const onCondition = (template: Template, id: string): boolean => {
   return expression.includes('{"Fn::Equals":[{"Ref":"SlackCompanyWorkspaces"},"enabled"]}') || expression.includes('{"Condition":"SlackCompanyModeOn');
 };
 
-export function withoutSlackCompanyMode(input: unknown, options: { proof?: boolean } = {}): unknown {
+export function withoutSlackCompanyMode(input: unknown): unknown {
   const template = input as Template;
   expect(template.Parameters?.SlackCompanyWorkspaces).toStrictEqual({
     Type: "String", Default: "disabled", AllowedValues: ["enabled", "disabled"],
@@ -34,11 +34,10 @@ export function withoutSlackCompanyMode(input: unknown, options: { proof?: boole
   });
   delete template.Parameters!.SlackCompanyWorkspaces;
   const conditions = Object.keys(template.Conditions ?? {}).filter((id) => id.startsWith("SlackCompanyMode"));
-  expect(conditions.sort()).toEqual(options.proof === true ? [expect.stringMatching(/^SlackCompanyModeOn/u), expect.stringMatching(/^SlackCompanyModeTaskPersonProofOn/u)].sort() : [expect.stringMatching(/^SlackCompanyModeOn/u)]);
+  expect(conditions.sort()).toEqual([expect.stringMatching(/^SlackCompanyModeOn/u)]);
   for (const id of conditions) expect(onCondition(template, id), id).toBe(true);
   const policies = Object.entries(template.Resources).filter(([id]) => id.startsWith("SlackCompanyMode"));
-  const expected = [...SLACK_COMPANY_POLICIES, ...(options.proof === true ? ["TaskPersonProof"] : [])];
-  expect(policies.map(([id]) => id.replace(/^SlackCompanyMode/u, "").replace(/[0-9A-F]{8}$/u, "")).sort()).toEqual([...expected].sort());
+    expect(policies.map(([id]) => id.replace(/^SlackCompanyMode/u, "").replace(/[0-9A-F]{8}$/u, "")).sort()).toEqual([...SLACK_COMPANY_POLICIES].sort());
   for (const [id, policy] of policies) {
     // Only inline policies under the switch's condition: nothing exists while it is off.
     expect(policy.Type, id).toBe("AWS::IAM::Policy");
@@ -62,9 +61,7 @@ export function withoutSlackCompanyMode(input: unknown, options: { proof?: boole
     expect(outputs[id]!.Condition, id).toBeUndefined();
     delete outputs[id];
   }
-  // DEC 254zc (6): the proof function's switch variables (its COMPANY_SIGNIN is withoutCompanySignIn's).
-  const variables = options.proof === true ? [...VARIABLES, [/^TaskPersonProofFunction[0-9A-F]{8}$/u, ["SLACK_COMPANY_WORKSPACES", "STATE_TABLE_NAME"]] as const] : VARIABLES;
-  for (const [pattern, names] of variables) {
+  for (const [pattern, names] of VARIABLES) {
     const found = Object.entries(template.Resources).filter(([id, resource]) => pattern.test(id) && resource.Type === "AWS::Lambda::Function");
     expect(found, String(pattern)).toHaveLength(1);
     const variables = (found[0]![1].Properties.Environment as { Variables: Record<string, unknown> }).Variables;
@@ -94,7 +91,7 @@ export function withoutSlackCompanyMode(input: unknown, options: { proof?: boole
   // literal back where pins taken before it need it. Batch 12: so this helper only checks that the variable stays derived.
   expect(brokerVariables).not.toHaveProperty("COMPANY_READS");
   // DEC 254zg (a): Slack company mode requires company sign-in, so the company layer's switch goes with it.
-  return withoutCompanySignIn(template, options);
+  return withoutCompanySignIn(template);
 }
 
 /** L2-2 PR 18d: the named slack stack's addition: three off-by-default parameters and four container variables (the switch, the table, the team, the environment's name). */

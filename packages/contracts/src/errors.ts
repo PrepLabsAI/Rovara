@@ -139,6 +139,11 @@ export const AgentXErrorCodeSchema = z.enum([
   "EXTERNAL_ACCOUNT_LINK_EXISTS",
   // Confirmed owner move, but its response could not be read. A 409 for older clients: re-read; never resend blindly.
   "COMMITTED_REFRESH_NEEDED",
+  // S1 (Slack offers every task action): a task action the person pressed is no longer offered (the task moved on), was pressed on an out-of-date card or digest, still needs a value or the confirm, or is the website's. Appended: no code changes meaning.
+  "TASK_ACTION_NOT_OFFERED",
+  "TASK_ACTION_STALE",
+  "TASK_ACTION_NEEDS_INPUT",
+  "TASK_ACTION_NEEDS_WEB",
 ]);
 
 /** A confirmed write whose current task view could not be read; never a pre-commit refusal. */
@@ -181,11 +186,28 @@ export const PROCESS_SELF_CONFIRM_MESSAGE = "Someone else who can approve change
 /** What PROCESS_IN_USE (409) says: a project's process layer can't be archived while it is the project's default process. */
 export const PROCESS_IN_USE_MESSAGE = "Switch the project to another way of working before archiving this one.";
 
+/**
+ * S1: why a task action was refused, as a stable word beside the code (a surface picks its words by it and never reads the sentence). The F3 package moves this list with the codes (`packages/code-api/src/errors.ts`).
+ * `not_linked` (no Rovara person for the chat account), `not_found` (the task is not this person's to see), `not_yours` (a reader who may not act), `not_offered` (the task moved on), `stale` (the card or the digest is old),
+ * `busy` (a step holds the workspace), `over_limit` (the task's cap has no room), `needs_web` (the Rovara website's own), `needs_input` (a value or the confirm is missing), `closed`, `unavailable` (a fault: check before pressing again).
+ */
+export const TASK_ACTION_REFUSAL_REASONS = ["not_linked", "not_found", "not_yours", "not_offered", "stale", "busy", "over_limit", "needs_web", "needs_input", "closed", "unavailable"] as const;
+export type TaskActionRefusalReason = (typeof TASK_ACTION_REFUSAL_REASONS)[number];
+
+/**
+ * S1: whether a refused move may have written something, set at the throw site by its position (before or after the round was admitted or the change committed), never mapped from a code or a sentence.
+ * `none`: nothing was written. `maybe`: check the task before pressing again. `done`: it is already committed. An error that names none is `maybe` (fail safe).
+ */
+export type TaskActionWrites = "none" | "maybe" | "done";
+export interface AgentXErrorDetail { reason?: TaskActionRefusalReason; writes?: TaskActionWrites }
+
 export class AgentXError extends Error {
   constructor(
     readonly code: AgentXErrorCode,
     message: string,
     readonly statusCode: number,
+    /** S1: the stable reason and the runtime `writes` of a refused task action (absent on every older throw). */
+    readonly detail: AgentXErrorDetail = {},
   ) {
     super(`${code}: ${message}`);
     this.name = "AgentXError";
@@ -198,18 +220,18 @@ export function errorStatus(code: AgentXErrorCode): number {
   if (code === "TASK_STOP_CONFIG_MISSING" || code === "TASK_STOP_CONFIG_INVALID" || code === "TASK_STOP_APPROVAL_ABOVE_CEILING") return 409;
   if (code === "AUTH_REQUIRED") return 401;
   // The sign-in is valid but too old, or the wrong kind, for this change: 403, so a client does not treat it as a sign-in that ended.
-  if (code === "CSRF_STALE" || code === "REAUTH_REQUIRED" || code === "FORBIDDEN" || code === "SLACK_TEAM_NOT_BOUND" || code === "SLACK_ACCOUNT_NOT_LINKED" || code === "PROJECT_ACCESS_DENIED" || code === "PROJECT_TASKS_DISABLED" || code === "TASK_ACCESS_DENIED" || code === "TRIAL_LOCKED" || code === "AGENT_NOT_ON_PROJECT" || code === "AGENT_TOOL_NOT_GRANTED" || code === "MODEL_NOT_ALLOWED" || code === "REMOVED_FROM_ORG" || code === "GITHUB_NOT_CONNECTED" || code === "SESSION_LEVEL_REQUIRED" || code === "LOCAL_AGENT_NOT_ALLOWED" || code === "PROCESS_SELF_CONFIRM" || code === "LINK_START_AGAIN") return 403;
+  if (code === "CSRF_STALE" || code === "REAUTH_REQUIRED" || code === "FORBIDDEN" || code === "SLACK_TEAM_NOT_BOUND" || code === "SLACK_ACCOUNT_NOT_LINKED" || code === "PROJECT_ACCESS_DENIED" || code === "PROJECT_TASKS_DISABLED" || code === "TASK_ACCESS_DENIED" || code === "TRIAL_LOCKED" || code === "AGENT_NOT_ON_PROJECT" || code === "AGENT_TOOL_NOT_GRANTED" || code === "MODEL_NOT_ALLOWED" || code === "REMOVED_FROM_ORG" || code === "GITHUB_NOT_CONNECTED" || code === "SESSION_LEVEL_REQUIRED" || code === "LOCAL_AGENT_NOT_ALLOWED" || code === "PROCESS_SELF_CONFIRM" || code === "LINK_START_AGAIN" || code === "TASK_ACTION_NEEDS_WEB") return 403;
   if (code === "NOT_FOUND" || code === "PROJECT_NOT_FOUND" || code === "TASK_NOT_FOUND" || code === "LEARNING_OFF" || code === "LEARNING_LOCKED" || code === "LESSONS_SWITCHED_OFF" || code === "NOT_AVAILABLE_HERE") return 404;
   if (code === "BUDGET_EXCEEDED" || code === "ORG_BUDGET_EXCEEDED" || code === "MACHINE_TIME_EXCEEDED" || code === "PROJECT_BUDGET_EXCEEDED" || code === "AGENT_BUDGET_EXCEEDED" || code === "TEST_ALLOWANCE_USED" || code === "CHAIN_BUDGET_EXCEEDED") return 402;
-  if (code === "CONFIG_INVALID" || code === "PROCESS_UNAVAILABLE" || code === "AUDIT_RANGE_INVALID" || code === "AUDIT_REASON_REQUIRED" || code === "AUDIT_FILTER_TOO_WIDE") return 400;
+  if (code === "CONFIG_INVALID" || code === "PROCESS_UNAVAILABLE" || code === "AUDIT_RANGE_INVALID" || code === "AUDIT_REASON_REQUIRED" || code === "AUDIT_FILTER_TOO_WIDE" || code === "TASK_ACTION_NEEDS_INPUT") return 400;
   if (code === "TOO_MANY_REQUESTS") return 429;
   if (code === "TRASH_EXPIRED") return 410;
   if (code === "RUNTIME_UNAVAILABLE" || code === "SLACK_UNAVAILABLE" || code === "MODEL_PROXY_UNAVAILABLE" || code === "AUDIT_UNAVAILABLE") return 503;
   return 409;
 }
 
-export function agentXError(code: AgentXErrorCode, message: string): AgentXError {
-  return new AgentXError(code, message, errorStatus(code));
+export function agentXError(code: AgentXErrorCode, message: string, detail?: AgentXErrorDetail): AgentXError {
+  return new AgentXError(code, message, errorStatus(code), detail);
 }
 
 /**

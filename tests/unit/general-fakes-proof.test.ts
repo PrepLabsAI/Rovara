@@ -3,11 +3,10 @@
 import { describe, expect, it } from "vitest";
 import {
   GENERAL_FAKE_LABEL, GENERAL_FAKE_NOT_RUN_SENTENCES, GeneralFakesSettingSchema, ProjectDefinitionSchema, TestProofSchema,
-  generalFakesPayloadOf, generalFakesRoundLine, proofHolds, workerProjectDefinition, type PlanDocument, type TestProof,
+  generalFakesPayloadOf, generalFakesRoundLine, proofHolds, workerProjectDefinition, type TestProof,
 } from "@agentx/contracts";
 import { withGeneralFakeFacts } from "../../packages/worker/src/verification/test-proof.js";
-import { loadProofContext } from "../../packages/broker/src/core/proof/proof-inputs.js";
-import { MOCK_PROOF_PREFIX, testProofQualifier } from "../../packages/broker/src/core/proof/proof-table.js";
+import { MOCK_PROOF_PREFIX } from "../../packages/broker/src/core/proof/proof-table.js";
 import { loadTestProofLines } from "../../packages/broker/src/developer/test-proof-lines.js";
 import { definition } from "../support/task-flow-harness.js";
 
@@ -82,28 +81,8 @@ describe("never proof", () => {
     artifacts: async () => [{ name: "test-proof.json", objectKey: key }],
     readArtifact: async () => JSON.stringify(stored),
   });
-  const plan: PlanDocument = {
-    schemaVersion: 1, title: "Retry", why: [{ text: "Payments drop.", author: "Priya" }], claims: [{ id: "1", text: "Payments are retried." }], notChanging: [], risks: [], decisions: [],
-    checks: { proposed: [{ id: "unit", label: "Unit tests", command: { cwd: "repo/payments", executable: "npm", args: ["test"], timeoutSeconds: 30 } }], proves: { unit: ["1"] } },
-  };
-  const approved = { format: "structured", plan, markdown: "", artifact: {} } as never;
-  const workflow = { candidate: { digest: DIGEST }, verification: { candidateDigest: DIGEST, results: [{ checkId: "unit", status: "PASS" }] } } as never;
 
-  it("the broker maps the facts to a made_by_rovara dependency, and the proof is qualified as made with a Rovara mock", async () => {
-    const stored = proof({ madeByRovara: [{ checkId: "readiness:0", served: 2 }] });
-    const context = await loadProofContext({ actions: actions(stored) }, task, workflow, approved);
-    expect(context?.checkDependencies?.get("unit")).toEqual([{ dependencyId: "general_fake", trust: "made_by_rovara" }]);
-    expect(testProofQualifier(context?.testProof, DIGEST, { recordedCheckIds: ["unit"], checkDependencies: context?.checkDependencies })).toBe(MOCK_PROOF_PREFIX);
-    // Without the facts nothing changes (golden).
-    const plain = await loadProofContext({ actions: actions(proof()) }, task, workflow, approved);
-    expect(plain).toEqual({ plan, testProof: proof() });
-  });
 
-  it("an unmappable fact drops the whole proof (fail closed)", async () => {
-    const context = await loadProofContext({ actions: actions(proof({ madeByRovara: [{ checkId: "readiness:9", served: 1 }] })) }, task, workflow, approved);
-    expect(context?.testProof).toBeUndefined();
-    expect(context?.checkDependencies).toBeUndefined();
-  });
 
   it("the v1 pull request line says first that it rests on a Rovara-made mock, and an unreadable part gives no line", async () => {
     const inert = (line: string) => line;

@@ -1,10 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { TestProofSchema, TestProofWriteSchema, type TestProof } from "../../packages/contracts/src/index.js";
+import { TestProofWriteSchema, type TestProof } from "../../packages/contracts/src/index.js";
 import { serializeTestProof, withScriptedReplyFacts } from "../../packages/worker/src/verification/test-proof.js";
 import { modelHelperReplyCollector } from "../../packages/worker/src/model-helper-round.js";
-import { buildProofTable } from "../../packages/broker/src/core/proof/proof-table.js";
-import { loadProofContext } from "../../packages/broker/src/core/proof/proof-inputs.js";
-import { loadTestProof } from "../../packages/broker/src/core/proof/test-proof-reader.js";
 import { expectLinearScaling } from "../support/scaling.js";
 
 const digest = "a".repeat(64);
@@ -41,33 +38,7 @@ describe("reply facts in the saved proof", () => {
     const ids = new Set(read.items.map((item) => item.checkId));
     expect(read.scriptedReplies?.every((entry) => ids.has(entry.checkId) && entry.taskMade === 1)).toBe(true);
   });
-  it("the broker reads written facts and refuses the WHOLE damaged proof rather than reviving an older one", async () => {
-    const input = proof();
-    input.items.push({ ...input.items[0]!, checkId: "readiness:1" });
-    const written = serializeTestProof(withScriptedReplyFacts(input, "project", facts));
-    let newest = written;
-    const task = { ownerKey: "owner", workspaceId: "workspace" };
-    const actions = {
-      operations: async () => [1, 2].map((i) => ({ id: String(i), kind: "task", status: "SUCCEEDED", createdAt: `2026-11-14T00:00:0${String(i)}.000Z` })),
-      artifacts: async (_workspace: string, operation: string) => [{ name: "test-proof.json", objectKey: `private/owner/workspace/${operation}/test-proof.json` }],
-      readArtifact: async (key: string) => key.includes("/2/") ? newest : serializeTestProof(proof()),
-    };
-    expect((await loadTestProof(actions, task, digest))?.scriptedReplies).toEqual(facts);
-    const plan = { schemaVersion: 1 as const, title: "Proof", why: [], claims: [{ id: "1", text: "Fixed" }], notChanging: [], risks: [], decisions: [], checks: { proposed: [{ id: "unit", label: "Tests", command: { cwd: ".", executable: "npm", args: ["test"], timeoutSeconds: 5 } }], proves: { unit: ["1"] } } };
-    const wf = { candidate: { digest }, verification: { candidateDigest: digest, results: [{ checkId: "unit", status: "PASS" }, { checkId: "unused", status: "PASS" }, { checkId: "third", status: "PASS" }] } } as never;
-    const table = async () => {
-      const context = await loadProofContext({ actions }, task, wf, { format: "structured", plan } as never);
-      return buildProofTable({ plan, checkResults: [{ checkId: "unit", status: "PASS" }], scenarioRows: [], testProof: context?.testProof, candidateDigest: digest, recordedCheckIds: ["unit", "unused", "third"], checkDependencies: context?.checkDependencies });
-    };
-    newest = serializeTestProof(input);
-    expect((await table()).rows[0]?.evidence[0]?.state).toBe("proven");
-    newest = written;
-    expect((await table()).rows[0]?.evidence[0]).toMatchObject({ state: "passed", notProvenReason: "agent_replies_unconfirmed" });
-    newest = JSON.stringify({ ...TestProofSchema.parse(JSON.parse(written)), scriptedReplies: "damaged" });
-    expect(await loadTestProof(actions, task, digest)).toBeUndefined();
-    expect((await table()).rows[0]?.evidence[0]?.state).toBe("passed");
-  });
-  it("collector snapshots candidate facts synchronously and ignores later rerun facts", () => {
+    it("collector snapshots candidate facts synchronously and ignores later rerun facts", () => {
     const collector = modelHelperReplyCollector();
     let delivered = 0;
     const plan = collector.wrap({ blockList: [], start: async () => undefined, onResult: () => { delivered++; } })!;

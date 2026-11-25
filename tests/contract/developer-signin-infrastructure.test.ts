@@ -5,10 +5,11 @@ import { withoutWebhookSecretLane } from "../support/webhook-secret-template.js"
 import { stuckStoppingInstall, withoutStuckStoppingAlarm } from "../support/stuck-stopping-alarm-template.js";
 import { withoutApiAccessLog } from "../support/api-access-log-template.js";
 import { withoutWorkerCallbackAlarm } from "../support/worker-callback-alarm-template.js";
+import { withoutDispatcherLessonsPeople } from "../support/dispatcher-lessons-people-template.js";
 import { App, CfnParameter, Stack, aws_iam as iam } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
-import { companyScoped, serviceRoleStatements, defaultBoundaryStatements, deployBoundaryStatements, IMPLICIT_COMPANY_ID, SERVICE_ROLE_SERVICES, SLACK_OIDC_ISSUER, type PolicyStatementJson } from "@agentx/contracts";
+import { TASK_PERSON_COMPANY_MEMBER_ATTRIBUTES, TASK_PERSON_DEVELOPER_RECORD_ATTRIBUTES, companyScoped, serviceRoleStatements, defaultBoundaryStatements, deployBoundaryStatements, IMPLICIT_COMPANY_ID, SERVICE_ROLE_SERVICES, SLACK_OIDC_ISSUER, type PolicyStatementJson } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { withoutCoreModelAccessRoute } from "../support/core-model-access-template.js";
 import { withoutCoreEngine } from "../support/core-engine-template.js";
@@ -192,7 +193,7 @@ function withoutBrokerMemberConditionCheck(template: TemplateJson): TemplateJson
 describe("broker membership condition-check grant", () => {
   it("adds only the exact member-key statement to the broker; every other action, resource and principal stays pinned", () => {
     // Webhook lane W3 + DEC 254zzz432: the webhook secret slot and the stuck-stopping alarm are asserted and taken out too, so both pins below still hold.
-    const before = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(structuredClone(namedRaw), { env: "staging" }), stuckStoppingInstall("staging")))));
+    const before = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutDispatcherLessonsPeople(structuredClone(namedRaw)), { env: "staging" }), stuckStoppingInstall("staging")))));
     // The providers branch also adds this exact capability output. Keep a measured
     // combined pin, then remove only the asserted output to retain the upstream pin.
     expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("23e7a69839d8b913eb1c601b320f5ba05c6416f324a22b6abede4901020ebee6");
@@ -702,7 +703,7 @@ describe("task-token key and membership IAM", () => {
   it("changes only the named task key, alias, two env vars, public read and membership list item", () => {
     // ENV-ROOM 2 is checked in full by broker-names-parameter-infrastructure.test.ts; its shape is asserted and it is taken out first, so the digest still pins everything else.
     // Webhook lane W3 + DEC 254zzz432: as above, so the digest below still holds.
-    const remainder = withoutWebhookSecretLane(withoutBrokerNamesParameter(withoutBrokerMemberConditionCheck(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(structuredClone(named), { env: "staging" }), stuckStoppingInstall("staging"))))));
+    const remainder = withoutWebhookSecretLane(withoutBrokerNamesParameter(withoutBrokerMemberConditionCheck(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutDispatcherLessonsPeople(structuredClone(named)), { env: "staging" }), stuckStoppingInstall("staging"))))));
     withoutCoreModelAccessRoute(remainder);
     // Guided onboarding PR 7: the Linear app's webhook route (no authorizer; the broker verifies the HMAC). Its shape is asserted here, then it is taken out so the digest still pins everything else.
     expect(remainder.Resources["LinearWebhookRoute"]).toMatchObject({ Type: "AWS::ApiGatewayV2::Route", Properties: { RouteKey: "POST /v1/linear/webhooks", AuthorizationType: "NONE" } });
@@ -1882,6 +1883,12 @@ const companySignInAuditTuples: AccessTuple[] = [
 const envRoom2Added: AccessTuple[] = [["role:BrokerServiceRole", "Allow", "ssm:GetParameters", "arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/broker-names", "{}"]];
 const envRoom2Removed = new Set(["dynamodb:GetRecords", "dynamodb:GetShardIterator"].flatMap((action) => ["table:State", "table:State/index/*"].map((resource) => JSON.stringify(["role:BrokerServiceRole", "Allow", action, resource, "{}"]))));
 /** DEC 254zzz(2): the install company import's two sign-in table reads (BrokerCompanyImportReads); asserted statement by statement in "gives the broker exactly the install company import's two reads". */
+// LESSONS-PORT-FIX (DEC 254zzz473): the dispatcher's two GetItem reads of the sign-in table (infra/lib/dispatcher-lessons-people.ts, checked in full by dispatcher-lessons-people-infrastructure.test.ts).
+// Written from the shared attribute lists; the condition text sorts its values and keys as the other rows here do.
+const dispatcherLessonsPeopleTuples: AccessTuple[] = [["COMPANY_MEMBER#*", TASK_PERSON_COMPANY_MEMBER_ATTRIBUTES], ["DEVELOPER#*", TASK_PERSON_DEVELOPER_RECORD_ATTRIBUTES]].map(([prefix, attributes]) => [
+  "role:DispatcherServiceRole", "Allow", "dynamodb:GetItem", "table:DeveloperSignInTable",
+  JSON.stringify({ "ForAllValues:StringEquals": { "dynamodb:Attributes": [...(attributes as readonly string[])].sort() }, "ForAllValues:StringLike": { "dynamodb:LeadingKeys": [prefix] }, Null: { "dynamodb:Attributes": ["false"], "dynamodb:LeadingKeys": ["false"] }, StringEqualsIfExists: { "dynamodb:Select": ["SPECIFIC_ATTRIBUTES"] } }),
+] as AccessTuple);
 const companyImportTuples: AccessTuple[] = [
   // DEC 254zzz29/254zzz32 (rule D: this one row's condition gains ORG#<id>#SIGNIN_ISSUER and ORG#<id>#EMAIL#*; "rule D: taking the new keys out ..." proves every other row is unchanged).
   ["role:BrokerServiceRole", "Allow", "dynamodb:GetItem", "table:DeveloperSignInTable", "{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"ORG#org_????????????????????#COMPANY\",\"ORG#org_????????????????????#EMAIL#*\",\"ORG#org_????????????????????#SIGNIN_ISSUER\"]},\"Null\":{\"dynamodb:LeadingKeys\":[\"false\"]}}"],
@@ -1938,7 +1945,7 @@ const codeBuildStartTuples: AccessTuple[] = [
 ];
 const pinnedTuples: AccessTuple[] = [
   ["role:BrokerServiceRole", "Allow", "dynamodb:ConditionCheckItem", "table:DeveloperSignInTable", "{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"COMPANY_MEMBER#*\"]},\"Null\":{\"dynamodb:LeadingKeys\":[\"false\"]}}"] as AccessTuple,
-  ...beforeTuples.filter((tuple) => !(tuple[1] === "Allow" && tuple[2] === "codebuild:StartBuild")), ...codeBuildStartTuples, ...chatGptKeyDenyTuples, ...hostedWiringTuples, ...githubSignInTuples, ...companySignInAuditTuples, ...attentionEmailTuples, ...companyImportTuples,
+  ...beforeTuples.filter((tuple) => !(tuple[1] === "Allow" && tuple[2] === "codebuild:StartBuild")), ...codeBuildStartTuples, ...chatGptKeyDenyTuples, ...hostedWiringTuples, ...githubSignInTuples, ...companySignInAuditTuples, ...attentionEmailTuples, ...companyImportTuples, ...dispatcherLessonsPeopleTuples,
   ["role:DeveloperTaskNotifierFunctionServiceRole", "Allow", "lambda:InvokeFunction", "function:Broker", "{}"] as AccessTuple,
   // DEC 254v(c): the dispatcher reads the callback signing key's one secret, under the core switch's condition (core-engine.ts). The broker, the eval tick and the reconciler read it through the secret's own policy, which adds no tuple here.
   ["role:DispatcherServiceRole", "Allow", "secretsmanager:GetSecretValue", "secret:CallbackSigningKeySecret", "{}"] as AccessTuple,

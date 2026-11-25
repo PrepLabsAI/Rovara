@@ -34,7 +34,6 @@ it("parks ownerless PEOPLE work through the deployed dispatcher's delivery wirin
     STATE_TABLE_NAME: "state", ARTIFACT_BUCKET_NAME: "artifacts", AWS_REGION: "us-west-2",
     EC2_WORKER_SUBNETS: "us-west-2a=subnet-0aaaaaaaaaaaaaaaa", EC2_WORKER_LAUNCH_TEMPLATE_ID: "lt-0123456789abcdef0",
   })) vi.stubEnv(name, value);
-  vi.stubEnv("TASK_PERSON_PROOF_FUNCTION_ARN", undefined);
   const db = new FakeDynamoDb();
   vi.spyOn(DynamoDBDocumentClient.prototype, "send").mockImplementation((command) => db.send(command as never) as never);
   const { handler } = await import("../../packages/broker/src/aws/dispatcher.js");

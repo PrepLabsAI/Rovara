@@ -11,7 +11,6 @@ import {
   type ChannelMembersResponse,
   type SlackAuthCheckResponse,
   type TaskPersonProofResponse,
-  type TaskPersonProofRequest,
   type TaskChannelPeopleResponse,
   type TaskPeopleDisplayReadRequest,
   type TaskPeopleDisplayReadResponse,
@@ -25,8 +24,6 @@ export interface SlackDirectory {
   channelMembers(userId: string, channelIds: readonly string[]): Promise<ChannelMembersResponse>;
   /** A fresh users.info and complete membership read that never reuses display caches or reads. */
   taskPersonProof(userId: string, channelIds: readonly string[]): Promise<TaskPersonProofResponse>;
-  /** Fresh dispatch-only proof with an endpoint-supplied deadline and explicit Slack call meter. */
-  taskDispatchPersonProof(request: TaskPersonProofRequest, admission: { deadlineAt: number; slackCallsLimit: number; abortSignal?: AbortSignal }): Promise<{ result: TaskPersonProofResponse; slackCallsUsed: number }>;
   /** Complete, fresh and bounded identities from the named channels; no display cache or in-flight read is reused. */
   taskChannelPeople(channelIds: readonly string[]): Promise<TaskChannelPeopleResponse>;
   /** Request-scoped, metered Task People display read. Old proof/list methods remain unchanged. */
@@ -378,16 +375,6 @@ export function slackDirectory(input: {
     },
     async taskPersonProof(userId, channelIds) {
       return taskPersonProof(userId, channelIds);
-    },
-    async taskDispatchPersonProof(request, limits) {
-      const admission: DisplayFetchAdmission = {
-        deadlineAt: Math.min(limits.deadlineAt, input.now() + 6_000),
-        slackCallsLimit: Math.min(limits.slackCallsLimit, 100),
-      ...(limits.abortSignal === undefined ? {} : { abortSignal: limits.abortSignal }),
-        slackCallsUsed: 0,
-      };
-      const result = await taskPersonProof(request.slackUserId, request.channelIds, admission);
-      return { result, slackCallsUsed: admission.slackCallsUsed };
     },
     async taskChannelPeople(channelIds) {
       return taskChannelPeople(channelIds);

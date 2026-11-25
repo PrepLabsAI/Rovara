@@ -16,6 +16,7 @@ import {
   type Admission, type DocumentStore, type OrgId, type Principal, type ProjectDefinition,
 } from "@agentx/contracts";
 import { createSetupProposalSubject, setupApplyKey } from "../../packages/broker/src/core/setup-agent/apply.js";
+import { readState, setupAgentState, stopSetupAgent } from "../../packages/broker/src/core/setup-agent/agent.js";
 import { setupAgentKey, setupPartition } from "../../packages/broker/src/core/setup-agent/keys.js";
 import { setupApproverAllows } from "../../packages/broker/src/core/setup-agent/setup-risk.js";
 import { RECHECK_RETRY_DELAY_MS, advanceCurrentRecheck, recheckRowKey, setupGateBeforeBuild, type RecheckRow } from "../../packages/broker/src/core/setup-agent/recheck.js";
@@ -762,6 +763,34 @@ describe("L4-SR2: the gateway pauses nightly upkeep under the draft's run (N1)",
     const row = (await repairsOf(r.w.h.store, r.w.h.deps.companyId, "payments"))[0]!;
     await endRun(r.w, row.taskId!, pausedResult("no_budget"));
     expect(await advanceRepairDraft(r.deps, "payments")).toMatchObject({ state: "failed", reason: "upkeep_paused" });
+  });
+});
+
+describe("the pause is read by the repair draft but never sent outward", () => {
+  // Released Cloud reads the setup view with a strict summary schema that has neither `pause` nor `cannot`: the outward view (`setupAgentState`) must not carry them, while `readState` (the repair draft's read) keeps them.
+  const CLOUD_SUMMARY_KEYS = ["stop", "commandsRun", "spendCents", "elapsedMs", "hostAsks", "partial"];
+  it("the outward view has only Cloud's summary keys; the repair draft still sees the pause and stops", async () => {
+    const r = await rig();
+    await breakSetup(r.w);
+    const row = (await repairsOf(r.w.h.store, r.w.h.deps.companyId, "payments"))[0]!;
+    await endRun(r.w, row.taskId!, { status: "failed", stop: "infrastructure", failure: "The setup run could not go on. Try again.", summary: { ...SUMMARY, stop: "infrastructure", partial: false, pause: "no_budget", cannot: "company_limit_not_set" } });
+    const latest = (await r.deps.latest("payments"))!;
+    const outward = await setupAgentState(r.deps, "payments", latest.revision);
+    expect(outward.status).toBe("failed");
+    expect(Object.keys(outward.summary ?? {}).sort()).toEqual([...CLOUD_SUMMARY_KEYS].sort());
+    expect((await readState(r.deps, "payments", latest.revision)).view.summary).toMatchObject({ pause: "no_budget", cannot: "company_limit_not_set" });
+    expect(await advanceRepairDraft(r.deps, "payments")).toMatchObject({ state: "failed", reason: "upkeep_paused" });
+  });
+
+  it.each([["cannot", { cannot: "rovara_ai_not_confirmed" }], ["pause", { pause: "no_budget" }]])("Stop pressed on a run that already ended with `%s` answers with exactly Cloud's summary keys", async (_name, extra) => {
+    const r = await rig();
+    await breakSetup(r.w);
+    const row = (await repairsOf(r.w.h.store, r.w.h.deps.companyId, "payments"))[0]!;
+    await endRun(r.w, row.taskId!, { status: "failed", stop: "infrastructure", failure: "The setup run could not go on. Try again.", summary: { ...SUMMARY, stop: "infrastructure", partial: false, ...extra } });
+    const stopped = await stopSetupAgent(r.deps, "payments", { requestId: randomUUID() }, "someone");
+    expect(stopped.status).toBe(200);
+    expect(stopped.view.status).toBe("failed");
+    expect(Object.keys(stopped.view.summary ?? {}).sort()).toEqual([...CLOUD_SUMMARY_KEYS].sort());
   });
 });
 

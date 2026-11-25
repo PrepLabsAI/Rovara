@@ -63,7 +63,7 @@ export async function keepPrFeedback(deps: TaskFlowDeps, caller: TaskCaller, tas
   const prior = await keepReceipt(deps, key, payloadHash, acting.actorId);
   if (task.workflow?.feedbackDecisions?.some(d => d.requestId === body.requestId && d.decision === "DISMISS" && d.actorId === acting.actorId)) return task;
   const wf = task.workflow;
-  if (task.closedAt !== undefined || wf === undefined || wf.revision !== body.expectedRevision) throw agentXError("IDEMPOTENCY_CONFLICT", "The feedback card changed. Refresh the task.");
+  if (task.closedAt !== undefined || wf === undefined || wf.revision !== body.expectedRevision) throw agentXError("IDEMPOTENCY_CONFLICT", "The feedback card changed. Refresh the task.", { reason: "stale", writes: "none" });
   // No paid fix or uncertain push is kept while it is running. The ordinary no-change transition also proves the original checked trees remain current.
   let next: WorkflowSnapshot;
   let extra: TransactItem[] = [];

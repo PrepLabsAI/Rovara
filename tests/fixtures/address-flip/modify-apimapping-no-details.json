@@ -1,0 +1,28 @@
+{
+  "ChangeSetName": "address-flip-fghij67890-1",
+  "StackName": "AgentXApiAddress",
+  "Status": "CREATE_COMPLETE",
+  "ExecutionStatus": "AVAILABLE",
+  "Parameters": [
+    {
+      "ParameterKey": "ApiId",
+      "ParameterValue": "fghij67890"
+    }
+  ],
+  "Changes": [
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "Mapping",
+        "PhysicalResourceId": "m1x2y3",
+        "ResourceType": "AWS::ApiGatewayV2::ApiMapping",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": []
+      }
+    }
+  ]
+}

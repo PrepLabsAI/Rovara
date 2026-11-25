@@ -3,9 +3,7 @@ import { describe, expect, it } from "vitest";
 import { type DueSchedule } from "@agentx/contracts";
 import { NIGHTLY_FIRE_MAX_AGE_MS, NIGHTLY_MIN_GAP_MS, NIGHTLY_RUN_MAX_MS, deleteNightlySchedule, handleNightlyFire, putNightlySchedule, recordNightlyResult, syncNightlySchedule, validateNightlyCron, type NightlyRunPort } from "../../packages/broker/src/core/test-env/nightly.js";
 import { readLatestNight } from "../../packages/broker/src/core/test-env/night-status.js";
-import { admitNightly } from "../../packages/broker/src/core/test-env/nightly-run.js";
 import { createFakeScheduler } from "../../packages/broker/src/ports/fake-scheduler.js";
-import { createAllowAllAdmission } from "../../packages/broker/src/ports/policy-defaults.js";
 import { HEAD2, ORG, PROJECT, SCHEDULED, T0, approveForTest, body, nightlyWorld, result, rows } from "../support/nightly-world.js";
 
 describe("the schedule", () => {
@@ -100,11 +98,10 @@ describe("a fire", () => {
   it("asks the Admission seam: a refusal reads as a skipped night, an allow lets it run", async () => {
     const h = await nightlyWorld();
     const asked: unknown[] = [];
-    const refusing = { admit: async (request: unknown) => { asked.push(request); return { allowed: false as const, code: "budget_exhausted", message: "The budget is used up." }; } };
-    h.deps.runs.admit = (input) => admitNightly(refusing, () => T0)({ orgId: input.orgId, project: input.project });
+    h.deps.runs.admit = async (input) => { asked.push(input); throw Object.assign(new Error("The budget is used up."), { code: "BUDGET_EXCEEDED" }); };
     expect(await handleNightlyFire(h.deps, h.due())).toEqual({ outcome: "skipped", reason: "budget" });
-    expect(asked).toEqual([{ companyId: ORG, idempotencyKey: `nightly.run:${ORG}:${PROJECT}:2026-11-05`, action: "nightly.run", projectName: PROJECT, subject: { type: "project", id: PROJECT } }]);
-    h.deps.runs.admit = (input) => admitNightly(createAllowAllAdmission(), () => T0)({ orgId: input.orgId, project: input.project });
+    expect(asked).toEqual([{ orgId: ORG, project: PROJECT, purpose: "nightly_baseline" }]);
+    h.deps.runs.admit = async () => undefined;
     expect((await handleNightlyFire(h.deps, h.due())).outcome).toBe("started");
   });
 

@@ -28,4 +28,5 @@ export function createOwnerTaskAccess(): TaskAccess {
 }
 
 /** The error for a task the principal may not see: the same as one that does not exist. */
-export const taskNotFound = () => agentXError("TASK_NOT_FOUND", "no such task");
+/** Every throw of it is before a write (a task that is not the caller's to see is refused first), so a surface can say nothing was done. */
+export const taskNotFound = () => agentXError("TASK_NOT_FOUND", "no such task", { reason: "not_found", writes: "none" });

@@ -35,6 +35,7 @@ import {
 import type { Construct } from "constructs";
 import { CORE_DISPATCHER_TIMEOUT_SECONDS, CORE_BROKER_TIMEOUT_SECONDS, E2E_ARTIFACT_RETENTION_DAYS, EVIDENCE_RETENTION_DAYS, E2E_ARTIFACT_RETENTION_TAG_KEY, E2E_ARTIFACT_RETENTION_TAG_VALUE, HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, OUTBOX_PENDING_INDEX, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX, TEST_SERVICES_SETTING_VARIABLE, TEST_SERVICE_IMAGES_SETTING_VARIABLE, EGRESS_ADDRESSES_PARAMETER_PATTERN, EGRESS_ADDRESSES_VARIABLE, NAT_EGRESS_ADDRESSES_OUTPUT, WORKER_SANDBOX_EGRESS_DEFAULT, WORKER_SANDBOX_EGRESS_SETTING_VARIABLE, WORKER_SANDBOX_EGRESS_VALUES } from "@agentx/contracts";
 import { API_ACCESS_LOG_FORMAT } from "./api-access-log.js";
+import { inApiAddressStack } from "./api-address.js";
 import { EgressAlarms } from "./egress-alarms.js";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 import { ChannelAdapters } from "./channel-adapters.js";
@@ -44,7 +45,7 @@ import { SlackCompanyTokenReader } from "./slack-company-token-reader.js";
 import { addGithubWebhookSecret, GITHUB_WEBHOOK_ROUTE, guardGithubWebhookRoute } from "./github-webhook.js";
 import { SavedEnvImages } from "./saved-env-images.js";
 import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
-import { TaskPersonProof } from "./task-person-proof.js";
+import { connectDispatcherLessonsPeople } from "./dispatcher-lessons-people.js";
 import { addBrokerDeadLetterQueues, addBrokerName, addBrokerSetting, addDerivedBrokerVariable, brokerEnvironmentName, brokerNamesParameterArn } from "./broker-names.js";
 import { CompanySignInSwitch } from "./company-signin.js";
 import { DeveloperTaskNotifier } from "./developer-task-notifier.js";
@@ -88,7 +89,8 @@ function unlistedAlarms(scope: Construct, prefix: string, egressPrefix: string =
   return scope.node.root.node.findAll().flatMap((construct) => {
     // CloudWatch returns a composite alarm only to a DescribeAlarms grant on *, which the broker has not.
     if (construct instanceof cloudwatch.CfnCompositeAlarm) return [`the health probe cannot read composite alarm ${construct.node.path}`];
-    if (!(construct instanceof cloudwatch.CfnAlarm)) return [];
+    // The address stack's certificate-expiry alarm (api-address.ts) is the address stack's own, to its own topic: not an install health alarm.
+    if (!(construct instanceof cloudwatch.CfnAlarm) || inApiAddressStack(construct)) return [];
     // The foundation's egress alarms keep the live names agentx-<env>-blocked-dns-spike and agentx-<env>-nat-egress-spike-<az>, which the probe's single-word suffixes
     // cannot list. They notify the alerts topic and are not on the admin health route.
     // Only those names: any other alarm inside EgressAlarms is still refused. The legacy production install's health alarms are AgentX<suffix>, but its egress alarms (when its
@@ -163,12 +165,6 @@ export class ControlPlaneStack extends Stack {
     // Spec 025 phase 25a: declared on the stack itself so the names are exact. The legacy deployment (production) has
     // the developer task settings too, so it runs tasks as named environments do.
     const signInParameters = developerSignInParameters(this, { tasks: true });
-    const taskPersonProofEnabled = naming.env === "agentxlivetest123" ? new CfnParameter(this, "TaskPersonProofEnabled", {
-      type: "String",
-      default: "false",
-      allowedValues: ["true", "false"],
-      description: "Install the dedicated task person proof workload in the approved named TEST environment",
-    }) : undefined;
 
     const state = new dynamodb.Table(this, "State", {
       partitionKey: { name: "pk", type: dynamodb.AttributeType.STRING },
@@ -1102,6 +1098,8 @@ export class ControlPlaneStack extends Stack {
         naming, env: naming.env ?? "production", api, stage: defaultStage, brokerIntegration: integration, broker, dispatcher, slackSecret, parameters: signInParameters, turnRecords, stateTable: state,
         ...(companySignIn === undefined ? {} : { company: companySignIn }),
       });
+      // The dispatcher's lessons people port (a worker step's source lessons need the project roster): the sign-in table's name and two projected GetItem reads of it, from the real table, both layouts, no switch.
+      connectDispatcherLessonsPeople(this, dispatcher, developerSignIn.table);
       // Named: one statement for the broker's two invokes (the plan evidence job and the sign-in function; developer-signin.ts leaves its grant to this), ENV-ROOM 2's IAM room.
       // The same resources CDK's grantInvoke gives each: the function and its versions and aliases.
       if (naming.env !== undefined) {
@@ -1115,24 +1113,6 @@ export class ControlPlaneStack extends Stack {
       developerSignIn.function.addEnvironment("ADMIN_OIDC_ISSUER", oidcIssuer.valueAsString);
       developerSignIn.function.addEnvironment("ADMIN_CLAIM", adminClaim.valueAsString);
       developerSignIn.function.addEnvironment("ADMIN_VALUES", adminValues.valueAsString);
-      if (naming.env === "agentxlivetest123" && taskPersonProofEnabled !== undefined) {
-        const proof = new TaskPersonProof(this, "TaskPersonProof", {
-          naming,
-          enabled: taskPersonProofEnabled,
-          slackTeamId: signInParameters.slackTeamId,
-          slackSecret,
-          developerSignInTable: developerSignIn.table,
-          dispatcher,
-          // DEC 254zc (6): the proof's switch variables come with the infrastructure switch (they change the version the dispatcher pins).
-          ...(companySignIn === undefined || slackCompany === undefined ? {} : { companySwitches: {
-            COMPANY_SIGNIN: companySignIn.value, SLACK_COMPANY_WORKSPACES: slackCompany.value,
-            STATE_TABLE_NAME: Token.asString(Fn.conditionIf(slackCompany.isOn.logicalId, state.tableName, "")),
-          } }),
-        });
-        if (slackCompany !== undefined) {
-          slackCompany.grant("TaskPersonProof", proof.role, [slackCompany.tokenRead(), slackCompany.stateReads(state, "ReadSlackWorkspaceBindings", SLACK_BINDING_READ_KEYS)], proof.install);
-        }
-      }
       addBrokerSetting(broker, naming, "taskPeopleChanges", taskParameters.taskPeopleChangesEnabled.valueAsString);
       addBrokerSetting(broker, naming, "taskPeoplePublicInvitations", taskParameters.taskPeoplePublicInvitationsEnabled.valueAsString);
       addBrokerSetting(broker, naming, "taskPeoplePrivateInvitations", taskParameters.taskPeoplePrivateInvitationsEnabled.valueAsString);

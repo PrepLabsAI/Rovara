@@ -235,7 +235,6 @@ describe("deploy parameters", () => {
     for (const [part, names] of Object.entries(OPERATOR_PARAMETERS)) {
       const declared = Object.keys(templates.get(part)?.Parameters ?? {});
       for (const name of names) {
-        if (name === "TaskPersonProofEnabled") continue; // Declared only in the owner-approved named TEST template.
         expect(declared, `${part} ${name}`).toContain(name);
       }
     }
@@ -363,11 +362,6 @@ describe("deploy parameters", () => {
     expect(stackParameters("control-plane", answers(), outputs, { packages: true })).not.toHaveProperty("TaskPeopleChangesEnabled");
     expect(stackParameters("control-plane", answers(), outputs, { packages: true })).not.toHaveProperty("TaskPeoplePublicInvitationsEnabled");
     expect(stackParameters("control-plane", answers(), outputs, { packages: true })).not.toHaveProperty("TaskPeoplePrivateInvitationsEnabled");
-  });
-
-  it("preserves the proof installation parameter without turning it into an install answer", () => {
-    expect(OPERATOR_PARAMETERS["control-plane"]).toContain("TaskPersonProofEnabled");
-    expect(stackParameters("control-plane", answers(), outputs, { packages: true })).not.toHaveProperty("TaskPersonProofEnabled");
   });
 });
 

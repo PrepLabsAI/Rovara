@@ -1,11 +1,8 @@
-// Test services are install-wide, so a project with NO dependencies must see exactly what it saw before: with the services switch on every user-visible output below is byte-for-byte the output with it off. If this
-// fails, the switch needs a per-project allow-list first. Covered: the setup proposal (sanitized draft), the task plans (checks and coding), the Prove report, the evidence pack, and the pull request lines the evidence
-// builds (the pull request body takes its testing lines from the pack and has no other test-services input).
+// Test services are install-wide, so a project with NO dependencies must see exactly what it saw before: with the services switch on the task plans below are byte-for-byte the plans with it off. If this
+// fails, the switch needs a per-project allow-list first. Covered: the proposal digest and the task plans (checks and coding). The evidence half (environment line, pack, pull request lines) went with its
+// deleted subject, test-env/evidence-line.ts.
 import { describe, expect, it } from "vitest";
 import { TestEnvironmentBodySchema, type OrgId, type TestEnvironmentBody } from "@agentx/contracts";
-import { buildEvidencePack } from "../../packages/broker/src/core/proof/evidence-pack.js";
-import { evidenceLines } from "../../packages/broker/src/core/proof/evidence-lines.js";
-import { evidenceEnvironmentOf } from "../../packages/broker/src/core/test-env/evidence-line.js";
 import { testEnvImplementPlanFor, testEnvPlanFor } from "../../packages/broker/src/core/test-env/task-plan.js";
 import { testEnvironmentForStart } from "../../packages/broker/src/core/test-env/usable.js";
 import { BENCH_ORG, bench } from "../support/test-env-bench.js";
@@ -37,7 +34,7 @@ async function project(env: NodeJS.ProcessEnv) {
 
 describe("a project with no dependencies sees the same with tx on and off", () => {
 
-  it("task plans (checks and coding), evidence environment, pack and PR lines are the same", async () => {
+  it("the proposal digest and the task plans (checks and coding) are the same", async () => {
     const on = await project(ON);
     const off = await project(OFF);
     // The same proposal digest (the environment body is hashed without a dependencies key).
@@ -54,17 +51,6 @@ describe("a project with no dependencies sees the same with tx on and off", () =
     same(plans[0], plans[2]);
     expect(JSON.stringify(plans[0])).not.toContain("dependencies");
     for (const env of [ON, OFF]) expect(await testEnvImplementPlanFor(on.deps, { orgId: ORG, project: PROJECT, taskId: TASK }, env)).toBeUndefined();
-    // Evidence: the environment the pack records and everything built from it.
-    const chosenOn = await evidenceEnvironmentOf(on.deps, { orgId: ORG, project: PROJECT, taskId: TASK }, ON);
-    const chosenOff = await evidenceEnvironmentOf(off.deps, { orgId: ORG, project: PROJECT, taskId: TASK }, OFF);
-    same(chosenOn, chosenOff);
-    expect(chosenOn.dependencies).toBeUndefined();
-    const checks = [{ id: "readiness:0", label: "pytest -q", source: "project" as const, before: "passed" as const, after: "passed" as const, class: "passing" as const, output: "", durationMs: 7, exitCode: 0 }];
-    const pack = (chosen: typeof chosenOn) => buildEvidencePack({ candidateDigest: "c".repeat(64), rawText: undefined, checks, environment: chosen.environment!, storedArtifacts: new Map(), ...(chosen.dependencies === undefined ? {} : { dependencies: chosen.dependencies }) });
-    same(pack(chosenOn), pack(chosenOff));
-    expect("dependencies" in pack(chosenOn).pack!.environment).toBe(false);
-    same(evidenceLines({ pack: pack(chosenOn).pack, mode: "summary" }, "c".repeat(64), 0), evidenceLines({ pack: pack(chosenOff).pack, mode: "summary" }, "c".repeat(64), 0));
-    expect(JSON.stringify(evidenceLines({ pack: pack(chosenOn).pack, mode: "summary" }, "c".repeat(64), 0))).not.toMatch(/ran against|Blocked by environment|not available/u);
   });
 
 });

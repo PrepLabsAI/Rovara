@@ -10,8 +10,10 @@ import type { TaskRecord } from "../task-flow/records.js";
 import { taskKey } from "../task-flow/keys.js";
 import { readTaskThread } from "./threads.js";
 import { threadSender, type ThreadNoticeDeps } from "./thread-notices.js";
+import { stateOffers, type OfferCapabilities } from "../task-actions/offers.js";
+import { taskActionButtons } from "./task-action-cards.js";
 
-export function workflowThreadRefresh(deps: Pick<ThreadNoticeDeps, "store" | "registry" | "now" | "companyOf" | "isMember" | "log" | "taskUrl" | "milestones"> & { companyId: OrgId; messageOf: (message: { text: string; blocks: unknown[] }) => RichMessage | undefined }) {
+export function workflowThreadRefresh(deps: Pick<ThreadNoticeDeps, "store" | "registry" | "now" | "companyOf" | "isMember" | "log" | "taskUrl" | "milestones"> & { companyId: OrgId; messageOf: (message: { text: string; blocks: unknown[] }) => RichMessage | undefined; /** S1: what the host can serve of the task action registry (see `ThreadNoticeDeps.taskActions`). */ taskActions?: OfferCapabilities | undefined }) {
   const sender = threadSender(deps);
   return async (orgId: OrgId, sessionId: string, taskId: string): Promise<void> => {
     if (orgId !== deps.companyId) return;
@@ -31,9 +33,20 @@ export function workflowThreadRefresh(deps: Pick<ThreadNoticeDeps, "store" | "re
     if (notice === undefined) return;
     const data = deps.messageOf(notice.message);
     if (data === undefined) throw new Error("workflow thread message is unreadable");
+    // S1: where the thread's adapter takes task action presses, what the task offers now is buttons on the notice (public: the press is judged for whoever presses).
+    const withActions = await withTaskActions(deps, adapter.capabilities, data, task as unknown as TaskRecord, taskPageUrl);
     await sender.send(orgId, sessionId, notice.key, () => adapter.deliver({ version: 1, id: notice.id, channel: thread.conversation.channel,
-      conversation: thread.conversation, createdAt: new Date(deps.now()).toISOString(), type: "message", data }));
+      conversation: thread.conversation, createdAt: new Date(deps.now()).toISOString(), type: "message", data: withActions }));
   };
+}
+
+/** The message with an `actions` part of the task's offers, when the adapter takes the presses, the host serves the registry and the task offers anything. */
+export async function withTaskActions(deps: { taskActions?: OfferCapabilities | undefined }, capabilities: { taskActions?: boolean | undefined; buttons: number }, message: RichMessage, task: TaskRecord, taskUrl: string | undefined): Promise<RichMessage> {
+  if (capabilities.taskActions !== true || deps.taskActions === undefined || message.parts === undefined) return message;
+  const offers = await stateOffers(deps.taskActions, task).catch(() => []);
+  const actions = taskActionButtons(offers, { taskId: task.taskId, taskUrl, limit: capabilities.buttons });
+  // A message that already carries a link button of its own to the task's page keeps it only once.
+  return actions.length === 0 || offers.length === 0 ? message : { ...message, parts: [...message.parts, { type: "actions", actions }] };
 }
 
 const milestonesOff = (milestones: ThreadNoticeDeps["milestones"]): boolean => (typeof milestones === "function" ? !milestones() : milestones === false);

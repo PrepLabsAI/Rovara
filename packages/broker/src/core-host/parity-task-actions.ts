@@ -15,7 +15,7 @@ import { iso } from "../core/task-flow/support.js";
 import { retryBlockedStep, NOTHING_TO_RETRY_STEP } from "../core/task-flow/retry.js";
 
 /** Keep the live People fence in the core step's own transaction, including a blocked planning retry. */
-function fencedFlow(deps: TaskFlowDeps, fence: readonly TransactItem[]): TaskFlowDeps {
+export function fencedFlow(deps: TaskFlowDeps, fence: readonly TransactItem[]): TaskFlowDeps {
   const store = deps.store;
   const guarded: DocumentStore = {
     indexes: store.indexes, ...(store.ttlAttribute === undefined ? {} : { ttlAttribute: store.ttlAttribute }), ...(store.changes === undefined ? {} : { changes: store.changes }),
@@ -38,7 +38,8 @@ function withFence(items: readonly TransactItem[], fence: readonly TransactItem[
   return result;
 }
 
-const stale = (message: string): never => { throw agentXError("IDEMPOTENCY_CONFLICT", message); };
+/** `writes` is where the throw is: before anything was written ("none", the default: a revision the owner did not see), or after the round was admitted or the step started ("maybe"). */
+const stale = (message: string, writes: "none" | "maybe" = "none"): never => { throw agentXError("IDEMPOTENCY_CONFLICT", message, { reason: "stale", writes }); };
 // One sentence, one meaning. "this retry is out of date; ..." is thrown ONLY before anything is written (a revision the owner did not see), and the developer-tasks.ts "the verification retry is stale; ..." likewise, so a
 // client may treat them as "nothing happened". A REPLAY of a request that already committed is answered as a replay (replayedStep / publishRetryReplayed) before either of them can be reached, so they never fire for
 // a request that wrote something. Every refusal after the round was admitted or the step started may follow a committed write (a block, a resolved dispatch row, a started run), so it
@@ -51,7 +52,7 @@ const AFTER_START = {
   review: "the review retry may already have started; refresh the task and check its progress before trying again",
 } as const;
 const started = (result: string, message: string): void => {
-  if (result === "STALE") stale(message);
+  if (result === "STALE") stale(message, "maybe");
   if (result === "WAITING") throw agentXError("WORKSPACE_NOT_READY", "The workspace is not ready yet. Try again in a moment.");
 };
 
@@ -73,7 +74,7 @@ export async function runParityTaskAction(deps: TaskFlowDeps, options: TaskActio
   if (workflow.stage === "REVIEW") {
     await reviewTaskOnRequest(deps, options, caller, taskId, value).catch((error: unknown) => {
       // Keep workflow/retry's stale refusal while using the owner's single review implementation.
-      if (error instanceof AgentXError && error.code === "WORKSPACE_BUSY") stale(AFTER_START.review);
+      if (error instanceof AgentXError && error.code === "WORKSPACE_BUSY") stale(AFTER_START.review, "maybe");
       throw error;
     });
     return;

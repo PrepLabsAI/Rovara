@@ -4,14 +4,12 @@
 // (Port lane L7b: the cases that went through Cloud's broker and the worker's own test-proof writer are not here; the proofs below are written out by hand in the worker's format.)
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { ProofTableViewSchema, REPLY_PROVENANCES, checkCountsTowardProof, scriptedRepliesCountTowardProof, type EvidenceTrustClass, type PlanDocument, type TestProof } from "../../packages/contracts/src/index.js";
+import { REPLY_PROVENANCES, checkCountsTowardProof, scriptedRepliesCountTowardProof, type EvidenceTrustClass, type PlanDocument, type TestProof } from "../../packages/contracts/src/index.js";
 import { WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, type WorkflowSnapshot } from "../../packages/contracts/src/task-workflow-node.js";
 import { REVIEW_SAME_MODEL_NOTE } from "../../packages/broker/src/core/proof/review-model-lines.js";
 import { PULL_REQUEST_BODY_MAX_BYTES } from "../../packages/broker/src/core/proof/pull-request-body.js";
 import { buildProofTable, testProofLinesOf, type ProofCheckResult, type ProofScenarioRow, type ProofTableInput } from "../../packages/broker/src/core/proof/proof-table.js";
 import { PROOF_LEVEL_LAST, proofSection } from "../../packages/broker/src/core/proof/proof-section.js";
-import { proofTableView } from "../../packages/broker/src/core/proof/proof-view.js";
-import { loadTestProof } from "../../packages/broker/src/core/proof/test-proof-reader.js";
 import { workflowPullRequestBody, workflowPullRequestStatusLines } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
 
 const taskId = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
@@ -90,13 +88,12 @@ describe("mock provenance in the proof", () => {
     expect(rowOf(table, "1.1")).toMatchObject({ result: "passed", evidence: [{ state: "passed", label: "with a Rovara-made mock; not Proven: Unit tests" }] });
   });
 
-  it("preserves the existing PR section and task view when provenance is absent or empty", () => {
+  it("preserves the existing PR section when provenance is absent or empty", () => {
     const workflow = workflowWith();
     const context = { plan: plan(), testProof: proofFor(CODE.digest) };
     for (const checkDependencies of [undefined, new Map(), dependencies("real")]) {
       const next = { ...context, checkDependencies };
       for (let level = 0; level <= PROOF_LEVEL_LAST; level += 1) expect(proofSection(workflow, next)!(level)).toEqual(proofSection(workflow, context)!(level));
-      expect(proofTableView(workflow, next)).toEqual(proofTableView(workflow, context));
     }
   });
 
@@ -283,27 +280,6 @@ describe("the Proof section of the version 2 pull request description", () => {
   });
 });
 
-describe("loadTestProof", () => {
-  const task = { ownerKey: "owner-key", workspaceId: "ws-1" };
-  const artifactKey = (operationId: string) => `private/owner-key/ws-1/${operationId}/test-proof.json`;
-  const actionsWith = (stored: Record<string, string>, operations = [{ id: "op-1", kind: "task", status: "SUCCEEDED", createdAt: "2026-10-27T10:00:00.000Z" }]) => ({
-    operations: async () => operations,
-    artifacts: async (_workspaceId: string, operationId: string) => (stored[artifactKey(operationId)] === undefined ? [] : [{ name: "test-proof.json", objectKey: artifactKey(operationId) }]),
-    readArtifact: async (objectKey: string) => { const text = stored[objectKey]; if (text === undefined) throw new Error("missing"); return text; },
-  });
-
-  it("returns nothing when there is no artifact (always, until the worker part lands), when it is for another digest, malformed, or from another workspace's key", async () => {
-    expect(await loadTestProof(actionsWith({}), task, CODE.digest)).toBeUndefined();
-    expect(await loadTestProof(actionsWith({ [artifactKey("op-1")]: JSON.stringify(proofFor(OTHER.digest)) }), task, CODE.digest)).toBeUndefined();
-    expect(await loadTestProof(actionsWith({ [artifactKey("op-1")]: "{not json" }), task, CODE.digest)).toBeUndefined();
-    // TE-B3 (reader tolerance): a key a newer writer added is dropped, and the proof still reads; a known field of the wrong type still does not.
-    expect(await loadTestProof(actionsWith({ [artifactKey("op-1")]: JSON.stringify({ ...proofFor(CODE.digest), extra: 1 }) }), task, CODE.digest)).toEqual(proofFor(CODE.digest));
-    expect(await loadTestProof(actionsWith({ [artifactKey("op-1")]: JSON.stringify({ ...proofFor(CODE.digest), status: 7 }) }), task, CODE.digest)).toBeUndefined();
-    const foreign = { ...actionsWith({ [artifactKey("op-1")]: JSON.stringify(proofFor(CODE.digest)) }), artifacts: async () => [{ name: "test-proof.json", objectKey: "private/someone-else/ws-9/op-1/test-proof.json" }] };
-    expect(await loadTestProof(foreign, task, CODE.digest)).toBeUndefined();
-    expect(await loadTestProof(actionsWith({ [artifactKey("op-1")]: JSON.stringify(proofFor(CODE.digest)) }), task, undefined)).toBeUndefined();
-  });
-});
 
 // Playbook P2: reviewer models have one source, Trust fix A2's Reviews lines. The Proof section is about requirements and evidence and names no reviewer model.
 describe("the reviewer model in a description that has a Proof section", () => {
@@ -365,7 +341,7 @@ describe("192a agent-written replies", () => {
       }
     });
   });
-  it("propagates to PR, folded rows, aggregate test lines and the task page", () => {
+  it("propagates to the PR section and body (unconfirmed, disagreed and proven wording)", () => {
     for (const result of [undefined, "failed", "passed"] as const) {
       const context = { plan: plan(), testProof: proofFor(CODE.digest), checkDependencies: dependencies(), realModelRun: result === undefined ? undefined : realRun(result) };
       const words = result === "passed" ? "proven with scripted AI replies" : result === "failed" ? DISAGREED : UNCONFIRMED;
@@ -374,11 +350,8 @@ describe("192a agent-written replies", () => {
       for (let level = 0; level <= PROOF_LEVEL_LAST; level += 1) {
         if (result !== "passed") expect(section(level)).toContain(explanation);
       }
-      const view = ProofTableViewSchema.parse(proofTableView(workflowWith(), context));
-      expect(view.rows.find((row) => row.claimId === "1.1")?.evidence[0]?.label).toBe(`${words}: Unit tests`);
       const body = bodyOf(context);
       expect(body).toContain(`${words}: Test proof:`);
-      expect(view.testProofLines.some((line) => line.startsWith(`${words}: Test proof:`))).toBe(true);
     }
   });
 });

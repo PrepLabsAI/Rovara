@@ -114,8 +114,8 @@ export const SETUP_RUN_REFUSED_MESSAGES = {
   isolationUnavailable: "setup isolation unavailable on this worker, so AgentX did not run the setup (nothing was run); other tasks are not affected",
 } as const;
 export type SetupRunRefusal = keyof typeof SETUP_RUN_REFUSED_MESSAGES;
-/** Why a run that ended `infrastructure` could not go on when trying again cannot help: a company admin turned setup runs off while it ran. Only the worker sets it, from the broker's own poll answer. */
-export const SETUP_RUN_CANNOT_REASONS = ["company_off"] as const;
+/** Why a run that ended `infrastructure` could not go on when trying again cannot help: a company admin turned setup runs off while it ran (`company_off`, from the broker's own poll answer), or the company has no monthly AI limit (`company_limit_not_set`, `rovara_ai_not_confirmed`: the gateway's fixed stops, DEC 254zzz491; this list is plain literals because this module imports only zod, and a test holds them equal to `GATEWAY_STOPS`). Only the worker sets it. */
+export const SETUP_RUN_CANNOT_REASONS = ["company_off", "company_limit_not_set", "rovara_ai_not_confirmed"] as const;
 
 export function isSetupRunLimitStop(word: string): word is SetupRunLimitStop {
   return (SETUP_RUN_LIMIT_STOPS as readonly string[]).includes(word);

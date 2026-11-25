@@ -8,6 +8,7 @@ import { withoutLegacyRuntimeBoundary } from "../support/legacy-runtime-boundary
 import { withoutWebhookSecretLane } from "../support/webhook-secret-template.js";
 import { withoutStuckStoppingAlarm } from "../support/stuck-stopping-alarm-template.js";
 import { withoutApiAccessLog } from "../support/api-access-log-template.js";
+import { withoutDispatcherLessonsPeople } from "../support/dispatcher-lessons-people-template.js";
 import { withoutWorkerCallbackAlarm } from "../support/worker-callback-alarm-template.js";
 import { withoutWorkerEcrScope } from "../support/worker-ecr-scope-template.js";
 
@@ -22,7 +23,9 @@ const LEGACY = { alarmName: "AgentXSessionStuckStopping", namespace: "AgentX" };
 const BOUNDED_STACK_PINS: Record<string, string> = {
   // APIGW-ACCESS-LOGS (2026-11-24): re-pinned for exactly the access log group and the `$default` stage AccessLogSettings. Rule D: with those two taken out (withoutApiAccessLog) the old pin
   // 61d1eac2d6a528e2f300b5cc4773fbd6d46b31f3d860c6f6514491fbe3bafb65 holds (the test below checks it).
-  AgentXControlPlane: "45259f9a0b368e97f50af3f88987e43b3b5360644d43ffd4f0f0d97222fc5b4b",
+  // LESSONS-PORT-FIX (DEC 254zzz473, rebased onto train 29 without turn-on): re-pinned for exactly the dispatcher's DEVELOPER_SIGNIN_TABLE_NAME variable and its DispatcherLessonsPeople policy. Rule D: with those
+  // taken out (withoutDispatcherLessonsPeople) train 29's pin 45259f9a0b368e97f50af3f88987e43b3b5360644d43ffd4f0f0d97222fc5b4b holds (the test below checks it).
+  AgentXControlPlane: "dce2fd8b76451211b4e08106846e906915dfdb257dccd8f6222dc09790a96b88",
   AgentXProductionFoundation: "e7c873b146a748408b545e42d2f17596c04ad229271ed7776312d312eca9ca63",
   AgentXSlackOrchestrator: "9ed4e1e13eeb3ecf860e61d9f2c9b332901f36190e0685fa695a390335420bf5",
 };
@@ -35,7 +38,7 @@ describe("legacy production templates", () => {
   for (const stack of legacyProductionStacks()) {
     if (stack.stackName === "AgentXControlPlane") {
       it("removing only Batch F additions preserves code/next's AgentXControlPlane template", () => {
-        const beforeBatchF = withoutWebhookSecretLane(withoutBatchFAdditions(withoutLegacyRuntimeBoundary(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(normalizedTemplate(stack)), LEGACY)))));
+        const beforeBatchF = withoutWebhookSecretLane(withoutBatchFAdditions(withoutLegacyRuntimeBoundary(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutDispatcherLessonsPeople(normalizedTemplate(stack))), LEGACY)))));
         expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("d9bfc520cf02657c1b6be9b16b821e910504a1599cb3652d7405f9c6509b4048");
       }, 120_000);
     }
@@ -45,6 +48,7 @@ describe("legacy production templates", () => {
       const pin = BOUNDED_STACK_PINS[stack.stackName];
       if (pin !== undefined) expect(createHash("sha256").update(JSON.stringify(template)).digest("hex"), `${stack.stackName} with the runtime boundary`).toBe(pin);
       else expect(JSON.stringify(template)).not.toContain("PermissionsBoundary");
+      if (stack.stackName === "AgentXControlPlane") expect(createHash("sha256").update(JSON.stringify(withoutDispatcherLessonsPeople(structuredClone(template)))).digest("hex"), "AgentXControlPlane minus only the dispatcher lessons people grant").toBe("45259f9a0b368e97f50af3f88987e43b3b5360644d43ffd4f0f0d97222fc5b4b");
       if (stack.stackName === "AgentXProductionFoundation") {
         expect(createHash("sha256").update(JSON.stringify(withoutWorkerEcrScope(template))).digest("hex"), "Foundation minus only the worker ECR lane's statements").toBe(FOUNDATION_PIN_BEFORE_WORKER_ECR_SCOPE);
       }
@@ -53,7 +57,7 @@ describe("legacy production templates", () => {
       if (stack.stackName === "AgentXControlPlane") {
         // APIGW-ACCESS-LOGS (2026-11-24): the access log group and the stage setting are asserted and taken out first, so the recorded pin and snapshot below still hold. The full-template pin above
         // (BOUNDED_STACK_PINS) is the one that moved.
-        const beforeAccessLog = withoutApiAccessLog(structuredClone(template));
+        const beforeAccessLog = withoutApiAccessLog(withoutDispatcherLessonsPeople(structuredClone(template)));
         expect(createHash("sha256").update(JSON.stringify(beforeAccessLog)).digest("hex"), "AgentXControlPlane minus only the access log").toBe("61d1eac2d6a528e2f300b5cc4773fbd6d46b31f3d860c6f6514491fbe3bafb65");
         const withoutBoundary = withoutLegacyRuntimeBoundary(beforeAccessLog);
         expect(createHash("sha256").update(JSON.stringify(withoutBoundary)).digest("hex")).toBe("7af9f78c71ac9c6156127490b80985a46f7f15b026c254e1e59df6e03451da3f");

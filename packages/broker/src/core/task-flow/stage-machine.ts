@@ -13,7 +13,7 @@ import { RUN_PRICE_REFUSED_MESSAGE } from "@agentx/model-runtime/provider-failur
 import {
   AgentXError,
   agentXError,
-  ROVARA_CODE_AGENT_ID,
+  ROVARA_CODE_AGENT_ID, GATEWAY_STOPS, gatewayStopOfText,
   ROVARA_AI_PAUSED_MESSAGE,
   WORKFLOW_BLOCK_REASONS,
   WorkflowSnapshotSchema,
@@ -521,8 +521,8 @@ export async function queueFirstRun(deps: TaskFlowDeps, task: TaskRecord): Promi
  * the first one's) and does nothing. Never throws for a task that moved on.
  */
 async function pauseInstallTask(deps: TaskFlowDeps, task: TaskRecord, operation: OperationRecord, ended: { status: string; error?: string | undefined }): Promise<boolean> {
-  // Two fixed gateway stops end the step with their own plain words, and the step waits for Retry: the install pause, and a run whose price authorization no longer fits the call (a Retry mints a fresh one).
-  const reason = ended.error === `MODEL_NOT_ALLOWED: ${ROVARA_AI_PAUSED_MESSAGE}` ? ROVARA_AI_PAUSED_MESSAGE : ended.error === `MODEL_NOT_ALLOWED: ${RUN_PRICE_REFUSED_MESSAGE}` ? RUN_PRICE_REFUSED_MESSAGE : undefined;
+  // Fixed gateway stops end the step with their own plain words, and the step waits for Retry: the install pause, a run whose price authorization no longer fits the call (a Retry mints a fresh one), and the gateway's table of company stops (GATEWAY_STOPS: no monthly AI limit, DEC 254zzz491).
+  const stop = gatewayStopOfText(ended.error), reason = stop !== undefined ? GATEWAY_STOPS[stop].message : ended.error === `MODEL_NOT_ALLOWED: ${ROVARA_AI_PAUSED_MESSAGE}` ? ROVARA_AI_PAUSED_MESSAGE : ended.error === `MODEL_NOT_ALLOWED: ${RUN_PRICE_REFUSED_MESSAGE}` ? RUN_PRICE_REFUSED_MESSAGE : undefined;
   if (ended.status !== "FAILED" || reason === undefined || task.workflow === undefined || operation.workflowRevision !== task.workflow.revision) return false;
   await blockStoppedStep(deps, task.taskId, operation, reason);
   return true;
