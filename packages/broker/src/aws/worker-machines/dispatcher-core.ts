@@ -205,6 +205,8 @@ export interface DispatcherMachineOps {
   sign: SessionWorkerMachinesDependencies["sign"];
   post: SessionWorkerMachinesDependencies["post"];
   ping: SessionWorkerMachinesDependencies["ping"];
+  /** WORKER-DELIVERY-IDENTITY (b-plus): asks EC2 before every ping and POST whether the machine at the session's address is the session's (machine-check.ts). The dispatcher's role may only Describe. */
+  verifyMachine: SessionWorkerMachinesDependencies["verifyMachine"];
 }
 
 export interface DispatcherCoreInputs {
@@ -287,7 +289,7 @@ export function createDispatcherCoreHost(inputs: DispatcherCoreInputs): { app: C
     workerMachines: {
       // The adapter asks for a binding only for a workspace of the company it is bound to (it checks the record first).
       sessions: inputs.machines.sessions, companyOfWorkspace, binding: async () => placement,
-      stopInstance: inputs.machines.stopInstance, sign: inputs.machines.sign, post: inputs.machines.post, ping: inputs.machines.ping, now: () => now().getTime(),
+      stopInstance: inputs.machines.stopInstance, sign: inputs.machines.sign, post: inputs.machines.post, ping: inputs.machines.ping, verifyMachine: inputs.machines.verifyMachine, now: () => now().getTime(),
     },
   };
   const grantKey = repositoryGrantKeyOf(callbackSigningKey);

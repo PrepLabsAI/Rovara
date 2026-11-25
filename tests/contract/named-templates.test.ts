@@ -23,6 +23,7 @@ import { withoutLinearWebhookGuard } from "../support/linear-webhook-route-templ
 import { withoutStuckStoppingAlarm } from "../support/stuck-stopping-alarm-template.js";
 import { withoutApiAccessLog } from "../support/api-access-log-template.js";
 import { withoutDispatcherLessonsPeople } from "../support/dispatcher-lessons-people-template.js";
+import { withoutMachineGone } from "../support/machine-gone-template.js";
 import { withoutRetainPolicies } from "../support/retain-policies-template.js";
 import { withoutWorkerCallbackAlarm } from "../support/worker-callback-alarm-template.js";
 import { withoutPublicApiAllowDomain, withoutPublicApiUrl } from "../support/public-api-url-template.js";
@@ -306,7 +307,7 @@ describe("named environment templates", () => {
     if (stack.stackName === "agentx-staging-control-plane") {
       it("removing only Batch F additions preserves code/next's agentx-staging-control-plane template", () => {
         // Linear webhook guard: the Linear route's throttle and alarm are asserted and taken out too (outermost), so this recorded pin still holds.
-        const beforeBatchF = withoutLinearWebhookGuard(withoutWebhookSecretLane(withoutBatchFAdditions(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(withoutCoreOutboxStreamRelay(normalizedTemplate(stack)), "named")), { named: true, sites: PUBLIC_API_SITES }), { env: "staging" }), STAGING)))));
+        const beforeBatchF = withoutLinearWebhookGuard(withoutWebhookSecretLane(withoutBatchFAdditions(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(withoutMachineGone(withoutCoreOutboxStreamRelay(normalizedTemplate(stack))), "named")), { named: true, sites: PUBLIC_API_SITES }), { env: "staging" }), STAGING)))));
         expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("8edf09fff29983cc3c3338a6b2d24bb27d061db29960bfa2e77a52c068618972");
       }, 120_000);
     }
@@ -325,10 +326,14 @@ describe("named environment templates", () => {
         // pins below hold as recorded (checked on the lines after the next).
         // LINEAR-WEBHOOK-GUARD (2026-11-24, rebased onto the public-URL pin): re-pinned for exactly the Linear route's stage throttle (one RouteSettings entry), its stage dependency and one alarm. Rule D: with those
         // taken out (withoutLinearWebhookGuard, asserted field by field in tests/support/linear-webhook-route-template.ts) the public-URL pin 74e8f0a3e94b69a322a78fb6c1c4e2952689f71f5af7c5bc6c0da4b4e9a38a69 holds (checked on the lines after the next).
-        // CORE-RUN-STOP-RELAY (G1, 2026-11-25): re-pinned for exactly the packed setting `rl=on` on the broker and the dispatcher (outermost). Rule D: with it taken out (withoutCoreOutboxStreamRelay,
+        // WORKER-DELIVERY-IDENTITY (2026-11-25, rebased onto the relay pin): re-pinned for exactly the instance state-change handler, its rule and the dispatcher's one Describe statement (outermost). Rule D: with those
+        // taken out (withoutMachineGone, tests/support/machine-gone-template.ts) the relay pin 9dbf7050b5448a66e1fd3e12cae432ed321209d710ea10789996304703b9e603 holds as recorded (checked on the next lines).
+        expect(createHash("sha256").update(JSON.stringify(template)).digest("hex")).toBe("d4df12774320923c2c47402221aebe99cbc2ec7ae2658c2ecde98caf4325c40d");
+        const withRelayOnly = withoutMachineGone(structuredClone(template));
+        expect(createHash("sha256").update(JSON.stringify(withRelayOnly)).digest("hex"), "minus only the machine-gone additions").toBe("9dbf7050b5448a66e1fd3e12cae432ed321209d710ea10789996304703b9e603");
+        // CORE-RUN-STOP-RELAY (G1, 2026-11-25): re-pinned for exactly the packed setting `rl=on` on the broker and the dispatcher. Rule D: with it taken out (withoutCoreOutboxStreamRelay,
         // tests/support/core-outbox-stream-relay-template.ts) the Linear guard pin 830e2fa7346af112695e09ceb5bab02848cc595c5598cad3347951b790898738 holds (checked on the next lines).
-        expect(createHash("sha256").update(JSON.stringify(template)).digest("hex")).toBe("9dbf7050b5448a66e1fd3e12cae432ed321209d710ea10789996304703b9e603");
-        const beforeRelay = withoutCoreOutboxStreamRelay(structuredClone(template));
+        const beforeRelay = withoutCoreOutboxStreamRelay(structuredClone(withRelayOnly));
         expect(createHash("sha256").update(JSON.stringify(beforeRelay)).digest("hex"), "minus only the outbox stream relay setting").toBe("830e2fa7346af112695e09ceb5bab02848cc595c5598cad3347951b790898738");
         const withoutGuard = withoutLinearWebhookGuard(structuredClone(beforeRelay));
         expect(createHash("sha256").update(JSON.stringify(withoutGuard)).digest("hex"), "minus only the Linear webhook guard").toBe("74e8f0a3e94b69a322a78fb6c1c4e2952689f71f5af7c5bc6c0da4b4e9a38a69");

@@ -9,6 +9,7 @@ import { withoutPublicApiUrl } from "../support/public-api-url-template.js";
 import { withoutCoreOutboxStreamRelay } from "../support/core-outbox-stream-relay-template.js";
 import { withoutWorkerCallbackAlarm } from "../support/worker-callback-alarm-template.js";
 import { withoutDispatcherLessonsPeople } from "../support/dispatcher-lessons-people-template.js";
+import { withoutMachineGone } from "../support/machine-gone-template.js";
 import { App, CfnParameter, Stack, aws_iam as iam } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -158,7 +159,9 @@ const SAMPLE_TABLE_ARN = "arn:aws:dynamodb:us-east-1:111122223333:table/agentx-s
 
 beforeAll(() => {
   const app = buildAgentXApp({ agentxEnv: "staging" });
-  const raw = controlPlane(app, "agentx-staging-control-plane");
+  // WORKER-DELIVERY-IDENTITY (2026-11-25), Rule D: the instance state-change handler, its rule and the dispatcher's one Describe statement are asserted and taken out of the control plane first
+  // (withoutMachineGone), so every pin, tuple list and resource-type map below holds as recorded; tests/contract/instance-state-change-infrastructure.test.ts pins the addition itself.
+  const raw = withoutMachineGone(controlPlane(app, "agentx-staging-control-plane"));
   namedRaw = structuredClone(raw);
   const full = withoutSlackCompanyMode(raw) as TemplateJson;
   namedWithSignInGrants = structuredClone(full);
@@ -172,7 +175,7 @@ beforeAll(() => {
   brokerArnEstimate = (policy.node.tryGetContext(ARN_ESTIMATE_CONTEXT) as number | undefined) ?? 150;
   brokerEstimate = document.statements.reduce((total, statement) => total + statement._estimateSize({ actionEstimate: 20, arnEstimate: brokerArnEstimate }), 0);
   longestNamed = withoutSlackCompanyMode(controlPlane(buildAgentXApp({ agentxEnv: LONGEST_ENV }), `agentx-${LONGEST_ENV}-control-plane`)) as TemplateJson;
-  legacy = controlPlane(buildAgentXApp(), "AgentXControlPlane");
+  legacy = withoutMachineGone(controlPlane(buildAgentXApp(), "AgentXControlPlane"));
 }, 300_000);
 
 // DEC 254zzz284: the only new authority is the broker's membership transaction fence.

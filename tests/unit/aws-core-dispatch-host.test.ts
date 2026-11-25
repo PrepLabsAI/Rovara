@@ -233,7 +233,7 @@ describe("the core on the dispatcher", () => {
       world,
       inputs: {
         env: environment, callbackSigningKey, documentClient: world.db, clients: { dynamo: new FakeDynamoDb({ tableName: "State" }), sqs: new FakeSqs(), s3: new FakeS3({ bucket: "artifacts" }) },
-        machines: { sessions: world.sessions, stopInstance: dispatcherStopInstance, sign: (message: Uint8Array) => world.sign(message), post: async () => ({ status: 500, body: "" }), ping: async () => undefined },
+        machines: { sessions: world.sessions, stopInstance: dispatcherStopInstance, sign: (message: Uint8Array) => world.sign(message), post: async () => ({ status: 500, body: "" }), ping: async () => undefined, verifyMachine: async () => ({ ok: true }) },
         changeVisibility: async () => undefined, log, now: () => new Date(clock),
       } as Parameters<typeof createDispatcherCoreHost>[0],
       advance: (milliseconds: number) => { clock += milliseconds; }, log,

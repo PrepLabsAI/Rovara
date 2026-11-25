@@ -12,7 +12,10 @@ export const ProjectSetupRuntimeRecordSchema = z.object({
   bindingDigest: digest, binding: Ec2RuntimeBindingSchema, manifestDigest: digest,
   runnerEnvironmentDigest: digest, runnerEnvironment: ProjectSetupRunnerEnvironmentSchema,
   runnerToolchainDigest: digest, runnerToolchain: ProjectSetupRunnerToolchainSchema,
-  endpoint: z.string().url().max(512), generation: z.number().int().positive(), transportCorrelationId: z.string().uuid(),
+  endpoint: z.string().url().max(512),
+  /** WORKER-DELIVERY-IDENTITY (WDI-SETUP): the EC2 instance that qualified at `endpoint`, recorded when the administrator who issued the challenge named it. Absent on rows registered before it (the delivery check then cannot verify the machine and says so, see machine-check.ts). */
+  instanceId: z.string().regex(/^i-[0-9a-f]{8,17}$/, "invalid instance ID").optional(),
+  generation: z.number().int().positive(), transportCorrelationId: z.string().uuid(),
   supportedSetupScopes: z.array(z.enum(["source-interface"])).min(1).max(1),
   state: z.enum(["READY", "PARKED", "UNAVAILABLE"]), qualifiedAt: timestamp, expiresAt: timestamp,
 }).strict().superRefine((row, context) => {
@@ -47,4 +50,9 @@ export function admitProjectSetupRuntime(
     || value.bindingDigest !== expectedDigest || canonicalJson(value.binding) !== canonicalJson(input.binding)
     || !value.supportedSetupScopes.includes("source-interface") || Date.parse(value.qualifiedAt) > input.now || Date.parse(value.expiresAt) <= input.now) return undefined;
   return value;
+}
+
+/** The runtime catalog row's instance, as fields for the setup session (none for a row registered without one). WORKER-DELIVERY-IDENTITY (WDI-SETUP). */
+export function setupSessionInstance(runtime: { instanceId?: string | undefined }): { instanceId?: string } {
+  return runtime.instanceId === undefined ? {} : { instanceId: runtime.instanceId };
 }

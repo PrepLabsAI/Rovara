@@ -648,8 +648,10 @@ describe("L1a broker environment derivation", () => {
     // LESSONS-PORT-FIX (DEC 254zzz473): the dispatcher's DEVELOPER_SIGNIN_TABLE_NAME variable and its DispatcherLessonsPeople policy are asserted and taken out first (withoutDispatcherLessonsPeople), so every pin below holds as recorded.
     // CODE-PUBLIC-URL (2026-11-24): the PublicApiUrl parameter, condition, URL-base Fn::Ifs and packed host are asserted and taken out too (withoutPublicApiUrl, after the two above), so every pin below holds as recorded.
     // RETAIN (arch ruling 2026-11-24): Retain on the control plane's five keys, channel state table and adapter secret is asserted and put back to Delete first (withoutRetainPolicies, innermost), so they hold too.
+    // WORKER-DELIVERY-IDENTITY (2026-11-25): the instance state-change handler, its rule and the dispatcher's one Describe statement are asserted and taken out first (withoutMachineGone, innermost), so every pin holds as recorded.
+    const machineless = () => withoutMachineGone(structuredClone(legacy.toJSON()));
     // CORE-RUN-STOP-RELAY (G1): every pin below except the first of the last two was recorded without the relay setting, so each starts from the template with exactly that taken out (Rule D).
-    const relayless = () => withoutCoreOutboxStreamRelay(structuredClone(legacy.toJSON()));
+    const relayless = () => withoutCoreOutboxStreamRelay(machineless());
     const beforeFirstGateway = withoutLinearWebhookRoute(withoutWebhookSecretLane(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(relayless())), { named: false }) as Json & { Outputs: Record<string, unknown> }), stuckStoppingInstall()))));
     expect(beforeFirstGateway.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
     delete beforeFirstGateway.Outputs.ModelRunPriceVersion;
@@ -668,7 +670,7 @@ describe("L1a broker environment derivation", () => {
     // CODE-PUBLIC-URL (Rule D, 2026-11-24): the same template with exactly the PublicApiUrl additions in (and the RETAIN policies in) has its own pin; with them taken out the pin above holds.
     // LINEAR-WEBHOOKS + guard (Rule D, rebased onto the public-URL pin): the same template with the Linear route, its throttle and its alarm in has its own pin; with exactly those taken out the pin after it (3175a57d...) holds.
     // CORE-RUN-STOP-RELAY (G1, 2026-11-25): the same template with the packed `rl=on` on the broker and the dispatcher in has its own pin; Rule D: with exactly that taken out (withoutCoreOutboxStreamRelay) the pin after it (6694babb...) holds.
-    const withRelay = withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutDispatcherLessonsPeople(structuredClone(legacy.toJSON()))), stuckStoppingInstall()));
+    const withRelay = withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutDispatcherLessonsPeople(machineless())), stuckStoppingInstall()));
     expect(digest(withRelay), "legacy with the outbox stream relay setting").toBe("177bca4c6b9eb5b7291f114c5253a536a8c038aeedbf2743bcc084b79189ee1c");
     expect(digest(withoutCoreOutboxStreamRelay(structuredClone(withRelay))), "legacy minus only the outbox stream relay setting").toBe("6694babb0383fdcefffed780d3da49ae296a9706ce9b4d8db102f467aa602d8f");
     expect(digest(withoutLinearWebhookRoute(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutDispatcherLessonsPeople(relayless())), stuckStoppingInstall()))))).toBe("3175a57d79eae0299da08518af571baed1e639d1daf44eae307e94037bc8faa8");
@@ -678,6 +680,7 @@ import { createHash } from "node:crypto";
 import { stuckStoppingInstall, withoutStuckStoppingAlarm } from "../support/stuck-stopping-alarm-template.js";
 import { withoutApiAccessLog } from "../support/api-access-log-template.js";
 import { withoutDispatcherLessonsPeople } from "../support/dispatcher-lessons-people-template.js";
+import { withoutMachineGone } from "../support/machine-gone-template.js";
 import { withoutRetainPolicies } from "../support/retain-policies-template.js";
 import { withoutPublicApiUrl } from "../support/public-api-url-template.js";
 import { withoutWorkerCallbackAlarm } from "../support/worker-callback-alarm-template.js";

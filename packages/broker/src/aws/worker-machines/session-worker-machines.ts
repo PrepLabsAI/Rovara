@@ -30,6 +30,7 @@ import {
   type WorkerMachines,
   type WorkspaceSession,
 } from "@agentx/contracts";
+import { MACHINE_CHECK_UNAVAILABLE_WORDS, type MachineVerifier } from "../machine-check.js";
 import type { SessionManager } from "../sessions.js";
 
 /** The worker's port (packages/worker/ec2/boot.sh); /invocations accepts only tokens signed by the dispatcher's KMS key (#80). */
@@ -73,6 +74,11 @@ export interface SessionWorkerMachinesDependencies {
   post: (url: string, init: { authorization: string; body: string }) => Promise<{ status: number; body: string }>;
   /** GET on the worker's /ping. Rejects or resolves undefined when the worker does not answer. */
   ping: (url: string) => Promise<SessionWorkerPing | undefined>;
+  /**
+   * WORKER-DELIVERY-IDENTITY (b-plus): asked before every ping and every POST, which are the only two things this adapter sends to a worker: is the machine at the session's address still the session's
+   * machine (machine-check.ts)? `{ ok: false }` means it is gone: nothing is sent, the session is already marked lost. A rejection means EC2 could not be asked. The broker's restricted adapter never reaches it.
+   */
+  verifyMachine: MachineVerifier;
   /** Epoch milliseconds. */
   now?: () => number;
 }
@@ -139,6 +145,23 @@ function readAnswer(text: string): Record<string, unknown> {
   } catch {
     return {};
   }
+}
+
+/** The worker's answer to a POST in the port's words: nothing for a 2xx, else the refusal. Fixed sentences. */
+function refuseStatus(status: number): void {
+  if (status === 401) throw new MachineError("unauthorized", "the worker refused the job's credentials");
+  if (status === 400 || status === 409 || status === 413) throw new MachineError("rejected", `the worker refused the job (HTTP ${status})`);
+  if (status < 200 || status >= 300) throw new MachineError("unavailable", `the worker answered HTTP ${status}`);
+}
+
+/** A READY session's health from the worker's /ping answer (none: it did not answer). */
+function healthFromPing(ping: SessionWorkerPing | undefined, session: WorkspaceSession, checkedAt: string, idle: (state: MachineState, detail?: string) => MachineHealth): MachineHealth {
+  if (ping === undefined || (ping.status !== "Healthy" && ping.status !== "HealthyBusy")) return idle("unhealthy", ping?.status === "BootFailed" ? "the worker's boot failed" : "the worker does not answer");
+  const reported = ping.activeOperations;
+  const active = typeof reported === "number" && Number.isSafeInteger(reported) && reported >= 0 ? reported : ping.status === "HealthyBusy" ? 1 : 0;
+  // What the worker lists now; the list recorded when the session became READY when the ping had none. Unknown is none (fail closed).
+  const features = [...(ping.features ?? session.workerFeatures ?? [])];
+  return { state: active > 0 ? "busy" : "ready", activeOperations: active, features, checkedAt };
 }
 
 /** The EC2 workspace sessions on the `WorkerMachines` port, for one company. */
@@ -214,18 +237,15 @@ export class SessionWorkerMachines implements WorkerMachines {
     // READY is a stored provisioning result, not evidence of current liveness. The watchdog waits on this refusal.
     if (this.#deps.brokerOnly === true) throw new MachineError("unavailable", BROKER_LIVE_HEALTH_WORDS);
     if (session.privateIp === undefined) return idle("unhealthy", "the worker has no address");
+    // A machine that is not the session's gets no request at all, not even a ping.
+    if (!(await this.#machineIsTheSessions(owned.workspaceId, session))) return idle("stopped", "the worker's machine is gone");
     let ping: SessionWorkerPing | undefined;
     try {
       ping = await this.#deps.ping(`http://${session.privateIp}:${SESSION_WORKER_PORT}/ping`);
     } catch {
       ping = undefined;
     }
-    if (ping === undefined || (ping.status !== "Healthy" && ping.status !== "HealthyBusy")) return idle("unhealthy", ping?.status === "BootFailed" ? "the worker's boot failed" : "the worker does not answer");
-    const reported = ping.activeOperations;
-    const active = typeof reported === "number" && Number.isSafeInteger(reported) && reported >= 0 ? reported : ping.status === "HealthyBusy" ? 1 : 0;
-    // What the worker lists now; the list recorded when the session became READY when the ping had none. Unknown is none (fail closed).
-    const features = [...(ping.features ?? session.workerFeatures ?? [])];
-    return { state: active > 0 ? "busy" : "ready", activeOperations: active, features, checkedAt };
+    return healthFromPing(ping, session, checkedAt, idle);
   }
 
   async deliver(machineId: string, invocation: WorkerInvocation): Promise<DeliveryReceipt> {
@@ -253,6 +273,8 @@ export class SessionWorkerMachines implements WorkerMachines {
         : {}),
     });
     const signature = await this.#deps.sign(Buffer.from(payload, "ascii"));
+    // The last thing before the bytes leave: a machine that is not the session's gets nothing. The core forgets a machine that is gone and starts another for its retry.
+    if (!(await this.#machineIsTheSessions(workspaceId, session))) throw new MachineError("not_found", "the worker's machine is gone");
     let response: { status: number; body: string };
     try {
       response = await this.#deps.post(`http://${session.privateIp}:${SESSION_WORKER_PORT}/invocations`, {
@@ -262,9 +284,7 @@ export class SessionWorkerMachines implements WorkerMachines {
     } catch {
       throw new MachineError("unavailable", "the worker could not be reached");
     }
-    if (response.status === 401) throw new MachineError("unauthorized", "the worker refused the job's credentials");
-    if (response.status === 400 || response.status === 409 || response.status === 413) throw new MachineError("rejected", `the worker refused the job (HTTP ${response.status})`);
-    if (response.status < 200 || response.status >= 300) throw new MachineError("unavailable", `the worker answered HTTP ${response.status}`);
+    refuseStatus(response.status);
     const answer = readAnswer(response.body);
     const answered = (ANSWERED_INVOCATION_KINDS as readonly string[]).includes(invocation.kind);
     return { duplicate: answer.duplicate === true, ...(answered ? { answer } : {}) };
@@ -290,6 +310,15 @@ export class SessionWorkerMachines implements WorkerMachines {
     // A STOPPING session is finished here when its instance is gone, else by the reaper's next tick (the instance is ended either way).
     const gone = session.instanceId === undefined ? true : (await this.#deps.stopInstance(session.instanceId)).gone;
     if (gone) await this.#deps.sessions.markStopped(owned.workspaceId, session.generation);
+  }
+
+  /** Whether EC2 says the machine at this READY session's address is the session's (machine-check.ts). A question EC2 could not answer is `unavailable`: nothing was sent, and the caller tries again. */
+  async #machineIsTheSessions(workspaceId: string, session: WorkspaceSession): Promise<boolean> {
+    try {
+      return (await this.#deps.verifyMachine({ kind: "workspace", workspaceId, generation: session.generation, instanceId: session.instanceId, privateIp: session.privateIp!, subnetIds: session.subnetId === undefined ? [] : [session.subnetId] })).ok;
+    } catch {
+      throw new MachineError("unavailable", MACHINE_CHECK_UNAVAILABLE_WORDS);
+    }
   }
 
   #now(): number {
