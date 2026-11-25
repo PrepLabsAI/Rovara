@@ -41,8 +41,8 @@ const TABLE: Record<PersonaName, string> = {
   // The starters whom the company's own rule still admits (it re-reads no grant for the task's own person with no People list) are refused on EVERY read: the live company membership and current project grant are re-read for every way in.
   "starter removed from the project": "- - - - - - - - - - - - - -",
   "starter removed from the company": "- - - - - - - - - - - - - -",
-  // THE SLACK SHARE (owner decision 254zzz558, option A): no grant, not on the list, in the channel the task is shared into: the whole task page, the diff and the comments included (CHANNEL_SHARE_PARTS, one cell each); the task read, the events and the timeline are not part of it.
-  "channel share member": "- - - - - - p p p p p p - p",
+  // THE SLACK SHARE (owner decision 254zzz558, option A): no grant, not on the list, in the channel the task is shared into: the whole task page (CHANNEL_SHARE_PARTS, one cell each: the task, its events and timeline, the question box, the plan, the proof, the spec, the checks, the code changes, the diff and the comments); the merge standing, the task list's round and the readers routes are not part of the page.
+  "channel share member": "p p - - p - p p p p p p p p",
   // Not in the loops: a task started through the bound channel with no grant is refused on every read on the core (the hotfix's ruling (a)).
   "starter via the bound channel": "- - - - - - - - - - - - - -",
 };
@@ -147,7 +147,7 @@ for (const hosted of [false, true]) describe(`the one read rule: the same table 
         if (route === "merge" && !hosted && persona.starter === true) { if (got === "refused") wrong.push(`${persona.name} | merge: refused`); continue; }
         const want = expectedOf(persona.name, rule);
         // The answers read hands a share no plan text (option B), so the scripted answer that cites the plan cannot be verified for it: "not found" is the share's answer there.
-        const expectedRoute = want === "refused" || (route === "answers" && want === "shared") ? "refused" : want === "part" ? "part" : "admitted";
+        const expectedRoute = want === "refused" ? "refused" : want === "part" ? "part" : "admitted";
         // The four new reads are stubs until their lanes fill them: a person admitted is told the fixed ROUTE_NOT_SERVED (so "admitted" is that answer here); a filled read answers 200.
         if (NEW_READ_NAMES.includes(route as never) && got === "admitted" && (FILLED_READS.includes(route) ? answer.status !== 200 : answer.code !== "ROUTE_NOT_SERVED")) { wrong.push(`${persona.name} | ${route}: ${JSON.stringify(answer)}`); continue; }
         if (got !== expectedRoute) wrong.push(`${persona.name} | ${route}: function ${want}, route ${got} ${JSON.stringify(answer)}`);
@@ -284,13 +284,17 @@ describe("the one read rule: what the decision carries", () => {
       // The same answer the task's owner is given on that read (served, or the read's own "nothing yet").
       expect(answer, read).toEqual(await w.ask(personaOf("owner"), read));
     }
-    // Not part of the decision: the task read, the events, the timeline, the merge standing and the answers read.
-    for (const read of ["task", "events", "merge", "timeline", "answers"] as const) {
-      const answer = await w.ask(member, read);
-      expect(answer.code === "TASK_NOT_FOUND" || (read === "answers" && answer.shape === "outcome:not_found"), `${read}: ${JSON.stringify(answer)}`).toBe(true);
-    }
+    // The page they open: the task read, the events, the timeline and the question box are shown too.
+    for (const read of ["task", "events"] as const) expect((await w.ask(member, read)).status, read).toBe(200);
+    // The timeline is still a placeholder (its lane has not filled it): admitted means the fixed ROUTE_NOT_SERVED, as for every other person it admits.
+    expect((await w.ask(member, "timeline")).code).toBe("ROUTE_NOT_SERVED");
+    expect((await w.ask(member, "answers")).shape).toBe("outcome:answered");
+    // Not part of the page: the merge standing, the task list's round and the readers routes.
+    expect((await w.ask(member, "merge")).code).toBe("TASK_NOT_FOUND");
+    expect(await outcomeOf(decideAs(w, member, "share"))).toBe("refused");
+    expect(await outcomeOf(decideAs(w, member, "readable"))).toBe("refused");
     // The decision: admitted by the page rule's channel share, with the code (the table says it is theirs to see).
-    for (const read of ["diff", "comments", "plan", "evidence", "spec", "checks", "changes", "evidenceFile"] as const) {
+    for (const read of ["task", "answers", "events", "timeline", "diff", "comments", "plan", "evidence", "spec", "checks", "changes", "evidenceFile"] as const) {
       const decision = await decideAs(w, member, read);
       expect([decision.mode, decision.sourceCode, decision.codeDetails], read).toEqual(["page", true, true]);
     }
@@ -300,30 +304,28 @@ describe("the one read rule: what the decision carries", () => {
     for (const read of ["comments", "changes", "plan"] as const) expect((await decideAs(w, member, read, { seams })).mode, read).toBe("page");
     expect(asked).not.toHaveBeenCalled();
     // A person with no share (not on the list, not in the channel) is refused on every one of those reads.
-    for (const read of ["diff", "comments", "plan", "evidence", "spec", "checks", "changes", "evidenceFile"] as const) expect(await outcomeOf(decideAs(w, personaOf("stranger"), read)), `stranger | ${read}`).toBe("refused");
+    for (const read of ["task", "answers", "events", "timeline", "diff", "comments", "plan", "evidence", "spec", "checks", "changes", "evidenceFile"] as const) expect(await outcomeOf(decideAs(w, personaOf("stranger"), read)), `stranger | ${read}`).toBe("refused");
     // No Slack identity or channel proof, no way in: a live People refusal is a "no", and a seam that is not bound admits nobody.
     expect(await outcomeOf(decideAs(w, member, "spec", { seams: { ...seamsOf(member), peoplePage: undefined as never } }))).toBe("refused");
   });
 
-  it("COMMENTING (owner decision 254zzz558: shared people can comment): the comment POST is judged by the comment action's own rule, not the read rule. The Slack channel share comments (the People list's implicit commenter); the stored share (\"Can view\") reads the comments but its person is on no People list, so the post is refused as before; a person with no share is refused", async () => {
+  it("COMMENTING through the real routes (owner decision 254zzz558): the Slack channel share and the stored share both pass the comment access (the post then stops at this world's missing plan, 409, not at a missing task); a person with no share is refused as a missing task. (The stored share's successful write is tested in tests/contract/core-plan-comments.test.ts.)", async () => {
     const w = await readRuleWorld({ hosted: true });
     const post = async (name: PersonaName) => {
       const persona = personaOf(name);
       const answer = await w.routes.route({ method: "POST", path: `/v1/dev/tasks/${w.taskIdOf(persona)}/comments`, headers: {}, body: JSON.stringify({ requestId: `req-${randomUUID().slice(0, 12)}`, document: "plan", text: "Looks right to me." }) }, w.caller(persona));
       return { status: answer?.statusCode, code: (JSON.parse(answer!.body) as { error?: { code?: string } }).error?.code };
     };
-    const results = { channel: await post("channel share member"), stored: await post("shared reader"), stranger: await post("stranger") };
-    // Past the access check (this world has no plan document, so the post itself stops at its own idempotency/plan checks, not at "no such task").
-    expect(results.channel, "the Slack channel share").toEqual({ status: 409, code: "IDEMPOTENCY_CONFLICT" });
-    // FOUND, not changed here: the stored share's person is on no People list, so the comment action refuses it as a missing task. Giving "Can view" people the comment right is a change of the comment rule (a write), not of a read cell.
-    expect(results.stored, "the stored share").toEqual({ status: 404, code: "TASK_NOT_FOUND" });
-    expect(results.stranger, "no share").toEqual({ status: 404, code: "TASK_NOT_FOUND" });
+    expect(await post("channel share member"), "the Slack channel share").toEqual({ status: 409, code: "IDEMPOTENCY_CONFLICT" });
+    expect(await post("shared reader"), "the stored share").toEqual({ status: 409, code: "IDEMPOTENCY_CONFLICT" });
+    expect(await post("admin and shared"), "the stored share, a company admin").toEqual({ status: 409, code: "IDEMPOTENCY_CONFLICT" });
+    for (const name of ["stranger", "left the project", "unknown role", "company admin", "project member", "other company"] as const) expect(await post(name), name).toEqual({ status: 404, code: "TASK_NOT_FOUND" });
   });
 
   it("each Slack share cell is its own: one cell withheld refuses that read for the channel share alone (the one-line change of a later answer)", async () => {
     const readRule = await import("../../packages/broker/src/core/task-flow/read-rule.js");
     const cells = readRule.CHANNEL_SHARE_PARTS;
-    expect(Object.entries(cells).sort()).toEqual([["changes", "shown"], ["checks", "shown"], ["comments", "shown"], ["diff", "shown"], ["evidence", "shown"], ["evidenceFile", "shown"], ["plan", "shown"], ["spec", "shown"]]);
+    expect(Object.entries(cells).sort()).toEqual([["answers", "shown"], ["changes", "shown"], ["checks", "shown"], ["comments", "shown"], ["diff", "shown"], ["events", "shown"], ["evidence", "shown"], ["evidenceFile", "shown"], ["plan", "shown"], ["spec", "shown"], ["task", "shown"], ["timeline", "shown"]]);
   });
 
   it("the old page rule's cached channel-membership branch (ten-minute list) cannot be reached for a plan comments or a diff read: the core's page rule seam strips the Slack identity, so a removed member is never honoured from the cache", async () => {
@@ -347,10 +349,10 @@ describe("the one read rule: what the decision carries", () => {
     }
   });
 
-  it("a plan the owner shared only the summary of is not handed over by the answers read: the shared reader's answer cannot cite it", async () => {
+  it("the answers read hands a share the plan like the rest of the page (owner decision 254zzz558; it was withheld while Q1 was open): the shared reader's answer reads like the commenter's", async () => {
     const w = await readRuleWorld();
     expect((await w.ask(personaOf("owner"), "answers")).shape).toBe("outcome:answered");
-    expect((await w.ask(personaOf("shared reader"), "answers")).shape).toBe("outcome:not_found");
+    expect((await w.ask(personaOf("shared reader"), "answers")).shape).toBe("outcome:answered");
     expect((await w.ask(personaOf("commenter"), "answers")).shape).toBe("outcome:answered");
   });
 

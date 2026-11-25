@@ -382,19 +382,13 @@ async function sessionAnswer(target: Mounted, request: BrokerRequest, caller: Ta
 
 
 /**
- * What the answers read may know of a task, for this asker: the task the one read rule shows them, and (option B, pending the owner's Q1) none of its plan, design or requirements text when the person was only shared the
- * task's summary. The set lives for one request.
+ * What the answers read may know of a task, for this asker: the task the one read rule shows them. A person the task is shared with sees the whole task page (the owner's decision 254zzz558), the plan included, so
+ * nothing of the task's documents is withheld from the scripted answer for them (it was, while Q1 was open: "option B").
  */
 function answerTasks(target: Mounted, caller: DeployedCaller, role: OrgRole): NonNullable<Parameters<typeof routeHostedAnswers>[0]["tasks"]> {
-  const withheld = new Set<string>();
   return {
     artifacts: target.runtime.flow.deps.artifacts,
-    read: async (_personId, taskId) => {
-      const decision = await decideRead(target, caller, role, { read: "answers", taskId });
-      if (decision.sharedRole !== undefined) withheld.add(decision.task.taskId);
-      return decision.task;
-    },
-    documentsWithheld: (taskId) => withheld.has(taskId),
+    read: async (_personId, taskId) => (await decideRead(target, caller, role, { read: "answers", taskId })).task,
   };
 }
 

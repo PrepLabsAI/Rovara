@@ -19,8 +19,6 @@ for (const persona of ["co-owner", "commenter", "viewer"]) CHANGED[`${persona} |
 for (const persona of ["project member", "unknown role", "left the project", "company admin", "stranger", "other company"]) {
   for (const read of NEW_READS) CHANGED[`${persona} | ${read}`] = { now: { status: 404, code: "TASK_NOT_FOUND", message: "no such task" }, why: "narrowing: the new reads refuse a non-reader as a missing task" };
 }
-// NARROWING (the answers read, pre-review S1): the answers frame carries none of the plan, design or requirements text for a share (option B), so the scripted answer that cites the plan cannot be verified: "not found".
-for (const persona of ["shared reader", "admin and shared"]) CHANGED[`${persona} | answers`] = { now: { status: 200, shape: "outcome:not_found" }, why: "narrowing: a share's answer frame has no plan text (option B)" };
 // OWNER DECISION 254zzz558 (option A, Q1 answered): a person the task is SHARED with (the stored share, "Can view") reads the whole task page, the code changes included, and can comment. Each cell below was a refusal (the
 // diff, the plan, the proof and the comments: the missing task's; the new reads: ROUTE_NOT_SERVED) and is now the answer the task's own person gets on that read in this world (the diff and the plan have nothing to show yet:
 // the same 404 as for the owner). A person with no share is not touched. The Slack channel share is not in this golden (it has no persona of the base); its cells are in tests/unit/task-read-rule.test.ts.
