@@ -14,7 +14,7 @@ import { createHash } from "node:crypto";
 import type { DocumentStore, MeterEntry, Metering, ModelUsage } from "@agentx/contracts";
 import { workspaceKeys } from "../core/task-flow/workspace-location.js";
 import { costPartition, type UsageAccounting } from "../core/cost/ledger.js";
-import { createHostedLedger } from "./hosted-modules.js";
+import { GATEWAY_ACTUAL_MODEL_ID, createHostedLedger, unreportedSettleEntryId } from "./hosted-modules.js";
 
 /** The worker's event type that carries a model session's usage (`TaskUsageTelemetry`). */
 export const USAGE_EVENT_TYPE = "usage";
@@ -97,6 +97,15 @@ export interface UsageBooking {
   bookOperationEvents(operation: { id: string; workspaceId: string; companyId: string }, events: ReadonlyArray<{ type: string; timestamp: string; payload: unknown }>): Promise<{ booked: number; unreadable: number }>;
 }
 
+/**
+ * The usage events still to book for the run. A run already settled at the gateway's actual figure (`usage:<run>:settled`, modelId `gateway-actual`, LOST-RUN-ACTUAL-SPEND) holds everything the run spent: a worker's late
+ * report describes the same calls and is acknowledged, not booked (booking it would count them twice).
+ */
+async function usagesNotYetSettled<T>(store: DocumentStore, operation: { id: string; companyId: string }, taskId: string, usages: readonly T[]): Promise<readonly T[]> {
+  const settled = await store.get({ pk: costPartition(operation.companyId, taskId), sk: `ENTRY#${unreportedSettleEntryId(operation.id)}` });
+  return settled?.["modelId"] === GATEWAY_ACTUAL_MODEL_ID ? [] : usages;
+}
+
 export function createUsageBooking(deps: { store: DocumentStore; metering: Metering; now?: () => Date }): UsageBooking {
   const ledger = createHostedLedger({ store: deps.store, metering: bookingMeter(deps.metering), ...(deps.now === undefined ? {} : { now: deps.now }) });
 
@@ -140,9 +149,11 @@ export function createUsageBooking(deps: { store: DocumentStore; metering: Meter
       const pointer = await deps.store.get((await workspaceKeys({ store: deps.store, companyId: operation.companyId }, operation.workspaceId)).taskPointerKey());
       const taskId = pointer?.["taskId"];
       if (typeof taskId !== "string" || taskId === "") throw new Error(NO_TASK_FOR_USAGE);
+      // LOST-RUN-ACTUAL-SPEND: a run already settled at the gateway's actual figure (`usage:<run>:settled`, modelId `gateway-actual`) holds everything the run spent: a worker's late report describes the same calls and is
+      // acknowledged, not booked (booking it would count them twice).
       let booked = 0;
       let unreadable = 0;
-      for (const event of usages) {
+      for (const event of await usagesNotYetSettled(deps.store, operation, taskId, usages)) {
         // The same event sent again (a retried batch) has the same time and payload, so the same entry id: it is counted once.
         const digest = createHash("sha256").update(`${event.timestamp}\n${JSON.stringify(event.payload) ?? "null"}`).digest("hex").slice(0, 40);
         const at = typeof event.timestamp === "string" && !Number.isNaN(Date.parse(event.timestamp)) ? new Date(Date.parse(event.timestamp)).toISOString() : (deps.now?.() ?? new Date()).toISOString();

@@ -378,9 +378,9 @@ function savedEnvLeaseOption(registry: AdapterRegistry, companyId: OrgId, env: N
   return savedEnvLease === undefined ? {} : { savedEnvLease };
 }
 
-/** SPEND-UNREPORTED-RUN: the spend reader's `settle` for a company, or nothing where this dispatcher has no money stop to settle with. */
+/** SPEND-UNREPORTED-RUN: the spend reader's `settle` for a company, or nothing where this dispatcher has no money stop to settle with. The dispatcher holds no signing key to ask the gateway (LOST-RUN-ACTUAL-SPEND): it settles only a run that never reached a machine and leaves any figure to the broker (`deferEstimate`) until the wait is over. */
 function unreportedSettle(inputs: Pick<DispatcherCoreInputs, "moneyStop" | "log">, registry: AdapterRegistry, companyId: OrgId, now: () => Date): { settle?: (taskId: string) => Promise<void> } {
   const moneyStop = inputs.moneyStop;
   if (moneyStop === undefined) return {};
-  return { settle: async (taskId) => { await createUnreportedRunSettler({ store: registry.require("storage"), companyId, moneyStop: moneyStop(registry, companyId), now, log: inputs.log })(taskId); } };
+  return { settle: async (taskId) => { await createUnreportedRunSettler({ store: registry.require("storage"), companyId, moneyStop: moneyStop(registry, companyId), now, log: inputs.log, deferEstimate: true })(taskId); } };
 }

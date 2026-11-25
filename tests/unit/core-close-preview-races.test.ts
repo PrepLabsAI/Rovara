@@ -38,7 +38,7 @@ async function fixture(discard = true) {
   if (preview.preview === null) throw new Error("fixture must have a preview");
   const input = { requestId: randomUUID(), expectedPreviewDigest: preview.preview.digest, discard_unpublished: discard };
   const effects = { flush: 0, holds: 0, terminations: 0, releases: 0, dispatch: 0, deletions: 0, follower: 0, model: 0 };
-  h.deps.moneyStop = { flushWaitMs: 0, async keepWholeHold() { effects.holds++; } };
+  h.deps.moneyStop = { flushWaitMs: 0 };
   h.deps.admission.release = async () => { effects.releases++; };
   h.machines.terminate = async () => { effects.terminations++; };
   h.machines.deliver = async () => { effects.dispatch++; return { duplicate: false }; };
@@ -177,7 +177,7 @@ describe("core accepted close preview races (P2)", () => {
     // Old clients never had the retained preflight. Restore the original running holder.
     await w.originalUpdate({ key: w.wk, ops: [change.set("activeOperationId", w.run.sk.slice(10))] });
     expect((await w.close({ requestId: randomUUID(), discard_unpublished: true })).status).toBe("CLOSED");
-    expect(w.effects.flush).toBe(1); expect(w.effects.holds).toBe(1); expect(w.effects.terminations).toBe(1);
+    expect(w.effects.flush).toBe(1); expect(w.effects.holds, "nothing is booked for a run lost at close (LOST-RUN-ACTUAL-SPEND)").toBe(0); expect(w.effects.terminations).toBe(1);
     expect((await w.snapshot()).some((r) => r.closeAcceptance !== undefined)).toBe(false);
   });
   it("R1 an in-flight legacy close cannot overwrite a concurrently accepted close", async () => {

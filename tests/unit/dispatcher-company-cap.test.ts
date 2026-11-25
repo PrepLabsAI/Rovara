@@ -154,7 +154,8 @@ describe("the dispatcher is wired to this reader", () => {
     const source = readFileSync(new URL("../../packages/broker/src/aws/dispatcher.ts", import.meta.url), "utf8");
     // L4-TA6 (#1087): one function builds the reader for Admission and for automatic fixing's cap; both wirings call it.
     expect(source).toContain('return dispatcherProjectTaskCap(process.env, { documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), now: () => Date.now() }, kms);');
-    expect(source.match(/projectTaskCap: dispatcherProjectTaskCapOf\(\)/gu)?.length).toBe(2);
+    // Three uses: the security modules (Admission), the money stop (LOST-RUN-ACTUAL-SPEND: the hold-estimate fallback is bounded by the task's live cap), and automatic fixing's cap.
+    expect(source.match(/projectTaskCap: dispatcherProjectTaskCapOf\(\)/gu)?.length).toBe(3);
     expect(source.match(/dispatcherProjectTaskCap\(/gu)?.length).toBe(1);
     expect(source).not.toMatch(/projectTaskCapReader\(/u);
     expect(source).toMatch(/^const kms = new KMSClient\(awsClientConfiguration\);$/mu);

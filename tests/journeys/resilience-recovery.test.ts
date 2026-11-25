@@ -162,6 +162,12 @@ describe("journey 13b: resilience, the code host, the state table and the owner'
     expect(failedPlan.operation.status).toBe("FAILED");
     expect(where(w, taskId)).toEqual({ stage: "PLAN", state: "BLOCKED" });
     expect(workflow(w, taskId).blockReason, "what the owner reads").toMatch(/^Rovara stopped while planning: RUNTIME_UNAVAILABLE: the model call failed/u);
+    // LOST-RUN-ACTUAL-SPEND: the failed run reached a machine and reported nothing, so what it spent is not known yet: Retry reads the SAME spend figure Approve does and, within the settle grace (120 s), refuses with the
+    // spend words (never reads the task as having spent nothing); once the run is past the grace the read settles it and Retry goes through.
+    const early = await w.maya("POST", `/v1/dev/tasks/${taskId}/workflow/retry`, { requestId: randomUUID(), expectedRevision: workflow(w, taskId).revision, instructions: "Try again." });
+    expect({ status: early.status, code: (early.body.error as { code?: string } | undefined)?.code }, "refused before the spend can be read").toEqual({ status: 402, code: "BUDGET_EXCEEDED" });
+    expect(where(w, taskId), "nothing was started").toEqual({ stage: "PLAN", state: "BLOCKED" });
+    w.harness.world.clock.advance(130);
     const retried = await w.maya("POST", `/v1/dev/tasks/${taskId}/workflow/retry`, { requestId: randomUUID(), expectedRevision: workflow(w, taskId).revision, instructions: "Try again." });
     expect(retried.status, JSON.stringify(retried.body).slice(0, 300)).toBe(200);
     expect(where(w, taskId), "planning runs again").toEqual({ stage: "PLAN", state: "RUNNING" });
@@ -169,7 +175,7 @@ describe("journey 13b: resilience, the code host, the state table and the owner'
     expect((await w.runStep("PLAN_CRITIQUE", [fauxAssistantMessage(fenced(PLAN_CRITIQUE_INFO_STRING, { verdict: "ok", points: [] }))])).operation.status).toBe("SUCCEEDED");
     expect(where(w, taskId), "the plan waits for the owner").toEqual({ stage: "PLAN_REVIEW", state: "WAITING" });
     // The failed run reached a worker machine and reported no usage. Its spend is settled on the next spend read once the 120 s grace has passed (SPEND-UNREPORTED-RUN, train 51): $0 only for a run that never reached a machine,
-    // otherwise the hold's remaining room booked as a MARKED estimate (core-host/unreported-run-settle.ts). Two hours of jobs pass; Approve is the first spend read after the failed run.
+    // otherwise the hold's remaining room booked as a MARKED estimate (core-host/unreported-run-settle.ts). Retry is the first spend read after the failed run (it settled the run once past the grace); two hours of jobs pass; Approve then reads the settled figure.
     for (let index = 0; index < 4; index += 1) await w.runJobs(1800);
     const listed = await w.maya("GET", "/v1/app/decisions");
     const card = (listed.body.cards as Array<{ id: string; taskId?: string }>).find((item) => item.taskId === taskId)!;
@@ -179,7 +185,7 @@ describe("journey 13b: resilience, the code host, the state table and the owner'
     const entries = w.harness.db.find((row) => row.entityType === "COST_ENTRY");
     const settled = entries.filter((row) => String(row.entryId).startsWith(`usage:${String(failedId)}:`));
     // This failed run reached a machine, so it is the marked estimate (not the $0 of a run that never reached one); the task has no hold room left in this journey, so the estimate books $0 and says it is an estimate.
-    expect(settled.map((row) => ({ entryId: row.entryId, provider: row.provider, modelId: row.modelId, chargeStatus: row.chargeStatus, micros: row.micros })), "the failed run is settled once, as a marked $0 estimate").toEqual([{ entryId: `usage:${String(failedId)}:unflushed`, provider: "rovara-unflushed-estimate", modelId: "hold-estimate", chargeStatus: "estimated", micros: 0 }]);
+    expect(settled.map((row) => ({ entryId: row.entryId, provider: row.provider, modelId: row.modelId, chargeStatus: row.chargeStatus, micros: row.micros })), "the failed run is settled once, as a marked $0 estimate").toEqual([{ entryId: `usage:${String(failedId)}:settled`, provider: "rovara-unflushed-estimate", modelId: "hold-estimate", chargeStatus: "estimated", micros: 0 }]);
     const money = ((await w.maya("GET", `/v1/dev/tasks/${taskId}`)).body.task as { money: { state: string; finality: string; spentMicros: { state: string; value: number }; estimatedMicros: { state: string; value: number }; coverage: { estimatedCalls: number } } }).money;
     const booked = entries.reduce((sum, row) => sum + Number(row.micros), 0);
     expect({ state: money.state, finality: money.finality, spent: money.spentMicros, estimated: money.estimatedMicros }, "the spend now reads, and every figure of it is marked as an estimate").toEqual({ state: "partial", finality: "provisional", spent: { state: "available", value: booked }, estimated: { state: "available", value: booked } });
@@ -199,6 +205,8 @@ describe("journey 13b: resilience, the code host, the state table and the owner'
     expect(where(w, taskId)).toEqual({ stage: "IMPLEMENT", state: "BLOCKED" });
     const reason = workflow(w, taskId).blockReason;
     expect(reason, "what the owner reads").toBe("implementation operation ended failed");
+    // The failed run reported no usage: Retry reads its spend once it is past the settle grace (see the planning case above).
+    w.harness.world.clock.advance(130);
     const retried = await w.maya("POST", `/v1/dev/tasks/${taskId}/workflow/retry`, { requestId: randomUUID(), expectedRevision: workflow(w, taskId).revision, instructions: "Try again." });
     expect(retried.status, JSON.stringify(retried.body).slice(0, 300)).toBe(200);
     expect(where(w, taskId), "coding runs again").toEqual({ stage: "IMPLEMENT", state: "RUNNING" });

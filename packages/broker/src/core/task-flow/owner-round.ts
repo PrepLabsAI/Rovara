@@ -12,6 +12,7 @@ import {
   agentXError,
   isRunLimitBlockReason,
   redactText,
+  spendUnreadableWords,
   type Principal,
   type TransactItem,
   type WorkflowOwnerAuthority,
@@ -33,7 +34,8 @@ export const NEVER_STARTED_TASK = "This task never started and its workspace was
 /** What a free-form turn on a workflow task is refused with (Cloud's words): its steps are moved by its approvals, a send back or its findings. */
 export const GATED_TASK_TURN_REFUSAL = "This task is waiting on its own approval steps. Use its approval buttons or the task's decision tool instead of sending more instructions.";
 export const WAITING_FOR_SPEND = "This task is waiting for more spend to be approved. Sending it on cannot skip that approval.";
-export const SPEND_UNKNOWN = "Rovara cannot tell what this task has spent, so it does not start more work on it. Try again in a moment.";
+/** The one sentence for a task whose spend cannot be read yet: the words table's (`spendUnreadable`), the same Approve says. */
+export const SPEND_UNKNOWN = spendUnreadableWords();
 export const TASK_PROJECT_GONE = (project: string): string => `project \`${project}\` no longer exists, so no new work starts on this task`;
 export const TASK_ARCHIVED = (project: string): string => `project \`${project}\` is archived; unarchive it to start new work`;
 
@@ -114,17 +116,22 @@ export async function admitRound(deps: TaskFlowDeps, options: TaskActionsOptions
   await releaseAdmission(deps, admitted.reservationId);
 }
 
+/**
+ * A spend that cannot be read yet is NOT "over the run limit" (the web and Slack would say so by that reason): it is `unavailable`, the table's own words, and the read may have settled a run (it books), so `writes` is `maybe`.
+ */
+const spendUnreadable = () => agentXError("BUDGET_EXCEEDED", SPEND_UNKNOWN, { reason: "unavailable", writes: "maybe" });
+
 /** The task's cap must have room: a task that has spent it (or whose spend cannot be told) is refused before a machine is woken. */
-async function requireRoomUnderCap(options: TaskActionsOptions, task: TaskRecord): Promise<void> {
+export async function requireRoomUnderCap(options: Pick<TaskActionsOptions, "roundCap">, task: TaskRecord): Promise<void> {
   if (options.roundCap === undefined) return;
   let cap: Awaited<ReturnType<NonNullable<TaskActionsOptions["roundCap"]>>>;
   try {
     cap = await options.roundCap(task);
   } catch {
-    throw agentXError("BUDGET_EXCEEDED", SPEND_UNKNOWN, { reason: "over_limit", writes: "none" });
+    throw spendUnreadable();
   }
   if (cap === undefined) return;
-  if (cap.spentUsd === undefined || !Number.isFinite(cap.spentUsd) || !Number.isFinite(cap.limitUsd)) throw agentXError("BUDGET_EXCEEDED", SPEND_UNKNOWN, { reason: "over_limit", writes: "none" });
+  if (cap.spentUsd === undefined || !Number.isFinite(cap.spentUsd) || !Number.isFinite(cap.limitUsd)) throw spendUnreadable();
   if (cap.spentUsd >= cap.limitUsd) {
     throw agentXError("BUDGET_EXCEEDED", "This task has used its run limit, so Rovara will not start more work on it. Start a new task.", { reason: "over_limit", writes: "none" });
   }

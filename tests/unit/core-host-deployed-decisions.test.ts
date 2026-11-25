@@ -5,7 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it, vi } from "vitest";
 import {
-  agentXError, change, orgScoped, INDEX_EXPIRY_ATTRIBUTE, DecisionCardsViewSchema, createWorkflowSnapshot, orgProjectCatalogKey, projectRevisionKey, submitWorkflowArtifact,
+  agentXError, change, orgScoped, spendUnreadableWords, INDEX_EXPIRY_ATTRIBUTE, DecisionCardsViewSchema, createWorkflowSnapshot, orgProjectCatalogKey, projectRevisionKey, submitWorkflowArtifact,
   type AdapterRegistry, type ApprovalProof, type ApprovalRequest, type Approvers, type JsonValue, type OrgId, type OrgRole, type Principal, type ProjectDefinition, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
@@ -724,7 +724,7 @@ describe("hosted tool approval owner ruling DEC 254zzz334", () => {
     const before = await t.stored(taskId);
     t.runtime.flow.deps.taskCapUsd = async () => state === "unknown-cap" ? undefined : 10;
     t.runtime.flow.deps.taskSpendUsd = async () => { if (state === "unreadable") throw new Error("unreadable"); return state === "unknown-spend" ? undefined : 10; };
-    await expect(t.deps.decideWorkflow(cardCaller("dev-a"), taskId, { requestId: randomUUID(), expectedRevision: before.revision, artifactDigest: before.artifacts.at(-1)!.sha256, decision: "APPROVE", reason: "Ship it", acknowledgedRunLimitUsd: 100_000 })).rejects.toThrow(state === "spent" ? "used its run limit" : "cannot tell");
+    await expect(t.deps.decideWorkflow(cardCaller("dev-a"), taskId, { requestId: randomUUID(), expectedRevision: before.revision, artifactDigest: before.artifacts.at(-1)!.sha256, decision: "APPROVE", reason: "Ship it", acknowledgedRunLimitUsd: 100_000 })).rejects.toThrow(state === "spent" ? "used its run limit" : spendUnreadableWords());
     const items = await t.deps.sources.list(cardCaller("dev-a"));
     const item = items.find((entry) => entry.taskId === taskId)!;
     const card = projectDecisionCards(items).cards.find((entry) => entry.id === cardOf(taskId))!;

@@ -10,9 +10,10 @@
 //   (ii)  `no_call`: zero ONLY when the run never reached a worker machine (`!reportsUsage`): then no model was ever called for it. Nothing else proves "no call": an event log does not (a SETUP_AGENT, FEEDBACK_REVIEW, REVIEW or
 //         WIKI_BUILD run calls models yet logs only plain notes, usage and result, and a refused usage batch stays at the front of the worker's queue so nothing after it is stored while the row count still matches).
 //         A proven $0 marker.
-//   (iii) `estimate`: neither is knowable. ONLY the task's hold room is booked as a MARKED estimate (`keepHoldAsEstimate`: entry `usage:<run>:unflushed` in the task's total, drawn from the hold; the hold then
+//   (iii) `estimate` (LOST-RUN-ACTUAL-SPEND: first `lost-run-actual.ts` asks the gateway for the ACTUAL figure and books it (`gateway_actual`), or waits for it; this is the fallback past the wait, or with no gateway to ask):
+//         neither is knowable. ONLY the task's hold room is booked as a MARKED estimate (`keepHoldAsEstimate`: entry `usage:<run>:settled`, the one id every settlement of a run uses, in the task's total, drawn from the hold; the hold then
 //         closed) (arch ruling: count what was actually spent, and what admission judged enough for the run; NOT topped up to a fixed estimate, so an estimate alone never reaches the cap). Marked, so
-//         LOST-RUN-ACTUAL-SPEND can replace it with the gateway's figure. A task with no hold of its own books a marked $0. A lost run keeps its own rule (`endUnflushed` -> `keepWholeHold`, topped up).
+//         LOST-RUN-ACTUAL-SPEND can replace it with the gateway's figure. A task with no hold of its own books a marked $0. A lost run (`usageUnflushed`) takes this same path: nothing is booked for it when it is lost.
 //
 // When: on the next read of the task's spend (the Approve check, automatic fixing), through `createCompanyTaskSpend`'s `settle`, and only for a run that ended more than a short grace ago (`UNREPORTED_SETTLE_GRACE_MS`):
 // a worker whose flush was refused may still send its report after its result, and that report, booked later, is counted exactly on top of a settled $0, and on top of an estimate (which then over-counts, marked as an estimate, never under-counts).
@@ -20,12 +21,13 @@
 import type { DocumentStore, OrgId } from "@agentx/contracts";
 import { costPartition } from "../core/cost/ledger.js";
 import { reportsUsage, type MoneyStop, type UnreportedSettlement } from "../core/task-flow/money-stop.js";
-import type { OperationRecord } from "../core/task-flow/records.js";
+import type { OperationRecord, TaskRecord } from "../core/task-flow/records.js";
 import { readRunLedger } from "./company-task-spend.js";
+import { settleActualFigure, type ActualFigureDeps } from "./lost-run-actual.js";
 
 /** How long after its end a run with no usage report waits before it is settled: a worker that retries its flush may still report. */
 export const UNREPORTED_SETTLE_GRACE_MS = 120_000;
-export type UnreportedRunCase = UnreportedSettlement | "estimate";
+export type UnreportedRunCase = UnreportedSettlement | "estimate" | "gateway_actual";
 export interface SettledRun { operationId: string; case: UnreportedRunCase }
 
 export interface UnreportedRunSettlerDeps {
@@ -34,6 +36,9 @@ export interface UnreportedRunSettlerDeps {
   moneyStop: MoneyStop;
   now: () => Date;
   graceMs?: number;
+  /** LOST-RUN-ACTUAL-SPEND: where the actual figure comes from (`lost-run-actual.ts`); both absent: an estimate at once, as before. */
+  gatewayCharges?: ActualFigureDeps["gatewayCharges"];
+  deferEstimate?: ActualFigureDeps["deferEstimate"];
   log?: (entry: Record<string, unknown>) => void;
 }
 
@@ -42,9 +47,8 @@ async function hasGatewayRecord(store: DocumentStore, companyId: OrgId, taskId: 
   return (await store.query({ pk: costPartition(companyId, taskId), sk: { op: "beginsWith", prefix: `ENTRY#usage-charge:${runId}:` }, limit: 1 })).items.length > 0;
 }
 
-/** What the rule decides for one ended run that owes a usage report: `kept_unbooked` (marked as kept, its estimate not booked yet), the two known $0 cases, or the estimate. Reads only. */
-export async function classifyUnreportedRun(store: DocumentStore, companyId: OrgId, taskId: string, run: OperationRecord): Promise<"kept_unbooked" | UnreportedRunCase> {
-  if (run.usageUnflushed === true) return "kept_unbooked";
+/** What the rule decides for one ended run that owes a usage report: the two known $0 cases, or the estimate (which `settleActualFigure` may turn into the gateway's actual, or a wait). Reads only. */
+export async function classifyUnreportedRun(store: DocumentStore, companyId: OrgId, taskId: string, run: OperationRecord): Promise<UnreportedSettlement | "estimate"> {
   if (!reportsUsage(run)) return "no_call";
   if (await hasGatewayRecord(store, companyId, taskId, run.id)) return "gateway_record";
   return "estimate";
@@ -53,10 +57,10 @@ export async function classifyUnreportedRun(store: DocumentStore, companyId: Org
 /** The READ-ONLY count of the tasks the sweep would settle (item 4): per task, whether it is still running, unreadable, or owes reports, and which case each owed run would get. Writes nothing. */
 export interface UnreportedCount {
   tasks: number; running: number; unreadable: number; clean: number; stuck: number;
-  runs: { gateway_record: number; no_call: number; estimate: number; kept_unbooked: number };
+  runs: { gateway_record: number; no_call: number; estimate: number };
 }
 export async function countUnreportedRuns(store: DocumentStore, companyId: OrgId, taskIds: Iterable<string>): Promise<UnreportedCount> {
-  const count: UnreportedCount = { tasks: 0, running: 0, unreadable: 0, clean: 0, stuck: 0, runs: { gateway_record: 0, no_call: 0, estimate: 0, kept_unbooked: 0 } };
+  const count: UnreportedCount = { tasks: 0, running: 0, unreadable: 0, clean: 0, stuck: 0, runs: { gateway_record: 0, no_call: 0, estimate: 0 } };
   for (const taskId of taskIds) {
     count.tasks += 1;
     const ledger = await readRunLedger(store, companyId, taskId).catch(() => undefined);
@@ -76,19 +80,16 @@ function pastGrace(run: OperationRecord, now: () => Date, graceMs: number): bool
 }
 
 /** Settles one ended run that owes a usage report, by the case `classifyUnreportedRun` decides. Answers the case settled, or undefined when this money stop cannot settle it (the next call tries again). */
-async function settleOneRun(deps: UnreportedRunSettlerDeps, taskId: string, reservationId: string | undefined, run: OperationRecord): Promise<UnreportedRunCase | undefined> {
+async function settleOneRun(deps: UnreportedRunSettlerDeps, task: TaskRecord, run: OperationRecord): Promise<UnreportedRunCase | undefined> {
+  const taskId = task.taskId;
   const mark = { operationId: run.id, taskId };
   const decided = await classifyUnreportedRun(deps.store, deps.companyId, taskId, run);
-  if (decided === "kept_unbooked") {
-    // Marked as kept, but its estimate was never booked (the keep failed after the mark): complete it. The hold and the estimate entry are both once-only.
-    await deps.moneyStop.keepWholeHold(reservationId, mark);
-    return "estimate";
-  }
   if (decided === "estimate") {
-    // (iii) nothing is knowable: the hold's room, and only that, booked as a marked estimate; the rest released.
-    if (deps.moneyStop.keepHoldAsEstimate === undefined) return undefined;
-    await deps.moneyStop.keepHoldAsEstimate(reservationId, mark);
-    return "estimate";
+    // The gateway's actual figure when it can be had (a lost run and an unreported run alike), else a wait, else (iii): the hold's room, and only that, booked as a marked estimate.
+    const figure = await settleActualFigure({ companyId: deps.companyId, moneyStop: deps.moneyStop, now: deps.now, gatewayCharges: deps.gatewayCharges, deferEstimate: deps.deferEstimate }, task, run);
+    if (figure === "wait" || (figure === "estimate" && deps.moneyStop.keepHoldAsEstimate === undefined)) return undefined;
+    if (figure === "estimate") await deps.moneyStop.keepHoldAsEstimate!(task.admissionReservationId, mark);
+    return figure === "settled" ? "gateway_actual" : "estimate";
   }
   // (i) the gateway's record is in the total already, or (ii) it is provable no call was made: a $0 marker, no hold touched.
   if (deps.moneyStop.settleUnreported === undefined) return undefined;
@@ -113,7 +114,7 @@ export function createUnreportedRunSettler(deps: UnreportedRunSettlerDeps): (tas
     for (const run of ledger.owing) {
       if (run.companyId !== companyId) continue;
       if (!pastGrace(run, deps.now, graceMs)) continue;
-      const outcome = await settleOneRun(deps, taskId, task.admissionReservationId, run);
+      const outcome = await settleOneRun(deps, task, run);
       if (outcome === undefined) continue;
       note({ event: "task_flow.unreported_run_settled", case: outcome, taskId });
       settled.push({ operationId: run.id, case: outcome });

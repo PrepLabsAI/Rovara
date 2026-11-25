@@ -1,5 +1,5 @@
 // Lane core-money-stop, the flow's side (core/task-flow/money-stop.ts): on a deployed install a Stop and a close let a running model run send its usage before it is ended, a run whose
-// usage never comes keeps its task's whole hold (marked estimated), a run past a cap is stopped with a fixed reason, and each model run is admitted before it is handed to a worker that
+// usage never comes is marked `usageUnflushed` and books nothing (its actual figure is settled from the gateway's record on the next spend read), a run past a cap is stopped with a fixed reason, and each model run is admitted before it is handed to a worker that
 // reports usage while it runs. Without `moneyStop` (the laptop) every one of these paths is as before.
 import { describe, expect, it } from "vitest";
 import { USAGE_CHECKPOINTS_FEATURE, type Admission, type OrgId, type WorkerInvocation } from "@agentx/contracts";
@@ -16,14 +16,12 @@ const FEATURES = ["task.workflowMode", "task.structuredPlans", USAGE_CHECKPOINTS
 
 interface StopWorld {
   h: Harness;
-  kept: Array<{ reservationId: string | undefined; operationId: string; taskId: string }>;
   /** Runs at each wait of a Stop (the worker's side: it may send its result here). */
   onWait: { run?: (() => Promise<void>) | undefined };
   cancels: WorkerInvocation[];
 }
 
 function world(options: { companyId?: OrgId; moneyStop?: boolean; features?: string[]; admission?: Admission; understandFirst?: boolean } = {}): StopWorld {
-  const kept: StopWorld["kept"] = [];
   const onWait: StopWorld["onWait"] = {};
   const dispatcher: { run?: () => Promise<unknown> } = {};
   const harness: HarnessOptions = {
@@ -37,7 +35,6 @@ function world(options: { companyId?: OrgId; moneyStop?: boolean; features?: str
           pollMs: 1_000,
           // Each wait: the dispatcher hands over what was queued (the cancel), then the worker may answer.
           sleep: async (ms: number) => { clock.advance(ms / 1_000); await dispatcher.run?.(); const run = onWait.run; onWait.run = undefined; await run?.(); },
-          async keepWholeHold(reservationId, mark) { kept.push({ reservationId, ...mark }); },
         } satisfies MoneyStop,
       }),
     }),
@@ -48,7 +45,7 @@ function world(options: { companyId?: OrgId; moneyStop?: boolean; features?: str
   const deliver = h.machines.deliver.bind(h.machines);
   const cancels: WorkerInvocation[] = [];
   h.machines.deliver = async (machineId, invocation) => { if (invocation.kind === "cancel") cancels.push(structuredClone(invocation)); return deliver(machineId, invocation); };
-  return { h, kept, onWait, cancels };
+  return { h, onWait, cancels };
 }
 
 /** A Full task whose planning step has been handed to its worker machine. */
@@ -76,8 +73,8 @@ const operationOf = async (h: Harness, run: { workspaceId: string; operationId: 
 const cancelsTo = (w: Pick<StopWorld, "cancels">, run: { operationId: string }) => w.cancels.filter((invocation) => invocation.kind === "cancel" && invocation.payload.targetOperationId === run.operationId);
 
 describe("Stop on a deployed install: the worker sends its usage first", () => {
-  it("asks the worker to stop, waits for its end, and keeps nothing estimated when the worker's result came", async () => {
-    const w = world(); const { h, kept, onWait } = w;
+  it("asks the worker to stop, waits for its end, and marks nothing unflushed when the worker's result came", async () => {
+    const w = world(); const { h, onWait } = w;
     const run = await runningPlan(h);
     // The worker stops and reports (its usage batch precedes its result) during the wait.
     onWait.run = async () => { await h.flow.recordResult({ workspaceId: run.workspaceId, operationId: run.operationId, fence: run.fence, status: "CANCELLED" }); };
@@ -88,14 +85,13 @@ describe("Stop on a deployed install: the worker sends its usage first", () => {
     expect(cancelsTo(w, run)[0]).toMatchObject({ kind: "cancel", workspaceId: run.workspaceId, fence: run.fence });
     expect(await operationOf(h, run)).toMatchObject({ status: "CANCELLED" });
     expect(await operationOf(h, run)).not.toHaveProperty("usageUnflushed");
-    expect(kept).toEqual([]);
     expect(h.clock.now - started).toBeLessThan(USAGE_FLUSH_WAIT_MS);
     const view = await h.flow.get(h.owner, run.taskId);
     expect(view.workflow).toMatchObject({ state: "BLOCKED", blockReason: "You stopped this step. Retry to run it again." });
   });
 
   it("does not block the next step a run that succeeded during the wait already started", async () => {
-    const w = world({ understandFirst: true }); const { h, kept, onWait } = w;
+    const w = world({ understandFirst: true }); const { h, onWait } = w;
     await h.registerProject();
     const started = await h.flow.start(h.owner, { requestId: newRequestId(), project: "payments", instructions: "Add a health endpoint", workflow: true });
     const drain = async (): Promise<void> => { for (let round = 0; round < 12; round += 1) { if ((await h.flow.dispatchOnce({ maxMessages: 10 })).received === 0) return; h.clock.advance(70); } };
@@ -112,18 +108,16 @@ describe("Stop on a deployed install: the worker sends its usage first", () => {
     };
     await cancelTask(h.deps, started.task.taskId);
     expect((await h.flow.get(h.owner, started.task.taskId)).workflow).toMatchObject({ stage: "PLAN", state: "RUNNING" });
-    expect(kept).toEqual([]);
   });
 
-  it("keeps the hold when the cancel cannot reach the worker (its machine is gone): the dispatcher drops it and the wait runs out", async () => {
-    const w = world(); const { h, kept } = w;
+  it("marks the run unflushed when the cancel cannot reach the worker (its machine is gone): the dispatcher drops it and the wait runs out", async () => {
+    const w = world(); const { h } = w;
     const run = await runningPlan(h);
     await h.machines.terminate(run.machineId);
     await cancelTask(h.deps, run.taskId);
     // The dispatcher tried it once (the machine answers "not found", which is not retried).
     expect(cancelsTo(w, run)).toHaveLength(1);
     expect(await operationOf(h, run)).toMatchObject({ status: "CANCELLED", usageUnflushed: true });
-    expect(kept).toHaveLength(1);
   });
 
   it("the broker never reaches the worker itself: the cancel is a dispatch message the dispatcher delivers, and only while the run is being stopped", async () => {
@@ -150,12 +144,11 @@ describe("Stop on a deployed install: the worker sends its usage first", () => {
 
 describe("closing a task with a run going, on a deployed install", () => {
 
-  it("ends the run INTERRUPTED and keeps the whole hold estimated when the worker does not answer", async () => {
-    const w = world(); const { h, kept } = w;
+  it("ends the run INTERRUPTED and marks the run unflushed (and books nothing) when the worker does not answer", async () => {
+    const w = world(); const { h } = w;
     const run = await runningPlan(h);
     await h.flow.close(h.owner, run.taskId);
     expect(await operationOf(h, run)).toMatchObject({ status: "INTERRUPTED", error: "the task was closed", usageUnflushed: true });
-    expect(kept).toEqual([{ reservationId: undefined, operationId: run.operationId, taskId: run.taskId }]);
   });
 });
 
@@ -169,8 +162,8 @@ describe("the per-run stop", () => {
     expect((await h.flow.get(h.owner, run.taskId)).workflow?.blockReason).toBe(SPEND_UNKNOWN_STOP_REASON);
   });
 
-  it("the run-lost sweep ends a stop the worker never answered, after the flush wait: CANCELLED with the reason, its hold kept estimated, its machine stopped", async () => {
-    const w = world(); const { h, kept } = w;
+  it("the run-lost sweep ends a stop the worker never answered, after the flush wait: CANCELLED with the reason, marked unflushed, its machine stopped", async () => {
+    const w = world(); const { h } = w;
     const run = await runningPlan(h);
     await requestSpendStop(h.deps, await operationOf(h, run), "company_day_cap");
     h.clock.advance(USAGE_FLUSH_WAIT_MS / 1_000 - 1);
@@ -179,7 +172,6 @@ describe("the per-run stop", () => {
     h.clock.advance(2);
     expect(await h.flow.sweepRunsOnce()).toMatchObject({ interrupted: 1 });
     expect(await operationOf(h, run)).toMatchObject({ status: "CANCELLED", error: spendStopReason("company_day_cap"), usageUnflushed: true });
-    expect(kept).toEqual([{ reservationId: undefined, operationId: run.operationId, taskId: run.taskId }]);
     expect((await h.machines.health(run.machineId)).state).toBe("stopped");
     expect((await h.flow.get(h.owner, run.taskId)).workflow).toMatchObject({ state: "BLOCKED", blockReason: spendStopReason("company_day_cap") });
   });
@@ -197,15 +189,14 @@ describe("the per-run stop", () => {
     expect(await operationOf(other.h, ended)).not.toHaveProperty("stopReason");
   });
 
-  it("a worker lost under a run keeps the task's whole hold estimated (the run-lost end)", async () => {
-    const w = world(); const { h, kept } = w;
+  it("a worker lost under a run marks it unflushed (the run-lost end)", async () => {
+    const w = world(); const { h } = w;
     const run = await runningPlan(h);
     await h.machines.terminate(run.machineId);
     await h.flow.sweepRunsOnce();
     h.clock.advance(RUN_LOST_GRACE_SECONDS + 1);
     await h.flow.sweepRunsOnce();
     expect(await operationOf(h, run)).toMatchObject({ status: "INTERRUPTED", error: RUN_LOST_MESSAGE, usageUnflushed: true });
-    expect(kept).toHaveLength(1);
   });
 });
 

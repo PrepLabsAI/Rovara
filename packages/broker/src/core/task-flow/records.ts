@@ -160,7 +160,7 @@ export interface OperationRecord extends Operation {
   /** A run stopped for money (money-stop.ts): the cap it reached, and when the stop was asked for. Its CANCELLED end blocks the step with the fixed reason. */
   stopReason?: string;
   stopRequestedAt?: string;
-  /** The run ended without its usage reaching the broker (its worker did not answer a stop in time, or was lost): its task's whole hold was kept, marked estimated. */
+  /** The run ended without its usage reaching the broker (its worker did not answer a stop in time, or was lost): it owes a figure, settled from the model gateway's record of its calls on the next read of the task's spend. */
   usageUnflushed?: true;
 }
 
