@@ -244,9 +244,15 @@
       "decision": "DEC 254zzz459"
     },
     {
+      "path": "tests/journeys/tier-growth.test.ts",
+      "minimumTests": 10,
+      "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): tier growth on the normal flow (TIER-GROWTH-MERGE, fixed). A control (small plan, small diff, merges, no reviewer asked) and the cases of a small plan whose diff rates above it: the higher tier's code and security reviews run on the current head (In review while they run, merge view not ready, press refused in the same words, then merges), a second push to risky (the old head's review does not count), a send-back to one file (growth is sticky, true words), the task's spending limit stopping the review round (Needs you), reviews that find a problem, and the bar with no reviewer wired. A whole task on the real core and real worker, in every pull request run; the floor is the file's 10 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "decision": "DEC 254zzz459"
+    },
+    {
       "path": "tests/journeys/web-task.test.ts",
-      "minimumTests": 7,
-      "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): journeys 1, 5 (web) and 9 (a web task start to close, quick and full path, default and self-approval merge rules, stop, another company). A whole task on the real core and real worker, in every pull request run; the floor is the file's 7 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "minimumTests": 9,
+      "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): journeys 1, 5 (web) and 9 (a web task start to close, quick and full path, default and self-approval merge rules, stop, another company; after a stop the worker's repository grant buys no push or clone credential, grant G1). A whole task on the real core and real worker, in every pull request run; the floor is the file's 9 runnable declarations, and deleting or trimming one is a reviewed edit.",
       "decision": "DEC 254zzz459"
     },
     {

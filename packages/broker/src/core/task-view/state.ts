@@ -7,6 +7,7 @@ import {
   CI_FIX_ROUNDS_MAX, CONFLICT_ROUNDS_MAX, FEEDBACK_AUTO_ROUNDS_MAX, PHASES, REASON_WORDS, STATUS_LINES, STEPS, WORKFLOW_BLOCK_REASONS, isRunLimitBlockReason, roundWords, workflowFixRounds,
   type PhaseKey, type PillKey, type RoleKey, type StepRow, type StepStateKey, type TaskStatus, type WorkflowSnapshot,
 } from "@agentx/contracts";
+import type { GrowthOwed } from "../merge/grown-owed.js";
 import { statusOfTask } from "./status.js";
 
 /** A wait the system makes, not a person: no machine was free, the AI provider limits requests, the day's allowance is used, the Slack access check is down. One pill, `waiting`; the reason says which. */
@@ -37,6 +38,8 @@ export interface StandingFacts {
   reviewBlock?: "findings" | "unfinished" | "not_started" | undefined;
   /** A check failed: an open pull request whose checks fail (merge tracking, read from the store) or a failing result on the current candidate. */
   failedChecks: boolean;
+  /** TIER-GROWTH-MERGE: the change grew after its plan and the higher level's code and security reviews are not on the record for its current head. Reviewing: the pill stays "In review" and the reason says so; needs_you: a decision waits. */
+  growthOwed?: GrowthOwed | undefined;
   /** A wait the host knows of beyond the workflow's own note. */
   wait?: SystemWait | undefined;
   /** A person pressed Stop and nothing has started the work again: the pill is `Stopped` (the work is kept, a retry resumes it). F2-B reads it from the task row's `personStop` mark (`facts.ts`), so every surface sees it; a host may also pass it. Absent: a stopped step reads as a blocked one does. */
@@ -178,12 +181,27 @@ function reviewBlockWords(facts: StandingFacts, base: TaskStatus, pill: PillKey 
   return facts.reviewBlock === "findings" ? STATUS_LINES.reviewFoundProblems : STATUS_LINES.reviewCouldNotFinish;
 }
 
+/** The status of a task that waits on something the one table says in its own words: a grown change's reviews, or a blocked review that needs a person. */
+function askedStatus(facts: StandingFacts, base: TaskStatus, pill: PillKey | "decision"): TaskStatus | undefined {
+  const growth = growthStatus(facts, pill);
+  if (growth !== undefined) return growth;
+  const words = reviewBlockWords(facts, base, pill);
+  return words === undefined ? undefined : { state: "needs_you", ...words };
+}
+
+/** A change that grew owes the higher level's reviews: never "Ready to merge" while it does (the merge view says the same words). */
+function growthStatus(facts: StandingFacts, pill: PillKey | "decision"): TaskStatus | undefined {
+  const owed = facts.growthOwed;
+  if (owed === undefined || facts.workflow?.stage !== "WAIT_FOR_MERGE" || (pill !== "in_review" && pill !== "decision")) return undefined;
+  return { state: owed.state === "needs_you" ? "needs_you" : "checking", reason: owed.reason, next: owed.next };
+}
+
 /** The person-free status line, with the reason this rule adds to the K4 sentences: a fix round, a wait, a fuller plan. */
 function refinedStatus(facts: StandingFacts, base: TaskStatus, pill: PillKey | "decision", spent: boolean): TaskStatus {
   const workflow = facts.workflow;
   if (facts.stoppedByPerson === true && !spent && !facts.budgetPaused && !facts.failedPrepare && base.state !== "merged" && base.state !== "closed") return { state: "finished_run", ...STATUS_LINES.stoppedByPerson };
-  const blockWords = reviewBlockWords(facts, base, pill);
-  if (blockWords !== undefined) return { state: "needs_you", ...blockWords };
+  const asked = askedStatus(facts, base, pill);
+  if (asked !== undefined) return asked;
   if (workflow?.stage === "WAIT_FOR_MERGE" && base.state === "ready_to_merge" && pill === "in_review" && facts.pullRequestReady === false) return { state: "checking", ...(facts.failedChecks ? STATUS_LINES.pullRequestChecksFailing : STATUS_LINES.pullRequestChecking) };
   // The status line and the pill agree: a task that waits on a person says so even where the old switch read the stage (review findings, a feedback card on the pull request).
   if (pill === "decision" && base.state !== "needs_you") return { state: "needs_you", ...STATUS_LINES.decisionWaiting };

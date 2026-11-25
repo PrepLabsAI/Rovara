@@ -3,7 +3,7 @@
 // wrapped around the broker's front. Nothing here writes a workflow, workspace or operation row, calls `acceptStep`, or posts a stage result by hand except the two the real
 // worker cannot make on a Mac (the machine's preparation and the host's pull request), which `handPosted` records so a journey's report can list them.
 import { execFileSync } from "node:child_process";
-import { createHmac, randomUUID, generateKeyPairSync, sign as cryptoSign } from "node:crypto";
+import { createHash, createHmac, randomUUID, generateKeyPairSync, sign as cryptoSign } from "node:crypto";
 import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -36,7 +36,7 @@ const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, 
 type Json = Record<string, unknown>;
 export interface Reply { status: number; body: Json }
 
-export async function createJourneyWorld(options: { world?: FakeWorldOptions; linear?: boolean; page?: boolean; colleague?: { role: "member" | "admin"; grant: "developer" | "administrator" }; workerTimeouts?: { reviewMs?: number }; chatPerson?: NonNullable<Parameters<typeof createCoreBrowserBroker>[0]>["chatPerson"] } = {}) {
+export async function createJourneyWorld(options: { modelGateway?: { url: string; model: string }; world?: FakeWorldOptions; linear?: boolean; page?: boolean; colleague?: { role: "member" | "admin"; grant: "developer" | "administrator" }; workerTimeouts?: { reviewMs?: number }; chatPerson?: NonNullable<Parameters<typeof createCoreBrowserBroker>[0]>["chatPerson"] } = {}) {
   const proof = createCoreProof();
   // Linear (journeys 3 and 4): the company's connection over the broker's table, the fake Linear behind the fetch seam, and the webhook route on the broker's front.
   const linearLogs: Array<Record<string, unknown>> = [];
@@ -53,7 +53,9 @@ export async function createJourneyWorld(options: { world?: FakeWorldOptions; li
   // `companies`, broker.ts:15993). The shared fixture gives it only with Linear on, so a page journey asks for it, over the same table.
   const pageTable: { current?: { send(command: unknown, options?: unknown): Promise<unknown> } } = {};
   const lazyPageTable = { send: (command: unknown, sendOptions?: unknown) => pageTable.current!.send(command, sendOptions) };
-  const harness = await createCoreBrowserBroker({ wrapCore: (root) => proof.wrap(root), ...(options.chatPerson === undefined ? {} : { chatPerson: options.chatPerson }), realJobServices: true, ...(options.world === undefined ? {} : { world: options.world }), ...(linearOption === undefined ? {} : { linear: linearOption }),
+  /** What the core logged, in order (a journey that proves a line was written reads it; no line carries a secret). */
+  const coreLogs: Array<Record<string, unknown>> = [];
+  const harness = await createCoreBrowserBroker({ wrapCore: (root) => proof.wrap(root), ...(options.chatPerson === undefined ? {} : { chatPerson: options.chatPerson }), realJobServices: true, log: (entry) => { coreLogs.push(entry); }, ...(options.modelGateway === undefined ? {} : { modelGateway: options.modelGateway }), ...(options.world === undefined ? {} : { world: options.world }), ...(linearOption === undefined ? {} : { linear: linearOption }),
     ...(options.page !== true ? {} : { developerExtra: { companies: companyMembershipFromDynamo(lazyPageTable, "signin"), taskPeopleConfiguration: { peopleChangesEnabled: true } } }) });
   pageTable.current = harness.db;
   const handler = proof.track(harness.handler);
@@ -160,6 +162,14 @@ export async function createJourneyWorld(options: { world?: FakeWorldOptions; li
       completedSetupSteps: [], readinessResults: [], creationIdentity: `fixture-${taskId}`, complete: true, updatedAt: new Date().toISOString() }, null, 2)}\n`, { mode: 0o600 });
   }
 
+  /** The hosted machine has been asked to prepare the workspace and nobody answers: the preparation is running when a person acts. Returns what the machine was asked (its grant and capability). */
+  async function holdPrepare(taskId: string) {
+    workspaceId = String(taskRow(taskId)!.workspaceId);
+    const preparing = await takeCoreInvocation(harness, workspaceId, "prepare", consumed);
+    consumed.add(preparing.invocation.operationId);
+    return preparing;
+  }
+
   /** The core's next step of this mode runs on the real worker, scripted by `responses`; returns once the core has the operation's terminal result. */
   /** The operations this journey has already taken: a stage that runs again (a send-back, a feedback fix) is a new operation, never one already run. */
   const consumed = new Set<string>();
@@ -246,11 +256,11 @@ export async function createJourneyWorld(options: { world?: FakeWorldOptions; li
   }
 
   /** One run of a deployment's scheduled jobs for the company, as the schedules would run them (merge tracking reads the code host, the session sweep, notice delivery). */
-  async function runJobs(advanceSeconds = 0): Promise<Record<string, unknown>> {
+  async function runJobs(advanceSeconds = 0, budgetMs = 5_000): Promise<Record<string, unknown>> {
     harness.world.clock.advance(advanceSeconds);
     const runtime = await harness.core.app.runtimeFor(harness.runtime.flow.deps.companyId);
     const reports: Record<string, unknown> = {};
-    for (const name of ["session-sweep", "merge-tracking", "notify-deliver"] as const) reports[name] = await runtime.services[name]?.pass({ budgetMs: 5_000 });
+    for (const name of ["session-sweep", "merge-tracking", "notify-deliver"] as const) reports[name] = await runtime.services[name]?.pass({ budgetMs });
     return reports;
   }
 
@@ -321,6 +331,18 @@ export async function createJourneyWorld(options: { world?: FakeWorldOptions; li
     return call(handler, { method: "POST", path: `/v1/internal/workspaces/${workspace}/operations/${operationId}/${action}`, headers: { "x-agentx-callback-capability": capability }, body });
   }
 
+  /**
+   * The worker's Git credential exchange with the grant its invocation carried: the real route, the grant's own first repository for the access asked (the claims are read here only to name it; nothing is signed or
+   * written). `id` is the grant's id as the broker logs it (the first 12 hex characters of sha256 of the grant's nonce).
+   */
+  function exchangeGrant(workspace: string, operationId: string, grant: string, access: "clone" | "push"): Promise<Reply & { id: string }> {
+    const claims = JSON.parse(Buffer.from(grant.split(".")[0]!, "base64url").toString("utf8")) as { nonce: string; repositories: Array<{ credentialRef: string; repositoryUrl: string; access: string }> };
+    const scope = claims.repositories.find((repository) => repository.access === access) ?? claims.repositories[0]!;
+    const id = createHash("sha256").update(claims.nonce).digest("hex").slice(0, 12);
+    return call(handler, { method: "POST", path: `/v1/internal/workspaces/${workspace}/operations/${operationId}/repository-credentials`, headers: { "x-agentx-repository-grant": grant },
+      body: { credentialRef: scope.credentialRef, repositoryUrl: scope.repositoryUrl, access } }).then((reply) => ({ ...reply, id }));
+  }
+
   /** Linear, as a person and Linear's own servers see it (journeys 3 and 4). Only with `linear: true`. */
   const linear = fakeLinearServer === undefined ? undefined : (() => {
     const server = fakeLinearServer;
@@ -364,8 +386,8 @@ export async function createJourneyWorld(options: { world?: FakeWorldOptions; li
   })();
 
   return {
-    harness, proof, linear, handler, as, maya, priya, omar, omarAsk, root, repository, baseCommit, faux, handPosted, taskRow,
-    prepare, runStep, startStep, stepEnd, approvePlan, publish, postWorkerCallback, refuseWrites, dispatchOnly, pumpDispatcher, tampered, tamperWithResults: (transform: ((body: Json) => Json) | undefined) => { resultTransform = transform; }, runJobs, linkGithubAsConnected, linkColleagueGithub, saveMergeRules,
+    harness, proof, linear, coreLogs, handler, as, maya, priya, omar, omarAsk, root, repository, baseCommit, faux, handPosted, taskRow,
+    prepare, holdPrepare, runStep, startStep, stepEnd, approvePlan, publish, postWorkerCallback, exchangeGrant, refuseWrites, dispatchOnly, pumpDispatcher, tampered, tamperWithResults: (transform: ((body: Json) => Json) | undefined) => { resultTransform = transform; }, runJobs, linkGithubAsConnected, linkColleagueGithub, saveMergeRules,
     async close() { for (const step of cleanups.splice(0).reverse()) await step(); },
   };
 }
