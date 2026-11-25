@@ -1062,3 +1062,19 @@ Every mutant is a change to `cloudWordsReason` in scripts/port-guard.ts, run aga
 | M14 | `llmgateway`, `aigateway` leave the Cloud-only list alone | survived: equivalent (the gateway rule refuses `llmgateway` and `aigateway` itself, as M3 shows from the other side) |
 
 The restored tree passes (305 of 305).
+
+## GETDEVELOPER-GITHUB (an adapter conversation's linked developer may sign in with GitHub), 2026-11-25, on base a0bc104f9
+
+Measured on the lane's working tree over tests/contract/channel-conversation-developer-record.test.ts (8 tests). The mutant was applied alone, the one file run, and the file restored.
+
+| Mutant / location | Mutation | Failing tests (of the file) | Restored |
+|---|---|---|---|
+| M1, broker/src/aws/broker-primitives.ts `channelConversationDependencies.getDeveloper` | `github` is dropped from the accepted providers again | 2 of 8 | green |
+
+## GITHUB-NOT-ON-REVIEW-LINK (a hand-built authorize link cannot take the review-link sign-in to GitHub), 2026-11-25, on base a0bc104f9
+
+Measured over tests/contract/company-github-signin.test.ts (33 tests). The mutant was applied alone, the one file run (--maxWorkers=1), and the file restored.
+
+| Mutant / location | Mutation | Failing tests (of the file) | Restored |
+|---|---|---|---|
+| M1, broker/src/developer/server.ts `authorize` | the `method=github` check for a request carrying `browserReturnTo` is dropped | 1 of 33 | green |
