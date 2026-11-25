@@ -274,6 +274,7 @@ const READERS: Record<string, string> = {
   "core/proof/eval-round-reader.ts": "ON: the eval request (first pass reads nothing; later passes read the saved rounds, bounded and operation-folder checked)",
   "core/setup-agent/plan-update.ts": "ON: at merge, the approved plan's setup changes become the setup-update offer (wrapper of approvedCodingPlan)",
   "core/sessions/ask-context-load.ts": "NOT the flow's reader: takes its own `artifacts` (not wired on a hosted root here; the hosted ask surface is separate)",
+  "core/task-flow/quick-size-record.ts": "ON: reads the just-written plan back from the company-bound reader (only when the planner did not hand it on; digest-checked, bounded, 3s cap, read-only) for the quick-size count; a failed read writes no record",
   "core/task-flow/stage-machine.ts": "ON: the earlier documents a planning run is given, and the plan text for the lighter flow's small-change route (lighter flow is not wired on hosted)",
   "core/task-log/plan-summary-source.ts": "NOT the flow's reader: the hosted plan summary is built over the registry's blobs directly (core-host/plan-summary.ts)",
   "core/work-breakdown/plan-graph.ts": "ON: the approval's work breakdown digest and ordered work's reload (ordered work stays off while workflowDependenciesEnabled is unset)",

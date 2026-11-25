@@ -7,11 +7,11 @@
 // Unread means at least medium and no files or proof chip on the card.
 // KNOWN LIMIT: "a check proves this claim" is what the PLAN asserts (its `checks.proves` and `scenarioProves`); nothing here runs the check, so a plan can claim proof it does not have and look less
 // risky. The backstop is the merge card, whose tier comes from the pull request's actual changed files and the checks that really ran.
-import type { DecisionRisk, PlanDocument, WorkflowSnapshot } from "@agentx/contracts";
+import type { DecisionRisk, WorkflowSnapshot } from "@agentx/contracts";
 import { planHasSetupChanges } from "@agentx/contracts";
 import type { LoadedDocument } from "../../developer/plan-document-reader.js";
 import { raiseRisk } from "@agentx/contracts";
-import { pathsIn, planFiles, planUntestedClaims } from "./plan-facts.js";
+import { pathsIn, planFiles, planText, planUntestedClaims } from "./plan-facts.js";
 import { riskTierOf } from "./risk-tier.js";
 
 export interface PlanFacts {
@@ -21,16 +21,6 @@ export interface PlanFacts {
   unread: boolean;
   /** L4-SC (DEC 254z c): the plan proposes a change to the project's test setup. The tier goes up one level (`bumpForSetupChanges`), which is read from the plan's own stored document, never from the planner's words about risk. */
   setupChange?: boolean | undefined;
-}
-
-/** Every bit of a plan's own text that may name a path: claims (and their children), risks, decisions and their options, and work items. */
-function planText(plan: PlanDocument): string {
-  const claims = (list: PlanDocument["claims"]): string[] => list.flatMap((claim) => [claim.text, ...(claim.children === undefined ? [] : claims(claim.children))]);
-  return [
-    ...claims(plan.claims), ...plan.risks, ...plan.notChanging,
-    ...plan.decisions.flatMap((decision) => [decision.question, ...decision.options.flatMap((option) => [option.label, option.consequence])]),
-    ...(plan.workBreakdown?.items ?? []).flatMap((item) => [item.title, item.description]),
-  ].join("\n");
 }
 
 /** The files the design under review names (its repositories and services are not files; its findings' sections are not either), when the workflow carries one. */
