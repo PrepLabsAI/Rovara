@@ -4,15 +4,15 @@
 import { randomUUID } from "node:crypto";
 import {
   IMPLICIT_COMPANY_ID, change, codeMilestoneKey, companyScoped, mergeTrackingDecisionDigest, mergeTrackingKey, when,
-  type ApprovalProof, type AuditEvent, type AuditSink, type CodeHost, type CodeMilestone, type MergeTrackingItem, type TransactItem, type WorkflowSnapshot,
+  type AuditEvent, type AuditSink, type CodeHost, type CodeMilestone, type MergeTrackingItem, type TransactItem, type WorkflowSnapshot,
 } from "../../packages/contracts/src/index.js";
 import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createLocalOwnerApprovers, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { FakeCodeHost, FakeHostModel } from "@agentx/broker/fakes";
 import {
-  fixedCodeSettings, plain, prepareMerge, soleOwnerPeople, storeLinkedChangeRequests, taskRecordKey,
-  type CodeMergeHost, type CodeMilestones, type MergeDependencies, type MergeTask, type MergeTrackingDependencies, type PreparedMerge, type SessionTimeline,
+  fixedCodeSettings, plain, prepareMerge, pressMergeAsPerson, soleOwnerPeople, storeLinkedChangeRequests, taskRecordKey,
+  type CodeMergeHost, type CodeMilestones, type MergeDependencies, type MergePressResult, type MergeTask, type MergeTrackingDependencies, type PreparedMerge, type SessionTimeline,
 } from "../../packages/broker/src/core/merge/index.js";
 import { linkedChangeRequestStep } from "../../packages/broker/src/core/proof/revert/linked-change-requests.js";
 
@@ -83,8 +83,6 @@ export interface MergeWorld {
   prs: Array<{ repositoryId: string; number: number; head: string; model: FakeHostModel }>;
   task(): Promise<MergeTask & { workflow: WorkflowSnapshot }>;
   setWorkflow(change: Record<string, unknown>): Promise<void>;
-  /** A fresh request and a proof of it from the owner's session. */
-  proofFor(prepared: PreparedMerge, overrides?: Partial<ApprovalProof>): ApprovalProof;
   prepare(): Promise<PreparedMerge>;
   /** Writes the tracking item the way a pass would for a healthy, approved pull request (or with the given changes). */
   seedTracking(overrides?: Partial<MergeTrackingItem>): Promise<void>;
@@ -93,6 +91,14 @@ export interface MergeWorld {
   syncRequests: string[];
   /** The audit rows that were COMMITTED (the sink also records what it was asked to stage). */
   auditRows(): Promise<unknown[]>;
+}
+
+/** The person who presses Merge in these tests: the world's one owner. */
+export const OWNER_PERSON_ID = localOwnerPrincipal().personId;
+
+/** The owner presses Merge on a prepared request (`pressMergeAsPerson`: every gate of the merge, no approver proof), on the given dependencies (the world's own by default). */
+export function pressAsOwner(deps: MergeDependencies, prepared: PreparedMerge, extra: Partial<Parameters<typeof pressMergeAsPerson>[1]> = {}): Promise<MergePressResult> {
+  return pressMergeAsPerson(deps, { taskId: TASK_ID, requestId: prepared.request.requestId, presserPersonId: OWNER_PERSON_ID, ...extra });
 }
 
 const urlOf = (repositoryId: string): string => `https://github.com/acme/${repositoryId}`;
@@ -178,12 +184,6 @@ export async function mergeWorld(options: MergeWorldOptions = {}): Promise<Merge
     async setWorkflow(patch) {
       const stored = await store.get(taskRecordKey(TASK_ID));
       await store.update({ key: taskRecordKey(TASK_ID), ops: [change.set(["workflow"], JSON.parse(JSON.stringify({ ...(stored!["workflow"] as object), ...patch })) as never)] });
-    },
-    proofFor(prepared, overrides = {}) {
-      return {
-        proofId: randomUUID(), method: "local-session", requestId: prepared.request.requestId, revision: prepared.request.revision, artifactDigest: prepared.request.artifactDigest,
-        token: OWNER_SESSION, ...overrides,
-      };
     },
     prepare: () => prepareMerge(deps, { taskId: TASK_ID, requestId: requestId() }),
     async seedTracking(overrides = {}) {

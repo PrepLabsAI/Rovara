@@ -5,13 +5,9 @@
 // on its tracking item and merges it, in repository order, with the checked head as the revision.
 //
 // What is different in Code:
-//  - The proof of a person is W0's `Approvers` seam, not a browser session and a confirmation page. `prepareMerge` makes the `ApprovalRequest` (bound to the task's workflow revision and to a digest
-//    of the exact pull requests, heads, merge method and risk level the person sees); the surface collects an `ApprovalProof` (the local owner's session, or a repository collaborator's comment);
-//    `pressMerge` verifies it with `Approvers.verify` and only then merges. A proof is used once: it is stored under `approvalProofKey` in the claim's transaction.
-//  - The merge core trusts `Approvers.verify` and the adapter's `requirement` (the methods it accepts and `minApprovers`, which this core enforces). It does NOT know who is calling: Cloud's rule "a token
-//    (the CLI, an AI tool) never merges" is not enforced here. Keeping the local session secret away from tokens and agent tools is the job of the surface that collects the proof (lane L8, see
-//    DEFERRED-CHECKS.md). Lane P3 (items A1, A3): a HIGH-risk merge needs a strong method, by the same rule as the decision gate (`strictMethodsFor`: what the adapter names in `strongMethods`, else the local session; a
-//    comment method never counts) and, when the adapter sets `signIn` (a company setting), a sign-in that satisfies it.
+//  - A person's press is `pressMergeAsPerson`: the caller (the hosted Merge button) has decided the person may merge and holds the task's merge lock. `prepareMerge` makes the `ApprovalRequest` (bound to the
+//    task's workflow revision and to a digest of the exact pull requests, heads, merge method and risk level the person sees), and the adapter's `requirement` (`minApprovers`) is still enforced. The press that
+//    carried an approver proof (`pressMerge`, with its proof use rows `MERGE_PROOF` and `MERGE_PROOF_TOKEN`) was deleted (DEC 254zzz527): nothing in production called it. Rows it wrote are left as they are and read by nothing.
 //  - The audit fact commits with the claim through W0's `AuditSink.stage`, as Cloud's ledger row did.
 //  - Everything provider-specific is behind the `CodeHost` port; people, settings, the task record, the timeline and the milestones are seams (seams.ts).
 import { createHash, randomUUID } from "node:crypto";
@@ -25,21 +21,17 @@ import {
   MergePressBodySchema,
   WORKFLOW_BLOCK_REASONS,
   agentXError,
-  approvalProofKey,
   change,
-  companyScoped,
   isBranchSyncBlockReason,
   isCiFixBlockReason,
   mergeTrackingKey,
   sessionEventId,
   withoutEmailAddresses,
   when,
-  type ApprovalProof,
   type ApprovalRequest,
   type ApprovalRequirement,
   type Approvers,
   type AuditSink,
-  checkApprovalSignIn,
   type ChangeRequestStatus,
   type CodeHost,
   type CodeSettings,
@@ -56,11 +48,9 @@ import {
   type TransactItem,
   type WorkflowSnapshot,
 } from "@agentx/contracts";
-import { LOCAL_SESSION_METHOD } from "../../ports/policy-defaults.js";
 import {
   canonicalPatchText, needsReviewerFloor, patchDigestOf, planningLevelOf, skippedPlanning, raiseTier, recordGrowth, recordTier, reviewerFloorRecorded, tierFromDiff, tierGrew, tierGrowthSentence, tierRank, tierReviewRecorded, type TierLevel,
 } from "../decisions/change-tier.js";
-import { strictMethodsFor } from "../decisions/strong-methods.js";
 import { scopeHoldOf } from "../build-step/scope-question.js";
 import { inertLine } from "../proof/inert-text.js";
 import { flowIs } from "../task-flow/flow-guard.js";
@@ -401,10 +391,7 @@ export function mergeViewFromReadiness(readiness: Readiness): MergeView {
 
 /** A code host that does not offer `merge` (the port's `merge` is optional): Rovara never merges there, a person does on the host. */
 const HOST_WILL_NOT_MERGE = "Rovara can't merge on this repository's code host. Merge it there.";
-const NOT_APPROVED = "Nobody approved this merge, so nothing was merged.";
-const SIGN_IN_NOT_FRESH = "This high-risk merge needs a recent sign-in. Sign in again and press Merge, so nothing was merged.";
 const NEEDS_MORE_APPROVERS = "This merge needs more than one approver, which Rovara Code can't collect yet, so nothing was merged.";
-const PROOF_USED = M.approvalUsed;
 
 export interface MergeSubject {
   taskId: string;
@@ -429,7 +416,7 @@ export interface PreparedMerge {
   orderOverride?: true;
 }
 
-/** The digest a proof is bound to: the exact pull requests and heads, the merge method and the risk level the person is shown. A change to any of them is a new question. */
+/** The digest an approval request is bound to: the exact pull requests and heads, the merge method and the risk level the person is shown. A change to any of them is a new question. */
 export function mergeArtifactDigest(subject: MergeSubject, method: CodeSettings["mergeMethod"], risk: MergeRisk["level"], tier?: TierLevel, order?: readonly string[] | "override"): string {
   // The tier is in the digest only when the task carries one, so the digest of every task from before the change tier is the one it always was. The same holds for the MR3 order: only an
   // order from dependencies, or a person's override, is in it.
@@ -544,57 +531,12 @@ export async function prepareMerge(
 
 export type MergePressResult = { status: "MERGED"; pullRequests: Array<{ repositoryId: string; number: number }> };
 
-/**
- * A person presses Merge with their proof. The request is made again from what tracking stored NOW (so the digest the proof is bound to is the digest of what would be merged now), the proof is
- * verified by `Approvers.verify`, and only then does the single merge path run, with the code host re-read for every pull request. A proof that does not verify merges nothing and claims nothing.
- */
-export async function pressMerge(
-  deps: MergeDependencies,
-  input: {
-    taskId: string; requestId: string; proof: ApprovalProof; presserPersonId?: string | undefined; expectedHeads?: ReadonlyArray<{ repositoryId: string; number: number; headSha: string }> | undefined;
-    orderOverride?: boolean | undefined;
-  },
-): Promise<MergePressResult> {
-  const prepared = await prepareMerge(deps, input);
-  // What the approver adapter requires is enforced here, before the proof is looked at: a method it does not list is no approval, and more than one approver cannot be collected yet.
-  if (!prepared.requirement.methods.includes(input.proof.method)) throw agentXError("FORBIDDEN", NOT_APPROVED);
-  const strong = strictMethodsFor("approve", prepared.risk.level, prepared.requirement);
-  if (strong !== undefined && !strong.includes(input.proof.method)) throw agentXError("FORBIDDEN", NOT_APPROVED);
-  if (prepared.requirement.minApprovers !== 1) throw agentXError("FORBIDDEN", NEEDS_MORE_APPROVERS);
-  // The use of the proof is written by the merge's own claim (`claimMerge`), when the merge proceeds: `verify` is only a check here, so any refusal before that claim leaves the same approval usable.
-  const verdict = await deps.approvers.verify({ ...prepared.request, useRecordedByCaller: true }, input.proof);
-  if (!verdict.approved) {
-    // A proof for what the person saw, when what would be merged is something else now, is "it changed", not "nobody approved": the person checks and approves again.
-    if (verdict.reason === "other_content" || verdict.reason === "other_revision") throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
-    if (verdict.reason === "proof_already_used") throw agentXError("FORBIDDEN", PROOF_USED);
-    throw agentXError("FORBIDDEN", NOT_APPROVED);
-  }
-  // An approval a merge already used stays refused whatever the adapter remembers (a restart forgets its memory): read from the same rows the claim writes.
-  await refuseUsedProof(deps, prepared.request.companyId, input.proof);
-  if (!prepared.requirement.methods.includes(verdict.method)) throw agentXError("FORBIDDEN", NOT_APPROVED);
-  if (strong !== undefined && !strong.includes(verdict.method)) throw agentXError("FORBIDDEN", NOT_APPROVED);
-  // The company's sign-in rule (decision 62): a high-risk merge needs the approver's sign-in to satisfy it. Fails closed on a missing sign-in time.
-  if (prepared.risk.level === "high" && prepared.requirement.signIn !== undefined && !checkApprovalSignIn(prepared.requirement.signIn, verdict.approver, deps.now(), { companySignIn: deps.identity?.capabilities.companySignIn === true }).ok) throw agentXError("FORBIDDEN", SIGN_IN_NOT_FRESH);
-  const task = await deps.host.loadTask(input.taskId);
-  if (task === undefined || task.orgId === undefined || !tracksMerge(task.workflow)) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
-  if (task.closedAt !== undefined || task.releasedAt !== undefined) throw agentXError("MERGE_NOT_READY", M.taskClosed);
-  // The task must still be at the revision the person approved, and merged by the method they were shown.
-  if (task.workflow.revision !== prepared.request.revision) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
-  // Read again right before the merge: the hold may have come back (a new push asked the question again).
-  if (await scopeHoldOf({ store: deps.store }, task)) throw agentXError("MERGE_NOT_READY", SCOPE_HELD);
-  const merged = await mergeTask(deps, task as MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot }, prepared.subject, {
-    decidedBy: verdict.approver.personId, occurrence: input.requestId, proof: input.proof, method: verdict.method, mergeMethod: prepared.mergeMethod, requestId: input.requestId, tier: prepared.tier,
-    ...(prepared.mergeOrder === undefined ? {} : { mergeOrder: prepared.mergeOrder }),
-  });
-  return { status: "MERGED", pullRequests: merged };
-}
-
 /** DEC 254zzz104: the method the audit names for a press made by a person on the Rovara website, whose standing the caller checked (no approver proof). */
 export const WEBSITE_PRESS_METHOD = "rovara-website-press";
 
 /**
  * Owner DEC 254zzz94/104: a person's press of Merge with NO approver proof. The CALLER has already decided the person may merge (the hosted Merge button: the website's own client, and the task owner, a co-owner,
- * a project admin or a company admin, read live) and holds the task's merge lock. Every other gate is the merge core's own, exactly as `pressMerge` runs them: the request made again from what tracking stored
+ * a project admin or a company admin, read live) and holds the task's merge lock. Every other gate is the merge core's own, exactly as the proof-carrying press (deleted) ran them: the request made again from what tracking stored
  * now (closed or released task, scope hold, stored readiness with approvals, self-approval, code owners, the recorded base, the second-review wait, the merge order), the task read again at the revision just
  * prepared, the scope hold read again, then the single merge path (`mergeTask`: the linked pull request, a FRESH host read of every pull request with Rovara's own Check left out, readiness for the exact
  * heads, the tier gate, a claim per pull request with its audit fact, the merge at the checked head). Only `Approvers.verify` is not asked: there is no proof to verify.
@@ -622,7 +564,7 @@ export async function pressMergeAsPerson(
   if (task.workflow.revision !== prepared.request.revision) throw agentXError("MERGE_NOT_READY", M.changedAfterConfirm);
   if (await scopeHoldOf({ store: deps.store }, task)) throw agentXError("MERGE_NOT_READY", SCOPE_HELD);
   const merged = await mergeTask(deps, task as MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot }, prepared.subject, {
-    decidedBy: input.presserPersonId, occurrence: input.requestId, proof: undefined, method: WEBSITE_PRESS_METHOD, mergeMethod: prepared.mergeMethod, requestId: input.requestId, tier: prepared.tier,
+    decidedBy: input.presserPersonId, occurrence: input.requestId, method: WEBSITE_PRESS_METHOD, mergeMethod: prepared.mergeMethod, requestId: input.requestId, tier: prepared.tier,
     ...(prepared.mergeOrder === undefined ? {} : { mergeOrder: prepared.mergeOrder }),
   });
   return { status: "MERGED", pullRequests: merged };
@@ -717,7 +659,7 @@ const TIER_UNREADABLE = "Rovara couldn't read the changed files from the code ho
  * makes the record stale. The record is written under `flowIs`, so a lost race is refused, and a whole-workflow writer that read the task earlier carries the stored record forward (flow-guard.ts). A host that cannot be read
  * refuses the merge too, and records nothing. When the lighter flow skipped planning steps (`flow.skippedSteps`), a small change also needs the reviewer's questions on the record for the current head and patch; a task that ran the whole plan does not.
  */
-/** Exported for the tests of its refusals (a head that cannot be bound); `pressMerge` is the one caller. */
+/** Exported for the tests of its refusals (a head that cannot be bound); `pressMergeAsPerson` is the one caller. */
 export async function tierGate(
   deps: MergeDependencies, task: MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot }, targets: ReadonlyArray<TierReadTarget & { headSha: string }>, scope: HostScope, shown: TierLevel | undefined,
 ): Promise<void> {
@@ -843,51 +785,27 @@ async function approvalFromStatus(
   });
 }
 
-/** Where a used proof is kept: one item for each proof, keyed by what the proof is (method, token, request), so a token cannot be used again under a fresh proof id. */
-const proofUseKey = (companyId: string, proof: ApprovalProof): { pk: string; sk: string } => ({ pk: companyScoped(companyId, "MERGE_PROOF"), sk: approvalProofKey(proof) });
-/** Where a proof is used up by what it is (method and token), not by the request it is presented for. */
-const tokenUseKey = (companyId: string, proof: ApprovalProof): { pk: string; sk: string } => ({
-  pk: companyScoped(companyId, "MERGE_PROOF_TOKEN"), sk: createHash("sha256").update(JSON.stringify([proof.method, proof.token])).digest("hex"),
-});
-
-/** The rows that hold the use of a proof: its own, and (for a proof that names one act, not a standing local session) the row of what it IS. */
-const proofUseKeys = (companyId: string, proof: ApprovalProof): Array<{ pk: string; sk: string }> => [proofUseKey(companyId, proof), ...(proof.method === LOCAL_SESSION_METHOD ? [] : [tokenUseKey(companyId, proof)])];
-
-/** Refuses a proof a merge already used. The claim's transaction is the guarantee; this read only refuses early and in plain words. */
-async function refuseUsedProof(deps: MergeDependencies, companyId: OrgId, proof: ApprovalProof): Promise<void> {
-  const rows = await Promise.all(proofUseKeys(companyId, proof).map((key) => deps.store.get(key)));
-  if (rows.some((row) => row !== undefined)) throw agentXError("FORBIDDEN", PROOF_USED);
-}
-
-/** A fresh audit fact id for each claim: the claim's own condition (one holder) and the proof's use rows keep one press from merging twice, and a press given back after a host refusal (`releaseMergeClaim`, the approval or the same request id) must be able to claim again, leaving one audit fact for each try. */
+/** A fresh audit fact id for each claim: the claim's own condition (one holder) keeps one press from merging twice, and a press given back after a host refusal (`releaseMergeClaim`, the same request id) must be able to claim again, leaving one audit fact for each try. */
 const factSalt = (): string => `\n${randomUUID()}`;
 
-type ClaimResult = { claimed: true; at: string } | { claimed: false; reason: "held" | "proof_used" };
+type ClaimResult = { claimed: true; at: string } | { claimed: false; reason: "held" };
 
 /**
  * Claims the merge of one pull request on its tracking item: only when nobody holds it, or the holder's claim is older than `MERGE_CLAIM_SECONDS`. The claim bumps the item's version. The audit
- * fact commits with the claim (a claim that was lost leaves none and a claim that was made always leaves one), and so does the use of the proof (`useProof`, the first claim of a press).
+ * fact commits with the claim (a claim that was lost leaves none and a claim that was made always leaves one).
  */
 async function claimMerge(
   deps: MergeDependencies, task: { taskId: string; orgId: OrgId }, pr: { repositoryId: string; number: number; url: string; repositoryKey: string }, headSha: string, by: string,
-  audit: { occurrence: string; method: string; proofMethod: string; proof: ApprovalProof | undefined; requestId: string },
-  useProof: boolean,
+  audit: { occurrence: string; method: string; pressMethod: string; requestId: string },
 ): Promise<ClaimResult> {
   const now = deps.now();
   const at = new Date(now).toISOString();
   const eventId = createHash("sha256").update(`pull_request.merge_requested\n${audit.occurrence}\n${pr.repositoryId}\n${String(pr.number)}${factSalt()}`).digest("hex");
   const staged = deps.audit.stage({
     eventId, companyId: task.orgId, at, actor: { type: "person", id: by }, action: "pull_request.merge_requested", subject: { type: "change_request", id: `${pr.repositoryKey}#${String(pr.number)}` },
-    // Which approval merged: its request and proof ids and its method. Never the token.
-    details: { repository: pr.repositoryKey, number: pr.number, method: audit.method, approvedBy: audit.proofMethod, requestId: audit.requestId, ...(audit.proof === undefined ? {} : { proofId: audit.proof.proofId }) },
+    // Which press merged: its request id and its method (`approvedBy`). Never a token.
+    details: { repository: pr.repositoryKey, number: pr.number, method: audit.method, approvedBy: audit.pressMethod, requestId: audit.requestId },
   });
-  // The use of the proof, in the claim's transaction. A local session is a standing secret by design and is used again and again; a proof whose token names one act (a comment id) is also
-  // used up by what it IS, whatever request it is presented for, so the same comment cannot approve a second request (a new head, another task).
-  const useRows: TransactItem[] = [];
-  if (useProof && audit.proof !== undefined) {
-    useRows.push({ kind: "put", item: plain({ ...proofUseKey(task.orgId, audit.proof), entityType: "MERGE_PROOF", requestId: audit.proof.requestId, taskId: task.taskId, usedAt: at }), condition: when.absent() });
-    if (audit.proof.method !== LOCAL_SESSION_METHOD) useRows.push({ kind: "put", item: plain({ ...tokenUseKey(task.orgId, audit.proof), entityType: "MERGE_PROOF_TOKEN", requestId: audit.proof.requestId, taskId: task.taskId, usedAt: at }), condition: when.absent() });
-  }
   const items: TransactItem[] = [
     {
       kind: "update", key: mergeTrackingKey(task.taskId, pr.repositoryId, pr.number), ops: [change.set(["mergeClaim"], { headSha, by, at }), change.add(["version"], 1)],
@@ -896,32 +814,26 @@ async function claimMerge(
         when.or(when.notExists("mergeClaim"), when.lte(["mergeClaim", "at"], new Date(now - MERGE_CLAIM_SECONDS * 1000).toISOString())),
       ),
     },
-    ...useRows,
     ...staged,
   ];
   const result = await deps.store.transact(items);
   if (result.applied) return { claimed: true, at };
-  // The step that failed says why: the claim (index 0) was held by someone else or the item is not there; a use row (the next ones) says the proof was used before. Anything else is a fault.
+  // The step that failed says why: the claim (index 0) was held by someone else or the item is not there. Anything else (the audit step) is a fault.
   if (result.failed.includes(0)) return { claimed: false, reason: "held" };
-  if (result.failed.some((index) => index >= 1 && index <= useRows.length)) return { claimed: false, reason: "proof_used" };
   throw agentXError("RUNTIME_UNAVAILABLE", "The merge could not be recorded.");
 }
 
 /**
  * Lets go of the claim after the host said no (nothing was merged, so nobody else needs to wait for the claim to age): only the claim this run made, found by who and when, so a claim somebody
  * else took since stays. Best effort: a claim that stays only costs the next press the wait it always cost. A host failure whose outcome is unknown keeps its claim (the next run finds out).
- * `used`: when this claim wrote the use of the proof (the first of the run), the proof is given back in the SAME transaction (only the use rows this claim wrote, found by when), so the person presses Merge again on the same approval. The proof is bound to the
- * task, the pull requests and their exact heads (the digest), so a freed proof can only retry that exact merge. If the claim was lost to another run, nothing is released and the proof stays used.
  */
 async function releaseMergeClaim(
-  deps: MergeDependencies, task: { taskId: string; orgId: OrgId }, pr: { repositoryId: string; number: number }, claim: { by: string; at: string }, used?: { proof: ApprovalProof | undefined; wroteUse: boolean },
+  deps: MergeDependencies, task: { taskId: string; orgId: OrgId }, pr: { repositoryId: string; number: number }, claim: { by: string; at: string },
 ): Promise<void> {
   const condition = when.and(when.present(), when.eq("orgId", task.orgId), when.eq("taskId", task.taskId), when.eq(["mergeClaim", "by"], claim.by), when.eq(["mergeClaim", "at"], claim.at));
   const ops = [change.remove(["mergeClaim"]), change.add(["version"], 1)];
   const key = mergeTrackingKey(task.taskId, pr.repositoryId, pr.number);
-  const freeProof = used?.wroteUse === true ? used.proof : undefined;
-  if (freeProof === undefined) { await deps.store.update({ key, ops, condition }).catch(() => undefined); return; }
-  await deps.store.transact([{ kind: "update", key, ops, condition }, ...proofUseKeys(task.orgId, freeProof).map((use) => ({ kind: "delete" as const, key: use, condition: when.eq("usedAt", claim.at) }))]).catch(() => undefined);
+  await deps.store.update({ key, ops, condition }).catch(() => undefined);
 }
 
 const hashNumber = (seed: string): number => Number.parseInt(createHash("sha256").update(seed).digest("hex").slice(0, 6), 16) % 1_000_000;
@@ -932,10 +844,10 @@ const hashNumber = (seed: string): number => Number.parseInt(createHash("sha256"
  */
 async function mergeTask(
   deps: MergeDependencies, tracked: MergeTask & { orgId: OrgId; workflow: WorkflowSnapshot }, subject: MergeSubject,
-  who: { decidedBy: string; occurrence: string; proof: ApprovalProof | undefined; method: string; mergeMethod: CodeSettings["mergeMethod"]; requestId: string; tier?: TierLevel | undefined; mergeOrder?: readonly string[] },
+  who: { decidedBy: string; occurrence: string; method: string; mergeMethod: CodeSettings["mergeMethod"]; requestId: string; tier?: TierLevel | undefined; mergeOrder?: readonly string[] },
 ): Promise<Array<{ repositoryId: string; number: number }>> {
   const { plan: checkedPlan, settings, alreadyMerged, mergedBefore, entries } = await mergeableNow(deps, tracked, subject, who.decidedBy, who.tier);
-  // MR3: the order the person approved (bound into the digest the proof verified): providers first, so a pull request is never merged before one it depends on.
+  // MR3: the order the person approved (bound into the digest the request carries): providers first, so a pull request is never merged before one it depends on.
   const order: MergeOrder | undefined = who.mergeOrder === undefined ? undefined : { kind: "dependencies", repositories: [...who.mergeOrder], providersOf: {} };
   const plan = order === undefined ? checkedPlan : inMergeOrder(checkedPlan.map((step) => ({ ...step, repositoryId: step.entry.repositoryId, number: step.entry.number })), order);
   // The method the person was shown is the method used: a setting changed since is a new question.
@@ -946,20 +858,16 @@ async function mergeTask(
   if (plan.some((step) => step.codeHost.merge === undefined)) throw agentXError("MERGE_NOT_READY", HOST_WILL_NOT_MERGE);
   // What an earlier run of this handler already merged counts, so a rerun that finds the second pull request refused still says the first merged.
   const merged: string[] = [...mergedBefore];
-  let proofUsed = false;
   for (const step of plan) {
     const { entry, url, headSha } = step;
     const claim = await claimMerge(
       deps, tracked, { repositoryId: entry.repositoryId, number: entry.number, url, repositoryKey: requireRepositoryKey(providerOf(step.codeHost), url) }, headSha, who.decidedBy,
-      { occurrence: who.occurrence, method: settings.mergeMethod, proofMethod: who.method, proof: who.proof, requestId: who.requestId }, !proofUsed,
+      { occurrence: who.occurrence, method: settings.mergeMethod, pressMethod: who.method, requestId: who.requestId },
     );
     if (!claim.claimed) {
-      if (claim.reason === "proof_used") throw agentXError("FORBIDDEN", PROOF_USED);
       // Another run holds the claim, or tracking has no item for the pull request yet: whichever it is, a later run finds out (the pull request merged, the claim gone stale).
       throw agentXError("RUNTIME_UNAVAILABLE", "Rovara is already merging this pull request.");
     }
-    const wroteUse = !proofUsed;
-    proofUsed = true;
     const result = await step.codeHost.merge!(changeRequestRef(url, entry.number), { revision: headSha, method: settings.mergeMethod }, scope);
     if (result.outcome === "merged" || result.outcome === "already_merged") {
       merged.push(entry.repositoryId);
@@ -972,9 +880,8 @@ async function mergeTask(
       }
       continue;
     }
-    // The host said no: nothing merged, so the claim goes at once and a second press right after is not told Rovara is already merging. The approval goes back too when this was the claim that used it up (the first of the run: nothing
-    // of this run is merged yet; a refusal of a later pull request, after a merge, keeps it used).
-    await releaseMergeClaim(deps, tracked, entry, { by: who.decidedBy, at: claim.at }, { proof: who.proof, wroteUse });
+    // The host said no: nothing merged, so the claim goes at once and a second press right after is not told Rovara is already merging.
+    await releaseMergeClaim(deps, tracked, entry, { by: who.decidedBy, at: claim.at });
     const why = refusalWords(result);
     if (merged.length === 0) {
       throw agentXError("MERGE_NOT_READY", result.reason === "head_changed" ? M.changedAfterConfirm : M.notMerged(entry.repositoryId, why));

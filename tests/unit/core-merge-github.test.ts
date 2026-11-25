@@ -8,10 +8,10 @@ import { githubCodeHost } from "../../packages/broker/src/plugins/code-host/gith
 import { GitHubAppCredentialProvider } from "../../packages/broker/src/plugins/code-host/github/client.js";
 import { FakeCodeHost } from "@agentx/broker/fakes";
 import { NO_HOST_MESSAGE } from "../../packages/broker/src/plugins/routing.js";
-import { pressMerge, registryRepositoryResolver, trackPullRequest } from "../../packages/broker/src/core/merge/index.js";
+import { registryRepositoryResolver, trackPullRequest } from "../../packages/broker/src/core/merge/index.js";
 import { GitHubFixtureApi } from "../support/ports/github-fixture-api.js";
 import { RecordingNetwork, TenantBinding } from "../support/ports/github-client-conformance.js";
-import { ORG, TASK_ID, mergeWorld } from "../support/merge-world.js";
+import { ORG, TASK_ID, mergeWorld, pressAsOwner } from "../support/merge-world.js";
 
 describe("the merge core over the registry, the GitHub adapter and the real GitHub client", () => {
   async function world() {
@@ -43,7 +43,7 @@ describe("the merge core over the registry, the GitHub adapter and the real GitH
     const pr = w.prs[0]!;
     expect((await w.trackingOf(pr))).toMatchObject({ ci: "passing", review: "approved" });
     const prepared = await (await import("../../packages/broker/src/core/merge/index.js")).prepareMerge(w.deps, { taskId: TASK_ID, requestId: w.requestId() });
-    const result = await pressMerge(w.deps, { taskId: TASK_ID, requestId: prepared.request.requestId, proof: w.proofFor(prepared) });
+    const result = await pressAsOwner(w.deps, prepared);
     expect(result.status).toBe("MERGED");
     expect(pr.model.getChangeRequest(String(pr.number)).state).toBe("merged");
     // The tenant binding was asked, for this company only, on the path of the whole flow.

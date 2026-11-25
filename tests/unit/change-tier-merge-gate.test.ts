@@ -1,9 +1,9 @@
 // The merge gate of the change tier: at merge the tier is recomputed from the code host's view of the change, and a change that grew past the tier its approval was given at is refused in plain words.
-// Driven through the real press (`pressMerge`) on the fake code host; the host here gives the patch text GitHub gives (the fake gives none).
+// Driven through the real press (`pressMergeAsPerson`) on the fake code host; the host here gives the patch text GitHub gives (the fake gives none).
 import { describe, expect, it } from "vitest";
 import type { ChangeRequestFilesPage, ChangeRequestRef, CodeHost, HostScope } from "../../packages/contracts/src/index.js";
 import { FakeCodeHost, type FakeHostModel } from "@agentx/broker/fakes";
-import { pressMerge, prepareMerge } from "../../packages/broker/src/core/merge/index.js";
+import { prepareMerge } from "../../packages/broker/src/core/merge/index.js";
 import { tierGate } from "../../packages/broker/src/core/merge/merge.js";
 import { patchDigestOf, recordQuestionsAnswered, recordTierReview, type TierLevel } from "../../packages/broker/src/core/decisions/change-tier.js";
 import { readReviewInput } from "../../packages/broker/src/core/merge/change-tier-read.js";
@@ -66,7 +66,7 @@ async function worldAt(level: "small" | "standard" | "risky", mode: Mode = { pat
 }
 const press = async (world: MergeWorld) => {
   const prepared = await prepareMerge(world.deps, { taskId: TASK_ID, requestId: world.requestId() });
-  return { prepared, run: () => pressMerge(world.deps, { taskId: TASK_ID, requestId: prepared.request.requestId, proof: world.proofFor(prepared) }) };
+  return { prepared, run: () => pressAsOwner(world.deps, prepared) };
 };
 /** A later push to the pull request's branch: the host's head moves, and tracking has read it. */
 async function pushed(world: MergeWorld, changes: Record<string, string | null>): Promise<void> {

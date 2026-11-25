@@ -14,8 +14,8 @@ import { CODE_HOST_COMMENT_METHOD, LOCAL_SESSION_METHOD, createLocalOwnerIdentit
 import { createDecisionGate, approvalRecordKey, type DecisionAttempt } from "../../packages/broker/src/core/decisions/approval-gate.js";
 import { createWorkflowDocumentSubject, workflowTaskKey, waitingDocumentDigest } from "../../packages/broker/src/core/decisions/workflow-subject.js";
 import { createIdentityMergePeople, soleOwnerPeople } from "../../packages/broker/src/core/merge/people.js";
-import { mergeReadiness, prepareMerge, pressMerge } from "../../packages/broker/src/core/merge/index.js";
-import { TASK_ID as MERGE_TASK, mergeWorld } from "../support/merge-world.js";
+import { mergeReadiness, prepareMerge } from "../../packages/broker/src/core/merge/index.js";
+import { TASK_ID as MERGE_TASK, mergeWorld, pressAsOwner } from "../support/merge-world.js";
 
 const COMPANY = IMPLICIT_COMPANY_ID;
 const NOW = new Date("2026-11-10T12:00:00.000Z");
@@ -176,24 +176,9 @@ describe("A1 and decision 62: the sign-in time, and the company's window", () =>
 
 const refusedMessage = async (run: () => Promise<unknown>): Promise<string> => { try { await run(); } catch (error) { const e = error as { code?: string; message: string }; return e.code !== undefined && e.message.startsWith(`${e.code}: `) ? e.message.slice(e.code.length + 2) : e.message; } return "merged"; };
 
-describe("A1 and A3 on the merge press", () => {
-  async function highRiskWorld(approvers: Approvers) {
-    const world = await mergeWorld();
-    await world.seedTracking();
-    await world.setWorkflow({ risk: { level: "high", reasons: ["auth"], candidateDigest: "c".repeat(64) } });
-    return { world, deps: { ...world.deps, approvers } };
-  }
-  const press = async (w: Awaited<ReturnType<typeof highRiskWorld>>, method = STEP_UP) => {
-    const prepared = await prepareMerge(w.deps, { taskId: MERGE_TASK, requestId: w.world.requestId() });
-    return pressMerge(w.deps, { taskId: MERGE_TASK, requestId: prepared.request.requestId, proof: w.world.proofFor(prepared, { method, token: TOKEN }) });
-  };
-  const refused = async (run: () => Promise<unknown>): Promise<string> => { try { await run(); } catch (error) { return (error as { message: string }).message; } return "merged"; };
-
-  it("any comment kind is refused for a high-risk merge, by name or by plug-in marking (review L1)", async () => {
-    const w = await highRiskWorld(plugin({ requirement: { methods: [STEP_UP, "slack-comment", "code-host-button"], strongMethods: [STEP_UP, "slack-comment", "code-host-button"], commentMethods: ["slack-comment"] } }));
-    for (const method of ["slack-comment", "code-host-button"]) expect(await refused(() => press(w, method))).toContain("Nobody approved");
-    expect((await press(w)).status).toBe("MERGED");
-  });
+describe("the presser on the merge press", () => {
+  // The press that carried an approver proof (strong methods, comment methods, the sign-in window on a high-risk merge) was deleted (DEC 254zzz527): nothing in production called it.
+  const refused = refusedMessage;
 
   it("the presser half of M1 end to end: a presser whose SECOND account is the only approver cannot press Merge (review N1)", async () => {
     const world = await mergeWorld({ allowSelfApproval: false });
@@ -209,35 +194,14 @@ describe("A1 and A3 on the merge press", () => {
     const press = async (accounts: string[]) => {
       const deps = { ...world.deps, people: people(accounts) as never };
       const prepared = await prepareMerge(deps, { taskId: MERGE_TASK, requestId: world.requestId(), presserPersonId: "presser-1" });
-      return pressMerge(deps, { taskId: MERGE_TASK, requestId: prepared.request.requestId, proof: world.proofFor(prepared), presserPersonId: "presser-1" });
+      return pressAsOwner(deps, prepared, { presserPersonId: "presser-1" });
     };
     // The presser's accounts are "999" and the approver's: refused, nothing merged.
-    expect(await refusedMessage(() => press(["999", priya]))).toBe("You approved this pull request, so someone else must press Merge.");
+    expect(await refused(() => press(["999", priya]))).toBe("You approved this pull request, so someone else must press Merge.");
     expect(world.prs[0]!.model.getChangeRequest(String(world.prs[0]!.number)).state).toBe("open");
     // Control: the presser has only "999" (a different person from the approver): it merges.
     expect((await press(["999"])).status).toBe("MERGED");
   });
-
-  it("the merge press also checks the identity capability for 'any active sign-in' (review M3), and a malformed window (review L3)", async () => {
-    const rule = { mode: "any-active" as const };
-    const recent = (w: Awaited<ReturnType<typeof highRiskWorld>>) => new Date(w.world.now.value - 60_000).toISOString();
-    for (const identity of [undefined, identityWith(false)]) {
-      const w = await highRiskWorld(plugin());
-      w.deps.approvers = plugin({ requirement: { strongMethods: [STEP_UP], signIn: rule }, authTime: recent(w) });
-      if (identity !== undefined) (w.deps as { identity?: unknown }).identity = identity;
-      expect(await refused(() => press(w))).toContain("recent sign-in");
-    }
-    const ok = await highRiskWorld(plugin());
-    ok.deps.approvers = plugin({ requirement: { strongMethods: [STEP_UP], signIn: rule }, authTime: recent(ok) });
-    (ok.deps as { identity?: unknown }).identity = identityWith(true);
-    expect((await press(ok)).status).toBe("MERGED");
-    for (const seconds of [Number.POSITIVE_INFINITY, 0]) {
-      const w = await highRiskWorld(plugin());
-      w.deps.approvers = plugin({ requirement: { strongMethods: [STEP_UP], signIn: { mode: "window", seconds } }, authTime: recent(w) });
-      expect(await refused(() => press(w))).toContain("recent sign-in");
-    }
-  });
-
 });
 
 describe("I1: the identity abilities", () => {
