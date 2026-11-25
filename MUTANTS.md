@@ -1358,3 +1358,36 @@ Production guards this lane adds: the task read's own rule first (`loadReadableT
 | M20 checks.ts reviews | a review's failure marker ignored | "the Code and Security review rows" |
 
 All 20 killed; the restored tree passes. Evidence applies to this lane's commit (parent a65c40ce7); the final-head gate and review belong to 9d.
+
+## RD-2b1 round 2 - Sonnet pre-review fixes (same lane, one new commit on 1d7edd14f)
+
+Guards added: customer text stripped of control, direction and invisible characters before redaction (`plainText`); no claim from an unapproved plan (a fixed sentence instead); approved Markdown plan and unreadable pack said in fixed words; the held file compared by size AND digest; no address on a file link until RD-2d serves files (`EVIDENCE_FILES_SERVED`); a file with no links view reads "withheld"; the failed end-to-end run keeps its own row and no scenario is called failed from one aggregate result; states that never read better than the facts (Faked, Partial, Findings accepted, disagreeing facts read Couldn't verify); no commit with several repositories; own-key lookups by id; ONE code-details gate (`mayReadCodeDetails`) hiding test names, causes, finding files and text, scan items and links; bounded parallel retention checks; `cache-control: no-store`; a join that cannot be made answers a fixed sentence. All mutants in tests/unit/rd2b1-checks-read.test.ts. M1 to M20 (above) were re-run on the restructured code: all killed again.
+
+| Mutant / location | Mutation | Failing test |
+|---|---|---|
+| M21 checks.ts `plainText` | control and format characters kept | "plainText removes NUL, ESC ..." and "test names, causes, labels ... carry none of them" |
+| M22 routes `planOf` | the latest draft read when none is approved | "the claims come from the plan version the owner approved ... no claim, no mapping" |
+| M23 checks.ts `linkOf` | an address served while files are not | link tests (route and join) |
+| M24 routes `statesOf` | the digest not compared | "the kept pack ... another digest is withheld" |
+| M25 checks.ts `linksOfRow` | no links view reads silent | link test (withheld) |
+| M26 checks.ts `rowsOf` | a failed aggregate run's row dropped | "a failed aggregate run keeps its own row" |
+| M27 checks.ts `rowsOf` | every scenario called failed | same test |
+| M28 checks.ts `passedResult` | a Rovara-made fake read as Passed | "a result answered by a Rovara-made fake is Faked" |
+| M29 checks.ts `reviewStateOf` | a partial review read as Passed | "a review that saw part of the diff reads Partial" |
+| M30 checks.ts `reviewStateOf` | all-accepted findings read as Findings | same test |
+| M31 checks.ts `passedResult` | a pass with a failed kept check read as Passed | "rowStateOf: ... disagree" and the Faked test |
+| M32 checks.ts `verifiedOf` | the first commit of several named | "with more than one repository no commit is named" |
+| M33 routes `packIsUnreadable` | an unreadable pack read as none kept | "an approved plan with no structured form says so; a pack ... cannot be read" |
+| M34 routes `planOf` | a Markdown plan silent | same test |
+| M35 checks.ts `ownList` | id looked up on the prototype (`toString`, `constructor`) | "a check or scenario id that is a word of the language" and the state tests |
+| M36 routes `mayReadCodeDetails` | the gate says no | route tests (links, details) |
+| M37 routes `STAT_AT_ONCE` | every file checked at once | "the files are checked against the store a few at a time" |
+| M38 routes `answer` | no `cache-control: no-store` | "an approved plan with no structured form ... never cached" |
+| M39 routes catch | a join failure rethrown | "a join that cannot be made answers one fixed sentence" |
+| M40 checks.ts reviews | finding file and text shown without the gate | "a reader who may not read code ..." |
+| M41 checks.ts `scanOf` | scan items shown without the gate | same test |
+| M42 checks.ts `linksOfRow` | links shown without the gate | same test and the link test |
+| M43 checks.ts `rowOf` | failing test names shown without the gate | same test |
+| M44 checks.ts words | the not-approved sentence empty | "no approved plan, an approved plan with no structured form ..." and the route test |
+
+All 44 killed; the restored tree passes. Evidence applies to the round-2 commit (parent 1d7edd14f); the final-head gate and review belong to 9d.

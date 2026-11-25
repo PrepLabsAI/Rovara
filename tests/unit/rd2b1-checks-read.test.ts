@@ -12,7 +12,7 @@ import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { evidencePackKey } from "../../packages/broker/src/core/proof/evidence-keep.js";
 import { evidenceArtifactKey } from "../../packages/broker/src/core/proof/evidence-artifacts.js";
 import { evidenceViewOf } from "../../packages/broker/src/core/proof/evidence-pack.js";
-import { CHECKS_VIEW_LIMITS, PLAN_UNREADABLE_WORDS, REVIEW_ONLY_WORDS, checksViewOf, rowStateOf, scenarioWords, type ChecksView } from "../../packages/broker/src/core/task-view/checks.js";
+import { CHECKS_VIEW_LIMITS, CHECKS_WORDS, PLAN_UNREADABLE_WORDS, REVIEW_ONLY_WORDS, checksViewOf, plainText, rowStateOf, scenarioWords, unavailableChecksView, type ChecksView } from "../../packages/broker/src/core/task-view/checks.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
@@ -43,7 +43,7 @@ function packOf(checks: Array<Record<string, unknown>>, extra: Record<string, un
   const base = clone(v1Pack()) as unknown as Record<string, unknown>;
   return { ...base, checks: checks.map((check) => ({ kind: "test", label: String(check["checkId"]), before: "passed", after: "passed", class: "passing", durationMs: 10, exitCode: 0, ...check })), notTested: [], api: [], ...extra } as unknown as EvidencePack;
 }
-const view = (input: Partial<Parameters<typeof checksViewOf>[0]> & { workflow: WorkflowSnapshot | undefined }): ChecksView => checksViewOf({ taskId: "t1", plan: undefined, pack: undefined, links: undefined, ...input });
+const view = (input: Partial<Parameters<typeof checksViewOf>[0]> & { workflow: WorkflowSnapshot | undefined }): ChecksView => checksViewOf({ taskId: "t1", plan: undefined, pack: undefined, links: undefined, codeDetails: true, evidenceLinks: true, ...input });
 const rowOf = (answer: ChecksView, id: string) => answer.rows.find((row) => row.id === id)!;
 const PASS = (checkId: string): Result => ({ checkId, status: "PASS" });
 
@@ -77,10 +77,11 @@ describe("the state of each row (derived from stored facts only)", () => {
     expect(rowOf(current, "unit").after).toBeUndefined();
   });
 
-  it("rowStateOf: a result wins over the pack; a pack alone (no recorded result) is read for its outcome", () => {
+  it("rowStateOf: a result and a kept check that disagree read Couldn't verify; a pack alone (no recorded result) is read for its outcome", () => {
     const workflow = workflowOf({ results: [PASS("unit")] });
     const verified = { kind: "current" as const, at: AT, commit: SHA };
-    expect(rowStateOf(workflow, verified, "unit", packOf([{ checkId: "unit", after: "failed", class: "regression" }]).checks[0])).toBe("passed");
+    expect(rowStateOf(workflow, verified, "unit", packOf([{ checkId: "unit", after: "failed", class: "regression" }]).checks[0])).toBe("unverified");
+    expect(rowStateOf(workflow, verified, "unit", packOf([{ checkId: "unit", after: "passed" }]).checks[0])).toBe("passed");
     expect(rowStateOf(workflow, verified, "x", packOf([{ checkId: "x", after: "timed_out" }]).checks[0])).toBe("failed");
     expect(rowStateOf(workflow, verified, "x", packOf([{ checkId: "x", after: "unknown" }]).checks[0])).toBe("unverified");
     expect(rowStateOf(workflow, verified, "x", packOf([{ checkId: "x", after: "not_run" }]).checks[0])).toBe("not_run");
@@ -88,8 +89,8 @@ describe("the state of each row (derived from stored facts only)", () => {
 
   it("with no workflow there are no rows and no reviews (an empty answer, never an error); a plan that could not be read says so", () => {
     expect(view({ workflow: undefined })).toEqual({ taskId: "t1", acceptance: [], rows: [], reviews: [], notTested: [] });
-    expect(view({ workflow: undefined, planUnreadable: true }).notTested).toEqual([PLAN_UNREADABLE_WORDS]);
-    expect(view({ workflow: workflowOf({ results: [PASS("unit")] }), planUnreadable: true }).notTested).toEqual([PLAN_UNREADABLE_WORDS]);
+    expect(view({ workflow: undefined, planNote: "unreadable" }).notTested).toEqual([PLAN_UNREADABLE_WORDS]);
+    expect(view({ workflow: workflowOf({ results: [PASS("unit")] }), planNote: "unreadable" }).notTested).toEqual([PLAN_UNREADABLE_WORDS]);
   });
 });
 
@@ -138,6 +139,12 @@ describe("which claim each check proves (the six acceptance checks)", () => {
   });
 });
 
+const cause = { kind: "change", paths: ["src/cart.ts"], pathsCount: 1, commit: SHA, basis: ["named_in_failure"] };
+const failing = (checkId: string, names: string[], withCauses = true) => ({
+  checkId, after: "failed", class: "regression", exitCode: 1,
+  tests: { total: names.length, passed: 0, failed: names.length, skipped: 0, errored: 0, names: names.map((name) => ({ name, status: "failed" })), newTests: [], ...(withCauses ? { failureCauses: names.map((testId) => ({ testId, cause })) } : {}) },
+});
+
 describe("end-to-end scenarios", () => {
   const e2e = (): PlanDocument["e2e"] => ({
     schemaVersion: 1, requestedTargetIds: ["web"], accountContextRefs: [], semanticExportDeltas: [],
@@ -147,16 +154,30 @@ describe("end-to-end scenarios", () => {
     ],
   } as unknown as PlanDocument["e2e"]);
 
-  it("the aggregate end-to-end result is shown as its scenarios: each with the claims it proves, fixed words for what it does (never the scenario's own text), and the aggregate's state", () => {
+  it("a passing aggregate end-to-end result is shown as its scenarios (not twice): each with the claims it proves, fixed words for what it does (never the scenario's own text), and the run's state", () => {
     const plan = planDocument({ e2e: e2e(), scenarioProves: { "owner-exports": ["1"], "viewer-refused": ["2"] }, claims: [{ id: "1", text: "Owners export" }, { id: "2", text: "Viewers cannot" }], checks: { proposed: [], proves: { unit: ["1"] } } });
-    const answer = view({ workflow: workflowOf({ results: [PASS("unit"), { checkId: "project-e2e", status: "FAILED" }] }), plan, pack: packOf([{ checkId: "unit" }, { checkId: "project-e2e", after: "failed", class: "regression" }]) });
-    expect(answer.rows.map((row) => [row.id, row.kind, row.state])).toEqual([["unit", "test", "passed"], ["lint", "lint", "not_run"], ["owner-exports", "e2e", "failed"], ["viewer-refused", "e2e", "failed"]]);
+    const answer = view({ workflow: workflowOf({ results: [PASS("unit"), PASS("project-e2e")] }), plan, pack: packOf([{ checkId: "unit" }, { checkId: "project-e2e" }]) });
+    expect(answer.rows.map((row) => [row.id, row.kind, row.state])).toEqual([["unit", "test", "passed"], ["lint", "lint", "not_run"], ["owner-exports", "e2e", "passed"], ["viewer-refused", "e2e", "passed"]]);
     expect(rowOf(answer, "owner-exports").what).toBe("Opens 1 page, clicks 1 time, lets an AI agent act toward a goal, then checks 2 results");
     expect(rowOf(answer, "viewer-refused").what).toBe("Sends 1 request, then checks 1 result");
     expect(rowOf(answer, "owner-exports").proves).toEqual(["1"]);
     expect(answer.acceptance.map((claim) => [claim.claimId, claim.checkIds])).toEqual([["1", ["unit", "owner-exports"]], ["2", ["viewer-refused"]]]);
     expect(JSON.stringify(answer)).not.toContain("SECRET-GOAL-TEXT");
     expect(answer.rows.some((row) => row.id === "project-e2e")).toBe(false);
+  });
+
+  it("a failed aggregate run keeps its own row (state, failing lines, output link) and no scenario is called failed: one result is for the whole run, so each scenario reads Couldn't verify", () => {
+    const plan = planDocument({ e2e: e2e(), scenarioProves: { "owner-exports": ["1"], "viewer-refused": ["2"] }, claims: [{ id: "1", text: "Owners export" }, { id: "2", text: "Viewers cannot" }], checks: { proposed: [], proves: {} } });
+    const ref = { kind: "log_txt" as const, sha256: "8".repeat(64), bytes: 20, retentionClass: "evidence-std" as const };
+    const pack = packOf([{ checkId: "unit" }, { ...failing("project-e2e", ["e2e.spec.ts::exports a csv"]), outputTailRef: ref }]);
+    const answer = view({ workflow: workflowOf({ results: [PASS("unit"), { checkId: "project-e2e", status: "FAILED" }] }), plan, pack, links: evidenceViewOf(pack, "t1", () => "available") });
+    expect(answer.rows.map((row) => [row.id, row.state])).toEqual([["unit", "passed"], ["lint", "not_run"], ["project-e2e", "failed"], ["owner-exports", "unverified"], ["viewer-refused", "unverified"]]);
+    expect(rowOf(answer, "project-e2e").failures?.map((item) => item.test)).toEqual(["e2e.spec.ts::exports a csv"]);
+    expect(rowOf(answer, "project-e2e").failures?.[0]?.cause).toContain("likely broken");
+    expect(rowOf(answer, "project-e2e").output).toMatchObject({ kind: "output", id: ref.sha256 });
+    expect(rowOf(answer, "owner-exports").what).toContain(CHECKS_WORDS.wholeRun);
+    expect(rowOf(answer, "owner-exports").failures).toBeUndefined();
+    expect(rowOf(answer, "owner-exports").after).toBeUndefined();
   });
 
   it("scenarios not run yet read Not run yet; a screenshot strip belongs to its own scenario, as links", () => {
@@ -182,11 +203,6 @@ describe("end-to-end scenarios", () => {
 });
 
 describe("failing tests, links, the scan, reviews and what was not tested", () => {
-  const cause = { kind: "change", paths: ["src/cart.ts"], pathsCount: 1, commit: SHA, basis: ["named_in_failure"] };
-  const failing = (checkId: string, names: string[], withCauses = true) => ({
-    checkId, after: "failed", class: "regression", exitCode: 1,
-    tests: { total: names.length, passed: 0, failed: names.length, skipped: 0, errored: 0, names: names.map((name) => ({ name, status: "failed" })), newTests: [], ...(withCauses ? { failureCauses: names.map((testId) => ({ testId, cause })) } : {}) },
-  });
 
   it("lists the failing tests with their likely cause, ten across all rows and the rest counted per row; a failed check with no causes lists its failing names without one", () => {
     const required = [chk("a"), chk("b"), chk("c")];
@@ -219,8 +235,17 @@ describe("failing tests, links, the scan, reviews and what was not tested", () =
       expect(row.retention, state).toBe(expected);
       expect(row.output, state).toEqual({ kind: "output", id: ref.sha256, label: "Command output", ...(state === "available" ? { href: `/v1/app/tasks/t1/evidence/${ref.sha256}` } : {}) });
     }
+    // No links view although the pack names a file (the view did not fit its schema): no link, and the row says the file is withheld, never silence. A row with no file says nothing.
     const none = rowOf(view({ workflow, pack, links: undefined }), "unit");
-    expect([none.output, none.retention]).toEqual([undefined, undefined]);
+    expect([none.output, none.retention]).toEqual([undefined, "withheld"]);
+    expect(rowOf(view({ workflow: workflowOf({ results: [PASS("unit"), PASS("lint")] }), pack: packOf([{ checkId: "unit" }, { checkId: "lint" }]), links: undefined }), "lint").retention).toBeUndefined();
+    // While Code does not serve the files (RD-2d), an available file carries no address and says so in fixed words; an expired one is as before.
+    const open = rowOf(view({ workflow, pack, links: evidenceViewOf(pack, "t1", () => "available"), evidenceLinks: false }), "unit");
+    expect(open.output).toEqual({ kind: "output", id: ref.sha256, label: CHECKS_WORDS.fileNotYet });
+    expect(open.retention).toBe("kept");
+    // A reader who may not read code gets no link and no failing lines, but the row's state and the retention word stay.
+    const blind = rowOf(view({ workflow, pack, links: evidenceViewOf(pack, "t1", () => "available"), codeDetails: false }), "unit");
+    expect([blind.output, blind.screenshots, blind.failures, blind.state, blind.retention]).toEqual([undefined, undefined, undefined, "passed", "kept"]);
     // Links for another pack than the one read are not used.
     const other = { ...evidenceViewOf(pack, "t1", () => "available")!, candidateDigest: D2 };
     expect(rowOf(view({ workflow, pack, links: other }), "unit").output).toBeUndefined();
@@ -263,6 +288,104 @@ describe("failing tests, links, the scan, reviews and what was not tested", () =
     expect(rowOf(answer, "extra").label).not.toContain("\n");
     expect(rowOf(answer, "extra").label).not.toMatch(/@(?!‍)/u);
     expect(rowOf(answer, "extra").state).toBe("failed");
+  });
+});
+
+// ---- review round: what customer text may carry, states that never read better than the facts, ids, who sees code
+
+/** Every string in a value. */
+const stringsOf = (value: unknown): string[] => (typeof value === "string" ? [value] : Array.isArray(value) ? value.flatMap(stringsOf) : value !== null && typeof value === "object" ? Object.values(value).flatMap(stringsOf) : []);
+const HIDDEN = /[\p{Cc}\p{Cf}]/u;
+
+describe("customer text is plain (no control, direction or invisible characters)", () => {
+  it("plainText removes NUL, ESC, C1, direction marks and isolates, zero-width characters and line breaks, keeping one space between words", () => {
+    expect(plainText("a\u0000b\u001bc\u0085d\u202ee\u2066f\u2069g\u200bh\ufeffi\nj\t k\u2028l")).toBe("abcdefgh i j k l");
+  });
+
+  it("test names, causes, labels, finding text and files, scan messages and paths, claim text and not-tested lines carry none of them", () => {
+    const evil = "x\u0000\u001b\u0085\u202e\u2066\u200by";
+    const names = [`tests/${evil}.test.ts::one`];
+    const pack = packOf([
+      { ...failing("unit", names, false), label: `Unit ${evil}` },
+      { checkId: "scan", kind: "security", findings: { tool: `semgrep${evil}`, newCount: 1, bySeverity: { critical: 0, high: 1, medium: 0, low: 0, info: 0 }, items: [{ ruleId: `r${evil}`, severity: "high", path: `src/${evil}.ts`, line: 3, message: `bad${evil}call` }] } },
+    ], { notTested: [{ kind: "claim", id: "c", text: `refund${evil}`, reason: `no${evil}test` }] });
+    const security = { operationId: randomUUID(), candidateDigest: DIGEST, provider: "p", version: "1", readOnly: true, recordedAt: AT, role: "SECURITY", status: "FINDINGS", findings: [{ text: `leak${evil}`, origin: "INTRODUCED", file: `src/${evil}.ts`, line: 2 }] };
+    const plan = planDocument({ claims: [{ id: "1", text: `Claim${evil}` }], notChanging: [`Keep${evil}`], checks: { proposed: [], proves: { unit: ["1", "nc1"] } } });
+    const answer = view({ workflow: workflowOf({ results: [{ checkId: "unit", status: "FAILED" }], reviews: [security] }), pack, plan });
+    const text = stringsOf(answer);
+    expect(text.length).toBeGreaterThan(20);
+    expect(text.filter((item) => HIDDEN.test(item))).toEqual([]);
+    expect(text.some((item) => item.includes("xy.test.ts") || item.includes("Claimxy"))).toBe(true);
+  });
+
+  it("a secret split by an invisible character is still redacted (the characters go before redaction)", () => {
+    const secret = "AKIA" + "ABCDEFGHIJKLMNOP";
+    const answer = view({ workflow: workflowOf({ results: [PASS("unit")] }), pack: packOf([{ checkId: "unit", label: `key ${secret.slice(0, 6)}\u200b${secret.slice(6)}` }]) });
+    expect(JSON.stringify(answer)).not.toContain(secret);
+    expect(JSON.stringify(answer)).not.toContain("ABCDEFGHIJKLMNOP");
+  });
+});
+
+describe("a state never reads better than the stored facts", () => {
+  it("a result answered by a Rovara-made fake is Faked, never Passed; a recorded pass whose kept check failed is Couldn't verify", () => {
+    const answer = view({ workflow: workflowOf({ results: [{ ...PASS("unit"), madeByRovara: true } as Result, PASS("lint")] }), pack: packOf([{ checkId: "unit" }, { checkId: "lint", after: "failed", class: "regression" }]) });
+    expect(answer.rows.map((row) => [row.id, row.state])).toEqual([["unit", "faked"], ["lint", "unverified"]]);
+  });
+
+  it("a review that saw part of the diff reads Partial, one whose blocking findings are all accepted reads Findings accepted, open findings read Findings", () => {
+    const base = { operationId: randomUUID(), candidateDigest: DIGEST, provider: "p", version: "1", readOnly: true, recordedAt: AT };
+    const finding = { text: "The version is public", origin: "INTRODUCED", severity: "MEDIUM", file: "src/health.ts", line: 4 };
+    const fingerprint = createHash("sha256").update(JSON.stringify(["SECURITY", finding.text, finding.file, finding.line])).digest("hex");
+    const states = (reviews: unknown[], accepted?: unknown[]) => view({ workflow: workflowOf({ reviews, ...(accepted === undefined ? {} : { accepted }) }) }).reviews.map((row) => row.state);
+    expect(states([{ ...base, role: "CRITIC", status: "PASS", findings: [], partialDiff: true }])).toEqual(["partial", "not_run"]);
+    expect(states([{ ...base, role: "SECURITY", status: "FINDINGS", findings: [finding] }])).toEqual(["not_run", "findings"]);
+    expect(states([{ ...base, role: "SECURITY", status: "FINDINGS", findings: [finding] }], [{ candidateDigest: DIGEST, role: "SECURITY", fingerprint, text: finding.text, reason: "ok", actorId: "a", at: AT }])).toEqual(["not_run", "findings_accepted"]);
+    expect(states([{ ...base, role: "CRITIC", status: "PASS", findings: [], partialDiff: true, failureReason: "TIMEOUT" }])).toEqual(["unfinished", "not_run"]);
+  });
+
+  it("with more than one repository no commit is named (the digest is the identity); with one it is", () => {
+    const workflow = workflowOf({ results: [PASS("unit")] });
+    expect(view({ workflow }).ranOn).toEqual({ commit: SHA, at: AT });
+    const two = { ...workflow, candidate: { ...workflow.candidate!, repositories: [...workflow.candidate!.repositories, { repositoryId: "api", commitSha: "e".repeat(40), treeSha: "f".repeat(40) }] } } as WorkflowSnapshot;
+    const answer = view({ workflow: two });
+    expect(answer.ranOn).toEqual({ at: AT });
+    expect(rowOf(answer, "unit").ranOn).toEqual({ at: AT });
+  });
+});
+
+describe("missing parts are said, ids are words, and who may see code", () => {
+  it("no approved plan, an approved plan with no structured form and an unreadable pack each add their one fixed sentence", () => {
+    const workflow = workflowOf({ results: [PASS("unit")] });
+    expect(view({ workflow, planNote: "unapproved" }).notTested).toEqual([CHECKS_WORDS.planUnapproved]);
+    expect(view({ workflow, planNote: "markdown" }).notTested).toEqual([CHECKS_WORDS.planNotStructured]);
+    expect(view({ workflow, packUnreadable: true }).notTested).toEqual([CHECKS_WORDS.evidenceUnreadable]);
+    expect(view({ workflow: undefined, packUnreadable: true, planNote: "unapproved" }).notTested).toEqual([CHECKS_WORDS.planUnapproved, CHECKS_WORDS.evidenceUnreadable]);
+    expect(unavailableChecksView("t1").notTested).toEqual([CHECKS_WORDS.viewFailed]);
+  });
+
+  it("a check or scenario id that is a word of the language (toString, constructor, hasOwnProperty) is just a row: no lookup finds a function", () => {
+    const required = [chk("constructor"), chk("valueOf")];
+    const plan = planDocument({ e2e: { schemaVersion: 1, requestedTargetIds: ["web"], accountContextRefs: [], semanticExportDeltas: [], scenarios: [{ scenarioId: "toString", requirementId: "r", requestedTargetIds: ["web"], required: true, accountProfileId: "o", minimumEvidence: "runtime", requiredRealComponentIds: [], steps: [], assertions: [{ kind: "visible", testId: "x", equals: true }] }] } as unknown as PlanDocument["e2e"], checks: { proposed: [], proves: { valueOf: ["1"] } }, scenarioProves: {} });
+    const pack = packOf([{ checkId: "hasOwnProperty" }, { checkId: "toString" }], { browser: [{ scenarioId: "constructor", strip: { before: [], after: [] } }] });
+    const answer = view({ workflow: workflowOf({ required, results: [PASS("constructor"), PASS("valueOf")] }), plan, pack });
+    expect(answer.rows.map((row) => [row.id, row.proves])).toEqual([["constructor", []], ["valueOf", ["1"]], ["hasOwnProperty", []], ["toString", []], ["toString", []], ["constructor", []]]);
+  });
+
+  it("a reader who may not read code gets every state, count and id, and no test name, cause, finding text or file, scan item or link", () => {
+    const ref = { kind: "log_txt" as const, sha256: "9".repeat(64), bytes: 40, retentionClass: "evidence-std" as const };
+    const scan = { tool: "semgrep", newCount: 1, bySeverity: { critical: 0, high: 1, medium: 0, low: 0, info: 0 }, items: [{ ruleId: "r1", severity: "high", path: "src/secret-module.ts", line: 3, message: "bad call" }] };
+    const pack = packOf([{ ...failing("unit", ["tests/secret-module.test.ts::one"]), outputTailRef: ref }, { checkId: "scan", kind: "security", findings: scan }]);
+    const finding = { text: "uses the secret module", origin: "INTRODUCED", severity: "HIGH", file: "src/secret-module.ts", line: 9 };
+    const review = { operationId: randomUUID(), candidateDigest: DIGEST, provider: "p", version: "1", readOnly: true, recordedAt: AT, role: "SECURITY", status: "FINDINGS", findings: [finding] };
+    const workflow = workflowOf({ results: [{ checkId: "unit", status: "FAILED" }], reviews: [review] });
+    const full = view({ workflow, pack, links: evidenceViewOf(pack, "t1", () => "available") });
+    expect(JSON.stringify(full)).toContain("secret-module");
+    const blind = view({ workflow, pack, links: evidenceViewOf(pack, "t1", () => "available"), codeDetails: false });
+    expect(JSON.stringify(blind)).not.toContain("secret-module");
+    expect(JSON.stringify(blind)).not.toContain(ref.sha256);
+    expect(rowOf(blind, "unit")).toMatchObject({ state: "failed", before: "passed", after: "failed", retention: "kept" });
+    expect(blind.securityScan).toEqual({ tool: "semgrep", counts: scan.bySeverity, items: [] });
+    expect(blind.reviews[1]).toEqual({ role: "security", state: "findings", findings: [{ severity: "high", accepted: false }] });
   });
 });
 
@@ -320,7 +443,7 @@ async function world() {
     const artifacts: unknown[] = [];
     const decisions: unknown[] = [];
     if (options.planned !== false) {
-      const versions: Array<{ proves: Record<string, string[]>; approved?: boolean }> = options.versions ?? [{ proves: PLAN_V1 }];
+      const versions: Array<{ proves: Record<string, string[]>; approved?: boolean }> = options.versions ?? [{ proves: PLAN_V1, approved: true }];
       for (const [index, version] of versions.entries()) {
         const text = canonicalPlanJson(planDocument(planWith(version.proves)));
         const objectKey = `private/${record.ownerKey}/${record.workspaceId}/plan-v${String(index + 1)}.json`;
@@ -338,7 +461,7 @@ async function world() {
     };
     await fake.store.put({ item: { ...(await fake.store.get(taskKey(task.taskId)))!, workflow } as never });
     if (options.pack !== undefined) await blobs.put(evidencePackKey({ ownerKey: record.ownerKey, workspaceId: record.workspaceId, taskId: task.taskId }, DIGEST), Buffer.from(JSON.stringify(options.pack)), { contentType: "application/json", metadata: {}, retention: "evidence-std" }, { overwrite: true });
-    for (const item of options.stored ?? []) await blobs.put(evidenceArtifactKey(record.ownerKey, record.workspaceId, task.taskId, item.sha256), item.bytes, { contentType: "text/plain", metadata: {}, retention: "evidence-std" }, { overwrite: true });
+    for (const item of options.stored ?? []) await blobs.put(evidenceArtifactKey(record.ownerKey, record.workspaceId, task.taskId, item.sha256), item.bytes, { contentType: "text/plain", metadata: { sha256: item.sha256 }, retention: "evidence-std" }, { overwrite: true });
     return { taskId: task.taskId, ownerKey: record.ownerKey, workspaceId: record.workspaceId };
   };
   const read = (caller: DeployedCaller, taskId: string) => routes.route(get(`/v1/dev/tasks/${taskId}/checks`), caller);
@@ -374,16 +497,23 @@ describe("GET /v1/dev/tasks/{id}/checks on a core task", () => {
     expect(row.response!.safeParse({ ...body, extra: 1, checks: { ...body.checks, other: [] } }).success).toBe(true);
   });
 
-  it("the claims come from the plan version the owner approved, not a newer draft; with none approved, the latest", async () => {
+  it("the claims come from the plan version the owner approved, not a newer draft; with none approved there is no plan: no claim, no mapping, one fixed sentence", async () => {
     const w = await world();
     const owner = w.person(OWNER_ID, FAKE_COMPANY);
-    const proves = async (versions: Array<{ proves: Record<string, string[]>; approved?: boolean }>) => {
+    const read = async (versions: Array<{ proves: Record<string, string[]>; approved?: boolean }>) => {
       const { taskId } = await w.taskOf(owner, FAKE_COMPANY, { versions });
-      return (JSON.parse((await w.read(owner, taskId))!.body) as { checks: ChecksView }).checks.rows.map((row) => row.proves);
+      return (JSON.parse((await w.read(owner, taskId))!.body) as { checks: ChecksView }).checks;
     };
     const draft = { unit: ["2"], build: ["1"] };
-    expect(await proves([{ proves: PLAN_V1, approved: true }, { proves: draft }])).toEqual([["1"], ["2"]]);
-    expect(await proves([{ proves: PLAN_V1 }, { proves: draft }])).toEqual([["2"], ["1"]]);
+    expect((await read([{ proves: PLAN_V1, approved: true }, { proves: draft }])).rows.map((row) => row.proves)).toEqual([["1"], ["2"]]);
+    // Nothing approved (before approval, or the approval is missing): the draft is not read, whichever version it is.
+    for (const versions of [[{ proves: PLAN_V1 }, { proves: draft }], [{ proves: draft }]]) {
+      const answer = await read(versions);
+      expect(answer.rows.map((row) => row.proves), "no mapping").toEqual([[], []]);
+      expect(answer.acceptance).toEqual([]);
+      expect(answer.notTested).toEqual([CHECKS_WORDS.planUnapproved]);
+      expect(JSON.stringify(answer)).not.toContain("Health answers 200");
+    }
   });
 
   it("a task with no stored plan (a Quick task) answers its rows and no acceptance list; a plan that cannot be read says so, never a failure", async () => {
@@ -406,14 +536,19 @@ describe("GET /v1/dev/tasks/{id}/checks on a core task", () => {
     const held = await w.taskOf(owner, FAKE_COMPANY, { pack: keptPack(), stored: [{ sha256: TAIL_REF.sha256, bytes: TAIL }] });
     const first = (JSON.parse((await w.read(owner, held.taskId))!.body) as { checks: ChecksView }).checks;
     readsAsRow("tasks.checks", { checks: first });
-    expect(first.rows[1]).toMatchObject({ id: "build", before: "passed", after: "failed", retention: "kept", output: { kind: "output", id: TAIL_REF.sha256, href: `/v1/app/tasks/${held.taskId}/evidence/${TAIL_REF.sha256}` } });
+    // RD-2d does not serve the files yet: a kept file says so in fixed words and has no address (a dead link is worse than none); the row still says it is kept.
+    expect(first.rows[1]).toMatchObject({ id: "build", before: "passed", after: "failed", retention: "kept", output: { kind: "output", id: TAIL_REF.sha256, label: CHECKS_WORDS.fileNotYet } });
+    expect(first.rows[1]!.output!.href).toBeUndefined();
     // The same pack with its file gone from the store (past retention): no link, and the row says so.
     await w.blobs.delete(evidenceArtifactKey(held.ownerKey, held.workspaceId, held.taskId, TAIL_REF.sha256));
     const gone = (JSON.parse((await w.read(owner, held.taskId))!.body) as { checks: ChecksView }).checks;
     expect(gone.rows[1]).toMatchObject({ retention: "expired", output: { id: TAIL_REF.sha256 } });
     expect(gone.rows[1]!.output!.href).toBeUndefined();
+    // The same size under another digest (the store's own record of what it holds) is not the pack's artifact either: withheld.
+    await w.blobs.put(evidenceArtifactKey(held.ownerKey, held.workspaceId, held.taskId, TAIL_REF.sha256), TAIL, { contentType: "text/plain", metadata: { sha256: "f".repeat(64) }, retention: "evidence-std" }, { overwrite: true });
+    expect(((JSON.parse((await w.read(owner, held.taskId))!.body) as { checks: ChecksView }).checks).rows[1]).toMatchObject({ retention: "withheld" });
     // Bytes of another size under the same name are not the pack's artifact: withheld, no link.
-    await w.blobs.put(evidenceArtifactKey(held.ownerKey, held.workspaceId, held.taskId, TAIL_REF.sha256), Buffer.from("other"), { contentType: "text/plain", metadata: {}, retention: "evidence-std" }, { overwrite: true });
+    await w.blobs.put(evidenceArtifactKey(held.ownerKey, held.workspaceId, held.taskId, TAIL_REF.sha256), Buffer.from("other"), { contentType: "text/plain", metadata: { sha256: TAIL_REF.sha256 }, retention: "evidence-std" }, { overwrite: true });
     const other = (JSON.parse((await w.read(owner, held.taskId))!.body) as { checks: ChecksView }).checks;
     expect(other.rows[1]).toMatchObject({ retention: "withheld" });
     expect(other.rows[1]!.output!.href).toBeUndefined();
@@ -440,6 +575,60 @@ describe("GET /v1/dev/tasks/{id}/checks on a core task", () => {
     expect((await w.read(colleague, taskId))?.statusCode).toBe(200);
     const crossed: DeployedCaller = { principal: localOwnerPrincipal({ companyId: OTHER, personId: OWNER_ID }), client: "cli" };
     expect((await w.read(crossed, taskId))?.statusCode).not.toBe(200);
+  });
+
+  it("an approved plan with no structured form says so; a pack in the store that cannot be read says so (none kept does not); the answer is never cached", async () => {
+    const w = await world();
+    const owner = w.person(OWNER_ID, FAKE_COMPANY);
+    const old = await w.taskOf(owner, FAKE_COMPANY);
+    const stored = (await w.fake.store.get(taskKey(old.taskId)))!;
+    const workflow = stored["workflow"] as unknown as { artifacts: Array<Record<string, unknown>> };
+    workflow.artifacts.forEach((artifact) => { delete artifact["format"]; });
+    await w.fake.store.put({ item: { ...stored, workflow } as never });
+    const markdown = await w.read(owner, old.taskId);
+    expect((JSON.parse(markdown!.body) as { checks: ChecksView }).checks.notTested).toEqual([CHECKS_WORDS.planNotStructured]);
+    expect(markdown!.headers["cache-control"]).toBe("no-store");
+    const none = await w.taskOf(owner, FAKE_COMPANY);
+    expect((JSON.parse((await w.read(owner, none.taskId))!.body) as { checks: ChecksView }).checks.notTested).toEqual([]);
+    const bad = await w.taskOf(owner, FAKE_COMPANY);
+    await w.blobs.put(evidencePackKey({ ownerKey: bad.ownerKey, workspaceId: bad.workspaceId, taskId: bad.taskId }, DIGEST), Buffer.from("not a pack"), { contentType: "application/json", metadata: {}, retention: "evidence-std" }, { overwrite: true });
+    const unreadable = (JSON.parse((await w.read(owner, bad.taskId))!.body) as { checks: ChecksView }).checks;
+    expect(unreadable.notTested).toEqual([CHECKS_WORDS.evidenceUnreadable]);
+    expect(unreadable.rows.map((row) => row.state)).toEqual(["passed", "failed"]);
+  });
+
+  it("the files are checked against the store a few at a time (at most eight at once), and a join that cannot be made answers one fixed sentence, not a failure", async () => {
+    const w = await world();
+    const owner = w.person(OWNER_ID, FAKE_COMPANY);
+    const tails = Array.from({ length: 20 }, (_, index) => Buffer.from(`output ${String(index)}`));
+    const refs = tails.map((tail) => ({ kind: "log_txt" as const, sha256: createHash("sha256").update(tail).digest("hex"), bytes: tail.byteLength, retentionClass: "evidence-std" as const }));
+    const pack = packOf(refs.map((ref, index) => ({ checkId: `check-${String(index)}`, outputTailRef: ref })));
+    const { taskId } = await w.taskOf(owner, FAKE_COMPANY, { pack, stored: refs.map((ref, index) => ({ sha256: ref.sha256, bytes: tails[index]! })) });
+    const real = w.blobs.stat.bind(w.blobs);
+    let inFlight = 0;
+    let most = 0;
+    const spy = vi.spyOn(w.blobs, "stat").mockImplementation(async (key: string) => {
+      inFlight += 1;
+      most = Math.max(most, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      inFlight -= 1;
+      return real(key);
+    });
+    const answer = await w.read(owner, taskId);
+    spy.mockRestore();
+    expect(answer?.statusCode).toBe(200);
+    expect(most).toBeGreaterThan(1);
+    expect(most).toBeLessThanOrEqual(8);
+    const checks = (JSON.parse(answer!.body) as { checks: ChecksView }).checks;
+    expect(checks.rows.filter((row) => row.retention === "kept").length).toBe(20);
+    // A stored workflow the join cannot read: the answer is the fixed sentence (access was settled first, so this says nothing about who may read).
+    const stored = (await w.fake.store.get(taskKey(taskId)))!;
+    const workflow = stored["workflow"] as unknown as { verification: { results: unknown[] } };
+    workflow.verification.results = [null];
+    await w.fake.store.put({ item: { ...stored, workflow } as never });
+    const broken = await w.read(owner, taskId);
+    expect(broken?.statusCode).toBe(200);
+    expect(JSON.parse(broken!.body)).toEqual({ checks: unavailableChecksView(taskId) });
   });
 
   it("two companies' packs stay apart, and a read writes nothing", async () => {
