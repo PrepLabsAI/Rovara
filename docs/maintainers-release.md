@@ -28,11 +28,11 @@ preparation are separate operations.
 ## Continuous production releases
 
 `AgentXReleasePipeline` runs the same release from AWS for every qualifying push to `mainline`,
-first to beta, then, when someone approves it, to production (#1242). It is a CodePipeline V2
+first to beta, then, when the owner approves that run, to production (#1242). It is a CodePipeline V2
 pipeline, `AgentXProductionRelease`, with three stages:
 
 ```
-Source (mainline push, Cloud release tag) → Beta (every run) ⏸ disabled transition → Production (on approval)
+Source (mainline push, Cloud release tag) → Beta (every run) ⏸ disabled transition → Production (its own approval, per run)
 ```
 
 The pipeline also deploys the companion Cloud product (the gateway, web and app) next to Code.
@@ -42,7 +42,8 @@ runs, in this order, with Preflight first:
 
 | Action | What it does |
 |---|---|
-| `CodePreflight` | In Production, first of all, closes the transition into Production, so a newer run cannot pass the open transition while the gates run. Then, in both stages, runs the port guard on the Code tree with the private name list (it fails if the list cannot be loaded), whatever the CI proof says |
+| `CodePreflight` | In Production, first of all, closes the transition into Production, so a newer run cannot pass the open transition while the run waits for its approval or runs its gates, and a rejected or timed-out run leaves the transition closed. Then, in both stages, runs the port guard on the Code tree with the private name list (it fails if the list cannot be loaded), whatever the CI proof says. Read-only: its role can clone the Code repository but not push (UseConnection is denied when `ProviderPermissionsRequired` is `read_write`) |
+| `ApproveProduction` | Production only, right after the Code Preflight: a CodePipeline manual approval for THIS run (see "Approving a production run"). Every other Production action, all of them writers, starts only after it is approved |
 | `Preflight` | Read-only: resolves the Cloud ref, pins Code, runs the gates, previews the change sets and writes the manifest; exports the effective `CODE_RELEASE` |
 | `CloudImage`, `CloudGateway`, `GatewayCheck` | Cloud's gateway image and deploy, then the check that the live gateway satisfies this Code |
 | `ReleaseBeta` / `ReleaseProduction` | The Code release below |
@@ -56,7 +57,8 @@ The order is the gateway, then Code, then web and app.
 - **Production:** the transition into it stays disabled. The newest beta run waits in front of
   it; a newer one replaces it (the pipeline runs in SUPERSEDED mode), so one promotion carries every
   merge since the last. `release-agentx-preflight-production` closes the transition again as the first
-  command of the stage, so each approval lets one run in.
+  command of the stage, before anything else, so each promotion lets one run in whatever happens next. The
+  stage's next action, `ApproveProduction`, is a manual approval that belongs to one pipeline execution.
 
 A run starts from a push to `mainline` that changes a deployable path (table below), or from a
 Cloud release tag (`vX.Y.Z`, not `vX.Y.Z-suffix`). A run started by a Cloud tag releases the
@@ -67,9 +69,9 @@ you start a run by hand):
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `CLOUD_REF` | `latest` | The Cloud release tag to deploy; `latest` is the newest tag on the Cloud trunk. An older tag is a Cloud rollback and forces `CODE_RELEASE=skip` |
+| `CLOUD_REF` | `from-trigger` | The Cloud release tag to deploy. `from-trigger` (what every triggered run carries) means the one `vX.Y.Z` tag on the Cloud commit the run started from (`CLOUD_SOURCE_COMMIT`); Preflight refuses, before any write, when that commit has no such tag or more than one. `latest` (the newest tag on the Cloud trunk) is for a run you start by hand. An older tag is a Cloud rollback and forces `CODE_RELEASE=skip` |
 | `CODE_RELEASE` | `run` | `skip` releases Cloud only; the commit's Code waits for a later run. Preflight may force `skip`, never `run` |
-| `CLOUD_PROD` | `on` | `off` leaves production's Cloud as it is for this run |
+| `CLOUD_PROD` | `off` | `off` leaves production's Cloud as it is for this run, so no push or tag deploys it. Start the run that promotes with `CLOUD_PROD=on` (and `CLOUD_REF` set to the tag, by hand): a tag push alone never reaches production, which also needs the transition into Production enabled |
 | `PIPELINE_MODE` | `release` | `adopt` only checks that Cloud as deployed is what the pipeline would deploy and changes nothing; run it once per environment before the first `release` run (the stage tool refuses a release run in an environment it never adopted). `rollback` deploys an earlier released Code commit (`CODE_ROLLBACK_TARGET`) and/or an older Cloud tag (`CLOUD_REF`) |
 | `CODE_ROLLBACK_TARGET` | `none` | With `PIPELINE_MODE=rollback`: the full 40-character Code commit to deploy. It must be in the stage's release history (below). `none` leaves Code as it is. Any other mode requires `none` |
 
@@ -118,8 +120,8 @@ never reads as "any commit"). The guard that runs while the private name list is
 released commit's, over the range target..released; nothing from the target, or from the commit that started the
 run, runs then. The release build then checks the target out, releases it, and on success records it as the
 released commit and moves it to the head of the history. The run goes through the same gates as any other
-(Preflight, the protected-resource gate, the rollback floors, drift) and, for Production, the same approval at the
-transition. A rollback needs `CODE_RELEASE=run` (a Cloud-side `skip` with a target stops the Code build: Code
+(Preflight, the protected-resource gate, the rollback floors, drift) and, for Production, the same approval (the transition, then
+`ApproveProduction`). A rollback needs `CODE_RELEASE=run` (a Cloud-side `skip` with a target stops the Code build: Code
 would not move) and `PIPELINE_MODE=rollback` with target `none` is a Cloud-only rollback (`CODE_RELEASE=skip`).
 The next forward run is judged from the rolled-back commit: every commit since is scanned again, whole; a
 squash that sits on a later commit than the rolled-back one is refused as a linear landing until a merge commit
@@ -149,7 +151,7 @@ Runbook notes for a rollback:
   merge commit lands.
 - Production rolls back only to a commit Production itself released: it checks Production's own history, so a
   commit that only Beta released is refused at Production's Preflight (after Beta has already rolled back; do not
-  approve the transition then).
+  approve the run then).
 - Rolling Code back to a commit before `3ce46251e` (the dispatch rule for an owner-only People list) parks every
   task that has a People record. A People record is created the first time someone opens a task's People view, so
   any hosted task may have one. The older dispatcher has no owner-only, no-checker branch. Treat such a rollback as
@@ -163,13 +165,51 @@ rollback target.
 There is no other adoption switch: nothing named `ROVARA_ADOPT_*` is a pipeline variable or an action
 input. `PIPELINE_MODE` is the only one, and every Preflight prints the mode as a note.
 
-To promote the commit waiting in front of Production, enable the transition in the console
-(**Enable transition** above the Production stage), or:
+### Approving a production run
 
-```sh
-aws codepipeline enable-stage-transition --pipeline-name AgentXProductionRelease \
-  --stage-name Production --transition-type Inbound
-```
+Every production deploy needs the owner's explicit approval for that run (DEC 254zzz506). Two things hold
+a run back, and they do different jobs:
+
+- the disabled transition holds the run that is waiting (a newer run replaces it, so you promote beta's newest commit);
+- the `ApproveProduction` action, right after the Production `CodePreflight` (which closes the transition
+  first, so the gate is closed whether the run is approved, rejected or times out), releases one execution.
+  An approval belongs to the execution that waits at it, so an open transition alone can never let a run
+  into Production unapproved. If the transition is enabled while nothing waits, or stays open because the
+  Production `CodePreflight` failed before its first command, the NEXT run enters the stage and stops at its
+  own approval.
+
+To promote the commit waiting in front of Production, as the owner:
+
+1. Enable the transition in the console (**Enable transition** above the Production stage), or:
+
+   ```sh
+   aws codepipeline enable-stage-transition --pipeline-name AgentXProductionRelease \
+     --stage-name Production --transition-type Inbound
+   ```
+
+   The waiting run enters Production and stops at `ApproveProduction`.
+2. Open that run's `ApproveProduction` action (**Review** in the console). Its text names the pipeline
+   execution, the Code commit, the Cloud source commit of the run, `CLOUD_REF`, `CLOUD_PROD`, `CODE_RELEASE`,
+   `PIPELINE_MODE` and `CODE_ROLLBACK_TARGET`. Check the execution id against the run you meant to release, and
+   the Cloud tag Beta resolved and deployed in Beta's `Preflight` log (it is not an exported variable, so the
+   approval text cannot show it; the Cloud source commit is not always the commit that tag points at). Then approve, or reject (a rejected run stops and the stage unlocks), or from a terminal:
+
+   ```sh
+   aws codepipeline get-pipeline-state --name AgentXProductionRelease   # the approval token of the waiting action
+   aws codepipeline put-approval-result --pipeline-name AgentXProductionRelease --stage-name Production \
+     --action-name ApproveProduction --token <token> --result summary="<what you checked>",status=Approved
+   ```
+
+An approval that nobody answers fails after 24 hours (the run stops, the stage unlocks, and the next run
+starts its own wait). Rejecting a run, or letting it time out, leaves the transition closed (the Code
+Preflight closed it before the approval), and a later run would stop at its own approval anyway.
+
+No role the template creates may approve, enable the transition, or start, retry or roll back a run: the
+only `codepipeline` rights in it are the Production `CodePreflight`'s `DisableStageTransition` (it can only
+close the gate) and the Beta `CodePreflight`'s read of the pipeline state. Approving is the owner's own
+identity (an administrator or an SSO permission set that holds `codepipeline:PutApprovalResult` on
+`AgentXProductionRelease/Production/ApproveProduction`). Nobody else is to hold it, and the Cloud projects' roles
+(in the private stack) must not either; check that stack when it changes.
 
 Nothing waiting means production already runs beta's newest commit. A failed production
 release leaves the transition disabled; the next promotion takes beta's newest commit again.

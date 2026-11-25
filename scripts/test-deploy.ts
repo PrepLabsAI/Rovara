@@ -306,6 +306,8 @@ export const CONTROL_PLANE_LAMBDAS = {
 /**
  * Repo-built control-plane Lambdas that test-deploy does not move, with why. A contract test requires every
  * repo-built Lambda of the synthesized control-plane template to be in exactly one of this and CONTROL_PLANE_LAMBDAS.
+ * Not listed on purpose: the beta canary's session function (packages/broker/src/aws/canary-session.ts). It exists only in the legacy control plane (beta, production's template) and only with its
+ * placement parameters; test-deploy builds named environments, whose template never has it (tests/contract/canary-session-infrastructure.test.ts), so there is nothing here to register.
  */
 export const CONTROL_PLANE_LAMBDAS_NOT_DEPLOYED: Readonly<Record<string, string>> = {
   // Batch 14 (#907, C8B): the attention email sender exists only while CoreAttentionEmail is on (off by default), so a code-only change set cannot count on it.

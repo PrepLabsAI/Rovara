@@ -13,7 +13,7 @@ async function queued(over: Parameters<typeof savedEnvWorld>[0] = {}) {
   const w = savedEnvWorld(over);
   const checked = await checkRebuild(w.deps, w.ids, "poll");
   if (!checked.ok || !checked.queued) throw new Error(`not queued: ${JSON.stringify(checked)}`);
-  const leased = await leaseForDispatch(w.deps, w.ids);
+  const leased = await leaseForDispatch(w.deps, w.ids, OP, checked.job.jobId);
   if (!leased.ok) throw new Error("not leased");
   return { w, job: leased.job };
 }

@@ -5,6 +5,7 @@
 //   POST <gateway>/v1/product/gemini/<path>[?query]   x-rovara-eval-scope, x-api-key -> 200 application/x-ndjson: one head, base64 chunks, one settle
 //   POST <gateway>/v1/product/vertex/<path>[?query]   (L4-EVV: a Vertex AI shaped call, the same scope, the same answer; google publisher only)
 //   POST <gateway>/v1/product/eval/release  {scope, calls, costMicros, unknown}    -> 200, once
+//   POST <gateway>/v1/product/bedrock/model/<id>/<operation>   x-api-key only (RF-5, route A: NO scope header, and not part of the stage's hold) -> the company's own AWS role answers; see below
 //
 // Money rules, each with a test (tests/unit/worker-eval-gateway-access.test.ts):
 // - A hold is used only when the gateway answered 200 with a readable scope and EXACTLY the asked calls and cost; a different
@@ -19,11 +20,16 @@
 //   nothing more, and a settle that takes its known spend past the held cost is flagged `overrun` even if the gateway did not say so.
 // - Release is sent once: with the larger of the meter's and the adapter's own call count and known spend, and `unknown` when either
 //   side lost a cost or a call is still open.
+// - RF-5 (Bedrock, route A): a call whose path is a Bedrock product path (`/model/<id>/<operation>`) is NOT sent under the stage's hold: the gateway refuses a Bedrock path that carries an eval scope header, and it holds, caps and
+//   counts every Bedrock call itself (per call, under the company's gateway cap; the customer's own AWS account pays). It goes through `createProductGatewayEgress({family: "bedrock"})` with the same task token source, one at a
+//   time (the gateway admits one call in flight per company and source), and settles `costMicros: 0` on THIS line: the stage counts the call (so the held call count, the call deadline and "any call that did not answer ok makes the
+//   round Not run" all apply) but not its dollars. The hold's own cost is released unspent. The words for a person: "counted by the company's gateway cap".
 // - No header, token, provider word or error text leaves this file: faults are fixed words.
 import {
   MODEL_EGRESS_CLASSES, MODEL_EGRESS_REFUSALS, parseModelEgressFrame, refusalResponse, sanitizeResponseHeaders,
   type ModelEgress, type ModelEgressEvent, type ModelEgressFrame, type ModelEgressRefusal, type ModelEgressScope, type ModelEgressSettle,
 } from "@agentx/contracts";
+import { createProductGatewayEgress } from "../product-gateway-egress.js";
 import type { EvalModelAccess, EvalModelHold } from "./eval-model-access.js";
 
 export const EVAL_GATEWAY_HOLD_PATH = "/v1/product/eval/hold";
@@ -61,6 +67,8 @@ const GEMINI_PATH = /^\/(?:v1|v1beta)\/models\/[A-Za-z0-9][A-Za-z0-9._-]{0,127}:
  * Anything else (the express form with no project, another publisher, a dot segment, an encoded character, another operation) never leaves.
  */
 const VERTEX_PATH = /^\/(?:v1|v1beta1)\/projects\/(?:[a-z][a-z0-9-]{4,28}[a-z0-9]|[0-9]{1,20})\/locations\/(?:global|[a-z]{2,15}-[a-z]{2,15}[0-9]{1,2})\/publishers\/google\/models\/[a-z0-9][a-z0-9.-]{0,95}:(?:generateContent|streamGenerateContent)$/u;
+/** The shape of a Bedrock product call's path (RF-5). Only the shape decides the route; the product egress checks the model id, the operation and the headers again before anything leaves. */
+const BEDROCK_PATH = /^\/model\/[^/]+\/(?:converse|converse-stream|invoke|invoke-with-response-stream)$/u;
 const QUERIES: readonly string[] = ["", "alt=sse"];
 /** The only frame headers that leave: the body's type and what the client accepts. Credentials, cookies and `x-rovara-*` never do. */
 const FORWARDED_HEADERS: readonly string[] = ["content-type", "accept"];
@@ -102,7 +110,7 @@ async function boundedText(response: Response, limit: number): Promise<string | 
 async function discard(response: Response): Promise<void> { try { await response.body?.cancel(); } catch { /* nothing to read */ } }
 
 /** One of the adapter's own refusals as events: a head with the fixed refusal answer, its body, and a settle at cost 0. Nothing was sent. */
-function* ownRefusal(word: Extract<ModelEgressRefusal, "cap" | "not_allowed" | "not_found">, family: "gemini" | "vertex" = "gemini"): Generator<ModelEgressEvent> {
+function* ownRefusal(word: Extract<ModelEgressRefusal, "cap" | "not_allowed" | "not_found">, family: "gemini" | "vertex" | "bedrock" = "gemini"): Generator<ModelEgressEvent> {
   const answer = refusalResponse(family, word);
   yield { kind: "head", status: answer.status, headers: answer.headers };
   yield { kind: "chunk", bytes: answer.body };
@@ -141,6 +149,8 @@ export function createEvalGatewayAccess(gatewayUrl: string, tokenSource: EvalGat
   const base = gatewayBase(gatewayUrl);
   if (typeof tokenSource !== "function") throw new Error("the eval gateway needs a task token source");
   const transport = options.fetch ?? fetch;
+  // RF-5: the Bedrock product route of the same gateway, with the same task token source and transport. Made once; it never sees the stage's scope.
+  const bedrockEgress = createProductGatewayEgress({ gatewayUrl: base, family: "bedrock", tokenSource, fetch: transport });
   const controlTimeoutMs = positive(options.controlTimeoutMs, EVAL_GATEWAY_CONTROL_TIMEOUT_MS);
   const streamLimit = positive(options.streamBytes, EVAL_GATEWAY_STREAM_BYTES);
   const token = async (): Promise<string | undefined> => {
@@ -194,6 +204,29 @@ export function createEvalGatewayAccess(gatewayUrl: string, tokenSource: EvalGat
     const handle = Object.freeze({}) as unknown as ModelEgressScope;
     let forwarded = 0; let known = 0; let unknown = false; let stopped = false; let released = false; let open = 0;
     const lost = (): EvalGatewayUnknownCost => { unknown = true; return new EvalGatewayUnknownCost(); };
+
+    // RF-5: Bedrock calls go one at a time (the gateway admits one call in flight per company and source; a second at once would read `busy`, which is a cap refusal and would make the round Not run).
+    let bedrockTurn: Promise<void> = Promise.resolve();
+    /** One Bedrock product call, outside the stage's hold. The same second lines as a Gemini call (released, stopped, held count used), the same unknown-cost rule (no settle: unknown), and the settle's cost (0) is added to the known spend. */
+    async function* bedrockCall(input: ModelEgressFrame, signal: AbortSignal | undefined): AsyncGenerator<ModelEgressEvent> {
+      if (released || stopped || unknown || forwarded >= heldCalls || known >= heldCost) { yield* ownRefusal("cap", "bedrock"); return; }
+      forwarded++; open++;
+      let delivered = false;
+      const before = bedrockTurn;
+      let next!: () => void;
+      bedrockTurn = new Promise<void>(resolve => { next = resolve; });
+      try {
+        await before;
+        if (signal?.aborted === true) throw lost();
+        for await (const event of bedrockEgress.forward(handle, input, signal === undefined ? undefined : { signal })) {
+          if (event.kind === "settle") { known += event.costMicros; if (!Number.isSafeInteger(known)) throw lost(); delivered = true; }
+          yield event;
+        }
+      } finally {
+        open--; next();
+        if (!delivered) unknown = true;
+      }
+    }
 
     async function* forward(given: ModelEgressScope, input: ModelEgressFrame, signal: AbortSignal | undefined): AsyncGenerator<ModelEgressEvent> {
       if (given !== handle) { yield* ownRefusal("not_found"); return; }
@@ -287,7 +320,8 @@ export function createEvalGatewayAccess(gatewayUrl: string, tokenSource: EvalGat
 
     return {
       scope: handle,
-      egress: { capabilities: { schemes: [] }, forward: (given, frame, opts) => forward(given, frame, opts?.signal) } satisfies ModelEgress,
+      // The path's own shape decides the lane (RF-5): a Bedrock product path under this hold's own scope goes to the Bedrock lane, anything else to the stage's own route.
+      egress: { capabilities: { schemes: [] }, forward: (given, frame, opts) => (given === handle && BEDROCK_PATH.test(String(frame?.path)) ? bedrockCall(frame, opts?.signal) : forward(given, frame, opts?.signal)) } satisfies ModelEgress,
       async release(spent) {
         if (released) throw new Error("eval hold already released");
         released = true;

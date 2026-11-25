@@ -7,6 +7,7 @@ import { PrepareSavedEnvSchema, SavedEnvPanelSchema, savedEnvRepositoryName, typ
 import { ARCHIVE_POLICY, SAVED_ENV_JOB_LEASE_MS, authorizeLease, checkRebuild, imageForTask, leaseForDispatch, lightSetup, markStale, mintPushForJob, savedEnvForPrepare, savedEnvPullLogin, sweepDeleted, SAVED_ENV_TASK_CHECK_MS, SAVED_ENV_RESET_COOLDOWN_MS, onProjectRegistered, onProjectArchived, onProjectDeleted, rebuildReason, recordBuild, reportFailure, requestReset, walk, type SavedEnvState } from "../../packages/broker/src/core/test-env/saved-env.js";
 import { panelView, resetFromPanel, savedEnvPanel } from "../../packages/broker/src/core/test-env/saved-env-panel.js";
 import { installSavedEnv, savedEnvPrepareOf } from "../../packages/broker/src/core/test-env/saved-env-prepare.js";
+import { queuedJobId } from "../support/saved-env-job.js";
 import { APPROVED, COMMIT, DAY, KEY, T0, dig, imageOf, iso, manifestOf, savedEnvWorld, type WorldOptions } from "../support/saved-env-world.js";
 
 const ids = { orgId: "org-1", projectId: "proj-1" };
@@ -297,11 +298,12 @@ describe("the push login belongs to the job's lease (mintPushForJob) and the tok
     const w = world();
     const queued = await checkRebuild(w.deps, ids, "push");
     expect(JSON.stringify(queued)).not.toContain(w.store.rows.get("org-1#proj-1")!.job!.leaseToken);
-    const first = await leaseForDispatch(w.deps, ids);
+    const first = await leaseForDispatch(w.deps, ids, "op-1", queuedJobId(queued));
     expect(first).toMatchObject({ ok: true, job: { reason: "no_image", commits: { svc: COMMIT } } });
     if (first.ok) expect(first.job.leaseToken).toBe(w.store.rows.get("org-1#proj-1")!.job!.leaseToken);
-    expect(await leaseForDispatch(w.deps, ids)).toEqual({ ok: false, reason: "nothing_to_dispatch" });
-    expect(await leaseForDispatch(world().deps, ids)).toEqual({ ok: false, reason: "nothing_to_dispatch" });
+    expect(await leaseForDispatch(w.deps, ids, "op-1", queuedJobId(queued))).toMatchObject({ ok: true });
+    expect(await leaseForDispatch(w.deps, ids, "op-2", queuedJobId(queued))).toEqual({ ok: false, reason: "nothing_to_dispatch" });
+    expect(await leaseForDispatch(world().deps, ids, "op-1", queuedJobId(queued))).toEqual({ ok: false, reason: "nothing_to_dispatch" });
   });
 
   it("only saved-env.ts uses the raw mintPushSession (routes call mintPushForJob)", () => {
@@ -596,7 +598,7 @@ describe("what the image registry can do for a worker decides what is queued and
     for (const w of [world({ capabilities: { scan: false } }), world({ registry: { startScan: async () => { throw new Error("scan down"); } } })]) {
       const queued = await checkRebuild(w.deps, ids, "push");
       expect(queued).toMatchObject({ ok: true, queued: true });
-      const lease = await leaseForDispatch(w.deps, ids);
+      const lease = await leaseForDispatch(w.deps, ids, "op-1", queuedJobId(queued));
       if (!lease.ok) throw new Error("no lease");
       const result = { ok: true, repository: w.repository, tag: "k-1", imageDigest: dig(2), manifest: manifestOf({ imageDigest: dig(2) }) };
       const recorded = await recordBuild(w.deps, ids, { jobId: lease.job.jobId, leaseToken: lease.job.leaseToken, result });
@@ -611,13 +613,13 @@ describe("what the image registry can do for a worker decides what is queued and
     const wrongRepository = world({ registry: { login: async (call) => other.login({ ...call, repository: savedEnvRepositoryName({ env: "test", orgId: "org-9", projectId: "elsewhere" }) }) } });
     const queued = await checkRebuild(wrongRepository.deps, ids, "push");
     expect(queued).toMatchObject({ ok: true, queued: true });
-    const lease = await leaseForDispatch(wrongRepository.deps, ids);
+    const lease = await leaseForDispatch(wrongRepository.deps, ids, "op-1", queuedJobId(queued));
     if (!lease.ok) throw new Error("no lease");
     expect(await mintPushForJob(wrongRepository.deps, ids, { jobId: lease.job.jobId, leaseToken: lease.job.leaseToken })).toEqual({ ok: false, reason: "unavailable" });
     const tooLong = world({ registry: { login: async (call) => { const login = await other.login({ ...call, maxSeconds: call.maxSeconds * 4 }); return { ...login, auth: { ...login.auth, repository: call.repository } }; } } });
     const again = await checkRebuild(tooLong.deps, ids, "push");
     expect(again).toMatchObject({ ok: true, queued: true });
-    const second = await leaseForDispatch(tooLong.deps, ids);
+    const second = await leaseForDispatch(tooLong.deps, ids, "op-1", queuedJobId(again));
     if (!second.ok) throw new Error("no lease");
     expect(await mintPushForJob(tooLong.deps, ids, { jobId: second.job.jobId, leaseToken: second.job.leaseToken })).toEqual({ ok: false, reason: "unavailable" });
   });

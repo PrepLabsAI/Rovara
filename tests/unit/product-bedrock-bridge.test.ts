@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { type ModelCatalogRow, type ModelEgressEvent, type ModelEgressFrame } from "@agentx/contracts";
 import { createProductGatewayEgress } from "../../packages/worker/src/product-gateway-egress.js";
-import { buildModelSandboxEnvironment, MODEL_DUMMY_KEY } from "../../packages/worker/src/model-sandbox-env.js";
+import { bedrockSandboxVariables, buildModelSandboxEnvironment, MODEL_BEDROCK_PLACEHOLDER_REGION, MODEL_DUMMY_KEY, ModelSandboxEnvError } from "../../packages/worker/src/model-sandbox-env.js";
 import { headersForBackend, parseModelTarget } from "../../packages/worker/src/model-helper-http.js";
 
 const CONTRACT = new URL("../../contracts/shared/model-gateway-product-bedrock.v2.json", import.meta.url);
@@ -143,14 +143,23 @@ describe("Bedrock responses", () => {
 describe("Bedrock sandbox configuration", () => {
   // Bedrock already has a catalog family, but no built-in row: the configured product supplies its selected row.
   const rows = [{ id: "bedrock", family: "bedrock", routesTo: "local_aws_front", redirect: [] }] as unknown as ModelCatalogRow[];
-  it("adds the helper endpoint and dummy AWS credentials only with productBedrock enabled", () => {
+  const BRIDGE_TOKEN = "cd".repeat(16);
+  it("adds the helper endpoint (with the exec's bridge token segment), dummy AWS credentials and a placeholder Region only with productBedrock enabled", () => {
     expect(rows).toHaveLength(1);
     const off = buildModelSandboxEnvironment({ rows, helperIp: "172.30.7.9" });
     expect(off.entries).toEqual([]);
-    expect(buildModelSandboxEnvironment({ rows, helperIp: "172.30.7.9", productBedrock: false }).entries).toEqual([]);
-    expect(buildModelSandboxEnvironment({ rows: [], helperIp: "172.30.7.9", productBedrock: true }).entries).toEqual([]);
-    const on = buildModelSandboxEnvironment({ rows, helperIp: "172.30.7.9", productBedrock: true });
-    expect(Object.fromEntries(on.entries)).toEqual({ AWS_ENDPOINT_URL_BEDROCK_RUNTIME: `http://rovara-models:8080/p/${rows[0]!.id}`, AWS_ACCESS_KEY_ID: MODEL_DUMMY_KEY, AWS_SECRET_ACCESS_KEY: MODEL_DUMMY_KEY });
+    expect(buildModelSandboxEnvironment({ rows: [], helperIp: "172.30.7.9", productBedrock: { token: BRIDGE_TOKEN } }).entries).toEqual([]);
+    const on = buildModelSandboxEnvironment({ rows, helperIp: "172.30.7.9", productBedrock: { token: BRIDGE_TOKEN } });
+    expect(Object.fromEntries(on.entries)).toEqual({
+      AWS_ENDPOINT_URL_BEDROCK_RUNTIME: `http://rovara-models:8080/p/${rows[0]!.id}/x/${BRIDGE_TOKEN}`, AWS_ACCESS_KEY_ID: MODEL_DUMMY_KEY, AWS_SECRET_ACCESS_KEY: MODEL_DUMMY_KEY,
+      AWS_REGION: MODEL_BEDROCK_PLACEHOLDER_REGION, AWS_DEFAULT_REGION: MODEL_BEDROCK_PLACEHOLDER_REGION, AWS_EC2_METADATA_DISABLED: "true",
+    });
+    // No session token, no profile, no secret value of any kind.
+    expect(on.entries.map(([name]) => name)).not.toContain("AWS_SESSION_TOKEN");
     expect(on.secretValues).toEqual([]);
+  });
+  it("refuses a row id or a token segment that is not a plain word (a slash or a dot segment could change the path the helper reads)", () => {
+    for (const token of ["", "a/b", "a b", "..", "a\nb", "x".repeat(129)]) expect(() => bedrockSandboxVariables("bedrock", token), token).toThrow(ModelSandboxEnvError);
+    for (const id of ["", "Bedrock", "a/b", "../x"]) expect(() => bedrockSandboxVariables(id, BRIDGE_TOKEN), id).toThrow(ModelSandboxEnvError);
   });
 });

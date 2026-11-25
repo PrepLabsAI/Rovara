@@ -1,5 +1,7 @@
 import { crc32 as zlibCrc32, deflateRawSync, inflateRawSync } from "node:zlib";
 import { e2eSecretSpellings } from "@agentx/contracts";
+import { markupTextOf } from "./trace-scrub-markup.js";
+import { htmlSafeJsonSpellings, snapshotTextOf } from "./trace-scrub-text.js";
 
 /**
  * Proof and evidence B4 (and fix round 1, Opus review C2): a Playwright trace is a ZIP of JSON-lines files (`trace.trace`, `trace.network`, `trace.stacks`), screencast images and blobs (`resources/`: response
@@ -36,6 +38,8 @@ export const TRACE_HEADER_ALLOW: ReadonlySet<string> = new Set([
 ]);
 const HEADER_CONTAINERS = new Set(["headers", "requestheaders", "responseheaders", "extrahttpheaders"]);
 const PAIR_CONTAINERS = new Set(["querystring", "params"]);
+/** Parents of `{ name, value }` pairs whose values are the round's own: cookies, and the web storage of a storage state. */
+const STORAGE_CONTAINERS = new Set(["cookies", "localStorage", "sessionStorage"]);
 /** A header whose value is a secret by its name: its value (and, for Authorization, the part after the scheme) is harvested. */
 const SENSITIVE_HEADER = /auth|token|session|key|secret|cookie|csrf|xsrf|credential|jwt|bearer|signature|^x-(?!request-id$|amzn-requestid$|forwarded|frame|content-type|powered)/iu;
 /** A field of a JSON body whose string value is harvested as a secret. */
@@ -178,7 +182,7 @@ function harvest(node: unknown, into: Secrets, parentKey: string, body: boolean)
       if (item !== null && typeof item === "object" && !Array.isArray(item)) {
         const entry = item as Record<string, unknown>;
         if (typeof entry.name === "string" && typeof entry.value === "string") {
-          if (parentKey === "cookies") into.add(entry.value);
+          if (STORAGE_CONTAINERS.has(parentKey)) into.add(entry.value);
           else if (HEADER_CONTAINERS.has(parentKey.toLowerCase())) harvestHeader(entry.name, entry.value, into);
         }
       }
@@ -197,6 +201,8 @@ function harvest(node: unknown, into: Secrets, parentKey: string, body: boolean)
   if (typeof node === "string") {
     if (looksLikeUrl(node)) harvestUrl(node, into);
     for (const value of queryValuesOf(node)) into.add(value);
+    // A form-encoded body held inline (`postData.text`, a console message): the values of its sensitive fields.
+    harvestForm(node, into);
     // JSON held inside a string (a console message, a stringified body) is read as the body it is.
     if ((node.startsWith("{") || node.startsWith("[")) && node.length <= 100_000) { try { harvest(JSON.parse(node), into, "", true); } catch { /* not JSON */ } }
   }
@@ -218,7 +224,7 @@ function newSecrets(known: readonly string[]): Secrets & { list(): string[] } {
 /** A search for the round's secrets, every spelling, in bytes or text. */
 function searcher(secrets: readonly string[], contains: (bytes: Uint8Array) => boolean): (data: Uint8Array | string) => boolean {
   // Every spelling, plus the PHP/JavaScript habit of escaping the slash in JSON (`a\/b`).
-  const needles = secrets.flatMap((secret) => [...e2eSecretSpellings(secret), secret.replace(/\//gu, "\\/")]).filter((form) => form.length >= MIN_SECRET_LENGTH).map((form) => Buffer.from(form, "utf8"));
+  const needles = secrets.flatMap((secret) => [...e2eSecretSpellings(secret), secret.replace(/\//gu, "\\/"), ...htmlSafeJsonSpellings(secret)]).filter((form) => form.length >= MIN_SECRET_LENGTH).map((form) => Buffer.from(form, "utf8"));
   return (data) => {
     const bytes = typeof data === "string" ? Buffer.from(data, "utf8") : Buffer.from(data.buffer, data.byteOffset, data.byteLength);
     return contains(bytes) || needles.some((needle) => bytes.includes(needle));
@@ -310,7 +316,7 @@ function rewriteTraceLines(text: string, hit: (text: string) => boolean, stats: 
     try { parsed = JSON.parse(line); } catch { return null; }
     const record = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
     const type = record?.type;
-    if (typeof type === "string" && SNAPSHOT_TYPES.has(type) && hit(line)) { stats.droppedSnapshots += 1; continue; }
+    if (typeof type === "string" && SNAPSHOT_TYPES.has(type) && hit(`${line}\n${snapshotTextOf(parsed)}`)) { stats.droppedSnapshots += 1; continue; }
     if (type === "screencast-frame" && record !== undefined && plan?.dropFrame(record) === true) {
       stats.droppedFrames += 1;
       if (typeof record.file === "string") plan.droppedFiles.add(record.file);
@@ -408,7 +414,9 @@ function scrubTraceEntries(zip: Uint8Array, contains: (bytes: Uint8Array) => boo
       if (event.type !== "frame-snapshot") continue;
       const page = typeof event.snapshot?.pageId === "string" ? event.snapshot.pageId : undefined;
       const time = typeof event.snapshot?.timestamp === "number" && Number.isFinite(event.snapshot.timestamp) ? event.snapshot.timestamp : undefined;
-      seen.push({ page, time, secret: secretHit(line), any: hitBytes(Buffer.from(line, "utf8")) });
+      // A secret a page rendered across sibling DOM nodes (two spans) is whole only in the snapshot's text, not in the line's JSON.
+      const scanned = `${line}\n${snapshotTextOf(event)}`;
+      seen.push({ page, time, secret: secretHit(scanned), any: hitBytes(Buffer.from(scanned, "utf8")) });
     }
   }
   // A snapshot that shows a round secret but names no page or time cannot be tied to the frames that show it: the trace is refused.
@@ -447,8 +455,8 @@ function scrubTraceEntries(zip: Uint8Array, contains: (bytes: Uint8Array) => boo
     let data = item.data;
     if (LINE_FILES.test(item.entry.name)) {
       data = lineOutputs.get(item.entry.name)!;
-    } else if (RESOURCE.test(item.entry.name) && hitBytes(data)) {
-      // A blob (a response body, the page source) that contains a round secret keeps its place and loses its content.
+    } else if (RESOURCE.test(item.entry.name) && hitBytes(Buffer.concat([data, Buffer.from(`\n${markupTextOf(item.text)}`, "utf8")]))) {
+      // A blob (a response body, the page source) that contains a round secret, whole or split by markup, keeps its place and loses its content.
       data = Buffer.from(TRACE_BLANKED, "utf8");
       stats.blankedResources += 1;
     } else if (hitBytes(data)) {

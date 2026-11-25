@@ -1,0 +1,10 @@
+{
+  "name": "rovara-model-gateway-image-toolchain",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The compiler the model gateway image build uses; versions and integrity hashes are copied from the root lockfile (a test holds them equal).",
+  "devDependencies": {
+    "@types/node": "22.20.3",
+    "typescript": "5.9.3"
+  }
+}

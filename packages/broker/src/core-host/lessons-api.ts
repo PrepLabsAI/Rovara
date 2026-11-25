@@ -327,8 +327,8 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
       if (!TASK_ID.test(taskId)) throw agentXError("TASK_NOT_FOUND", NO_SUCH_TASK);
       const task = await lessons.readTask(taskId).catch(() => { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); });
       // A task of another company or project, or one the person may not read (not on the roster and not its own person), is the same "no such task".
-      // A person off the roster learns nothing about the project from a task id (the same "No such project." as a project that does not exist), unless the task is their own.
-      if (!onRoster && (task === undefined || task.developerId !== personId)) throw notFound(NO_SUCH_PROJECT);
+      // A person off the roster learns nothing about the project from a task id (the same "No such project." as a project that does not exist), not even from a task they started: a person removed from the project keeps no hold on it.
+      if (!onRoster) throw notFound(NO_SUCH_PROJECT);
       if (task === undefined || task.companyId !== companyId || task.project !== project) throw agentXError("TASK_NOT_FOUND", NO_SUCH_TASK);
       if (route === "task") {
         const wikiUse = onRoster ? await options.wikiTaskUse?.(companyId, project, taskId) : undefined;

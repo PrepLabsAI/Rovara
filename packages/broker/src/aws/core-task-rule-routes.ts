@@ -19,7 +19,7 @@ import type { z } from "zod";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskRouteDependencies } from "./developer-tasks.js";
-import { grantTaskReader, listTaskReaders, readsAsReader, revokeTaskReader } from "./task-readers.js";
+import { grantTaskReader, holdsOwnTask, listTaskReaders, readsAsReader, revokeTaskReader } from "./task-readers.js";
 import { getTaskPeople } from "../developer/task-people.js";
 import { addTaskWebPerson, confirmTaskPeopleProposal, getTaskPeopleCandidates, getTaskPeopleProposal, proposeTaskOwnership, proposeTaskPeopleRole } from "../developer/task-people-effects.js";
 import { createCorePlanComment, listCorePlanComments, readCoreTaskDiff } from "../developer/task-code-routes.js";
@@ -195,7 +195,8 @@ export function createCoreTaskRuleRoutes(depsFor: (person: { developerId: string
       const document = await documentRoute(rest, deps, caller, task, url, input.request);
       if (document !== undefined) return document;
       // Readers and the timeline: the task's own person, or (to read) a reader it is shared with who is still a project member; anyone else reads no such task, in the old owner check's words.
-      const owner = task.developerId === caller.developerId;
+      // The task's own person counts only while they still hold the project grant in this company (read now): removed from the project or the company, they read no such task, as anyone else does.
+      const owner = await holdsOwnTask(deps, task, caller.developerId);
       const reader = !owner && await readsAsReader(deps, task, caller.developerId);
       if (!owner && !reader) throw agentXError("TASK_NOT_FOUND", `no task ${taskId} of yours`);
       if (rest === "events") return json({ events: await coreTimeline(input.store, input.companyId, task, whole(url.searchParams.get("limit"), DEVELOPER_EVENTS_DEFAULT, 1, DEVELOPER_EVENTS_MAX, "limit")) });

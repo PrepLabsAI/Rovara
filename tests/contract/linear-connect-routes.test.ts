@@ -17,6 +17,7 @@ import { linearCompanyApiAccess } from "../../packages/broker/src/aws/linear-wir
 import { LINEAR_SCOPES } from "../../packages/broker/src/aws/linear-oauth-client.js";
 import { COMPANY_A_ID as A, COMPANY_B_ID as B } from "../../packages/testing/src/isolation/two-company.js";
 import { companyProjectRow } from "../support/company-layout-projects.js";
+import { sessionBindingOf } from "../../packages/broker/src/developer/session-binding.js";
 
 const PERSON_B = "e".repeat(64);
 const PERSON_C = "c".repeat(64);
@@ -164,7 +165,7 @@ describe("complete", () => {
     w.as(PERSON_B, B); w.as(PERSON, A);
     expect(refused(await w.call("POST", `${BASE}/complete`, { state: first.body.state, code }, { sub: PERSON_B, sid: "session-eeee" }))).toEqual(startAgain);
     // The store itself, with the starter's own session: another person, another company, never spend it (only the company and person checks can refuse these).
-    const starter = { companyId: A, personId: PERSON, sessionId: "session-dddd" };
+    const starter = { companyId: A, personId: PERSON, sessionBinding: sessionBindingOf("session-dddd") };
     expect(await w.connections.spendState(first.body.state as string, { ...starter, personId: PERSON_C })).toBeUndefined();
     expect(await w.connections.spendState(first.body.state as string, { ...starter, companyId: B })).toBeUndefined();
     // Still live after all that: the owner's own completes once, and only once (a FRESH code from Linear for the same state, so only the state's single use can refuse it).
@@ -645,3 +646,55 @@ async function waitFor(condition: () => boolean): Promise<void> {
   for (let i = 0; i < 200 && !condition(); i++) await new Promise((resolve) => setTimeout(resolve, 1));
   if (!condition()) throw new Error("timed out");
 }
+
+// Session-id-at-rest: the sign-in session id is the browser's login cookie, so the connect state row keeps a digest of it (never the id), and the spend compares digests.
+describe("the session at rest", () => {
+  const COOKIE = "cookie-0123456789abcdef-secret";
+  const rowOf = (w: ReturnType<typeof world>, state: string) => w.db.get(`LINEAR_CONNECT#${createHash("sha256").update(state).digest("hex")}`, "META")!;
+  it("mints a digest of the session and never the id; the same session spends it, another session does not", async () => {
+    const w = world(); w.as(PERSON, A, "admin", COOKIE);
+    const started = await w.start();
+    const state = started.body.state as string;
+    const code = () => w.linear.approve(started.body.authorizeUrl as string, WORKSPACE_A);
+    const row = rowOf(w, state);
+    expect(row).toMatchObject({ sessionBinding: sessionBindingOf(COOKIE) });
+    expect(row).not.toHaveProperty("sessionId");
+    expect(JSON.stringify(row)).not.toContain(COOKIE);
+    w.as(PERSON, A, "admin", "another-session");
+    expect(refused(await w.complete({ state, code: code() }))).toEqual(startAgain);
+    expect(rowOf(w, state)).toMatchObject({ status: "live" });
+    w.as(PERSON, A, "admin", COOKIE);
+    expect((await w.complete({ state, code: code() })).status).toBe(200);
+    expect(JSON.stringify(rowOf(w, state))).not.toContain(COOKIE);
+  });
+  it("a row an older build wrote (the raw id, no digest) is refused with the start-again words and is not spent", async () => {
+    const w = world(); w.as(PERSON, A, "admin", COOKIE);
+    const started = await w.start();
+    const state = started.body.state as string;
+    const { sessionBinding: _digest, ...rest } = rowOf(w, state); void _digest;
+    w.db.set({ ...rest, sessionId: COOKIE });
+    expect(refused(await w.complete({ state, code: w.linear.approve(started.body.authorizeUrl as string, WORKSPACE_A) }))).toEqual(startAgain);
+    expect(rowOf(w, state)).toMatchObject({ status: "live", sessionId: COOKIE });
+    expect(w.db.get(linearConnectionKey(A).pk, "META")).toBeUndefined();
+  });
+});
+
+describe("a caller with no sign-in session (a registered service's own token)", () => {
+  const SIGN_IN_AGAIN = "your AgentX sign-in has ended; run agentx login <url> again";
+  const direct = (w: ReturnType<typeof world>, path: string, body: unknown, sessionId: string | undefined) => {
+    const ctx = { documentClient: w.db, signInTableName: "SignIn", now: w.now, wiring: w.deps.developer.linearConnect!, projectInCompany: async () => true, projectRole: async () => undefined };
+    const caller = { developerId: PERSON, sessionId, amr: "slack", name: "Ada" } as unknown as Parameters<typeof routeLinearConnect>[1];
+    return routeLinearConnect(ctx, caller, A, { method: "POST", path, headers: {}, requestId: "r", body: JSON.stringify(body) }, new URL(path, "https://broker.example.test"));
+  };
+  const states = (w: ReturnType<typeof world>) => [...w.db.items.values()].filter((row) => (row as { entityType?: string }).entityType === "LINEAR_CONNECT_STATE");
+  it.each([["empty", ""], ["missing", undefined]] as const)("an %s session id is refused before any state is minted, and cannot spend one", async (_name, sessionId) => {
+    const w = world(); w.as(PERSON, A);
+    await expect(direct(w, `${BASE}/connect`, {}, sessionId)).rejects.toMatchObject({ code: "AUTH_REQUIRED", message: expect.stringContaining(SIGN_IN_AGAIN) as string });
+    expect(states(w)).toEqual([]);
+    const started = await w.start();
+    const code = w.linear.approve(started.body.authorizeUrl as string, WORKSPACE_A);
+    await expect(direct(w, `${BASE}/complete`, { state: started.body.state, code }, sessionId)).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
+    expect(states(w)).toHaveLength(1); expect(states(w)[0]).toMatchObject({ status: "live" });
+    expect(w.db.get(linearConnectionKey(A).pk, "META")).toBeUndefined();
+  });
+});

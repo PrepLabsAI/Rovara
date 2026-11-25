@@ -250,6 +250,7 @@ describe("POST /v1/app/sessions/{id}/answers needs the owner's level", () => {
     const routes = createCoreDevRoutes({ app, companyOf, wiring: () => ({ ...WIRED, members: sessionMembers }) });
     const caller = (personId: string): DeployedCaller => ({ principal: { ...localOwnerPrincipal({ companyId: FAKE_COMPANY, personId }), roles: ["member"] }, client: "cli" });
     const owner = caller(OWNER_ID);
+    grants.set(developerIdOf(owner.principal), "contributor"); // the task's owner is a member who holds the project (a live grant is re-checked; a person off the project owns nothing)
     const runtime = await app.runtimeFor(FAKE_COMPANY);
     const deps = runtime.flow.deps;
     const { task } = await runtime.flow.start({ principal: owner.principal, client: "test", origin: "app" }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true });

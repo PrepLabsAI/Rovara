@@ -24,8 +24,19 @@ export const AGENTX_RELEASE_PROJECT_NAME = "release-agentx-production";
 // #1242: the beta release's project, under the same rule as the production one.
 export const AGENTX_BETA_RELEASE_PROJECT_NAME = "release-agentx-beta";
 export const AGENTX_RELEASE_PIPELINE_NAME = "AgentXProductionRelease";
-/** The pipeline's last stage. Its inbound transition stays disabled: enabling it is the manual approval that promotes beta's commit (#1242). */
+/** The pipeline's last stage. Its inbound transition stays disabled, so a run waits in front of it (#1242); the run is released by its OWN approval action (DEC 254zzz506). */
 export const AGENTX_PRODUCTION_STAGE = "Production";
+/**
+ * PROD-APPROVAL-BOUND (DEC 254zzz506: every production deploy needs the owner's explicit approval for THAT run). The Production stage holds a CodePipeline manual approval, run order 2, right after
+ * the Code Preflight (run order 1, read-only: its first command closes the transition, then the port guard runs). Every other Production action, all of them writers, runs after the approval.
+ * An approval belongs to one execution, so an open transition alone (enabled while no run waited, or left open when the Code Preflight failed before its first command) can no
+ * longer let the NEXT run into Production unapproved: that run stops at its own approval. The gate closes BEFORE the approval, so a rejected or timed-out run leaves the transition closed, whatever
+ * the outcome. The transition stays disabled as well: it holds the run that is waiting (a newer run replaces it, SUPERSEDED mode, #1242), the approval releases it.
+ * No role this template creates may approve, enable the transition, or start or retry an execution.
+ */
+export const AGENTX_PRODUCTION_APPROVAL_ACTION = "ApproveProduction";
+/** An unanswered approval fails after this long (the run stops; the stage unlocks); CodePipeline's own default is 7 days. */
+export const AGENTX_PRODUCTION_APPROVAL_TIMEOUT_HOURS = 24;
 /** The beta release build's own role, by a fixed name: the beta account's release role trusts exactly this role (beta-release-access.ts). */
 export const AGENTX_BETA_BUILD_ROLE_NAME = "agentx-release-beta-build";
 /** The role in the beta account that the beta release runs as (beta-release-access.ts). */
@@ -43,7 +54,7 @@ export const AGENTX_PRODUCTION_CODE_PREFLIGHT_PROJECT_NAME = `${AGENTX_CODE_PREF
 /**
  * The namespaces of the two source actions: their CommitId reaches every Cloud action. CodePipeline refuses a namespace that equals the name of any artifact of the pipeline
  * ("Namespaces must be unique across the pipeline definition and cannot conflict with any artifact names"), and the Cloud source's output artifact is named `CloudSource`
- * (its name is part of the S3 key layout the Cloud stack's grants rely on), so its namespace carries a suffix. Nothing reads a `#{CloudSourceVariables.*}` variable today.
+ * (its name is part of the S3 key layout the Cloud stack's grants rely on), so its namespace carries a suffix. Beta's Cloud Preflight reads `#{CloudSourceVariables.CommitId}` as CLOUD_SOURCE_COMMIT (the commit a pushed Cloud tag points at).
  */
 export const CODE_SOURCE_NAMESPACE = "CodeSource";
 export const CLOUD_SOURCE_NAMESPACE = "CloudSourceVariables";
@@ -166,8 +177,18 @@ export const CODE_HISTORY_PARAMETER = {
   production: "/agentx/release/code-history/production",
 } as const;
 export const CODE_HISTORY_LIMIT = 10;
-/** CLOUD_REF's default: the newest vX.Y.Z tag on the Cloud trunk (a variable's default may not be empty). */
+/** The newest vX.Y.Z tag on the Cloud trunk. A value to type on a manual run; never CLOUD_REF's default and never what a tag-push run carries. */
 export const CLOUD_REF_LATEST = "latest";
+/**
+ * CLOUD_REF's default (a variable's default may not be empty), so what every triggered run carries. CodePipeline V2 cannot bind the pushed tag to a variable: a trigger has no variables, and the
+ * CodeStarSourceConnection output variables (AuthorDate, BranchName, CommitId, CommitMessage, ConnectionArn, FullRepositoryName) hold no tag name. So the Cloud actions get the commit the
+ * Cloud source resolved (CLOUD_SOURCE_COMMIT_VARIABLE), and the value below tells the Cloud Preflight to resolve the ref from that commit: exactly one vX.Y.Z tag on it, else refuse before any write.
+ */
+export const CLOUD_REF_FROM_TRIGGER = "from-trigger";
+/** The Cloud source's commit (`#{CloudSourceVariables.CommitId}`), on Beta's Cloud Preflight action (Production's reads the ref Beta resolved): the commit the pushed tag points at when a tag push started the run. */
+export const CLOUD_SOURCE_COMMIT_VARIABLE = "CLOUD_SOURCE_COMMIT";
+/** CLOUD_PROD's default: a triggered run never deploys production's Cloud; the production flip sets `on` explicitly, per run. */
+export const CLOUD_PROD_DEFAULT = "off";
 /** The tags that start a run: `v1.2.3` yes, `v1.2.3-rc1` no. */
 export const CLOUD_TAG_TRIGGER = { tagsIncludes: ["v*.*.*"], tagsExcludes: ["v*-*"] } as const;
 /** The Cloud steps of a stage, in order; the Code release sits after GatewayCheck (gateway, then Code, then web and app: BETA-CLOUD-PLAN 1.2). */
@@ -182,11 +203,15 @@ export const CLOUD_STEPS_AFTER_CODE = [
   { action: "CloudProof", step: "proof" },
 ] as const;
 export const AGENTX_RELEASE_AWS_CLI_VERSION = "2.36.47";
+// Every stack the release scripts name (scripts/release-production.ts, release-common.ts): the release roles may read these (cloudformation:DescribeStacks) and no more.
+// A stack the release only READS still belongs here: without the grant, DescribeStacks answers AccessDenied, which the release cannot tell from a missing stack (train 41: AgentXApiAddress).
+// tests/contract/release-stacks-list.test.ts fails if a stack the scripts name is missing. Append only: [0] is the install's GitHub App stack for CI's proof.
 export const AGENTX_RELEASE_STACKS = [
   "AgentXControlPlane",
   "AgentXProductionFoundation",
   "AgentXProductionRuntime",
   "AgentXSlackOrchestrator",
+  "AgentXApiAddress",
 ] as const;
 // Deployable inputs only: the worker and Slack orchestrator images, the control-plane Lambdas, and the CDK app.
 // packages/aws-adapters is left out on purpose: the legacy production template must stay byte-identical, and the images take only that
@@ -435,6 +460,21 @@ export class ReleasePipelineStack extends Stack {
       }
       // The action's input is the Code clone, which the project reads through the repository's connection.
       preflight.addToRolePolicy(useConnection);
+      if (closesGate) {
+        // The Production Code Preflight runs BEFORE the owner's approval, so it may clone and may not push: UseConnection is denied when the provider action needs write permission
+        // (codeconnections:ProviderPermissionsRequired = read_write; the other value is read_only; the legacy prefix has its own key). A Deny, because CDK adds an unconditioned
+        // codestar-connections:UseConnection Allow to the role of every CodeBuild action whose input is a connection source, and a condition on an Allow could not take it back.
+        // StringEquals read_write, not StringNotEquals read_only: a request that lacks the key (not verified against a live clone) is not denied, so Production cannot break at its first action.
+        for (const prefix of ["codeconnections", "codestar-connections"]) {
+          preflight.addToRolePolicy(new iam.PolicyStatement({
+            sid: `ReadOnlyConnectionUse${prefix === "codeconnections" ? "" : "Legacy"}`,
+            effect: iam.Effect.DENY,
+            actions: [`${prefix}:UseConnection`],
+            resources: [connectionArn.valueAsString],
+            conditions: { StringEquals: { [`${prefix}:ProviderPermissionsRequired`]: "read_write" } },
+          }));
+        }
+      }
       return preflight;
     };
     const betaPreflightProject = preflightProject("BetaCodePreflight", AGENTX_BETA_CODE_PREFLIGHT_PROJECT_NAME, false);
@@ -503,8 +543,8 @@ export class ReleasePipelineStack extends Stack {
     // V2 variables: every one has a default, so a push or a tag starts a run; a manual run overrides them.
     const cloudRef = new codepipeline.Variable({
       variableName: PIPELINE_VARIABLE_CLOUD_REF,
-      defaultValue: CLOUD_REF_LATEST,
-      description: `The Cloud release tag to deploy (vX.Y.Z); ${CLOUD_REF_LATEST} is the newest tag on the Cloud trunk. An older tag is a Cloud rollback: it forces CODE_RELEASE=skip`,
+      defaultValue: CLOUD_REF_FROM_TRIGGER,
+      description: `Cloud tag (vX.Y.Z); ${CLOUD_REF_FROM_TRIGGER} (triggered runs) is the one tag on the Cloud commit, else refuse; ${CLOUD_REF_LATEST}: newest tag, manual runs. An older tag is a Cloud rollback`,
     });
     const codeRelease = new codepipeline.Variable({
       variableName: PIPELINE_VARIABLE_CODE_RELEASE,
@@ -513,8 +553,8 @@ export class ReleasePipelineStack extends Stack {
     });
     const cloudProd = new codepipeline.Variable({
       variableName: PIPELINE_VARIABLE_CLOUD_PROD,
-      defaultValue: "on",
-      description: "on deploys Cloud in the Production stage; off leaves production Cloud as it is for this run (a per-run choice, not a switch)",
+      defaultValue: CLOUD_PROD_DEFAULT,
+      description: "off (default: no trigger deploys production Cloud) leaves it as it is; on deploys Cloud in the Production stage. Set on for the run that promotes (per run, not a switch)",
     });
 
     const pipelineMode = new codepipeline.Variable({
@@ -565,6 +605,8 @@ export class ReleasePipelineStack extends Stack {
             [PIPELINE_VARIABLE_MODE]: { value: pipelineMode.reference() },
             // Only the Cloud Preflight gets the Code context of its stage (see CODE_CONTEXT_VARIABLE); the later steps read it from the stage CLI's state.
             ...(spec.step === "preflight" ? { [CODE_CONTEXT_VARIABLE]: { value: `#{${CODE_PREFLIGHT_NAMESPACE[environment]}.${CODE_CONTEXT_VARIABLE}}` } } : {}),
+            // Beta's Preflight only (the 1000-character limit): it resolves a CLOUD_REF of from-trigger from this commit; Production's Preflight and the later steps read the resolved ref from the stage CLI's state.
+            ...(spec.step === "preflight" && environment === "beta" ? { [CLOUD_SOURCE_COMMIT_VARIABLE]: { value: cloudSource.variables.commitId } } : {}),
             [CLOUD_EXPECTED_ACCOUNT_VARIABLE]: { value: environment === "beta" ? betaAccountId.valueAsString : this.account },
             EXEC_ID: { value: "#{codepipeline.PipelineExecutionId}" },
             CODE_SHA: { value: source.variables.commitId },
@@ -592,10 +634,12 @@ export class ReleasePipelineStack extends Stack {
       codePreflight: actions.CodeBuildAction,
       codeStep: (runOrder: number) => actions.CodeBuildAction,
       firstState: codepipeline.Artifact | undefined,
+      reserved = 0,
     ): { actions: actions.CodeBuildAction[]; last: codepipeline.Artifact | undefined } => {
       const built: actions.CodeBuildAction[] = [codePreflight];
       let state = firstState;
-      let runOrder = 2;
+      // The first Cloud action follows the Code Preflight, after the `reserved` run orders a caller keeps for an action of its own (Production's approval).
+      let runOrder = codePreflight.actionProperties.runOrder! + 1 + reserved;
       const cloud = (spec: { action: string; step: string }): void => {
         const made = cloudAction(environment, spec, runOrder, state);
         built.push(made.action);
@@ -622,11 +666,27 @@ export class ReleasePipelineStack extends Stack {
       undefined,
     );
 
+    // The approval's text names the run (execution id), the Code commit, the Cloud commit Beta resolved from, and the variables that decide what the run does. All are values of THIS
+    // execution, resolved when the action starts (a manual approval's CustomData takes #{...} references; the configuration limit is 1000 characters, pinned by a test).
+    // The Cloud TAG Beta resolved is in the stage CLI's state, not an exported variable: the owner reads it in Beta's Preflight log (the approval says so).
+    const approvalText = [
+      `Approve THIS run only: pipeline execution #{codepipeline.PipelineExecutionId}.`,
+      `Production releases Code commit ${source.variables.commitId} with the Cloud source commit of this run, ${cloudSource.variables.commitId}.`,
+      `Cloud ref ${cloudRef.reference()}, Cloud production ${cloudProd.reference()}, Code release ${codeRelease.reference()}, mode ${pipelineMode.reference()}, rollback target ${rollbackTarget.reference()}.`,
+      "The Cloud tag Beta resolved and deployed is the one named in Beta's Preflight log: check it before you approve. Reject any run that is not the one you meant to release.",
+    ].join(" ");
+    const productionApproval = new actions.ManualApprovalAction({
+      actionName: AGENTX_PRODUCTION_APPROVAL_ACTION,
+      runOrder: 2,
+      additionalInformation: approvalText,
+      timeout: Duration.hours(AGENTX_PRODUCTION_APPROVAL_TIMEOUT_HOURS),
+    });
+
     new codepipeline.Pipeline(this, "Pipeline", {
       pipelineName: AGENTX_RELEASE_PIPELINE_NAME,
       pipelineType: codepipeline.PipelineType.V2,
       variables: [cloudRef, codeRelease, cloudProd, pipelineMode, rollbackTarget],
-      // #1242: every merge goes to beta; production takes beta's newest commit only when someone enables the transition into Production.
+      // #1242: every merge goes to beta; production takes beta's newest commit only when someone enables the transition into Production AND approves that run (the Production stage's first action).
       // A run waiting in front of a disabled transition is replaced by a newer one only in SUPERSEDED mode, which is what makes one promotion carry
       // every merge since the last. (QUEUED, #114, kept each merge apart; two merges that land while beta is deploying now go to beta together.)
       // A run with CODE_RELEASE=skip supersedes a waiting promotion too: its Code waits for a later run (Preflight prints that).
@@ -645,12 +705,14 @@ export class ReleasePipelineStack extends Stack {
         },
         {
           stageName: AGENTX_PRODUCTION_STAGE,
-          // The manual approval: enable this transition (console, or `aws codepipeline enable-stage-transition`) to promote the commit waiting here.
+          // The transition holds the run that is waiting here (enable it, console or `aws codepipeline enable-stage-transition`, to let that run in). It is NOT the approval: the
+          // approval is the stage's second action, one per execution, so an open transition cannot admit a run the owner has not approved (DEC 254zzz506).
           transitionToEnabled: false,
           transitionDisabledReason: PROMOTION_GATE_REASON,
-          // CodePreflight comes FIRST and its first command closes the gate this run came through, so a newer run cannot pass the open transition while the gates run.
+          // The Code Preflight comes FIRST (read-only): its first command closes the gate this run came through, so a newer run cannot pass the open transition while this one waits for
+          // its approval or runs its gates, and a rejected or timed-out run leaves the transition closed. The approval comes SECOND, before every other action (all of them writers).
           // Its Cloud counterpart then reads the beta run's final state.
-          actions: stageActions(
+          actions: ((production) => [production.actions[0]!, productionApproval, ...production.actions.slice(1)])(stageActions(
             "production",
             new actions.CodeBuildAction({
               actionName: "CodePreflight",
@@ -662,7 +724,8 @@ export class ReleasePipelineStack extends Stack {
             }),
             (runOrder) => codeAction("ReleaseProduction", project, runOrder, productionPreflightNamespace, releaseOutput),
             beta.last,
-          ).actions,
+            1,
+          )),
         },
       ],
       triggers: [
@@ -676,7 +739,8 @@ export class ReleasePipelineStack extends Stack {
             }],
           },
         },
-        // A Cloud release tag starts a run too: the Code half of that run is the newest mainline commit, which the Preflight pins.
+        // A Cloud release tag starts a run too: the Code half of that run is the newest mainline commit, which the Preflight pins. The run carries CLOUD_REF=from-trigger and CLOUD_PROD=off
+        // (never `latest`, never `on`), and the transition into Production stays disabled and the stage opens with its own approval: the tag alone cannot reach Production.
         {
           providerType: codepipeline.ProviderType.CODE_STAR_SOURCE_CONNECTION,
           gitConfiguration: {
@@ -721,7 +785,7 @@ function recordReleasedCode(parameter: string, historyParameter: string): string
 
 /** Why the transition into Production is disabled; also the reason the production release gives when it closes it again. */
 // CodePipeline allows only letters, digits, spaces and !@().*?- in a transition's reason.
-export const PROMOTION_GATE_REASON = "Production waits for a manual approval - enable this transition to release the commit waiting here (issue 1242)";
+export const PROMOTION_GATE_REASON = "Production waits for the owner - enable this transition to let the run waiting here in and then approve ApproveProduction for that run (issue 1242)";
 
 export function releaseProjectSettings(logGroup: logs.ILogGroup) {
   return {

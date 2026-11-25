@@ -12,6 +12,7 @@ import { githubLinkOf, linkedGithubPerson } from "../../packages/broker/src/core
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { GitHubAppCredentialProvider } from "../../packages/broker/src/plugins/code-host/github/client.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
+import { sessionBindingOf } from "../../packages/broker/src/developer/session-binding.js";
 
 const NOW0 = Date.parse("2026-11-17T12:00:00.000Z");
 const TIME = "2026-11-01T09:00:00.000Z";
@@ -113,7 +114,7 @@ describe("start", () => {
     expect(answer.body.authorizeUrl).toBe(`https://github.com/login/oauth/authorize?client_id=Iv1.client&state=${state}`);
     expect(answer.body.expiresAt).toBe(new Date(NOW0 + 600_000).toISOString());
     const stored = await w.store.get({ pk: `GITHUB_LINK_STATE#${createHash("sha256").update(state).digest("hex")}`, sk: "META" });
-    expect(stored).toMatchObject({ companyId: A, personId: ADA, sessionId: "s-ada", provider: "github-link", status: "live" });
+    expect(stored).toMatchObject({ companyId: A, personId: ADA, sessionBinding: sessionBindingOf("s-ada"), provider: "github-link", status: "live" });
     // The state is never kept in the clear, and it is not in the install flow's key family.
     expect(JSON.stringify(stored)).not.toContain(state);
     expect(await w.store.get({ pk: `GITHUB_CONNECT#${createHash("sha256").update(state).digest("hex")}`, sk: "META" })).toBeUndefined();
@@ -270,7 +271,7 @@ describe("claim: the person links the account GitHub says is theirs, to themselv
     const answers = await Promise.all([w.claim({ state, code: "c1" }), w.claim({ state, code: "c2" })]);
     expect(answers.map((answer) => answer.status).sort()).toEqual([200, 403]);
   });
-  it.each([["status", "used"], ["provider", "github-install"], ["companyId", B], ["personId", BEA], ["sessionId", "other-session"], ["expiresAt", 1]] as const)(
+  it.each([["status", "used"], ["provider", "github-install"], ["companyId", B], ["personId", BEA], ["sessionBinding", sessionBindingOf("other-session")], ["expiresAt", 1]] as const)(
     "a state whose %s changes between its read and its spend is refused", async (field, value) => {
       const w = world(); const state = await w.startState();
       const key = { pk: `GITHUB_LINK_STATE#${createHash("sha256").update(state).digest("hex")}`, sk: "META" };
@@ -287,10 +288,10 @@ describe("claim: the person links the account GitHub says is theirs, to themselv
   it("a state of the install flow (its own key family and provider) is not a link state", async () => {
     const w = world(); const secret = "B".repeat(43);
     const hash = createHash("sha256").update(secret).digest("hex");
-    await w.store.put({ item: { pk: `GITHUB_CONNECT#${hash}`, sk: "META", entityType: "GITHUB_CONNECT_STATE", provider: "github-install", status: "live", companyId: A, personId: ADA, sessionId: "s-ada", createdAt: TIME, expiresAt: Math.floor(NOW0 / 1000) + 600 } });
+    await w.store.put({ item: { pk: `GITHUB_CONNECT#${hash}`, sk: "META", entityType: "GITHUB_CONNECT_STATE", provider: "github-install", status: "live", companyId: A, personId: ADA, sessionBinding: sessionBindingOf("s-ada"), createdAt: TIME, expiresAt: Math.floor(NOW0 / 1000) + 600 } });
     expect((await w.claim({ state: secret, code: "ada-code" })).body.error).toEqual(uniform);
     // Even a row copied into the link family with the install provider is refused.
-    await w.store.put({ item: { pk: `GITHUB_LINK_STATE#${hash}`, sk: "META", entityType: "GITHUB_LINK_STATE", provider: "github-install", status: "live", companyId: A, personId: ADA, sessionId: "s-ada", createdAt: TIME, expiresAt: Math.floor(NOW0 / 1000) + 600 } });
+    await w.store.put({ item: { pk: `GITHUB_LINK_STATE#${hash}`, sk: "META", entityType: "GITHUB_LINK_STATE", provider: "github-install", status: "live", companyId: A, personId: ADA, sessionBinding: sessionBindingOf("s-ada"), createdAt: TIME, expiresAt: Math.floor(NOW0 / 1000) + 600 } });
     expect((await w.claim({ state: secret, code: "ada-code" })).body.error).toEqual(uniform);
     expect(w.github.requests).toHaveLength(0);
   });
@@ -403,5 +404,36 @@ describe("unlink", () => {
     await w.store.put({ item: { ...githubAccountKey(A, "7"), entityType: "GITHUB_ACCOUNT_LINK", companyId: A, githubUserId: "7", login: "ada-lovelace", personId: BEA, linkedAt: TIME } });
     expect((await w.unlink()).body).toMatchObject({ unlinked: true });
     expect(await linkedPerson(w, A, "7")).toBe(BEA);
+  });
+});
+
+// Session-id-at-rest: the sign-in session id is the browser's login cookie, so the link state row keeps a digest of it (never the id), and the spend compares digests.
+describe("the session at rest", () => {
+  const COOKIE = "cookie-0123456789abcdef-secret";
+  const keyOf = (state: string) => ({ pk: `GITHUB_LINK_STATE#${createHash("sha256").update(state).digest("hex")}`, sk: "META" });
+  it("mints a digest of the session and never the id; the same session spends it, another session does not", async () => {
+    const w = world(); w.db.set({ pk: `SESSION#${COOKIE}`, sk: "META", sessionId: COOKIE, developerId: ADA, amr: "slack", clientId: "web-app", startedAt: new Date(NOW0 - 60_000).toISOString(), endsAt: NOW0 / 1000 + 86_400 }); w.as(ADA, COOKIE);
+    const state = await w.startState();
+    const row = await w.store.get(keyOf(state));
+    expect(row).toMatchObject({ sessionBinding: sessionBindingOf(COOKIE) });
+    expect(row).not.toHaveProperty("sessionId");
+    expect(JSON.stringify(row)).not.toContain(COOKIE);
+    w.as(ADA, "s-ada-2");
+    expect((await w.claim({ state, code: "ada-code" })).body.error).toEqual(uniform);
+    expect(await w.store.get(keyOf(state))).toMatchObject({ status: "live" });
+    w.as(ADA, COOKIE);
+    expect((await w.claim({ state, code: "ada-code" })).status).toBe(200);
+    expect(JSON.stringify(await w.store.get(keyOf(state)))).not.toContain(COOKIE);
+  });
+  it("a row an older build wrote (the raw id, no digest) is refused with the start-again words and is not spent", async () => {
+    const w = world(); w.db.set({ pk: `SESSION#${COOKIE}`, sk: "META", sessionId: COOKIE, developerId: ADA, amr: "slack", clientId: "web-app", startedAt: new Date(NOW0 - 60_000).toISOString(), endsAt: NOW0 / 1000 + 86_400 }); w.as(ADA, COOKIE);
+    const state = await w.startState();
+    const { sessionBinding: _digest, ...rest } = (await w.store.get(keyOf(state)))!; void _digest;
+    await w.store.put({ item: { ...rest, sessionId: COOKIE } });
+    const answer = await w.claim({ state, code: "ada-code" });
+    expect(answer.status).toBe(403); expect(answer.body.error).toEqual(uniform);
+    expect(w.github.requests).toHaveLength(0);
+    expect(await w.store.get(keyOf(state))).toMatchObject({ status: "live", sessionId: COOKIE });
+    expect(await linkedPerson(w, A, "7")).toBeUndefined();
   });
 });

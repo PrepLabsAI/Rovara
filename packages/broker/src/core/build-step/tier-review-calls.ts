@@ -4,6 +4,7 @@
 //
 // What is sent: the prompt, built here or by the floor, and nothing else. The change is in the prompt as ONE JSON value between boundary lines made fresh for the call; no patch text goes into any other field,
 // and no system text is added.
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import type { ModelIdentifier, ModelSelection } from "@agentx/contracts";
 import { REVIEW_PATCH_MAX_CHARS, REVIEW_TIMEOUT_MS, escapedForPrompt, type TierReviewer } from "../decisions/tier-reviewer.js";
@@ -23,7 +24,30 @@ export type TierReviewCall = (input: { model: ModelSelection | undefined; prompt
  * Asked before every reviewer call, so the call is counted against the task's spend (Cloud's S3 wiring meters it like any model call of the task). `false`: the task may not spend more, and the call is not made
  * (the reviewer counts as unavailable: the change fails closed). Absent: nothing is metered.
  */
-export type TierReviewMeter = (input: { taskId: string; purpose: TierReviewPurpose; model: ModelSelection | undefined; promptChars: number }) => Promise<boolean>;
+export type TierReviewMeter = (input: { taskId: string; purpose: TierReviewPurpose; model: ModelSelection | undefined; promptChars: number; /** The exact text about to be sent, when the caller has it: the meter prices that, not an estimate. */ prompt?: string }) => Promise<boolean | "unavailable">;
+// `true`: the call may be made. `false`: the task's spending limit does not allow it (the person is told that). `"unavailable"`: the meter could not tell (a price or a record could not be read): nothing is sent, and
+// the person is not told the limit stopped it, because it did not.
+
+/** The task's spending limit refused a call (the meter said no, or the call's own worst case did not fit in what the task has left). Decided by this type, never by the text of a message. */
+export class TierReviewCapError extends Error {
+  constructor() { super("the task's spending limit stopped this review"); this.name = "TierReviewCapError"; }
+}
+
+/** The gateway cannot serve this review at all (its refusal is not the spending limit: for example a checking model its reviewer grants do not support). Not retried on every pass: it is a failure of the kind `unsupported`. */
+export class TierReviewUnsupported extends Error {
+  constructor() { super("the gateway cannot serve this review"); this.name = "TierReviewUnsupported"; }
+}
+
+/** A failure after the request may have reached the model (an answer that cannot be read, a timeout, a booking that failed): the call is never repeated, because the first may already be paid for. */
+export class TierReviewNoRetry extends Error {
+  constructor(message = "the review call failed after it was sent") { super(message); this.name = "TierReviewNoRetry"; }
+}
+
+/**
+ * Which task a reviewer call is for. The tier pass opens this scope around everything it does for one task, so an install's `tierReviewCall` (which is given only what the model is sent: the model, the prompt, the
+ * purpose and a signal) can still pay for the call as that task. A call made outside the scope names no task.
+ */
+export const tierReviewTask = new AsyncLocalStorage<{ taskId: string }>();
 
 /** The wait before the one retry of a reviewer call that failed fast (an outage, not a timeout). */
 export const TIER_REVIEW_RETRY_MS = 1_000;
@@ -32,18 +56,21 @@ export const TIER_REVIEW_RETRY_MS = 1_000;
  * One reviewer call with its own deadline: the call is given an abort signal that fires at the deadline (a hung call is cancelled, not left running and billing), and a call that FAILED (threw before the deadline)
  * is tried once more after a short wait. A timeout is not retried. A retry can never lose a yes: only a call that gave no answer at all is repeated.
  */
-export async function callWithDeadline(call: TierReviewCall, input: { model: ModelSelection | undefined; prompt: string; purpose: TierReviewPurpose }, timeoutMs: number, meter?: () => Promise<boolean>): Promise<string> {
+export async function callWithDeadline(call: TierReviewCall, input: { model: ModelSelection | undefined; prompt: string; purpose: TierReviewPurpose }, timeoutMs: number, meter?: (prompt: string) => Promise<boolean | "unavailable">): Promise<string> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => { controller.abort(); reject(new Error("timeout")); }, timeoutMs); });
   const attempt = async (): Promise<string> => {
-    if (meter !== undefined && !(await meter())) throw new Error("not allowed to spend");
+    const allowed = meter === undefined ? true : await meter(input.prompt);
+    if (allowed === false) throw new TierReviewCapError();
+    if (allowed !== true) throw new Error("the spend check could not be made");
     return call({ ...input, signal: controller.signal });
   };
   try {
     return await Promise.race([
       attempt().catch(async (error: unknown) => {
-        if (controller.signal.aborted || (error instanceof Error && error.message === "not allowed to spend")) throw error;
+        // Never repeated: a timeout, the spending limit, and any failure after the request was sent (the first call may already be paid). Only a failure before anything was sent is tried once more.
+        if (controller.signal.aborted || error instanceof TierReviewCapError || error instanceof TierReviewNoRetry || error instanceof TierReviewUnsupported) throw error;
         await new Promise((resolve) => { setTimeout(resolve, TIER_REVIEW_RETRY_MS); });
         if (controller.signal.aborted) throw error;
         return attempt();
@@ -95,7 +122,7 @@ function jsonIn(text: string): unknown {
 }
 
 /** The floor's reviewer over the install's call: it sends the floor's own prompt (`input.prompt`) and nothing else, and hands back what the model answered for the floor to judge. */
-export function tierReviewerOf(input: { call: TierReviewCall; model: ModelSelection | undefined; refused?: string | undefined; meter?: (() => Promise<boolean>) | undefined; timeoutMs?: number | undefined }): TierReviewer {
+export function tierReviewerOf(input: { call: TierReviewCall; model: ModelSelection | undefined; refused?: string | undefined; meter?: ((prompt: string) => Promise<boolean | "unavailable">) | undefined; timeoutMs?: number | undefined }): TierReviewer {
   return {
     answer: async (asked) => {
       if (input.refused !== undefined) throw new Error("no model fits the checking stage");
@@ -133,17 +160,20 @@ export interface GrownReviewResult {
   completed: boolean;
   findings: number;
   mustFix: number;
-  /** Why it did not complete (a fixed word): unavailable, malformed, too_large, empty, refused. */
+  /** Why it did not complete (a fixed word): unavailable, malformed, too_large, empty, refused, unsupported (the gateway cannot serve this review), cap (the task's spending limit), no_reviewer (this install has no reviewer to call). */
   failure?: string | undefined;
+  /** What each review said, when it ran: a review that completed with nothing to fix is not paid for again on the same head when the other one did not complete. */
+  roles?: Partial<Record<GrownReviewRole, { completed: boolean; mustFix: number }>> | undefined;
 }
 
 /** One review, bounded in time. Fails closed: an answer that is not `{findings: [{text, mustFix}]}` did not complete. */
-async function oneReview(call: TierReviewCall, model: ModelSelection | undefined, role: GrownReviewRole, prompt: string, timeoutMs: number, meter?: () => Promise<boolean>): Promise<GrownReviewResult> {
+async function oneReview(call: TierReviewCall, model: ModelSelection | undefined, role: GrownReviewRole, prompt: string, timeoutMs: number, meter?: (prompt: string) => Promise<boolean | "unavailable">): Promise<GrownReviewResult> {
   let text: string;
   try {
     text = await callWithDeadline(call, { model, prompt, purpose: role }, timeoutMs, meter);
-  } catch {
-    return { completed: false, findings: 0, mustFix: 0, failure: "unavailable" };
+  } catch (error) {
+    // The task's spending limit is not an outage of the reviewer: the person is told that, and the review is asked again once the limit lets it through.
+    return { completed: false, findings: 0, mustFix: 0, failure: error instanceof TierReviewCapError ? "cap" : error instanceof TierReviewUnsupported ? "unsupported" : "unavailable" };
   }
   const answer = jsonIn(text) as { findings?: unknown } | undefined;
   const findings = answer !== null && typeof answer === "object" ? answer.findings : undefined;
@@ -154,25 +184,31 @@ async function oneReview(call: TierReviewCall, model: ModelSelection | undefined
 }
 
 /** The reviews of a grown tier (code and security) on exactly the patch given (the gate's read at the current head). Both must complete; what cannot be put to them does not complete. */
-export async function runGrownReviews(input: { call: TierReviewCall; model: CheckingModel; level: "standard" | "risky"; files: readonly string[]; patchText: string; timeoutMs?: number; meter?: (purpose: TierReviewPurpose) => Promise<boolean> }): Promise<GrownReviewResult> {
+export async function runGrownReviews(input: { call: TierReviewCall; model: CheckingModel; level: "standard" | "risky"; files: readonly string[]; patchText: string; timeoutMs?: number; meter?: (purpose: TierReviewPurpose, prompt: string) => Promise<boolean | "unavailable">; /** Reviews that already passed on this head: not asked, not paid for, again. */ passed?: readonly GrownReviewRole[] }): Promise<GrownReviewResult> {
   if (input.model.refused !== undefined) return { completed: false, findings: 0, mustFix: 0, failure: "refused" };
   if (input.patchText.trim() === "") return { completed: false, findings: 0, mustFix: 0, failure: "empty" };
   if (input.patchText.length > REVIEW_PATCH_MAX_CHARS) return { completed: false, findings: 0, mustFix: 0, failure: "too_large" };
   const results: GrownReviewResult[] = [];
+  const roles: NonNullable<GrownReviewResult["roles"]> = {};
   for (const role of ["code_review", "security_review"] as const) {
-    results.push(await oneReview(input.call, input.model.model, role, grownReviewPrompt(role, input.level, input.files, input.patchText), input.timeoutMs ?? REVIEW_TIMEOUT_MS, input.meter === undefined ? undefined : () => input.meter!(role)));
+    const done: GrownReviewResult = input.passed?.includes(role) === true ? { completed: true, findings: 0, mustFix: 0 }
+      : await oneReview(input.call, input.model.model, role, grownReviewPrompt(role, input.level, input.files, input.patchText), input.timeoutMs ?? REVIEW_TIMEOUT_MS, input.meter === undefined ? undefined : (prompt) => input.meter!(role, prompt));
+    results.push(done);
+    roles[role] = { completed: done.completed, mustFix: done.mustFix };
+    // A review that could not run (no answer) leaves the other one unasked: nothing more is paid for a round that cannot complete.
+    if (!done.completed && done.failure === "cap") break;
   }
   // Every review that did not complete says why (one word each, in order): a malformed answer is never hidden behind an outage of the other.
   const failures = [...new Set(results.filter((result) => !result.completed).map((result) => result.failure ?? "unknown"))];
   return {
     completed: failures.length === 0, findings: results.reduce((sum, result) => sum + result.findings, 0), mustFix: results.reduce((sum, result) => sum + result.mustFix, 0),
-    ...(failures.length === 0 ? {} : { failure: failures.join(", ") }),
+    ...(failures.length === 0 ? {} : { failure: failures.join(", ") }), roles,
   };
 }
 
 /** One code review of a small change's patch, for a head no review step saw (a person's push): the same patch the floor is asked about. */
-export async function runCodeReview(input: { call: TierReviewCall; model: CheckingModel; files: readonly string[]; patchText: string; timeoutMs?: number; meter?: (purpose: TierReviewPurpose) => Promise<boolean> }): Promise<GrownReviewResult> {
+export async function runCodeReview(input: { call: TierReviewCall; model: CheckingModel; files: readonly string[]; patchText: string; timeoutMs?: number; meter?: (purpose: TierReviewPurpose, prompt: string) => Promise<boolean | "unavailable"> }): Promise<GrownReviewResult> {
   if (input.model.refused !== undefined) return { completed: false, findings: 0, mustFix: 0, failure: "refused" };
   if (input.patchText.trim() === "" || input.patchText.length > REVIEW_PATCH_MAX_CHARS) return { completed: false, findings: 0, mustFix: 0, failure: input.patchText.trim() === "" ? "empty" : "too_large" };
-  return oneReview(input.call, input.model.model, "code_review", grownReviewPrompt("code_review", "standard", input.files, input.patchText).replace("now needs standard checks", "is small"), input.timeoutMs ?? REVIEW_TIMEOUT_MS, input.meter === undefined ? undefined : () => input.meter!("code_review"));
+  return oneReview(input.call, input.model.model, "code_review", grownReviewPrompt("code_review", "standard", input.files, input.patchText).replace("now needs standard checks", "is small"), input.timeoutMs ?? REVIEW_TIMEOUT_MS, input.meter === undefined ? undefined : (prompt) => input.meter!("code_review", prompt));
 }

@@ -1,0 +1,20 @@
+{
+ "status": 200,
+ "stop": "end_turn",
+ "blocks": [
+  {
+   "type": "thinking",
+   "thinking": "Now respond pong, perhaps \"Pong.\" The tool returned pong. Could say \"Pong.\" Concise.",
+   "signature": ""
+  },
+  {
+   "type": "text",
+   "text": "Pong."
+  }
+ ],
+ "usage": {
+  "input": 246,
+  "output": 41
+ },
+ "complete": true
+}

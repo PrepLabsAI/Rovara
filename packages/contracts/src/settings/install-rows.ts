@@ -16,9 +16,20 @@
  * `carriedBy` is carried.ts's column.
  */
 import { CORE_AGENT_MODEL_CHOICE_VARIABLE, CORE_AGENT_MODEL_VARIABLE, CORE_ANSWERS_MODEL_VARIABLE, CORE_LEARNING_MODEL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE, CORE_OUTBOX_STREAM_RELAY_VARIABLE } from "../core-engine-infra.js";
+import { CANARY_SESSION_PLACEMENT_ROWS } from "../canary-session-placement.js";
 import { PUBLIC_API_URL_MAX_LENGTH, PUBLIC_API_URL_PATTERN, PUBLIC_API_URL_VARIABLE } from "../public-api-url.js";
 import { configRow, installRow } from "./define.js";
 import { TEST_SERVICES_SETTING_VARIABLE, TEST_SERVICE_IMAGES_SETTING_VARIABLE } from "./variables.js";
+
+/**
+ * CANARY-SESSION (arch ruling 2026-11-25): the pattern and the words of a placement parameter are written once, in packages/contracts/src/canary-session-placement.ts (with the facts only that file
+ * holds: what could derive the value, and why it is a parameter anyway); the install rows below read them from there, so the row and the template cannot say two things.
+ */
+const placement = (parameter: string) => {
+  const found = CANARY_SESSION_PLACEMENT_ROWS.find((row) => row.parameter === parameter);
+  if (found === undefined) throw new Error(`${parameter} has no placement row`);
+  return found;
+};
 
 export const INSTALL_ROWS = [
   installRow({
@@ -890,6 +901,38 @@ export const INSTALL_ROWS = [
     words: "The control plane API's permanent public address (the same value as the control plane's), allowed on the DNS firewall so workers and the Slack orchestrator can reach the control plane there; empty (the default): none",
     class: "operator", declaredIn: "named", kept: 48,
     carriedBy: ["operator-kept"],
+  }),
+  // CANARY-SESSION (arch ruling 2026-11-25): the four PLACEMENT parameters of the beta canary's session function. Operator placement (which environment a resource exists in), not a customer
+  // or company setting, never shown in any screen. Only the legacy control plane declares them (the named layout never does), always empty by default, and an upgrade never names them:
+  // `cdk deploy` keeps the deployed value, which is how the one beta stack that holds them keeps them. So: declaredIn legacy, no `kept` position, not in OPERATOR_PARAMETERS or in the
+  // refusal list of the legacy stacks (that list is the named-only parameters; these are the opposite). scripts/release-production.ts refuses a release that names them or a production stack that holds one.
+  installRow({
+    part: "control-plane", parameter: "CanarySessionPlacementEnvironment",
+    type: { kind: "text", pattern: placement("CanarySessionPlacementEnvironment").pattern }, default: "",
+    words: placement("CanarySessionPlacementEnvironment").description,
+    class: "operator", declaredIn: "legacy",
+    carriedBy: ["none"],
+  }),
+  installRow({
+    part: "control-plane", parameter: "CanarySessionPerson",
+    type: { kind: "text", pattern: placement("CanarySessionPerson").pattern }, default: "",
+    words: placement("CanarySessionPerson").description,
+    class: "operator", declaredIn: "legacy",
+    carriedBy: ["none"],
+  }),
+  installRow({
+    part: "control-plane", parameter: "CanarySessionCompany",
+    type: { kind: "text", pattern: placement("CanarySessionCompany").pattern }, default: "",
+    words: placement("CanarySessionCompany").description,
+    class: "operator", declaredIn: "legacy",
+    carriedBy: ["none"],
+  }),
+  installRow({
+    part: "control-plane", parameter: "CanarySessionStepRoleName",
+    type: { kind: "text", pattern: placement("CanarySessionStepRoleName").pattern }, default: "",
+    words: placement("CanarySessionStepRoleName").description,
+    class: "operator", declaredIn: "legacy",
+    carriedBy: ["none"],
   }),
   // Not a parameter: the literal the legacy install's broker carries (#1149), so the broker derives only what its own layout names.
   installRow({

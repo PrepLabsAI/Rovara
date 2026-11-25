@@ -9,13 +9,14 @@ import { workspaceKeys } from "../task-flow/workspace-location.js";
 //     nothing that must be fixed. A failed or unanswered review is recorded for the head and never asked again for it (no shopping for a clean review); a new push gets a new review.
 // The record is written under `flowIs` (the record read), re-applied to the newer record when another writer got in first, so a yes is never lost to a race. It reads the record, never the switch: a task that
 // skipped steps owes these checks whether or not the lighter flow is still on.
-import { change, hostRateLimitRetryAt, promptLocationsOf, when, type FlowQuickCheck, type FlowTierKind, type HostScope, type WorkflowFlow, type WorkflowSnapshot } from "@agentx/contracts";
+import { GROWTH_WORDS, change, hostRateLimitRetryAt, promptLocationsOf, when, type FlowQuickCheck, type FlowTierKind, type HostScope, type WorkflowFlow, type WorkflowSnapshot } from "@agentx/contracts";
 import { codeHostForRecord } from "../../plugins/routing.js";
 import {
   DOCS_ROUTE_LINES_MAX, capReasons, higherLevel, raiseTier, tierGrowthPhrase, type TierReason, plannedPathsExceeded, planningLevelOf, recordGrowth, recordTier, recordTierReview, skippedPlanning, tierFromDiff, tierGrowthSentence, tierRank, tierReviewRecorded, type ChangeTier, type TierFile, type TierLevel,
 } from "../decisions/change-tier.js";
 import { floorOwed, reviewTextOf, withoutTierReviews } from "../decisions/tier-floor-state.js";
 import { applyReviewerFloor, recordReviewerFloor, type ReviewerFloorResult } from "../decisions/tier-reviewer.js";
+import { REVIEW_RUNS_MAX, failureKindsOf, owedLevelOf, reviewAttempt } from "../merge/grown-owed.js";
 import { baseCommitsOf, boundCommits, readTierInput, seenHeadsOf, unseenCommits, type TierReadTarget, type UnseenCommitsRead } from "../merge/change-tier-read.js";
 import { changeRequestRef } from "../merge/host-port.js";
 import { inertLine } from "../proof/inert-text.js";
@@ -33,7 +34,7 @@ import { textReaderOf } from "./plan-input.js";
 import { pathsIn, planFiles } from "../decisions/plan-facts.js";
 import { fileTypeOf } from "../decisions/sensitive-list.js";
 import { pullRequestRecordKey, pullRequestRecordOf } from "./records.js";
-import { checkingModelOf, runCodeReview, runGrownReviews, tierReviewerOf, type CheckingModel, type GrownReviewResult, type TierReviewPurpose } from "./tier-review-calls.js";
+import { checkingModelOf, runCodeReview, runGrownReviews, tierReviewTask, tierReviewerOf, type CheckingModel, type GrownReviewResult, type TierReviewCall, type TierReviewPurpose } from "./tier-review-calls.js";
 import { createHash } from "node:crypto";
 
 export type TierChecksOutcome = "not_owed" | "checked" | "unavailable";
@@ -100,8 +101,6 @@ function raisedByCheck(tier: ChangeTier, failed: FlowQuickCheck): ChangeTier {
   return { ...tier, level, reasons: [{ code: "quick_check_failed", path: inert((failed.detail ?? "").replace(/^check /u, ""), 200) }, ...tier.reasons].slice(0, 50) };
 }
 
-const reviewAttempt = (level: TierLevel, head: string) => `review level=${level} head=${head}`;
-
 /**
  * The words a commit flagged between checks is named with (DEC 213): the commit's short id, what the rules found and in which file (never the text itself), and for a credential what to do about it. Deterministic: the
  * phrase is the rule's, the path the host's (inert).
@@ -148,11 +147,20 @@ export function withRecordedUnseen(tier: ChangeTier, recorded: Pick<ChangeTier, 
 }
 
 /** One pass of the lighter flow's checks for a task. Never throws for a host or a model that cannot answer: the record then stays as it was (the merge gate refuses what is owed). */
-export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, beforeRequest?: () => void): Promise<TierChecksOutcome> {
+export function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, beforeRequest?: () => void): Promise<TierChecksOutcome> {
+  return tierReviewTask.run({ taskId: task.taskId }, () => tierChecksOf(deps, task, beforeRequest));
+}
+
+async function tierChecksOf(deps: TaskFlowDeps, task: TaskRecord, beforeRequest?: () => void): Promise<TierChecksOutcome> {
   const workflow = task.workflow;
-  if (workflow === undefined || task.closedAt !== undefined || !skippedPlanning(workflow.flow) || deps.codeHosts === undefined) return "not_owed";
+  // The lighter flow owes its checks on every head. A task that ran its whole plan owes ONLY the higher level's reviews, and only once it grew (`flow.grewAfterBuild`): TIER-GROWTH-MERGE.
+  const lighter = skippedPlanning(workflow?.flow);
+  const owedLevel = owedLevelOf(workflow);
+  if (workflow === undefined || owesNothing(deps, task, lighter, owedLevel)) return "not_owed";
   const open = (workflow.pullRequests ?? []).filter((entry) => entry.state === "OPEN" || entry.state === "UNKNOWN");
   if (open.length === 0) return "not_owed";
+  // A review the task's spending limit stopped waits one fixed time before it is asked again: said before anything is read from the code host, so a waiting task costs no host reads on each pass.
+  if (capWaiting(workflow.flow, owedLevel, Date.parse(iso(deps)))) return "not_owed";
   const call = deps.tierReviewCall;
   const scope: HostScope = { orgId: deps.companyId };
   const at = iso(deps);
@@ -162,7 +170,7 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
     for (const entry of open) {
       const definition = project?.definition.repositories.find((repository) => repository.name === entry.repositoryId);
       if (definition === undefined) return "unavailable";
-      const host = codeHostForRecord(deps.codeHosts, definition);
+      const host = codeHostForRecord(deps.codeHosts!, definition);
       beforeRequest?.();
       const remote = await host.getChangeRequest(changeRequestRef(definition.url, entry.number), scope);
       if (remote.state !== "open") return "not_owed";
@@ -175,6 +183,8 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
     const bound = boundCommits(targets.map((target) => ({ repositoryId: target.repositoryId, headSha: target.headSha, baseCommitSha: workflow.reviewBase?.find((base) => base.repositoryId === target.repositoryId)?.baseCommitSha })));
     const head = bound.headSha;
     if (head === undefined) return "unavailable";
+    // A task that ran its whole plan owes nothing more once the higher level's reviews are on the record for this head.
+    if (!lighter && owedLevel !== undefined && tierReviewRecorded(workflow.flow, owedLevel, head)) return "not_owed";
     // The gate's own read of the change at the pinned heads, once: the reviewer is given exactly its patch (the form `readReviewInput` gives), and the tier reads the head facts the same read returned.
     const read = await readTierInput(targets, scope, beforeRequest);
     const input = { ...reviewTextOf(read.diff), diff: read.diff };
@@ -235,26 +245,28 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
       const recorded = recordTier(current, { ...tier, level: higherLevel(tier.level, level), reasons: [...outside.slice(0, 5).map((path) => ({ code: "outside_plan_code", path: path.slice(0, 200) })), ...tier.reasons].slice(0, 50) });
       return tierRank(recorded.tier.level) > tierRank(planned) ? recordGrowth(recorded.flow, planned, recorded.tier.level, at) : recorded.flow;
     };
-    let draft = withPlanScope(withDocsTotal(withTier(flow)));
+    // The lighter flow's other checks (the docs total, the plan's files) are its own; a task that ran its whole plan has only its tier kept up to date for this head.
+    const tierOf = (current: WorkflowFlow | undefined): WorkflowFlow | undefined => (lighter ? withPlanScope(withDocsTotal(withTier(current))) : withTier(current));
+    let draft = tierOf(flow);
     const checking = await checkingModelOf(deps, task.workspaceId);
     // Every reviewer call is counted against the task's spend when the install meters it; a refusal is an unavailable reviewer (fail closed).
-    const meterFor = (purpose: TierReviewPurpose) => (deps.tierReviewMeter === undefined ? undefined : () => deps.tierReviewMeter!({ taskId: task.taskId, purpose, model: checking.model, promptChars: input.patchText.length }));
+    const meterFor = (purpose: TierReviewPurpose) => (deps.tierReviewMeter === undefined ? undefined : (prompt?: string) => deps.tierReviewMeter!({ taskId: task.taskId, purpose, model: checking.model, promptChars: input.patchText.length, ...(prompt === undefined ? {} : { prompt }) }));
     // The floor: a small change is put to the one strongest-available reviewer once per head and patch. Without a reviewer wired, nothing is asked and the gate keeps refusing.
     let floor: ReviewerFloorResult | undefined;
-    if (draft?.tier !== undefined && draft.tier.level === "small" && draft.tier.headSha === head && floorOwed(draft, head, input.patchText) && call !== undefined) {
+    if (lighter && draft?.tier !== undefined && draft.tier.level === "small" && draft.tier.headSha === head && floorOwed(draft, head, input.patchText) && call !== undefined) {
       floor = await applyReviewerFloor({ tier: draft.tier, reviewer: tierReviewerOf({ call, model: checking.model, refused: checking.refused, meter: meterFor("questions") }), files: input.files, patchText: input.patchText });
       draft = recordReviewerFloor(draft, floor, at) ?? draft;
     }
     // A head no review step saw (it is not the head Rovara published for the reviewed code): the small change's one code reviewer reads the same patch the floor was asked about.
     const reviewedHead = open.every((entry) => entry.candidateDigest === workflow.candidate?.digest && targets.some((target) => target.repositoryId === entry.repositoryId && target.headSha === entry.headSha));
     let unreviewed: GrownReviewResult | undefined;
-    if (!reviewedHead && draft?.tier?.level === "small" && call !== undefined && !ownQuickChecks(draft).some((check) => check.detail?.includes(reviewAttempt("small", head)) === true)) {
-      unreviewed = await runCodeReview({ call, model: checking, files: input.files, patchText: input.patchText, meter: (purpose) => meterFor(purpose)?.() ?? Promise.resolve(true) });
+    if (lighter && !reviewedHead && draft?.tier?.level === "small" && call !== undefined && !ownQuickChecks(draft).some((check) => check.detail?.includes(reviewAttempt("small", head)) === true)) {
+      unreviewed = await runCodeReview({ call, model: checking, files: input.files, patchText: input.patchText, meter: (purpose, prompt) => meterFor(purpose)?.(prompt) ?? Promise.resolve(true) });
     }
     // The quick checks of this head, by kind.
     const tierNow = draft?.tier;
     const floorAnswered = draft?.quickChecks?.some((check) => check.detail?.startsWith(`tier_questions head=${head} `) === true) === true;
-    const checks = tierNow === undefined ? [] : quickChecksOf({ kinds: tierNow.kinds, tier: tierNow, head, workflow, files: input.diff.files, checking, floorAnswered, at });
+    const checks = tierNow === undefined || !lighter ? [] : quickChecksOf({ kinds: tierNow.kinds, tier: tierNow, head, workflow, files: input.diff.files, checking, floorAnswered, at });
     if (unreviewed !== undefined) {
       checks.push(quickCheckEntry({ kind: "code_config", outcome: unreviewed.completed && unreviewed.mustFix === 0 ? "passed" : "failed", at,
         detail: `${reviewAttempt("small", head)} code review of a version no review step saw: ${unreviewed.completed ? `${String(unreviewed.mustFix)} must be fixed` : `did not run (${unreviewed.failure ?? "unknown"})`}` }));
@@ -276,16 +288,11 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
     const grew = level !== undefined && (tierRank(level) > tierRank(planned) || draft?.grewAfterBuild !== undefined);
     // A review that could not run (an outage, nothing found) is run again on a later pass, once the reviewer is back: it gave no answer, so running it again cannot shop for one. One that ran is not.
     // At most `REVIEW_RUNS_MAX` runs on one head, each a while after the one before (10, 20, 40 minutes...); then only Retry or a new push runs it again.
-    const nowMs = Date.parse(at);
-    const attempted = level !== undefined && ownQuickChecks(draft).some((check) => {
-      if (check.detail?.includes(reviewAttempt(level, head)) !== true) return false;
-      if (!isOutageEntry(check)) return true;
-      const runs = runsOf(check);
-      return runs >= REVIEW_RUNS_MAX || nowMs - Date.parse(check.at) < REVIEW_RERUN_WAIT_MS * 2 ** (runs - 1);
-    });
+    const attempted = level !== undefined && reviewAttempted(draft, level, head, Date.parse(at));
     // A failed check of this head (a failed review included) holds it: nothing is asked again for it, and no review record is written while it stands.
-    if (grew && level !== "small" && draft?.tier?.headSha === head && !tierReviewRecorded(draft, level, head) && !attempted && blockingFailure(draft, head) === undefined && call !== undefined) {
-      grown = { level, result: await runGrownReviews({ call, model: checking, level, files: input.files, patchText: input.patchText, meter: (purpose) => meterFor(purpose)?.() ?? Promise.resolve(true) }) };
+    // An install with no reviewer to call (Code's laptop) cannot run them: for a task that ran its whole plan that is recorded for the head, so the person is told and the task never waits on a run that cannot happen.
+    if (grew && level !== "small" && draft?.tier?.headSha === head && !tierReviewRecorded(draft, level, head) && !attempted && blockingFailure(draft, head) === undefined && (call !== undefined || !lighter)) {
+      grown = { level, result: await grownReviewsOf({ call, model: checking, level, files: input.files, patchText: input.patchText, meter: (purpose, prompt) => meterFor(purpose)?.(prompt) ?? Promise.resolve(true), passed: passedRolesOf(draft, level, head) }, input.diff.files, lighter) };
     }
     const withReview = (current: WorkflowFlow | undefined): WorkflowFlow | undefined => {
       if (current === undefined || grown === undefined) return current;
@@ -295,8 +302,9 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
       const passed = grown.result.completed && grown.result.mustFix === 0;
       if (!passed) {
         const earlier = ownQuickChecks(current).find((check) => check.detail?.includes(reviewAttempt(grown.level, head)) === true && isOutageEntry(check));
-        const runs = (earlier === undefined ? 0 : runsOf(earlier)) + 1;
-        const noted = withQuickChecks(current, [quickCheckEntry({ kind: "code_config", outcome: "failed", at,
+        // The task's spending limit is not a run of the reviewer: it does not use up the runs (the review is asked again once the limit lets it through).
+        const runs = (earlier === undefined ? 0 : runsOf(earlier)) + (grown.result.failure === "cap" ? 0 : 1);
+        const noted = withQuickChecks(current, [...rolePassEntries(current, grown.result, grown.level, head, at), quickCheckEntry({ kind: "code_config", outcome: "failed", at,
           detail: `${reviewAttempt(grown.level, head)} ${String(grown.result.findings)} findings, ${String(grown.result.mustFix)} must be fixed${grown.result.completed ? "" : `; did not run (${grown.result.failure ?? "unknown"}); runs=${String(runs)}`}` })]);
         return withoutTierReviews(noted, head);
       }
@@ -314,7 +322,7 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
     let finalFlow: WorkflowFlow | undefined = flow;
     for (let attempt = 0; attempt < WRITE_ATTEMPTS && !written; attempt += 1) {
       const base = current.flow;
-      const tiered = withPlanScope(withDocsTotal(withTier(base)));
+      const tiered = tierOf(base);
       const next = withReview(withChecks(floor === undefined ? tiered : recordReviewerFloor(tiered, floor, at) ?? tiered));
       finalFlow = next ?? base;
       scoped = finalFlow === undefined ? { asked: false } : planScopeQuestion(attempt === 0 ? earlierQuestion : await readScopeQuestion(deps, task.taskId), task, {
@@ -338,14 +346,7 @@ export async function runTierChecks(deps: TaskFlowDeps, task: TaskRecord, before
     // A small change that grew to risky: the scope question (from the head's own deterministic reasons), the banner on the pull request, and the notice, once per question.
     if (finalFlow !== undefined && scoped.question !== undefined) await scopeNotice(deps, task, { flow: finalFlow, question: scoped.question, asked: scoped.asked, at, targets });
     // The person is told what grew, once per head and level (the review's own record says whether it passed).
-    if (grown !== undefined && task.sessionId !== undefined && draft?.tier !== undefined) {
-      const sentence = tierGrowthSentence(draft.tier, (path) => inertLine(path, 80));
-      const outcome = grown.result.completed && grown.result.mustFix === 0 ? `The ${grown.level} reviews ran on the current version and found nothing that must be fixed.`
-        : grown.result.completed ? `The ${grown.level} reviews found ${String(grown.result.mustFix)} things that must be fixed before it can merge.` : `The ${grown.level} reviews could not run, so it can't be merged until a new version is reviewed.`;
-      const eventId = `evt_${createHash("sha256").update(`tier-growth\u0000${task.taskId}\u0000${grown.level}\u0000${head}`).digest("hex").slice(0, 24)}`;
-      await new SessionStore(deps.store).appendEvent(deps.companyId as never, task.sessionId as never, { eventId, at, type: "status", actor: { kind: "system" }, text: `${sentence} ${outcome}` })
-        .catch((error: unknown) => log(deps, { event: "tier_checks.notice_not_written", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" }));
-    }
+    if (grown !== undefined && draft?.tier !== undefined) await growthNotice(deps, task, { tier: draft.tier, lighter, grown, head, at });
     log(deps, { event: "tier_checks.done", taskId: task.taskId, level: draft?.tier?.level, floor: floor === undefined ? "not_asked" : floor.answered === true ? (floor.raised ? "yes" : "no") : "failed_closed", grown: grown === undefined ? "none" : grown.result.completed ? "ran" : "did_not_run", reviewer: call === undefined ? "missing" : "wired" });
     return "checked";
   } catch (error) {
@@ -391,11 +392,74 @@ async function plannedPathsOf(deps: TaskFlowDeps, workflow: WorkflowSnapshot, re
   return [...new Set([...(loaded.format === "structured" ? planFiles(loaded.plan) : []), ...pathsIn(loaded.markdown), ...namedPaths(requestText, workflow.intent?.assessment)])];
 }
 
+/** The grown tier's two reviews, or the fixed result when this install has no reviewer to call (Code's laptop): recorded for the head, so the person is told and the task never waits on a run that cannot happen. */
+export async function grownReviewsOf(input: Omit<Parameters<typeof runGrownReviews>[0], "call"> & { call: TierReviewCall | undefined }, files: readonly TierFile[], lighter: boolean): Promise<GrownReviewResult> {
+  const { call, ...rest } = input;
+  if (call === undefined) return { completed: false, findings: 0, mustFix: 0, failure: "no_reviewer" };
+  // For a task that ran its whole plan (the lighter flow keeps what it did): a file the host listed with no patch (binary, or over the host's size) would be put to the reviewers as nothing: a clean answer about nothing is not a review of it.
+  if (!lighter && files.some((file) => file.patch === undefined && !(file.status === "renamed" && file.additions + file.deletions === 0))) return { completed: false, findings: 0, mustFix: 0, failure: "too_large" };
+  return runGrownReviews({ ...rest, call });
+}
+
+/** Nothing is owed or nothing can be done: the task is closed, there is no code host to read, or it ran its whole plan and never grew. */
+const owesNothing = (deps: TaskFlowDeps, task: TaskRecord, lighter: boolean, owedLevel: TierLevel | undefined): boolean => task.closedAt !== undefined || (!lighter && owedLevel === undefined) || deps.codeHosts === undefined;
+
+/** Whether the grown review of this level on the head the record holds was stopped by the task's spending limit and its fixed wait has not passed. */
+function capWaiting(flow: WorkflowFlow | undefined, level: TierLevel | undefined, nowMs: number): boolean {
+  const head = flow?.tier?.headSha;
+  return head !== undefined && level !== undefined && ownQuickChecks(flow).some((check) => check.detail?.includes(reviewAttempt(level, head)) === true && isOutageEntry(check) && failureKindsOf(check.detail).every((kind) => kind === "cap") && nowMs - Date.parse(check.at) < REVIEW_RERUN_WAIT_MS);
+}
+
+const rolePassDetail = (level: TierLevel, head: string, role: string) => `review-role level=${level} head=${head} role=${role} passed`;
+
+/** The reviews of this level that already passed on this head (one of the two did not complete last time): not asked, and not paid for, again. */
+function passedRolesOf(flow: WorkflowFlow | undefined, level: TierLevel, head: string): Array<"code_review" | "security_review"> {
+  return (["code_review", "security_review"] as const).filter((role) => ownQuickChecks(flow).some((check) => check.outcome === "passed" && check.detail?.includes(rolePassDetail(level, head, role)) === true));
+}
+
+/** The record of each review that completed with nothing to fix in a round that did not complete as a whole. */
+function rolePassEntries(flow: WorkflowFlow, result: GrownReviewResult, level: TierLevel, head: string, at: string): FlowQuickCheck[] {
+  const already = new Set(passedRolesOf(flow, level, head));
+  return (["code_review", "security_review"] as const).filter((role) => result.roles?.[role]?.completed === true && result.roles[role].mustFix === 0 && !already.has(role))
+    .map((role) => quickCheckEntry({ kind: "code_config", outcome: "passed", at, detail: rolePassDetail(level, head, role) }));
+}
+
+/**
+ * Whether the grown review of this level and head has been asked and is not to be asked again now. A review that could not run (an outage, nothing found) is run again on a later pass, once the reviewer is back: it gave no
+ * answer, so running it again cannot shop for one. One that ran is not. At most `REVIEW_RUNS_MAX` runs on one head, each a while after the one before (10, 20, 40 minutes...); then only Retry or a new push runs it again. A
+ * spending-limit stop is asked again, for free (nothing is called while the limit holds), with no count: the person has been told, and the review runs once the limit lets it through.
+ */
+function reviewAttempted(flow: WorkflowFlow | undefined, level: TierLevel, head: string, nowMs: number): boolean {
+  return ownQuickChecks(flow).some((check) => {
+    if (check.detail?.includes(reviewAttempt(level, head)) !== true) return false;
+    if (!isOutageEntry(check)) return true;
+    const runs = runsOf(check);
+    const capOnly = failureKindsOf(check.detail ?? "").every((kind) => kind === "cap");
+    // A spending-limit stop is asked again after the one fixed wait (it never grows with the runs: nothing was run), an outage after a wait that doubles.
+    return (!capOnly && runs >= REVIEW_RUNS_MAX) || nowMs - Date.parse(check.at) < REVIEW_RERUN_WAIT_MS * (capOnly ? 1 : 2 ** Math.min(runs - 1, 5));
+  });
+}
+
+/** What the grown reviews found, in one sentence for the person. */
+function growthOutcome(level: TierLevel, result: GrownReviewResult): string {
+  if (result.completed) return result.mustFix === 0 ? `The ${level} reviews ran on the current version and found nothing that must be fixed.` : `The ${level} reviews found ${String(result.mustFix)} things that must be fixed before it can merge.`;
+  return result.failure === "cap" ? `The task's spending limit stopped the ${level} reviews, so it can't be merged until they have run.` : `The ${level} reviews could not run, so it can't be merged until a new version is reviewed.`;
+}
+
+/** The person is told what grew and what the reviews found, once per head and level (a status line of the session). Best effort. */
+async function growthNotice(deps: TaskFlowDeps, task: TaskRecord, input: { tier: ChangeTier; lighter: boolean; grown: { level: TierLevel; result: GrownReviewResult }; head: string; at: string }): Promise<void> {
+  if (task.sessionId === undefined) return;
+  const sentence = input.lighter ? tierGrowthSentence(input.tier, (path) => inertLine(path, 80)) : GROWTH_WORDS.running(input.grown.level);
+  const eventId = `evt_${createHash("sha256").update(`tier-growth\u0000${task.taskId}\u0000${input.grown.level}\u0000${input.head}`).digest("hex").slice(0, 24)}`;
+  await new SessionStore(deps.store).appendEvent(deps.companyId as never, task.sessionId as never, { eventId, at: input.at, type: "status", actor: { kind: "system" }, text: `${sentence} ${growthOutcome(input.grown.level, input.grown.result)}` })
+    .catch((error: unknown) => log(deps, { event: "tier_checks.notice_not_written", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" }));
+}
+
 /** A grown review that could not run (an outage) and found nothing that must be fixed: it holds nothing by itself, and is run again. */
 function isOutageEntry(check: FlowQuickCheck): boolean {
   const detail = check.detail ?? "";
-  const kinds = /did not run \(([^)]*)\)/u.exec(detail)?.[1]?.split(", ") ?? [];
-  return check.outcome === "failed" && /\breview level=/u.test(detail) && kinds.length > 0 && kinds.every((kind) => kind === "unavailable" || kind === "refused") && /\b0 must be fixed/u.test(detail);
+  const kinds = failureKindsOf(detail);
+  return check.outcome === "failed" && /\breview level=/u.test(detail) && kinds.length > 0 && kinds.every((kind) => kind === "unavailable" || kind === "refused" || kind === "cap") && /\b0 must be fixed/u.test(detail);
 }
 
 /** A failed check of this head that blocks it: every failed own entry except an outage of a review (which is run again). */
@@ -444,8 +508,7 @@ export function testOfPlannedFile(path: string, planned: readonly string[]): boo
   });
 }
 
-/** How many times a review that could not run is run on one head before only Retry or a new push runs it again, and the wait before the second run (doubling after it). */
-const REVIEW_RUNS_MAX = 3;
+/** The wait before the second run of a review that could not run on one head (doubling after it; the number of runs is `REVIEW_RUNS_MAX`). */
 const REVIEW_RERUN_WAIT_MS = 10 * 60_000;
 
 /** The runs an outage entry counts (an entry from before the count was kept is one run). */

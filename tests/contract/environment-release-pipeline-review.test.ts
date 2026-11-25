@@ -46,13 +46,16 @@ function allowsOf(key: ReleaseRoleKey): Allow[] {
 }
 
 describe("P1 review: production pipeline", () => {
-  it("leaves the production release pipeline's RAW template as pinned (sha256 recorded from d66d3c158 and 894278638: equal; re-pinned by L1 and L9b)", () => {
+  it("leaves the production release pipeline's RAW template as pinned (sha256 recorded from d66d3c158 and 894278638: equal; re-pinned by L1, L9b and PROD-APPROVAL-BOUND)", () => {
     const stack = buildAgentXApp().node.children.find((child) => child.node.id === "AgentXReleasePipeline") as Stack;
     const digest = createHash("sha256").update(JSON.stringify(Template.fromStack(stack).toJSON())).digest("hex");
     // L1 (2026-11-24): re-pinned from 01152c761e64805857a650b5473c6e80ceac9fd586f39e062df2a836f2dc72c0; the changed resources are listed at PRODUCTION_PIPELINE_TEMPLATE_SHA256 in environment-release-pipeline.test.ts, which holds the same pin.
     // PH-S3-PREFIXES (2026-11-25): re-pinned from 291ca54736e9e0f05f06fcbed1c04e118baea14d90ab4e5867786548eb1cdc80; see PRODUCTION_PIPELINE_TEMPLATE_SHA256 in environment-release-pipeline.test.ts for the three changed resources (re-pinned again when the own-prefix s3:AbortMultipartUpload was added).
     // PIPELINE-NAMESPACE-FIX (2026-11-25): re-pinned from 5d132f12052ae5d438250549e7edca670208048e96421b91b4688586219eb679; only the Cloud source action's Namespace changed (see PRODUCTION_PIPELINE_TEMPLATE_SHA256 in environment-release-pipeline.test.ts).
-    expect(digest).toBe("a1a1b3c352ec39a5cdb923036fb981ad32e749c770beb6d00119dfa968fbbecd");
+    // L1-RELEASE-TAG-TRIGGER (2026-11-25): re-pinned from a1a1b3c352ec39a5cdb923036fb981ad32e749c770beb6d00119dfa968fbbecd; only the Pipeline's CLOUD_REF and CLOUD_PROD defaults and descriptions and CLOUD_SOURCE_COMMIT on the Beta Cloud Preflight changed (see PRODUCTION_PIPELINE_TEMPLATE_SHA256 in environment-release-pipeline.test.ts).
+    // PROD-APPROVAL-BOUND (2026-11-25): re-pinned from 6afbab33423ee9f888a3b10ea01311b6a1c3a46599d6521b25551d844b84d325; the Production stage gains its ApproveProduction manual approval, second, after the read-only Code Preflight (run orders after it +1, a new action role with no policy, one more AssumeRole statement for the pipeline role, the transition's reason text and the same text in the Production Code Preflight's gate command; the five hunks, the fifth being two read-only-clone Deny statements on the Production Code Preflight role, are listed at PRODUCTION_PIPELINE_TEMPLATE_SHA256 in environment-release-pipeline.test.ts).
+    // RELEASE-STACKS-ADDRESS (2026-11-25): re-pinned from 7e66d04fc164d8a3edc90962636c21a8d514ec15369e0275dc04fa8283a30d46; only the two release builds' ReadReleaseStacks statements gained stack/AgentXApiAddress/* (see PRODUCTION_PIPELINE_TEMPLATE_SHA256 in environment-release-pipeline.test.ts).
+    expect(digest).toBe("ddd23afa7a00a60f4559a3fd980009d3b476e0a5cead70d1e3e0307faa5f927b");
   });
 });
 

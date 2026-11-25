@@ -1,0 +1,24 @@
+import { beforeAll, expect, it } from "vitest";
+import { denyNetwork } from "./model-gateway-no-network.js";
+import { chargeReceipt } from "./model-gateway-charge-receipt-fixture.js";
+import { InMemoryMeter } from "../../packages/model-gateway/src/meter.js";
+import { DynamoMeter } from "../../packages/model-gateway/src/dynamo-meter.js";
+import { Dynamo } from "../../packages/model-gateway/src/dynamo.js";
+import { WireDynamo } from "./model-gateway-wire-dynamo.js";
+beforeAll(denyNetwork);
+for (const adapter of ["memory", "dynamo"]) it(`${adapter}: conflicting older content is refused and reopened coverage returns to the durable pending queue`, async () => {
+  const first = chargeReceipt(), tables = { meter: "meter", ledger: "ledger", markers: "markers" };
+  const wire = new WireDynamo(Object.values(tables));
+  const db = new Dynamo({ region: "us-west-2", credentials: async () => ({ accessKeyId: "TEST", secretAccessKey: "not-real" }), transport: wire.transport });
+  const meter = adapter === "memory" ? new InMemoryMeter(() => Date.parse(first.occurredAt)) : new DynamoMeter({ db, tables, now: () => Date.parse(first.occurredAt) });
+  const scope = { iss: first.issuer, cid: first.companyId, pid: first.project, tid: first.taskId };
+  const reserved = await meter.reserve({ scope, caps: { task: 200, projectMonth: 200, companyMonth: 200 }, estimateMicros: 80 }); if (!reserved.ok) throw new Error("reserve");
+  first.callId = reserved.reservation.id;
+  await meter.settleV2({ reservationId: first.callId, receipt: first });
+  const final = { ...first, revision: 2, replacesRevision: 1, status: "final" as const, reason: "reported_cost" as const, amountMicros: { state: "available" as const, value: 30 }, providerCostMicros: { state: "available" as const, value: 30 } };
+  await meter.applyChargeReceipt(final);
+  await expect(meter.applyChargeReceipt({ ...first, recordedAt: "2026-02-01T00:00:00.000Z" })).rejects.toThrow();
+  await meter.applyChargeReceipt({ ...first, revision: 3, replacesRevision: 2 });
+  expect((await meter.pendingFor({ provider: first.model.provider, model: first.model.modelId }, 10)).items).toHaveLength(1);
+  expect((await meter.read(scope)).every(r => r.spentMicros === 80 && r.estimatedMicros === 80)).toBe(true);
+});

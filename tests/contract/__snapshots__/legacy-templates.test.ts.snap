@@ -16966,6 +16966,22 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     ],
                   ],
                 },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":cloudformation:us-east-1:",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":stack/AgentXApiAddress/*",
+                    ],
+                  ],
+                },
               ],
               "Sid": "ReadReleaseStacks",
             },
@@ -17770,7 +17786,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
         },
         "DisableInboundStageTransitions": [
           {
-            "Reason": "Production waits for a manual approval - enable this transition to release the commit waiting here (issue 1242)",
+            "Reason": "Production waits for the owner - enable this transition to let the run waiting here in and then approve ApproveProduction for that run (issue 1242)",
             "StageName": "Production",
           },
         ],
@@ -17907,7 +17923,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Fn::Join": [
                       "",
                       [
-                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"beta"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"preflight"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"CODE_CTX","type":"PLAINTEXT","value":"#{BetaCodePreflight.CODE_CTX}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
+                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"beta"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"preflight"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"CODE_CTX","type":"PLAINTEXT","value":"#{BetaCodePreflight.CODE_CTX}"},{"name":"CLOUD_SOURCE_COMMIT","type":"PLAINTEXT","value":"#{CloudSourceVariables.CommitId}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
                         {
                           "Ref": "BetaAccountId",
                         },
@@ -18260,6 +18276,26 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
               },
               {
                 "ActionTypeId": {
+                  "Category": "Approval",
+                  "Owner": "AWS",
+                  "Provider": "Manual",
+                  "Version": "1",
+                },
+                "Configuration": {
+                  "CustomData": "Approve THIS run only: pipeline execution #{codepipeline.PipelineExecutionId}. Production releases Code commit #{CodeSource.CommitId} with the Cloud source commit of this run, #{CloudSourceVariables.CommitId}. Cloud ref #{variables.CLOUD_REF}, Cloud production #{variables.CLOUD_PROD}, Code release #{variables.CODE_RELEASE}, mode #{variables.PIPELINE_MODE}, rollback target #{variables.CODE_ROLLBACK_TARGET}. The Cloud tag Beta resolved and deployed is the one named in Beta's Preflight log: check it before you approve. Reject any run that is not the one you meant to release.",
+                },
+                "Name": "ApproveProduction",
+                "RoleArn": {
+                  "Fn::GetAtt": [
+                    "PipelineProductionApproveProductionCodePipelineActionRole02F1F3F2",
+                    "Arn",
+                  ],
+                },
+                "RunOrder": 2,
+                "TimeoutInMinutes": 1440,
+              },
+              {
+                "ActionTypeId": {
                   "Category": "Build",
                   "Owner": "AWS",
                   "Provider": "CodeBuild",
@@ -18307,7 +18343,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Arn",
                   ],
                 },
-                "RunOrder": 2,
+                "RunOrder": 3,
               },
               {
                 "ActionTypeId": {
@@ -18357,7 +18393,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Arn",
                   ],
                 },
-                "RunOrder": 3,
+                "RunOrder": 4,
               },
               {
                 "ActionTypeId": {
@@ -18407,7 +18443,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Arn",
                   ],
                 },
-                "RunOrder": 4,
+                "RunOrder": 5,
               },
               {
                 "ActionTypeId": {
@@ -18457,7 +18493,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Arn",
                   ],
                 },
-                "RunOrder": 5,
+                "RunOrder": 6,
               },
               {
                 "ActionTypeId": {
@@ -18489,7 +18525,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Arn",
                   ],
                 },
-                "RunOrder": 6,
+                "RunOrder": 7,
               },
               {
                 "ActionTypeId": {
@@ -18539,7 +18575,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Arn",
                   ],
                 },
-                "RunOrder": 7,
+                "RunOrder": 8,
               },
               {
                 "ActionTypeId": {
@@ -18589,7 +18625,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Arn",
                   ],
                 },
-                "RunOrder": 8,
+                "RunOrder": 9,
               },
             ],
             "Name": "Production",
@@ -18641,8 +18677,8 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
         ],
         "Variables": [
           {
-            "DefaultValue": "latest",
-            "Description": "The Cloud release tag to deploy (vX.Y.Z); latest is the newest tag on the Cloud trunk. An older tag is a Cloud rollback: it forces CODE_RELEASE=skip",
+            "DefaultValue": "from-trigger",
+            "Description": "Cloud tag (vX.Y.Z); from-trigger (triggered runs) is the one tag on the Cloud commit, else refuse; latest: newest tag, manual runs. An older tag is a Cloud rollback",
             "Name": "CLOUD_REF",
           },
           {
@@ -18651,8 +18687,8 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
             "Name": "CODE_RELEASE",
           },
           {
-            "DefaultValue": "on",
-            "Description": "on deploys Cloud in the Production stage; off leaves production Cloud as it is for this run (a per-run choice, not a switch)",
+            "DefaultValue": "off",
+            "Description": "off (default: no trigger deploys production Cloud) leaves it as it is; on deploys Cloud in the Production stage. Set on for the run that promotes (per run, not a switch)",
             "Name": "CLOUD_PROD",
           },
           {
@@ -18668,6 +18704,28 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
         ],
       },
       "Type": "AWS::CodePipeline::Pipeline",
+    },
+    "PipelineProductionApproveProductionCodePipelineActionRole02F1F3F2": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "PipelineRoleD68726F7",
+                    "Arn",
+                  ],
+                },
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+      },
+      "Type": "AWS::IAM::Role",
     },
     "PipelineProductionCloudGatewayCodePipelineActionRole3C55E799": {
       "Properties": {
@@ -19336,6 +19394,16 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
               "Effect": "Allow",
               "Resource": {
                 "Fn::GetAtt": [
+                  "PipelineProductionApproveProductionCodePipelineActionRole02F1F3F2",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
                   "PipelineProductionPreflightCodePipelineActionRole732673C6",
                   "Arn",
                 ],
@@ -19474,7 +19542,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
   "phases": {
     "install": {
       "commands": [
-        "aws codepipeline disable-stage-transition --pipeline-name AgentXProductionRelease --stage-name Production --transition-type Inbound --reason \\"Production waits for a manual approval - enable this transition to release the commit waiting here (issue 1242)\\"",
+        "aws codepipeline disable-stage-transition --pipeline-name AgentXProductionRelease --stage-name Production --transition-type Inbound --reason \\"Production waits for the owner - enable this transition to let the run waiting here in and then approve ApproveProduction for that run (issue 1242)\\"",
         "node_version=\\"$(cat .node-version)\\"",
         "node_archive=\\"node-v\${node_version}-linux-arm64.tar.xz\\"",
         "curl -fsSL -o \\"/tmp/\${node_archive}\\" \\"https://nodejs.org/dist/v\${node_version}/\${node_archive}\\"",
@@ -19773,6 +19841,32 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
               "Resource": {
                 "Ref": "GitHubConnectionArn",
               },
+            },
+            {
+              "Action": "codeconnections:UseConnection",
+              "Condition": {
+                "StringEquals": {
+                  "codeconnections:ProviderPermissionsRequired": "read_write",
+                },
+              },
+              "Effect": "Deny",
+              "Resource": {
+                "Ref": "GitHubConnectionArn",
+              },
+              "Sid": "ReadOnlyConnectionUse",
+            },
+            {
+              "Action": "codestar-connections:UseConnection",
+              "Condition": {
+                "StringEquals": {
+                  "codestar-connections:ProviderPermissionsRequired": "read_write",
+                },
+              },
+              "Effect": "Deny",
+              "Resource": {
+                "Ref": "GitHubConnectionArn",
+              },
+              "Sid": "ReadOnlyConnectionUseLegacy",
             },
             {
               "Action": [
@@ -20216,6 +20310,22 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                         "Ref": "AWS::AccountId",
                       },
                       ":stack/AgentXSlackOrchestrator/*",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":cloudformation:us-east-1:",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":stack/AgentXApiAddress/*",
                     ],
                   ],
                 },

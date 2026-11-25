@@ -14,6 +14,7 @@ import { routeDeveloperRequest } from "../../packages/broker/src/aws/developer-r
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { signInLinksThroughLambda } from "../../packages/broker/src/aws/sign-in-link-routes.js";
 import { GITHUB_ISSUER, githubSignInProvider } from "../../packages/broker/src/developer/providers.js";
+import { sessionBindingOf } from "../../packages/broker/src/developer/session-binding.js";
 import { API, authorizeQuery, httpEvent, TEAM } from "../support/developer-fakes.js";
 import { B, SECRET, WEB, X, person, sharedSignInWorld } from "../support/company-shared-signin-world.js";
 import { GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, fakeGithub, type FakeGithubUser } from "../support/fake-github.js";
@@ -157,6 +158,8 @@ describe("connecting a second sign-in (DEC 254w)", () => {
     // The task the Slack session starts is owned by its token's person (developer-tasks.ts: taskIndexKey(caller.developerId, ...)).
     const owner = decodeJwt(slack.access!).sub as string;
     const at = new Date(w.now()).toISOString(), taskId = "22222222-2222-4222-8222-222222222222";
+    // The person (a member of X) holds a grant on the project: their own list shows a task only while they do.
+    w.db.set({ pk: `ORG#${X}#MEMBER#${owner}`, sk: "PROJECT#p", entityType: "MEMBERSHIP", ownerKey: owner, projectName: "p", role: "developer", grantedAt: at });
     w.db.set({ pk: `DEVTASK#${taskId}`, sk: "META", entityType: "DEVELOPER_TASK", taskId, developerId: owner, provider: "slack", developerName: "Link Me", client: "slack", project: "p", title: "from Slack",
       workspaceId: "w", ownerKey: owner, conversationId: "c", startingRevision: 1, shared: false, createdAt: at, updatedAt: at, companyId: X });
     w.db.set({ pk: `DEVELOPER#${owner}`, sk: `TASK#${at}#${taskId}`, entityType: "DEVELOPER_TASK_INDEX", taskId, title: "from Slack", project: "p", status: "CLOSED", shared: false, createdAt: at, updatedAt: at });
@@ -733,4 +736,40 @@ describe("a link, the list and an unlink under the synthesized sign-in role (DEC
     for (const call of newCalls) expect(before.allows(call), shape(call)).toBe(false);
     expect(w.db.get(`DEVELOPER#${sid("U0LINKME1")}`, "META")).toMatchObject({ mergedInto: P });
   }, 120_000);
+});
+
+// Session-id-at-rest: the session id is the browser's login cookie, so the link row keeps a digest of it (never the id), and finish compares digests.
+describe("the session at rest", () => {
+  it("the link row holds a digest of the session and never the id; the same session finishes it", async () => {
+    const w = world();
+    const github = await w.githubMember();
+    const cookie = decodeJwt(github).sid as string;
+    const started = await w.start(github, "slack");
+    const row = w.db.get(`SIGNIN_LINK#${started.body.linkId as string}`, "META")!;
+    expect(row).toMatchObject({ entityType: "SIGNIN_LINK", sessionBinding: sessionBindingOf(cookie) });
+    expect(row).not.toHaveProperty("sessionId");
+    expect(JSON.stringify(row)).not.toContain(cookie);
+    const { location } = await w.atProvider(started.body.authorizeUrl as string, { slack: "U0LINKME1", team: TEAM });
+    expect(JSON.stringify(w.db.get(`SIGNIN_LINK#${started.body.linkId as string}`, "META"))).not.toContain(cookie);
+    expect(await w.finish(github, location!)).toEqual({ status: 200, body: { method: "slack" } });
+  });
+  it("a row an older build wrote (the raw id, no digest) is refused with the usual words, and nothing is linked", async () => {
+    const w = world();
+    const github = await w.githubMember();
+    const cookie = decodeJwt(github).sid as string;
+    const started = await w.start(github, "slack");
+    const key = `SIGNIN_LINK#${started.body.linkId as string}`;
+    const { sessionBinding: _digest, ...rest } = w.db.get(key, "META")!; void _digest;
+    w.db.set({ ...rest, sessionId: cookie });
+    // At the provider's callback it is the existing expired page (no redirect, no code), and the row is not consumed.
+    const { answer, location } = await w.atProvider(started.body.authorizeUrl as string, { slack: "U0LINKME1", team: TEAM });
+    expect(location).toBeUndefined();
+    expect(answer.body).toContain("This connect link has expired");
+    expect(w.db.get(key, "META")).not.toHaveProperty("consumedAt");
+    // Finishing it directly (even with the very session that started it) is the usual refusal.
+    const direct = { kind: "sign-in-link-finish", developerId: decodeJwt(github).sub, sessionId: cookie, linkId: started.body.linkId, linkCode: `lnc_${"A".repeat(43)}`, verifier: VERIFIER };
+    expect(await w.handler(direct as never)).toEqual({ ok: false, error: "refused", message: SIGN_IN_LINK_TEXT.refused });
+    expect(w.db.get(`DEVELOPER#${sid("U0LINKME1")}`, "META")).toBeUndefined();
+    expect(w.db.get(key, "META")).not.toHaveProperty("attemptAt");
+  });
 });

@@ -1,0 +1,22 @@
+{
+ "status": 200,
+ "stop": "tool_use",
+ "blocks": [
+  {
+   "type": "thinking",
+   "thinking": "I need respond to user \"Call the ping tool.\" Should use functions.ping. Then respond likely concise. I have tool. Should call.",
+   "signature": ""
+  },
+  {
+   "type": "tool_use",
+   "id": "call_8ec9600b17c85d14800a8aa74aa5112e",
+   "name": "ping",
+   "input": {}
+  }
+ ],
+ "usage": {
+  "input": 153,
+  "output": 64
+ },
+ "complete": true
+}

@@ -17,6 +17,7 @@ import { withoutLinearWebhookRoute } from "../support/linear-webhook-route-templ
 import { withoutCoreOutboxStreamRelay } from "../support/core-outbox-stream-relay-template.js";
 import { withoutMachineGone } from "../support/machine-gone-template.js";
 import { withTaskPeopleInvitationSwitches } from "../support/task-people-invitations-template.js";
+import { withoutCanarySession } from "../support/canary-session-template.js";
 
 skipLambdaBundling();
 // CODE-PUBLIC-URL (2026-11-24): the legacy control plane's external URL bases that now go through the public address helper, counted so a URL that bypasses the helper moves it.
@@ -68,14 +69,18 @@ describe("legacy production templates", () => {
       it("removing only Batch F additions preserves code/next's AgentXControlPlane template", () => {
         // F1 L1a-1: the two deleted invitation switches are put back innermost (Rule D, tests/support/task-people-invitations-template.ts), so this older pin holds as recorded.
         // DEC 254zzz488: the Linear webhook route (asserted and taken out, outermost) is the only change to the pins below besides the public-URL, lessons and RETAIN additions.
-        const beforeBatchF = withoutLinearWebhookRoute(withoutWebhookSecretLane(withoutBatchFAdditions(withoutLegacyRuntimeBoundary(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(withoutMachineGone(withTaskPeopleInvitationSwitches(withoutCoreOutboxStreamRelay(normalizedTemplate(stack)))))), { named: false, sites: PUBLIC_API_SITES })), LEGACY))))));
+        const beforeBatchF = withoutLinearWebhookRoute(withoutWebhookSecretLane(withoutBatchFAdditions(withoutLegacyRuntimeBoundary(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(withoutMachineGone(withTaskPeopleInvitationSwitches(withoutCoreOutboxStreamRelay(withoutCanarySession(normalizedTemplate(stack))))))), { named: false, sites: PUBLIC_API_SITES })), LEGACY))))));
         expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("d9bfc520cf02657c1b6be9b16b821e910504a1599cb3652d7405f9c6509b4048");
       }, 120_000);
     }
     it(`${stack.stackName} is unchanged`, () => {
       // DEC 254zzz432: the alarm is taken out first, so every pin below holds as recorded (checked to be exactly one resource). DEC 254zzz488: so is the Linear webhook route.
-      const withMachineGone = stack.stackName === "AgentXControlPlane" ? withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(normalizedTemplate(stack), LEGACY)) : normalizedTemplate(stack);
-      // WORKER-DELIVERY-IDENTITY (2026-11-25), Rule D: the control plane's full pin (the line above) is now taken with the instance state-change handler, its rule and the dispatcher's one Describe statement
+      const withCanary = stack.stackName === "AgentXControlPlane" ? withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(normalizedTemplate(stack), LEGACY)) : normalizedTemplate(stack);
+      // CANARY-SESSION (Rule D): the control plane's full pin with the canary session function in (its four empty placement parameters, condition, template rule, function, role policy, invoke permission, metric filters,
+      // alarms, output and the token key's conditional deny list) is below; with exactly those taken out (withoutCanarySession, asserted field by field in tests/support/canary-session-template.ts) the machine-gone pin after it holds, and so does everything after that.
+      if (stack.stackName === "AgentXControlPlane") expect(createHash("sha256").update(JSON.stringify(withCanary)).digest("hex"), "AgentXControlPlane with the canary session function").toBe("966add12a1c1f44fe37c04299dd47f6a67e6b8166e12061cd7a1e50f971a055a");
+      const withMachineGone = stack.stackName === "AgentXControlPlane" ? withoutCanarySession(structuredClone(withCanary)) : withCanary;
+      // WORKER-DELIVERY-IDENTITY (2026-11-25), Rule D: the control plane's pin (the line above) is taken with the instance state-change handler, its rule and the dispatcher's one Describe statement
       // in; with exactly those taken out (withoutMachineGone, tests/support/machine-gone-template.ts, which asserts they are exactly that) the relay pin recorded before it (4694a39b..., the full control plane with the outbox stream relay setting) holds, and with the relay setting out the Linear pin 0289bd3b... holds.
       // F1 L1a-1 (2026-11-25): that full pin moved too, for exactly the two deleted invitation parameters and their two packed settings (tu, tv). Rule D: with them put back (withTaskPeopleInvitationSwitches) the pin recorded
       // before it, 0639c6df..., holds (the second line).

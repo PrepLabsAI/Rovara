@@ -83,7 +83,7 @@ describe("the closed list of kinds", () => {
   });
 
   it.each([["task"], ["saved_env_rebuild"]])(
-    "refuses %j before anything is read or written (the image rebuild kind has no start until SI-2)", async (kind) => {
+    "refuses %j before anything is read or written (a starter that was given no rebuild start refuses the image rebuild kind like a kind outside the list: the hosted starter has none in this release)", async (kind) => {
       const w = await world();
       const answer = await ask(w, { kind });
       expect(answer).toEqual({ outcome: "refused", reason: "kind_not_allowed" });

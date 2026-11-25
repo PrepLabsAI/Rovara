@@ -14,13 +14,13 @@ async function queued(over: Parameters<typeof savedEnvWorld>[0] = {}) {
 describe("the lease is the operation's", () => {
   it("is given to the operation that takes it, again to the same operation (a delivery retried after the token was taken), and to no other", async () => {
     const { w, jobId } = await queued();
-    const first = await leaseForDispatch(w.deps, w.ids, "op-a");
+    const first = await leaseForDispatch(w.deps, w.ids, "op-a", jobId);
     expect(first).toMatchObject({ ok: true, job: { jobId } });
     expect(w.row()?.job).toMatchObject({ dispatchedOperationId: "op-a" });
-    const again = await leaseForDispatch(w.deps, w.ids, "op-a");
+    const again = await leaseForDispatch(w.deps, w.ids, "op-a", jobId);
     expect(again).toEqual(first);
-    expect(await leaseForDispatch(w.deps, w.ids, "op-b")).toEqual({ ok: false, reason: "nothing_to_dispatch" });
-    expect(await leaseForDispatch(w.deps, w.ids)).toEqual({ ok: false, reason: "nothing_to_dispatch" });
+    expect(await leaseForDispatch(w.deps, w.ids, "op-b", jobId)).toEqual({ ok: false, reason: "nothing_to_dispatch" });
+    expect(await leaseForDispatch(w.deps, w.ids, "", jobId)).toEqual({ ok: false, reason: "nothing_to_dispatch" });
   });
 
 });

@@ -17,6 +17,7 @@
 //   - Only this company's connection (and so its token) is ever used for this company's projects: the company is the caller's, never named by the request.
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
+import { sessionBindingOf } from "../developer/session-binding.js";
 import { agentXError, AgentXError, AgentXNameSchema, ON_THE_WEBSITE_MESSAGE, OrgIdSchema, type DocumentStore } from "@agentx/contracts";
 import { Membership, membershipKey } from "./company-check.js";
 import type { DeveloperCaller } from "./developer-routes.js";
@@ -103,6 +104,12 @@ function body(request: AdaptedHttpRequest): unknown {
 }
 
 /** The caller's live membership in `companyId`, or 401. */
+/** The state rows keep a digest of the caller's sign-in session, so a caller with none (a registered service's own token has no sign-in session) never mints or spends one. */
+const sessionBindingOfCaller = (caller: DeveloperCaller): string => {
+  if (typeof caller.sessionId !== "string" || caller.sessionId === "") throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  return sessionBindingOf(caller.sessionId);
+};
+
 async function liveMembership(ctx: LinearConnectContext, caller: DeveloperCaller, companyId: string): Promise<z.infer<typeof Membership>> {
   try {
     const response = await ctx.documentClient.send(new GetCommand({ TableName: ctx.signInTableName, Key: membershipKey(caller.developerId), ConsistentRead: true })) as { Item?: unknown };
@@ -151,7 +158,8 @@ async function discard(ctx: LinearConnectContext, companyId: string, tokens: Lin
  */
 export async function routeLinearConnect(ctx: LinearConnectContext, caller: DeveloperCaller, companyId: string, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   const member = await liveMembership(ctx, caller, companyId);
-  const who = { companyId: member.companyId, personId: caller.developerId, sessionId: caller.sessionId };
+  // Only the paths that mint or spend a state ask for this: it refuses a caller with no sign-in session before anything is written or read.
+  const whoOf = () => ({ companyId: member.companyId, personId: caller.developerId, sessionBinding: sessionBindingOfCaller(caller) });
 
   const project = PROJECT_PATH.exec(url.pathname);
   if (project !== null) return projectRoute(ctx, member, caller.developerId, project[1]!, request);
@@ -169,7 +177,8 @@ export async function routeLinearConnect(ctx: LinearConnectContext, caller: Deve
     const app = await ctx.wiring.app().catch(() => undefined);
     if (app === undefined) throw agentXError("RUNTIME_UNAVAILABLE", CONNECT_NOT_SET_UP);
     let minted: { state: string; verifier: string; expiresAt: number };
-    try { minted = await ctx.wiring.connections.mintState(who); } catch { throw agentXError("RUNTIME_UNAVAILABLE", CONNECT_UNAVAILABLE); }
+    const startWho = whoOf();
+    try { minted = await ctx.wiring.connections.mintState(startWho); } catch { throw agentXError("RUNTIME_UNAVAILABLE", CONNECT_UNAVAILABLE); }
     return { state: minted.state, expiresAt: new Date(minted.expiresAt * 1000).toISOString(), authorizeUrl: linearAuthorizeUrl(app, minted.state, minted.verifier) };
   }
 
@@ -178,7 +187,7 @@ export async function routeLinearConnect(ctx: LinearConnectContext, caller: Deve
     if (!isAdmin(member)) throw startAgain();
     const parsed = CompleteBody.safeParse(body(request));
     if (!parsed.success) throw startAgain();
-    const verifier = await ctx.wiring.connections.spendState(parsed.data.state, who);
+    const verifier = await ctx.wiring.connections.spendState(parsed.data.state, whoOf());
     if (verifier === undefined) throw startAgain();
     const app = await ctx.wiring.app().catch(() => undefined);
     if (app === undefined) throw agentXError("RUNTIME_UNAVAILABLE", CONNECT_NOT_SET_UP);

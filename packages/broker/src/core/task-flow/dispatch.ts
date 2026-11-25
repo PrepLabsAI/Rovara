@@ -40,6 +40,7 @@ import { serialWorkerCanResume } from "../work-breakdown/parallel-parts.js";
 import { CallbackCapabilities, type CallbackAction } from "../../callbacks.js";
 import { admit, releaseAdmission } from "./admission.js";
 import { runWatchItem } from "./run-watch-rows.js";
+import { beforeMachine, savedEnvBuildFields } from "./saved-env-lease-step.js";
 import type { DispatchMessage } from "./accept.js";
 import type { TaskFlowDeps } from "./deps.js";
 import { registriesForPrepare } from "../project-registries/prepare.js";
@@ -266,7 +267,8 @@ async function handleWorkerDispatch(deps: TaskFlowDeps, queue: Queue, message: R
   // Standing instructions (the company's rules and the project's How we work): read now, before admission and before any machine is started, since a refusal needs no machine and a code host that is down must
   // not wake one on every try. The playbook is read at the commit the task pinned when it started. A refusal that waiting will not mend ends the step with its sentence; a read that may pass is tried again, and when
   // the tries run out the step ends with the true cause (the rules could not be read), never "the machine did not become ready".
-  const rules = await dispatchStanding(deps, operation, workspace, receiveCount);
+  // A rebuild whose lease cannot be handed over is refused here, read only, before admission and before any machine is started (saved-env-lease-step.ts).
+  const rules = await beforeMachine(deps, operation, workspace, receiveCount < DISPATCH_ATTEMPTS_MAX, () => dispatchStanding(deps, operation, workspace, receiveCount));
   if (rules.error !== undefined) return rules.retry ? retryLater() : endAndAck("FAILED", rules.error);
   const standing = rules.standing;
   if (receiveCount > DISPATCH_ATTEMPTS_MAX) return endAndAck("FAILED", DISPATCH_EXHAUSTED_ERROR);
@@ -425,11 +427,15 @@ function onlyPinned<P extends { repositories: ReadonlyArray<{ name: string }> }>
 }
 
 /** The project as a worker is sent it, with the registries its PREPARE carries (where, never a credential), or the sentence that ends the preparation. */
-async function preparedProject(deps: TaskFlowDeps, definition: ProjectDefinition, spec: OperationRecord["dispatch"], features: readonly string[], toWorker: (definition: ProjectDefinition) => object | string): Promise<string | { forWorker: object; registries: Awaited<ReturnType<typeof registriesForPrepare>> & object }> {
+async function preparedProject(deps: TaskFlowDeps, definition: ProjectDefinition, spec: OperationRecord["dispatch"], features: readonly string[], toWorker: (definition: ProjectDefinition) => object | string, rebuild: { operation: OperationRecord; workspace: WorkspaceRecord }): Promise<string | { forWorker: object; registries: Awaited<ReturnType<typeof registriesForPrepare>> & object; rebuildBuild: object }> {
   const forWorker = toWorker(definition);
   if (typeof forWorker === "string") return forWorker;
   const registries = await registriesForPrepare({ project: definition, companyId: deps.companyId, install: deps.projectRegistries, readOnly: spec.payload["readOnly"] === true, features });
-  return typeof registries === "string" ? registries : { forWorker, registries };
+  if (typeof registries === "string") return registries;
+  // Saved project images: a rebuild's preparation is sent with its job's lease token, taken now and put in THIS invocation only (never in what is stored; nothing here logs the payload). A refusal is a sentence and the
+  // operation ends (fail closed); the registry's settle then ends the job. Any other preparation: nothing added.
+  const build = await savedEnvBuildFields(deps, rebuild.operation, rebuild.workspace, features);
+  return typeof build === "string" ? build : { forWorker, registries, rebuildBuild: build };
 }
 
 /** Builds the worker's invocation, or a sentence saying why this operation cannot be sent to this worker. */
@@ -504,9 +510,9 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
     // a push (below, and every other kind) never do. The worker asks for each credential by name, with the preparation's own grant (core/project-registries/exchange.ts). A worker that cannot take the field is refused: setup would
     // otherwise run without the registry and fail on a 401. An install that cannot serve them (or a CodeArtifact registry its rules refuse) ends the preparation with a fixed sentence.
     // A pinned preparation reads exactly the repositories it pinned (see `onlyPinned`); the registries are the project's own.
-    const prepared = await preparedProject(deps, project.definition, spec, features, (definition) => onlyPinned(toWorker(definition), spec.payload["pins"]));
+    const prepared = await preparedProject(deps, project.definition, spec, features, (definition) => onlyPinned(toWorker(definition), spec.payload["pins"]), { operation, workspace });
     if (typeof prepared === "string") return prepared;
-    const { forWorker, registries } = prepared;
+    const { forWorker, registries, rebuildBuild } = prepared;
     // L4-NETG follow-up (DEC 254zzz90): the exact S3 hosts the project's allowed websites name, for a worker that lists the feature and only when there are some. The gateway-mode worker publishes them to its host's egress gateway; the allowed
     // websites themselves were approved through the existing audited flow (customer role and company checks), so this adds no route and no permission. Scope, said plainly (owner DEC 254zzz90, review M1/M2): there is NO Rovara staff step on this lift
     // (for the install's own region the VPC list already allows `*.s3.<region>`), and one lifted bucket host is region-wide S3 for that project's sandboxes (the gateway sees the TLS name; S3 routes by Host inside TLS).
@@ -515,6 +521,7 @@ async function buildInvocation(deps: TaskFlowDeps, operation: OperationRecord, w
       ...payload,
       project: forWorker,
       ...registries,
+      ...rebuildBuild,
       ...(s3Hosts.length === 0 ? {} : { egressS3Allow: s3Hosts }),
       repositoryGrant: deps.repositoryGrants.issue({
         ownerKey: workspace.ownerKey, projectName: workspace.projectName, workspaceId: workspace.id, operationId: operation.id,

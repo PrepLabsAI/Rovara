@@ -399,19 +399,38 @@ export async function authorizeLease(deps: SavedEnvDeps, ids: { orgId: string; p
 /**
  * The dispatcher takes the queued job's lease token to hand it to the worker that will build. Nobody else sees a token: not `checkRebuild`'s result, not a task, not the setup agent. The token goes to ONE
  * operation (`operationId`, kept with `dispatchedAt`): the same operation asking again (a delivery that is retried after the token was taken) is given the same token, any other operation or a caller
- * that names none gets nothing.
+ * that names none gets nothing. Both ids are required and are checked at run time too (an empty or non-text one gets nothing): the caller names the job the broker stored with the operation, the answer is only for
+ * exactly that job, and a project whose current job is another (the lease ran out and a newer job was queued) gives nothing and marks nothing: the newer job stays untaken for its own operation.
  */
-export async function leaseForDispatch(deps: SavedEnvStoreDeps, ids: { orgId: string; projectId: string }, operationId?: string): Promise<{ ok: true; job: Pick<RebuildJob, "jobId" | "leaseToken" | "reason" | "approved" | "commits" | "leaseUntil"> } | { ok: false; reason: "disabled" | "nothing_to_dispatch" | "stale_write" }> {
-  const off = disabled(deps);
-  if (off !== undefined) return off;
-  const state = await deps.store.get(ids.orgId, ids.projectId);
-  const job = state?.job;
-  if (state === undefined || job === undefined || Date.parse(job.leaseUntil) <= deps.now() || state.deleted === true || state.archived === true || !state.enabled) return { ok: false, reason: "nothing_to_dispatch" };
+export async function leaseForDispatch(deps: SavedEnvStoreDeps, ids: { orgId: string; projectId: string }, operationId: string, jobId: string): Promise<{ ok: true; job: Pick<RebuildJob, "jobId" | "leaseToken" | "reason" | "approved" | "commits" | "leaseUntil"> } | { ok: false; reason: "disabled" | "nothing_to_dispatch" | "stale_write" }> {
+  const found = await leasableJob(deps, ids, operationId, jobId);
+  if (!found.ok) return found;
+  const { state, job } = found;
   const given = { ok: true as const, job: { jobId: job.jobId, leaseToken: job.leaseToken, reason: job.reason, approved: job.approved, commits: job.commits, leaseUntil: job.leaseUntil } };
-  if (job.dispatchedAt !== undefined) return operationId !== undefined && job.dispatchedOperationId === operationId ? given : { ok: false, reason: "nothing_to_dispatch" };
-  const written = await commit(deps, state, { ...state, job: { ...job, dispatchedAt: iso(deps.now()), ...(operationId === undefined ? {} : { dispatchedOperationId: operationId }) } }, audit(deps, state, "rebuild_queued", { reason: "dispatched" }));
+  if (job.dispatchedAt !== undefined) return given;
+  const written = await commit(deps, state, { ...state, job: { ...job, dispatchedAt: iso(deps.now()), dispatchedOperationId: operationId } }, audit(deps, state, "rebuild_queued", { reason: "dispatched" }));
   if (written === undefined) return { ok: false, reason: "stale_write" };
   return given;
+}
+
+/** Read only, and nothing is taken: whether `leaseForDispatch` would hand this job's lease to this operation now (the dispatcher asks before it starts a machine). The same checks, the same refusals, no write. */
+export async function canLeaseForDispatch(deps: SavedEnvStoreDeps, ids: { orgId: string; projectId: string }, operationId: string, jobId: string): Promise<{ ok: true } | { ok: false; reason: "disabled" | "nothing_to_dispatch" }> {
+  const found = await leasableJob(deps, ids, operationId, jobId);
+  return found.ok ? { ok: true } : found;
+}
+
+/** The checks both of them share: the install's switch, both ids, a live project, the named job being the project's current one with a live lease, and no other operation having been given it. */
+async function leasableJob(deps: SavedEnvStoreDeps, ids: { orgId: string; projectId: string }, operationId: string, jobId: string): Promise<{ ok: true; state: SavedEnvState; job: RebuildJob } | { ok: false; reason: "disabled" | "nothing_to_dispatch" }> {
+  const off = disabled(deps);
+  if (off !== undefined) return off;
+  const nothing = { ok: false, reason: "nothing_to_dispatch" } as const;
+  if (typeof operationId !== "string" || operationId === "" || typeof jobId !== "string" || jobId === "") return nothing;
+  const state = await deps.store.get(ids.orgId, ids.projectId);
+  const job = state?.job;
+  if (state === undefined || job === undefined || Date.parse(job.leaseUntil) <= deps.now() || state.deleted === true || state.archived === true || !state.enabled) return nothing;
+  if (job.jobId !== jobId) return nothing;
+  if (job.dispatchedAt !== undefined && job.dispatchedOperationId !== operationId) return nothing;
+  return { ok: true, state, job };
 }
 
 /**

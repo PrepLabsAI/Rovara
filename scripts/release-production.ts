@@ -54,6 +54,12 @@ const DNS_FIREWALL_MODE_OUTPUT = "DnsFirewallMode";
 const EGRESS_ALLOW_DOMAINS_OUTPUT = "EgressAllowDomains";
 // CODE-PUBLIC-URL: --require-public-api-address refuses a release that has no address stack to take the permanent address from; --confirm-public-api-url-change names the issuer change a first or changed address is.
 const PRODUCTION_FLAGS = ["--reuse-unchanged-worker", "--require-existing-foundation", "--create-slack-orchestrator", "--require-public-api-address", "--confirm-public-api-url-change"];
+// CANARY-SESSION (arch ruling 2026-11-25): the beta canary's session function is placed by hand, in beta only. Not imported from packages/ or infra (this script loads before the build):
+// tests/contract/canary-session-production.test.ts keeps these in step with packages/contracts/src/canary-session-placement.ts and infra/lib/release-pipeline.ts (the beta project's BETA_RELEASE_ROLE_ARN variable).
+const CANARY_PLACEMENT_PREFIX = "CanarySession";
+const CANARY_PLACEMENT_ENVIRONMENT_PARAMETER = "CanarySessionPlacementEnvironment";
+// The beta release project (and only it) has this variable: the beta release role's ARN, built from the pipeline stack's BetaAccountId parameter. The beta ACCOUNT is read from it; no account id is written in any file.
+const BETA_RELEASE_ROLE_VARIABLE = "BETA_RELEASE_ROLE_ARN";
 const RELEASE_TAG_PATTERN = /^release-\d{8}T\d{6}Z-([a-f0-9]{7,40})$/;
 
 // Every path that environments/base/Dockerfile copies into the worker image, plus the build files.
@@ -74,6 +80,7 @@ export const WORKER_IMAGE_INPUTS = [
   "packages/orchestrator/package.json",
   "packages/broker/package.json",
   "packages/gateway/package.json",
+  "packages/model-gateway/package.json",
   "packages/mcp/package.json",
   "packages/slack-service/package.json",
   "packages/local-adapters/package.json",
@@ -101,6 +108,7 @@ export const SLACK_ORCHESTRATOR_IMAGE_INPUTS = [
   "packages/worker/package.json",
   "packages/broker/package.json",
   "packages/gateway/package.json",
+  "packages/model-gateway/package.json",
   "packages/mcp/package.json",
   "packages/local-adapters/package.json",
   "packages/aws-adapters/package.json",
@@ -210,6 +218,28 @@ export function plannedPublicApiUrl(input: {
   assertChangeConfirmed(input.controlPlane, value, input.confirmChange);
   assertFirewallAllows(input.foundation, value);
   return value;
+}
+
+/** The beta account the release already knows: the account of the beta release role's ARN, which only the beta release project is given (infra/lib/release-pipeline.ts); undefined everywhere else. */
+export function betaAccountFromEnvironment(environment: NodeJS.ProcessEnv): string | undefined {
+  return /^arn:aws:iam::([0-9]{12}):role\/[A-Za-z0-9+=,.@_-]{1,64}$/u.exec(environment[BETA_RELEASE_ROLE_VARIABLE] ?? "")?.[1];
+}
+
+/**
+ * CANARY-SESSION, the production lock (arch ruling 2026-11-25 condition 2; THE SECOND LOCK, the first being the template's condition): refuses, before anything is built or deployed, (1) a release whose
+ * own parameter set names a CanarySession* parameter (a release never places the function: a hand change set does, in beta), and (2) any release that does not run IN the beta account when the live
+ * control plane holds a non-empty CanarySession* parameter. "In the beta account" is decided by the caller identity's ACCOUNT against the beta account the release already knows
+ * (`betaAccountFromEnvironment`), never by a profile name: a local profile called anything, pointing at production, gets no exemption. `cdk deploy` keeps the deployed value of every parameter it is
+ * not given, so without (2) a production stack that ever got the value would keep the function through every release. The handler's checks are a consistency check plus data checks, not a lock.
+ */
+export function assertNoCanaryPlacement(input: { account: string; betaAccount: string | undefined; controlPlane: StackDescription | undefined; planned: readonly string[] }): void {
+  const planned = input.planned.filter((argument) => argument.includes(`:${CANARY_PLACEMENT_PREFIX}`));
+  if (planned.length > 0) throw new Error(`this release's parameters name ${CANARY_PLACEMENT_PREFIX}* (${planned.map((argument) => argument.slice(argument.indexOf(":") + 1, argument.indexOf("="))).join(", ")}): a release never places the canary session function, only a hand change set in beta does; nothing was changed`);
+  if ((input.betaAccount !== undefined && input.account === input.betaAccount) || input.controlPlane === undefined) return;
+  const placed = (input.controlPlane.Parameters ?? []).filter((parameter) => (parameter.ParameterKey ?? "").startsWith(CANARY_PLACEMENT_PREFIX) && (parameter.ParameterValue ?? "") !== "");
+  if (placed.length > 0) {
+    throw new Error(`${CONTROL_PLANE_STACK} holds ${placed.map((parameter) => parameter.ParameterKey).join(", ")}, but the canary session function exists only in beta and this release is not running in the beta account (${CANARY_PLACEMENT_ENVIRONMENT_PARAMETER} must be empty here); nothing was changed`);
+  }
 }
 
 export function releaseRevisionFromTags(tags: readonly string[]): string | undefined {
@@ -323,6 +353,8 @@ export async function releaseProduction(
     runner.aws(["sts", "get-caller-identity", "--output", "json"]).stdout,
   ) as { Account?: string };
   if (!identity.Account) throw new Error("AWS did not return an account ID");
+  // CANARY-SESSION: decided before anything is built, pushed or deployed, so a refusal leaves AWS as it was.
+  assertNoCanaryPlacement({ account: identity.Account, betaAccount: betaAccountFromEnvironment(process.env), controlPlane: describeIfExists(runner, options.region, CONTROL_PLANE_STACK), planned: optionalControlPlaneParameters() });
   const repositoryUri = `${identity.Account}.dkr.ecr.${options.region}.amazonaws.com/${options.repository}`;
   ensureRepository(runner, options);
 

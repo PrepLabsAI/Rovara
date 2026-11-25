@@ -286,7 +286,8 @@ describe("release pipeline trigger", () => {
     // dependency change of that package always changes package-lock.json, which starts the pipeline.
     // F3 cut 1: packages/code-api (the Code API package) is copied into both images and built through contracts, but it is not in the trigger list yet: the legacy production template must stay byte-identical
     // (tests/contract/legacy-templates.test.ts), and every commit that changes it so far also changes contracts or the broker, which start the pipeline. Adding it is a change to the production pipeline's own stack.
-    const notTriggered = new Set(["packages/aws-adapters/package.json", "packages/testing/package.json", "packages/code-api"]);
+    // #1478: the model gateway's manifest likewise (the gateway is its own image and stacks; the worker and Slack images never run it).
+    const notTriggered = new Set(["packages/aws-adapters/package.json", "packages/testing/package.json", "packages/model-gateway/package.json", "packages/code-api"]);
     const samples = [...WORKER_IMAGE_INPUTS, ...SLACK_ORCHESTRATOR_IMAGE_INPUTS].filter((input) => !notTriggered.has(input)).map((input) =>
       statSync(input).isDirectory() ? `${input}/src/index.ts` : input);
     expect(samples.filter((sample) => !triggered(sample))).toEqual([]);

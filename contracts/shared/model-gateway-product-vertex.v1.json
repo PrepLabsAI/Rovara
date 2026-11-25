@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "bridge": "model-gateway-product-ai.v1.json",
+  "provider": {
+    "name": "vertex",
+    "upstreamHosts": [
+      "{location}-aiplatform.googleapis.com",
+      "aiplatform.googleapis.com"
+    ],
+    "paths": [
+      "/v1/product/vertex/{version}/projects/{project}/locations/{location}/publishers/google/models/{model}:generateContent",
+      "/v1/product/vertex/{version}/projects/{project}/locations/{location}/publishers/google/models/{model}:streamGenerateContent?alt=sse"
+    ],
+    "versions": [
+      "v1",
+      "v1beta1"
+    ],
+    "project": "^[a-z][a-z0-9-]{4,28}[a-z0-9]$",
+    "location": "^(?:global|[a-z]{2,15}-[a-z]{2,15}[0-9]{1,2})$",
+    "model": "^[a-z0-9][a-z0-9.-]{0,95}$",
+    "workerRemovesHeaders": [
+      "authorization",
+      "x-goog-api-key",
+      "x-goog-user-project",
+      "x-goog-iam-authorization-token",
+      "x-goog-iam-authority-selector"
+    ],
+    "workerRemovesQuery": [
+      "key"
+    ]
+  },
+  "refusals": [
+    {
+      "status": 400,
+      "type": "not_allowed",
+      "message": "this Google Cloud project or location is not the one connected for product AI"
+    },
+    {
+      "status": 502,
+      "type": "product_key_refused",
+      "message": "not run: the product key was refused (check it in Settings)"
+    },
+    {
+      "status": 503,
+      "type": "unavailable",
+      "message": "model access unavailable"
+    }
+  ]
+}
