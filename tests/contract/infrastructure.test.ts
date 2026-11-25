@@ -581,7 +581,8 @@ describe("production release pipeline", () => {
     ] as const;
     let previousState: string | undefined;
     for (const [stageName, environment, parameter] of [["Beta", "beta", "CloudBetaProjectName"], ["Production", "production", "CloudProductionProjectName"]] as const) {
-      const prefix = stageName;
+      // PH-S3-PREFIXES: a state artifact is State<Beta|Prod><Action> (the Cloud roles may write exactly their environment's prefix; see release-pipeline-s3-prefixes.test.ts).
+      const prefix = environment === "beta" ? "StateBeta" : "StateProd";
       const stageActions = pipelineProperties().Stages.find((stage) => stage.Name === stageName)!.Actions;
       const cloudActions = expectedSteps.map(([name]) => stageActions.find((action) => action.Name === name)!);
       for (const [index, [name, step]] of expectedSteps.entries()) {
@@ -593,7 +594,7 @@ describe("production release pipeline", () => {
         expect(inputs.slice(0, 2), `${stageName} ${name}`).toEqual(["CloudSource", "Source"]);
         expect(inputs[2], `${stageName} ${name}`).toBe(previousState);
         expect(inputs.length).toBe(previousState === undefined ? 2 : 3);
-        expect(action.OutputArtifacts.map((artifact) => artifact.Name), `${stageName} ${name}`).toEqual([`${prefix}${name}State`]);
+        expect(action.OutputArtifacts.map((artifact) => artifact.Name), `${stageName} ${name}`).toEqual([`${prefix}${name}`]);
         const variables = actionVariables(action);
         expect(variables.STAGE_ENV?.value).toBe(environment);
         expect(variables.STAGE_STEP?.value).toBe(step);
@@ -607,15 +608,15 @@ describe("production release pipeline", () => {
         expect(variables.EXEC_ID?.value).toBe("#{codepipeline.PipelineExecutionId}");
         expect(variables.CODE_SHA?.value).toBe("#{CodeSource.CommitId}");
         for (const variable of Object.values(variables)) expect(variable.type).toBe("PLAINTEXT");
-        previousState = `${prefix}${name}State`;
+        previousState = `${prefix}${name}`;
       }
       // Only Preflight exports the effective CODE_RELEASE, through its own namespace.
-      expect(cloudActions[0]!.Namespace).toBe(`${prefix}Preflight`);
+      expect(cloudActions[0]!.Namespace).toBe(`${stageName}Preflight`);
       for (const action of cloudActions.slice(1)) expect(action.Namespace).toBeUndefined();
     }
     // Production's Preflight reads beta's LAST state: the Cloud sha and gateway digest beta proved.
     const productionPreflight = pipelineProperties().Stages.find((stage) => stage.Name === "Production")!.Actions.find((action) => action.Name === "Preflight")!;
-    expect(productionPreflight.InputArtifacts.map((artifact) => artifact.Name)).toEqual(["CloudSource", "Source", "BetaCloudProofState"]);
+    expect(productionPreflight.InputArtifacts.map((artifact) => artifact.Name)).toEqual(["CloudSource", "Source", "StateBetaCloudProof"]);
     // The pipeline may start exactly the named Cloud projects, found through the parameters.
     const startable = JSON.stringify(statements.filter((statement) => [statement.Action].flat().includes("codebuild:StartBuild")).map((statement) => statement.Resource));
     expect(startable).toContain('{"Ref":"CloudBetaProjectName"}');

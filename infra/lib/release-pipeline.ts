@@ -45,6 +45,53 @@ export const CODE_SOURCE_NAMESPACE = "CodeSource";
 export const CLOUD_SOURCE_NAMESPACE = "CloudSource";
 export const AGENTX_PRODUCTION_WORKER_REPOSITORY = "agentx-worker-production";
 
+/**
+ * The pipeline's artifact bucket holds every artifact of every run, and it is not versioned: a role that can write anywhere in it can overwrite the `Source` and
+ * `CloudSource` artifacts that a later stage reads (the Production stage builds from the same `Source` the approval was given on), or another stage's output. Each build role
+ * therefore writes only its own output artifacts (PH-S3-PREFIXES), and the bucket's own grant (ReleaseArtifactBucket) gives it nothing else.
+ *
+ * CodePipeline stores an artifact at `<pipeline name, first 20 characters>/<artifact name, first 10 characters>/<id>`. Nothing here reads a real run: the patterns stay right for
+ * any truncation at or beyond those lengths and for none at all (a name longer than its limit is cut to the limit and ends in `*`), and a shorter truncation fails closed (a write
+ * is refused and the first beta run shows it). The private Cloud stack's grants (cloud-release-actions.ts) hold the same two numbers and the Cloud state prefixes below.
+ */
+export const ARTIFACT_KEY_PIPELINE_CHARS = 20;
+export const ARTIFACT_KEY_NAME_CHARS = 10;
+/**
+ * The Cloud steps' state artifacts: `State<Beta|Prod><Action>`. One short prefix per environment tells an environment's states from every other artifact in the bucket
+ * (`Source`, `CloudSource`, `ReleaseManifest`, `BetaReleaseManifest`): a bare `Beta*` would match `BetaReleaseManifest`, the Code beta release's own output.
+ */
+export const CLOUD_STATE_ARTIFACT_PREFIXES = { beta: "StateBeta", production: "StateProd" } as const;
+export const cloudStateArtifactName = (environment: "beta" | "production", action: string): string => `${CLOUD_STATE_ARTIFACT_PREFIXES[environment]}${action}`;
+/** The S3 resource pattern of every object of one artifact: `<bucket ARN>/<pipeline>/<artifact>`, cut as CodePipeline cuts it (a cut name ends in `*`). */
+export function artifactKeyPattern(bucketArn: string, artifactName: string): string {
+  const pipeline = AGENTX_RELEASE_PIPELINE_NAME.length > ARTIFACT_KEY_PIPELINE_CHARS ? `${AGENTX_RELEASE_PIPELINE_NAME.slice(0, ARTIFACT_KEY_PIPELINE_CHARS)}*` : AGENTX_RELEASE_PIPELINE_NAME;
+  const artifact = artifactName.length > ARTIFACT_KEY_NAME_CHARS ? `${artifactName.slice(0, ARTIFACT_KEY_NAME_CHARS)}*` : `${artifactName}/*`;
+  return `${bucketArn}/${pipeline}/${artifact}`;
+}
+
+/**
+ * The pipeline's artifact bucket, which hands out its write grant by role. aws-cdk-lib gives the project of every CodeBuild action that has an output
+ * `bucket.grantReadWrite(project)`: read, PutObject, tagging and retention, DeleteObject* and Abort*, on the whole bucket. For a project registered with `scopeWrites` the grant
+ * is read on the bucket (what the inputs need) and PutObject plus AbortMultipartUpload (a failed upload leaves no stranded parts) on the project's own output artifacts, and nothing else. Any other grantee (the pipeline's own role, the source
+ * action roles) gets CDK's grant unchanged.
+ */
+export class ReleaseArtifactBucket extends s3.Bucket {
+  private readonly ownOutputs = new Map<iam.IPrincipal, readonly string[]>();
+
+  /** The object patterns a project's role may write: its output artifacts, and what the explicit Deny leaves out. */
+  scopeWrites(project: codebuild.IProject, outputNames: readonly string[]): string[] {
+    const patterns = outputNames.map((name) => artifactKeyPattern(this.bucketArn, name));
+    this.ownOutputs.set(project.grantPrincipal, patterns);
+    return patterns;
+  }
+
+  override grantReadWrite(identity: iam.IGrantable, objectsKeyPattern?: unknown): iam.Grant {
+    const patterns = this.ownOutputs.get(identity.grantPrincipal);
+    if (patterns === undefined) return super.grantReadWrite(identity, objectsKeyPattern);
+    return this.grantRead(identity).combine(iam.Grant.addToPrincipal({ grantee: identity, actions: ["s3:PutObject", "s3:AbortMultipartUpload"], resourceArns: [...patterns] }));
+  }
+}
+
 // The Cloud half of the one pipeline. Its CodeBuild projects, their roles and the Cloud permissions boundary live in a small private stack
 // (the Cloud release actions stack, lane L1b); this stack only references the projects by name, through parameters (BETA-CLOUD-PLAN 1.1, C6).
 /**
@@ -206,7 +253,7 @@ export class ReleasePipelineStack extends Stack {
       }),
     };
 
-    const artifactBucket = new s3.Bucket(this, "Artifacts", {
+    const artifactBucket = new ReleaseArtifactBucket(this, "Artifacts", {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
       enforceSSL: true,
@@ -416,6 +463,15 @@ export class ReleasePipelineStack extends Stack {
     const cloudSourceOutput = new codepipeline.Artifact("CloudSource");
     const releaseOutput = new codepipeline.Artifact("ReleaseManifest");
     const betaOutput = new codepipeline.Artifact("BetaReleaseManifest");
+    // Each release build writes its own manifest and nothing else in the artifact bucket (PH-S3-PREFIXES). The bucket gives the project's role read on the bucket and PutObject on
+    // its own output (ReleaseArtifactBucket), and the Deny holds even if a later change widens that: every write but its own output is refused (NotResource), including the
+    // Source and CloudSource artifacts the Production stage reads, the other release's manifest and the Cloud state artifacts. No delete, no abort, no tagging, no retention.
+    for (const [buildProject, output] of [[project, releaseOutput], [betaProject, betaOutput]] as const) {
+      const ownOutput = artifactBucket.scopeWrites(buildProject, [output.artifactName!]);
+      buildProject.addToRolePolicy(new iam.PolicyStatement({
+        sid: "DenyArtifactWritesOutsideOwnOutput", effect: iam.Effect.DENY, actions: ["s3:PutObject*", "s3:DeleteObject*", "s3:AbortMultipartUpload"], notResources: ownOutput,
+      }));
+    }
     const source = new actions.CodeStarConnectionsSourceAction({
       actionName: "GitHub",
       connectionArn: connectionArn.valueAsString,
@@ -484,7 +540,7 @@ export class ReleasePipelineStack extends Stack {
       previous: codepipeline.Artifact | undefined,
     ): { action: actions.CodeBuildAction; output: codepipeline.Artifact } => {
       const prefix = environment === "beta" ? "Beta" : "Production";
-      const output = new codepipeline.Artifact(`${prefix}${spec.action}State`);
+      const output = new codepipeline.Artifact(cloudStateArtifactName(environment, spec.action));
       return {
         output,
         action: new actions.CodeBuildAction({
