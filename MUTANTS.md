@@ -1224,3 +1224,10 @@ Own-task and grant reads (code/next after the project-grant hotfix landed; MEMBE
 | admin-actions.ts projectGrant | The grant read not wrapped in `readingMembership` (a raw throw is swallowed by ownTaskHold) | killed, 1 failed |
 | core-engine-root.ts projectGrantRoleFromDynamo | The grant read not wrapped (a raw throw answers 400 CONFIG_INVALID) | killed, 1 failed |
 | developer-routes.ts taskReaderPerson (old-engine channel check) | The nested catch around `checkProjectAccess` returns `mayStart: false` again | SURVIVED: no journey drives an old-engine task's own person through the bound-channel test; the one-line rethrow is the same as the other catches |
+
+Old-engine own-task bound-channel check (follow-up to the SURVIVED row above), `tests/contract/own-task-channel-read-failure.test.ts`: an old-engine task's own person, held by the bound channel with no grant, with ONE failed membership read at each read of the path in turn (held, or the retryable 503, never `mayStart: false`).
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| developer-routes.ts taskReaderPerson (old-engine channel check) | The nested catch around `checkProjectAccess` returns `mayStart: false` again | killed, 1 failed (the earlier SURVIVED row) |
+| developer-routes.ts taskReaderPerson | The live-company catch returns `projectMember: false` again | killed, 1 failed |
