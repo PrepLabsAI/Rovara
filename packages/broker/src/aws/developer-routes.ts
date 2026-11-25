@@ -1318,7 +1318,7 @@ function memberActions(deps: DeveloperRouteDependencies) {
 /**
  * Spec 067: a registered, not removed person, with their name and whether they hold a grant on `project`. With `ownTask` (the task's own person asking whether they still hold their task) it also
  * answers `mayStart`: the SAME live test the task start meets, `checkProjectAccess`: the grant, or fresh bound-channel membership while the project lets channel members use it and the person is
- * Slack-linked, for an OLD-engine task only (no engine stamp; a core task's own person needs the grant). Read now, nothing kept; a read that fails (Slack unreachable, a refusal, the stamp) is "no", as at the start. A reader never gets it (a reader needs the grant itself).
+ * Slack-linked, for an OLD-engine task only (no engine stamp; a core task's own person needs the grant). Read now, nothing kept; a read that fails (Slack unreachable, a refusal, the stamp) is "no", as at the start; a MEMBERSHIP read that fails is the retryable 503 instead (membership-read.ts). A reader never gets it (a reader needs the grant itself).
  */
 async function taskReaderPerson(deps: DeveloperRouteDependencies, developerId: string, project: string, taskCompany?: string, options?: { ownTask?: true; taskId?: string }): Promise<{ name: string; projectMember: boolean; mayStart?: boolean } | undefined> {
   const person = await getSignIn<Pick<DeveloperRecord, "revoked" | "displayName" | "slackUserId">>(deps, `DEVELOPER#${developerId}`);
