@@ -21,6 +21,8 @@ export const SetupAgentViewSchema = z.object({
   proposal: SetupProposalSchema.optional(),
   failure: z.string().max(1_000).optional(),
   verification: z.record(z.string().min(1).max(100), z.enum(SETUP_VERIFICATION_STATES)).optional(),
+  /** For a command item that does not match the code: the first command no quote shows, per item id (additive; absent when not known). */
+  unmatched: z.record(z.string().min(1).max(100), z.string().min(1).max(600)).optional(),
   verified: z.boolean().optional(),
   /** A company admin has turned setup runs off: nothing can be started. */
   companySetupOff: z.literal(true).optional(),
@@ -56,6 +58,8 @@ export const SetupConfirmRequestSchema = z.object({
   requestId: z.string().uuid(),
   expectedRevision: z.number().int().min(0),
   itemIds: z.array(z.string().min(1).max(100)).max(128).optional(),
+  /** Command items among `itemIds` the person ticked after the page warned that Rovara could not find the command in the code. */
+  useAnyway: z.array(z.string().min(1).max(100)).max(128).optional(),
 }).strict();
 export const SETUP_CONFIRM_LEFT_OUT = ["unverified", "refused_command", "not_a_command_item", "too_many", "invalid_command"] as const;
 export const SetupConfirmReplySchema = z.object({

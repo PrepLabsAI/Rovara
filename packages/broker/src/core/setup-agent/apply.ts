@@ -41,7 +41,20 @@ export const SetupConfirmBodySchema = z.object({
   expectedRevision: z.number().int().min(0),
   /** Items to use, by id (setup, tests and prompt-location items). Absent: every item that passed. At most the proposal's own item limits in all (32 + 32 commands, 40 locations). */
   itemIds: z.array(z.string().min(1).max(100)).max(SETUP_CONFIRM_ITEM_IDS_MAX).optional(),
+  /** Command items (a subset of `itemIds`) the person ticked although the page said they do not match the code, after its warning. Such an item is used like one that could not be checked against a file (listed as `unchecked`); the refused-command rules and the second-machine check apply as for any item. Never used for any other kind of item. */
+  useAnyway: z.array(z.string().min(1).max(100)).max(SETUP_CONFIRM_ITEM_IDS_MAX).optional(),
 }).strict();
+
+/** The verdicts with the command items a person ticked anyway (`useAnyway`, and also named in `itemIds`) moved from `unverified` to `unchecked`: the person's own explicit choice, counted as such and nothing more. Pure. */
+export function verdictsWithUseAnyway(
+  proposal: Parameters<typeof setupItemsOf>[0], verification: Readonly<Record<string, SetupVerification>>, itemIds: readonly string[] | undefined, useAnyway: readonly string[] | undefined,
+): Readonly<Record<string, SetupVerification>> {
+  if (itemIds === undefined || useAnyway === undefined || useAnyway.length === 0) return verification;
+  const allowed = new Set(setupItemsOf(proposal).filter((item) => item.kind === "setup" || item.kind === "tests").map((item) => item.id));
+  const moved: Record<string, SetupVerification> = { ...verification };
+  for (const id of useAnyway) if (itemIds.includes(id) && allowed.has(id) && verification[id] === "unverified") moved[id] = "unchecked";
+  return moved;
+}
 
 export const SETUP_CONFIRM_WORDS = {
   notReady: "There is no setup from Rovara to use. Ask Rovara to set the project up first.",
@@ -201,8 +214,11 @@ export function promptLocationsFromProposal(
  * (an empty choice, only unverified or already-held locations, only failed commands) is refused as "nothing"; commands with nothing usable are no refusal while a prompt location is usable. Pure, so it is tested without a store.
  */
 export function chooseCandidateItems(
-  proposal: Parameters<typeof setupItemsOf>[0], verification: Readonly<Record<string, SetupVerification>>, definition: { repositories: ReadonlyArray<{ name: string; path: string }>; promptLocations?: unknown }, itemIds: readonly string[] | undefined,
+  proposal: Parameters<typeof setupItemsOf>[0], checked: Readonly<Record<string, SetupVerification>>, definition: { repositories: ReadonlyArray<{ name: string; path: string }>; promptLocations?: unknown }, itemIds: readonly string[] | undefined,
+  useAnyway?: readonly string[],
 ): { made: CandidateCommands; locations: CandidatePromptLocations } {
+  // A command row the page said does not match the code, ticked by the person after that warning, counts as one that could not be checked against a file (see `verdictsWithUseAnyway`).
+  const verification = verdictsWithUseAnyway(proposal, checked, itemIds, useAnyway);
   const items = setupItemsOf(proposal);
   // DEC 254zzz495 (N3): an empty setup can always be used. A person who ticked nothing ("Use without setup or tests"), or a run that found no setup, test or prompt-location item at all, has the empty choice: no commands change
   // (the project keeps the setup and tests it has) and nothing is refused. A choice that names items which all fail their checks is still refused as "nothing".
@@ -253,7 +269,7 @@ export async function confirmSetupAgent(deps: SetupApplyDeps, project: string, r
   if (view.verified !== true || view.verification === undefined) throw agentXError("CHANGE_STALE", SETUP_CONFIRM_WORDS.notChecked);
   const full = await deps.flow.projects.latest(project);
   if (full === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist`);
-  const { made, locations } = chooseCandidateItems(view.proposal!, view.verification, full.definition, body.itemIds);
+  const { made, locations } = chooseCandidateItems(view.proposal!, view.verification, full.definition, body.itemIds, body.useAnyway);
   const setup = made.setup ?? full.definition.setup;
   const readiness = made.readiness ?? full.definition.readiness;
   if (made.used.length === 0 && locations.used.length === 0 && readiness.length > 0) throw agentXError("CONFIG_INVALID", SETUP_CONFIRM_WORDS.nothingChanges);

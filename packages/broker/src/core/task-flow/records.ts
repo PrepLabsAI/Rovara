@@ -69,7 +69,7 @@ export type TaskRecord = Omit<DeveloperTaskRecord, "provider" | "charge"> & {
     | { status: "ready"; stop: SetupRunEndWord; proposal: SetupProposal; summary: SetupRunSummary }
     | { status: "failed"; stop: SetupRunEndWord; failure: string; proposal?: SetupProposal; summary?: SetupRunSummary };
   /** A setup run: what re-reading the proposal's citations from the code host found, kept once every verdict was final. */
-  setupAgentVerification?: { at: string; items: Record<string, SetupVerification> };
+  setupAgentVerification?: { at: string; items: Record<string, SetupVerification>; unmatched?: Record<string, string> };
   /** The end of a setup run, written once with its result. */
   agentRunEnd?: { state: string; at: string };
 };

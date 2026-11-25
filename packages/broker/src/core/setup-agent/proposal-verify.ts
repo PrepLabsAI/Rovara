@@ -91,15 +91,29 @@ const endsName = (rest: string, allowGit: boolean): boolean => {
   return tail === "" || !/^[A-Za-z0-9_-]/u.test(tail) && (tail[0] !== "." || tail.length === 1 || !/^\.[A-Za-z0-9_-]/u.test(tail));
 };
 
-/** Whether the quotes (already shown to be in the files) contain what the item proposes, as whole tokens. Call only for a checkable item whose every file citation holds. */
-function quotesSupport(item: SetupItem, citations: readonly Provenance[], sourceEdges: (citation: Provenance) => SourceEdges | undefined): boolean {
-  const has = (needle: string): boolean => {
+/** Whether a command (whitespace collapsed) is in a quote as a whole token: the quotes were already shown to be in the files. */
+function commandInQuotes(citations: readonly Provenance[], sourceEdges: (citation: Provenance) => SourceEdges | undefined): (needle: string) => boolean {
+  return (needle) => {
     const wanted = collapse(needle);
     return citations.some((citation) => {
       const quote = usableQuoteOf(citation);
       return quote !== undefined && hasToken(quote, wanted, (character) => COMMAND_EDGE.test(character), (rest) => COMMAND_EDGE.test(rest[0]!), sourceEdges(citation));
     });
   };
+}
+
+/** The first command of a setup, tests or check item that no quote contains (whitespace collapsed), or undefined when every command is in a quote. Call only for an item whose every file citation holds. */
+function firstUnmatchedCommand(item: SetupItem, citations: readonly Provenance[], sourceEdges: (citation: Provenance) => SourceEdges | undefined): string | undefined {
+  const has = commandInQuotes(citations, sourceEdges);
+  const value = item.proposed.value as { commands?: string[]; command?: string };
+  const commands = item.kind === "check" ? [value.command!] : value.commands!;
+  const missing = commands.find((command) => !has(command));
+  return missing === undefined ? undefined : collapse(missing);
+}
+
+/** Whether the quotes (already shown to be in the files) contain what the item proposes, as whole tokens. Call only for a checkable item whose every file citation holds. */
+function quotesSupport(item: SetupItem, citations: readonly Provenance[], sourceEdges: (citation: Provenance) => SourceEdges | undefined): boolean {
+  const has = commandInQuotes(citations, sourceEdges);
   /** A repository or host name, case-folded: not part of a longer name before it, and ending where a name ends. */
   const hasName = (needle: string, allowGit: boolean, bare = false): boolean => {
     const wanted = collapse(needle).toLowerCase();
@@ -157,7 +171,7 @@ function locateInText(citation: Provenance, item: SetupItem, code: CodeText): Lo
 }
 
 /** What re-reading a proposal found: a verdict per item, and whether every verdict is final (nothing was left unread by a failed read, a timeout or a deadline). */
-export interface ProposalVerification { items: Record<string, SetupVerification>; final: boolean }
+export interface ProposalVerification { items: Record<string, SetupVerification>; final: boolean; /** For a command item whose quotes read fine but do not contain one of its commands: the first such command, whitespace made single, per item id. Absent for every other item and verdict. */ unmatched?: Record<string, string> }
 
 /** The verdict for every item of a proposal. Never throws: a failed read leaves the items that needed it `unchecked` and the result not final. */
 export async function verifyProposalDetailed(
@@ -209,6 +223,7 @@ export async function verifyProposalDetailed(
   const sourceEdges = (citation: Provenance): SourceEdges | undefined => located.get(citation)?.edges;
 
   const result: Record<string, SetupVerification> = {};
+  const unmatched: Record<string, string> = {};
   let final = true;
   for (const item of items) {
     const fileCitations = item.proposed.from.filter(isFileCitation);
@@ -217,9 +232,13 @@ export async function verifyProposalDetailed(
     if (verdicts.includes("fails")) result[item.id] = "unverified";
     else if (verdicts.includes("unread")) { result[item.id] = "unchecked"; final = false; }
     else if (verdicts.includes("skipped")) result[item.id] = "unchecked";
-    else result[item.id] = quotesSupport(item, fileCitations, sourceEdges) ? "verified" : "unverified";
+    else if (isCommandItem(item)) {
+      const missing = firstUnmatchedCommand(item, fileCitations, sourceEdges);
+      result[item.id] = missing === undefined ? "verified" : "unverified";
+      if (missing !== undefined) unmatched[item.id] = missing;
+    } else result[item.id] = quotesSupport(item, fileCitations, sourceEdges) ? "verified" : "unverified";
   }
-  return { items: result, final };
+  return { items: result, final, ...(Object.keys(unmatched).length === 0 ? {} : { unmatched }) };
 }
 
 /** The verdict for every item of a proposal (see `verifyProposalDetailed`). */
