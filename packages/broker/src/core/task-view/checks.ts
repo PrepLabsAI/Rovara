@@ -61,7 +61,7 @@ export interface ChecksView {
   securityScan?: { tool: string; counts: Record<string, number>; items: Array<{ ruleId: string; severity: string; path: string; line: number; message: string }> };
   /** What the task did not test (the pack's own list), each a thing a person may print as "not tested". */
   notTested: string[];
-  /** Notices about this read itself, never untested items: the checks could not be shown, a part could not be used (the plan, the recorded evidence), or no automated check applies (the policy's own words). */
+  /** Served as an additive member that the `tasks.checks` row does not declare yet (the schema is tolerant: a client reads unknown members as they are; declaring it in the row is a Code API 1.6 change, 1.5 being on mainline). Notices about this read itself, never untested items: the checks could not be shown, a part could not be used (the plan, the recorded evidence), or no automated check applies (the policy's own words). */
   notes: string[];
 }
 
