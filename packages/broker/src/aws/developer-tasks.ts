@@ -231,7 +231,8 @@ import {
 } from "../developer/owner-answers.js";
 import type { TaskPeopleDisplayAdmission } from "../developer/task-people-display-budget.js";
 import { loadTestProofLines } from "../developer/test-proof-lines.js";
-import { TASK_ENTRY_AREAS, involvedOnCore, ownerOfExistingTask, ownerOfTaskId, serveCoreTask, startOnCore, taskEntryOperation, type CoreTaskEntry } from "./engine-boundary.js";
+import { TASK_ENTRY_AREAS, involvedOnCore, ownerOfExistingTask, ownerOfTaskId, serveCoreTaskRoute, startOnCore, taskEntryOperation, type CoreTaskEntry } from "./engine-boundary.js";
+import { missingTaskWords } from "../core-host/task-route-answer.js";
 
 export interface DeveloperTaskRouteDependencies extends Pick<TaskPeopleEffectsDependencies, "registerTaskWebPerson" | "listTaskWebCandidates"> {
   documentClient: { send(command: unknown): Promise<unknown> };
@@ -5526,7 +5527,9 @@ const TASK_PATH_PREFIX = "/v1/dev/tasks/";
  * not show this caller and a task the retired spec 056 workflow started both answer with it, so neither can be told from a task that does not exist.
  */
 function answerAsMissing(taskId: string): never {
-  throw agentXError("TASK_NOT_FOUND", TASK_ID.test(taskId) ? `no task ${taskId} of yours` : "that is not a task ID of yours");
+  // D1-1: the CORE says these words for a task it owns and may not show this caller (core-host/task-route-answer.ts holds them, once). This is the old route's own answer for a task that is not the
+  // core's (the retired spec 056 workflow's, or an id with no task) and for an install with no core entry, until D1-2c collapses the task checks.
+  throw agentXError("TASK_NOT_FOUND", missingTaskWords(taskId));
 }
 
 
@@ -5567,7 +5570,7 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
     // A method the route table has no row for is not a route here either (developer-routes.ts refuses it before sign-in; this keeps the router's own answer the same).
     if (!TASK_ROUTE_PATTERNS.some((pattern) => pattern.test(url.pathname)) || devRouteOf(request.method, url.pathname) === undefined) throw agentXError("NOT_FOUND", "route not found");
     const entryTaskId = safeDecode(entry[1]);
-    if (await ownerOfTaskId(deps, entryTaskId, TASK_ENTRY_AREAS[operation]) === "core") return serveCoreTask(deps.coreTasks, request, caller, entryTaskId, () => Promise.resolve(answerAsMissing(entryTaskId)));
+    if (await ownerOfTaskId(deps, entryTaskId, TASK_ENTRY_AREAS[operation]) === "core") return serveCoreTaskRoute(deps.coreTasks, request, caller, entryTaskId, () => Promise.resolve(answerAsMissing(entryTaskId)));
     // A task the retired spec 056 workflow started has no reader any more: it answers exactly like a missing task.
     return answerAsMissing(entryTaskId);
   }

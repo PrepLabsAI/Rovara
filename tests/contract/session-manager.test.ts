@@ -105,7 +105,7 @@ describe("session manager: first provisioning", () => {
     expect(world.instances.get(readyB.instanceId!)).toMatchObject({ workspaceId: workspaceB, generation: 1, running: true });
     expect(readyB.instanceId).not.toBe(firstA.instanceId);
     expect(readyB.privateIp).not.toBe(firstA.privateIp);
-    expect(await ensure(workspaceB)).toEqual({ ready: true, generation: 1, privateIp: readyB.privateIp });
+    expect(await ensure(workspaceB)).toEqual({ ready: true, generation: 1, privateIp: readyB.privateIp, instanceId: readyB.instanceId, subnetId: readyB.subnetId });
 
     await world.machinesFor(COMPANY_A).stop(sessionMachineId(workspaceA));
     expect(await world.sessions.get(workspaceA)).toMatchObject({ state: "STOPPED", generation: 1 });
@@ -118,7 +118,7 @@ describe("session manager: first provisioning", () => {
     expect(new Set([firstA.privateIp, readyB.privateIp, restartedA.privateIp]).size).toBe(3);
     expect(world.executions.map(({ name }) => name)).toEqual([`ws-${workspaceA}-gen-1`, `ws-${workspaceB}-gen-1`, `ws-${workspaceA}-gen-2`]);
     expect(await world.sessions.get(workspaceB)).toEqual(readyB);
-    expect(await ensure(workspaceA)).toEqual({ ready: true, generation: 2, privateIp: restartedA.privateIp });
+    expect(await ensure(workspaceA)).toEqual({ ready: true, generation: 2, privateIp: restartedA.privateIp, instanceId: restartedA.instanceId, subnetId: restartedA.subnetId });
   });
 
   it("starts the provisioning again when the first start failed before it was recorded", async () => {
@@ -191,7 +191,7 @@ describe("session manager: picking the machine size (DEC 254zb)", () => {
     await w.sessions.markVolume(w.workspaceId, 1, "vol-0123456789abcdef0");
     await w.sessions.markInstance(w.workspaceId, 1, "i-0123456789abcdef0", "10.42.128.10", { instanceType: "m6g.large" });
     await w.sessions.markReady(w.workspaceId, 1);
-    expect(await w.sessions.ensureSession({ workspaceId: w.workspaceId, binding })).toEqual({ ready: true, generation: 1, privateIp: "10.42.128.10", machineFallback: "x86-unavailable" });
+    expect(await w.sessions.ensureSession({ workspaceId: w.workspaceId, binding })).toEqual({ ready: true, generation: 1, privateIp: "10.42.128.10", instanceId: "i-0123456789abcdef0", subnetId: expect.any(String) as unknown, machineFallback: "x86-unavailable" });
   });
 
   it("launches the default when the picker fails, never failing the provisioning", async () => {

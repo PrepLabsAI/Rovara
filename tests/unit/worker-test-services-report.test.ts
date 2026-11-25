@@ -1,7 +1,7 @@
 // Test services, slice 1: the worker's self-report line (test-services-report.ts): schema, boot facts, what it looks at, and that nothing secret or named can get into it.
 import { describe, expect, it } from "vitest";
 import { TEST_SERVICES_REPORT_EVENT, checkReport, collectReport, emitReport, parseBootFacts, reportLine, type TestServicesReport } from "../../packages/worker/src/test-services-report.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 const FACTS = { metadataBlocked: true, runWalls: true, ipv6Drops: true, prepull: "ok", prepulled: 1, loggedOut: true, dockerVersion: "25.0.5" };
 const report = (over: Partial<TestServicesReport> = {}): TestServicesReport => ({ phase: "run_end", outcome: "completed", leftoverContainers: 0, leftoverNetworks: 0, runDirEmpty: true, runDirTmpfs: true, workingSandboxPaused: false, ...over });

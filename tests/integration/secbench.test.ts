@@ -12,7 +12,7 @@ import { gradeSecbenchPrediction, SECBENCH_EVALUATOR_COMMIT, SECBENCH_EVALUATOR_
 import type { ProcessRunner } from "../../packages/worker/src/swebench/grade.js";
 import type { SecbenchVerdict, SwebenchRun, SwebenchRunResult } from "@agentx/contracts";
 import { resultMessage } from "../../packages/slack-service/src/swebench-command.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 import { runSwebench, type RunReporter } from "../../packages/worker/src/swebench/run.js";
 import type { PiSessionAdapter, PiSessionHandle } from "../../packages/worker/src/pi-session.js";
 import { MAX_COMMAND_OUTPUT_BYTES, tailCollector } from "../../packages/worker/src/collected-process.js";

@@ -20,7 +20,7 @@
 // `sweepRunScopedLeases` revokes the leases a crash left behind once they are past their expiry. The record holds no secret: the approved account entry (pool id, role ARN, hook URLs, a secret NAME), the
 // handle and the expiry.
 //
-// Everything that touches the outside world (the sandbox, a Cognito test pool, the customer's hook, the replay) is an injected port, so this file has no network, no AWS SDK and no clock of its own. A real
+// Everything that touches the outside world (the sandbox, a Cognito test pool, the customer's hook, the replay) is an injected port, so this file has no network and no AWS SDK, and reads the clock only as the hold's default (see `revokeRunScopedAccounts`). A real
 // binding to a customer's account is deployed and called through the install's own wrapper only.
 //
 // Rules, all fail closed:
@@ -315,7 +315,7 @@ export function revocationSettledAt(report: RevocationReport, now: number): bool
 /**
  * Ends the sessions of every lease, revokes the account, and proves it (see the top of the file). `sessions` are the credentials the round really held, by profile id, in memory only. Retried and bounded;
  * never throws, and keeps going after a failure so one stuck account does not leave the others alive. Marks each fully revoked lease in the store (retried; a failure is an alert and `recorded: false`).
- * `control: false` skips the positive controls (the sweeper and a failed provision's cleanup have no proof to give, only a cleanup to make). `clock` reads the time AFTER the revocations, for the hold.
+ * `control: false` skips the positive controls (the sweeper and a failed provision's cleanup have no proof to give, only a cleanup to make). `clock` reads the time AFTER the revocations, for the hold; with none passed the real clock is read, never `now` (the start time), which would end the hold early.
  */
 export async function revokeRunScopedAccounts(input: { leases: readonly RunScopedLease[]; accounts: readonly TestEnvAccount[]; ports: AccountProvisionerPorts; store?: LeaseStore; now: number;
   sessions?: ReadonlyMap<string, readonly SessionCredential[]>; maxTokenTtlMs?: number; maxHoldMs?: number; control?: boolean; clock?: () => number; onAlert?: LeaseAlertHook; signal?: AbortSignal }): Promise<RevocationReport> {
@@ -366,7 +366,7 @@ export async function revokeRunScopedAccounts(input: { leases: readonly RunScope
     if (sessionsEnded && revoked && accountGone && input.store !== undefined) recorded = await updateLease(input.store, lease.leaseId, { state: "revoked" }, input.onAlert);
     report.push({ profileId: lease.profileId, sessionsEnded, revoked, accountGone, existenceControl, sessionProof, recorded });
   }
-  const revokedAt = (input.clock ?? (() => input.now))();
+  const revokedAt = (input.clock ?? Date.now)();
   const plan = needsHold ? holdFor({ statedTtlMs: input.maxTokenTtlMs, maxHoldMs: input.maxHoldMs }) : undefined;
   const refused = plan !== undefined && "refused" in plan;
   const result: RevocationReport = { confirmed: false, accounts: report,

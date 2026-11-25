@@ -29,7 +29,7 @@
 // number, and the ids the sweep passes on must pass a plain-id check. A dependency's alias (`postgres`) is not part of this module; the helper launcher (TS14) must validate it before it uses `--network-alias`.
 import { createHash } from "node:crypto";
 import { agentXError } from "@agentx/contracts";
-import type { DockerCli } from "./swebench/containers.js";
+import type { DockerCli } from "./docker-cli.js";
 import { DOCKER_CALL_TIMEOUT_MS, isSlotCollision, setupNetworkSlot } from "./setup-network.js";
 
 /** The family label; its value is the network's name (a hash of the run id). Every container and the network of a run carry it. */

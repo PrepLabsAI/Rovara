@@ -55,7 +55,7 @@ describe("the Code API package", () => {
       cpSync(PACKAGE, join(work, "pkg"), { recursive: true, filter: (path) => !/(^|\/)(dist|node_modules|[^/]*\.tsbuildinfo)(\/|$)/u.test(path) });
       symlinkSync(resolve("node_modules"), join(work, "pkg", "node_modules"));
       execFileSync(process.execPath, [resolve("node_modules/typescript/bin/tsc"), "-p", join(work, "pkg", "tsconfig.json")], { cwd: join(work, "pkg"), stdio: "pipe" });
-      for (const file of ["index.js", "index.d.ts", "errors.js", "routes.js", "scopes.js", "task-standing.js", "version.js"]) expect(existsSync(join(work, "pkg", "dist", file)), file).toBe(true);
+      for (const file of ["index.js", "index.d.ts", "errors.js", "routes.js", "scopes.js", "task-changes.js", "task-checks.js", "task-existing-reads.js", "task-read-common.js", "task-spec.js", "task-standing.js", "task-timeline.js", "version.js"]) expect(existsSync(join(work, "pkg", "dist", file)), file).toBe(true);
       writeFileSync(join(work, "pkg", "package.json"), JSON.stringify({ ...manifest, version: "1.2.0" }));
       const built = await import(pathToFileURL(join(work, "pkg", "dist", "index.js")).href) as typeof codeApi;
       const here = codeApi;

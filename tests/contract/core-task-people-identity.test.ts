@@ -16,6 +16,7 @@ import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/ta
 import { developerRecordKeyedBy, type DeveloperRecord } from "../../packages/broker/src/developer/store.js";
 import { createHarness, newRequestId } from "../support/task-flow-harness.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
+import { readsAsRow } from "../support/code-api-row-read.js";
 
 /** "attribute": the record carries `developerId` (the old fixture shape). "key": the REAL stored shape, the id only in `pk`. */
 type RecordShape = "attribute" | "key";
@@ -108,6 +109,7 @@ describe("People on a task made by real core start", () => {
     const answer = await routes.route({ request: { method: "GET", path, headers: {} }, path, person: { developerId: w.developerId, name: "Owner" }, companyId: w.h.deps.companyId, task: w.task as unknown as Record<string, unknown>, store: w.h.store });
     expect(answer.statusCode).toBe(200);
     expect(JSON.parse(answer.body)).toMatchObject({ view: { canManage: true, people: [{ you: true, role: "owner", method: "cloud" }] } });
+    readsAsRow("tasks.people", JSON.parse(answer.body));
   });
   it.each([false, true])("only the cold owner receives a specific People proof refusal (display=%s)", async display => {
     for (const owner of [false, true]) {

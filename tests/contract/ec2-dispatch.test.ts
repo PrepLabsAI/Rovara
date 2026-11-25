@@ -47,6 +47,8 @@ function delivery(overrides: Partial<Ec2DeliveryDependencies> = {}, without: Rea
     progress,
     applicationPlanNotNegotiated,
     planQualityNotNegotiated,
+    verifyMachine: async () => ({ ok: true }),
+    failOperation: async () => undefined,
     now: () => NOW,
     ...overrides,
   };
@@ -166,7 +168,7 @@ describe("ec2-ebs delivery", () => {
     const complete = createWorkflowE2EReadinessCompleter({ documentClient: documentClient as never, tableName: "state" });
     const post = vi.fn<Ec2DeliveryDependencies["post"]>(async () => ({ status: 200, body: "{}" }));
     const deliver = createEc2Delivery({
-      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined,
+      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined, verifyMachine: async () => ({ ok: true }), failOperation: async () => undefined,
       sessions: { ensureSession: async () => ({ ready: true, generation, privateIp: "10.42.128.10" }) },
       binding: async () => binding, sign: kmsSign, post, progress: async () => undefined, now: () => NOW,
       validateWorkflowE2EReadiness: validate,
@@ -1225,7 +1227,7 @@ describe("ec2-ebs delivery through the real session manager", () => {
     db.set({ pk: `OUTBOX#${record.id}`, sk: "OUTBOX", ...record });
     const post = vi.fn<Ec2DeliveryDependencies["post"]>(async () => ({ status: 200, body: "{}" }));
     const deliver = createEc2Delivery({
-      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined,
+      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined, verifyMachine: async () => ({ ok: true }), failOperation: async () => undefined,
       sessions,
       binding: (workspaceId) => workspaceBinding(db, "state", workspaceId),
       sign: kmsSign,
@@ -1267,7 +1269,7 @@ describe("ec2-ebs delivery through the real session manager", () => {
     const markFailed = vi.fn(async () => undefined);
     const markDelivered = vi.fn(async () => undefined);
     const deliver = createEc2Delivery({
-      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined,
+      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined, verifyMachine: async () => ({ ok: true }), failOperation: async () => undefined,
       sessions,
       binding: (workspaceId) => workspaceBinding(fixture.db, "state", workspaceId),
       sign: kmsSign,

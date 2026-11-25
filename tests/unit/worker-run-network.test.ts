@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { RUN_NETWORK_CREATED_LABEL, RUN_NETWORK_EXPIRES_LABEL, RUN_NETWORK_LABEL, RUN_NETWORK_SLOTS, RUN_NETWORK_WORKSPACE_LABEL, runNetworkAddresses, runNetworkCreateArgs, runNetworkHelperIp, runNetworkName, servicesNetworkStaleAfterMs, startServicesNetwork, sweepServicesNetworks } from "../../packages/worker/src/run-network.js";
 import { SETUP_NETWORK_LABEL, SETUP_WORKSPACE_LABEL } from "../../packages/worker/src/setup-network.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 const RUN = "11111111-1111-4111-8111-111111111111";
 const WS = "0123456789abcdef";

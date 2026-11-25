@@ -165,3 +165,146 @@ All killed by tests/contract/task-owner-channel-access.test.ts (9 tests).
 | C2, `taskReaderPerson` own-task answer | a failed or refused start check answers `mayStart: true` (fail open) | red (6 of 9) |
 | C3, `taskReaderPerson` own-task answer | the start check is asked as a fixed Slack user, not the person's own link | red (1 of 9: no Slack link) |
 | C4, `holdsOwnTask` | reads `projectMember` only (the first hotfix) | red (3 of 9: the red commit) |
+## RD-2.0 - contract rows for the task page reads (commit 567630b57 plus the S2/S3 follow-up)
+
+Production guards this lane adds: the `owns()` clause and the mount hunk in `core-host/dev-routes.ts`, GET-only and the anchored path regex in `core-host/task-screen-routes.ts`, the stub's fixed `ROUTE_NOT_SERVED` refusal (`task-spec-routes.ts`, the other three stubs are the same line), the code's 404 status (`packages/code-api/src/errors.ts`), and the existing script-token line that keeps a token off the four paths. Each mutant was applied singly to the working tree, one targeted run, then the file was restored with `git checkout -- <file>`.
+
+| Mutant / location | Mutation | Failing test (all in tests/unit/core-host-dev-routes.test.ts, "the task page's new reads (RD-2.0)", unless noted) |
+|---|---|---|
+| M1 dev-routes.ts `owns()` | drop `\|\| taskScreenRoute(path, method) !== undefined` | both tests: no answer (undefined) instead of 404 / 403 |
+| M2 task-screen-routes.ts `taskScreenRoute` | GET-only check removed | "serves GET only": POST/PUT answered instead of left to the old broker |
+| M3 task-screen-routes.ts `PATH` | drop the `$` anchor | "serves GET only": `/specs` and `/spec/x` answered |
+| M4 task-spec-routes.ts | stub resolves 200 `{}` instead of refusing | "answers ROUTE_NOT_SERVED ...": 200 instead of 404 |
+| M5 code-api errors.ts | remove `ROUTE_NOT_SERVED` from the 404 group | code-api-errors "lists every code in its order", code-api-version digest, and the dev-routes test (409 instead of 404) |
+| M6 dev-routes.ts script-token line | let the four paths past the token refusal | "serves GET only ... keeps a script token out": 404 instead of 403 |
+| M7 dev-routes.ts `taskSurfaceAnswer` | remove the `routeTaskScreen` line | "answers ROUTE_NOT_SERVED ...": undefined instead of 404 |
+| M8 task-spec-routes.ts | code `NOT_FOUND` instead of `ROUTE_NOT_SERVED` | "answers ROUTE_NOT_SERVED ...": body differs from the row's example refusal |
+
+All 8 killed; the restored tree passes (17 files, 539 tests, `tsc -b` clean). Evidence applies to this lane's commits; the final-head gate and review belong to 9d.
+
+## SI-1: saved images, kind and constants (branch pr/si-1-20261125)
+
+Two mutants, applied singly to the tracked source, the touched suites run, then restored with `git checkout`. Suites: `saved-env-rebuild-constants`, `system-starter`, `saved-env-registry`, `system-owner-access`, `saved-env-images-infrastructure`, `named-templates` (after `tsc -b`).
+
+| Mutant | Location | Mutation | Expected kill |
+|---|---|---|---|
+| M1 | `packages/broker/src/core/system-runs/starter.ts` `startable` | also accept `saved_env_rebuild` | `system-starter.test.ts` "refuses saved_env_rebuild before anything is read or written" |
+| M2 | `packages/contracts/src/saved-env.ts` | `SAVED_ENV_KEEP = 3` | `saved-env-rebuild-constants.test.ts` (value) and the keep-two cases in `saved-env-registry.test.ts` |
+
+Results (6 files, 153 tests green before and after): M1 killed, 1 failed (`system-starter.test.ts` refuses "saved_env_rebuild" before anything is read or written). M2 killed, 4 failed (`saved-env-rebuild-constants.test.ts` numbers; `saved-env-registry.test.ts` "keeps the newest two images", "row keeps at most two images", and the manage walk test). Both restored with `git checkout`; the tree matches the committed source.
+
+## MAINTAIN-TOKEN-CLEANUP (a plain maintenance takes the push token only after the cleanup)
+
+Tests: `tests/contract/worker-credential-fetch-cleanup.test.ts` and `tests/integration/pull-request-maintenance.test.ts` (37 tests together; the maintenance file is a post-deploy file, so it was run with a scratch vitest config that drops it from the exclude list). Each mutant applied to `packages/worker/src/` from a copy and restored from it (restored files compared byte-for-byte); `tsc -b` not re-run per mutant.
+| Mutant / location | Mutation | Failing tests | Restored |
+|---|---|---|---|
+| M1, maintain-pull-request.ts, the credential fetch | `fetchContainedCredential({...})` replaced with `options.credentialProvider(repository)` (no cleanup in any maintain path) | 11 of 37: the two contract source checks, the 3 existing workflow-fix cleanup tests, the 6 new plain-maintenance tests | 37 passed |
+| M2, publish.ts `fetchContainedCredential` | the `containWorkspace` call is skipped | 9 of 37 (maintenance: 3 existing + 6 new); the same mutant fails 6 of 75 in pull-request-publication.test.ts (publication's own cleanup tests) | green |
+| M3, publish.ts `fetchContainedCredential` | the credential is fetched first, the cleanup runs after it (stubbed steps) | 11 of 37 (same set as M1) | 37 passed |
+
+### MAINTAIN-TOKEN-CLEANUP, second commit: the push token is fetched after the checks
+
+The maintain flow now reads the head and the base with a contained token that is dropped before the checks, and fetches the token that pushes (also through `fetchContainedCredential`) after the checks. Same tests plus the new order test (`runs the project's checks with no token in hand`); the maintenance file run with a scratch config that drops the post-deploy exclusion. Source restored from a copy after each mutant (compared).
+| Mutant / location | Mutation | Failing tests | Restored |
+|---|---|---|---|
+| M4, maintain-pull-request.ts `pushCredential` | the old order: the push token is fetched once before the checks and reused (`const early = await fetchContainedCredential(...); pushCredential = async () => early`) | 2 of 40: the order test (check, cleanup, credential, push), and the "sync that leaves nothing to push asks for no push token" test | 40 passed |
+| M5, maintain-pull-request.ts first fetch | the read of the head and the base takes the token from `options.credentialProvider` directly (no cleanup) | 13 of 40 (both contract source checks, the cleanup tests of a fix, a plain append and sync, the order test) | 40 passed |
+M1 to M3 above still apply (the helper and its callers).
+
+### MAINTAIN-TOKEN-CLEANUP, third commit (test only): the contract test pins every credential line
+
+`tests/contract/worker-credential-fetch-cleanup.test.ts` now also pins, per file and in source order, every non-comment line in packages/worker/src that names `credentialProvider`, `fetchContainedCredential` or `/repository-credentials`, so any new or reshaped call fails until it is classified. Each mutant applied to the file, the contract file run, the file restored from a copy and compared with `cmp`.
+| Mutant / location | Mutation (one added line) | Failing tests (of 5) | Restored |
+|---|---|---|---|
+| B1, publish.ts, after `fetchCredential` | `const early = await options.credentialProvider(repository);` | 2: the new pin test and the old call list | 5 passed |
+| B1b, publish.ts | `const early = await options.credentialProvider(registered);` (another argument name: the Opus bypass) | 1: the new pin test (the old list test missed it) | 5 passed |
+| B2, maintain-pull-request.ts, before `pushCredential` | `const early = await options["credentialProvider"](repository);` (bracket access) | 1: the new pin test | 5 passed |
+
+### MAINTAIN-TOKEN-CLEANUP, fourth commit (test only): the pinned-line regex also catches the provider's name and factory
+
+The pinned-line regex of `tests/contract/worker-credential-fetch-cleanup.test.ts` now also matches `\b(create)?RepositoryCredentialProvider\b`, so a new file that builds a second provider through the `./index.js` export is listed. Each mutant is one new file under packages/worker/src, removed afterwards (`git status` clean of it).
+| Mutant | Mutation | Failing tests (of 5) | Removed |
+|---|---|---|---|
+| C1 | new file `zz-second-provider.ts`: `import { createRepositoryCredentialProvider } from "./index.js"; export const second = createRepositoryCredentialProvider;` | 1: the pin test (the pre-widening test stayed green on this shape) | 5 passed |
+| C2 | new file `zz-second-type.ts`: `RepositoryCredentialProvider` imported from `./index.js` and re-exported as a type | 1: the pin test | 5 passed |
+
+## D1-1-CORE-SAYS-MISSING-TASK (M1 to M3 on code head 9d7662435, M4 on the pre-review commit after it; on origin/code/next 800b647ed)
+
+Tests: `tests/unit/core-task-route-answer.test.ts` and `tests/contract/d1-1-task-route-answers.test.ts` (the exact-answer table, golden recorded on the pre-D1-1 base, and the "told what a missing id is told" cases), run together after each mutant of `packages/broker/src/core-host/task-route-answer.ts` (M1 to M3) or `packages/broker/src/core-host/dev-routes.ts` (M4), each restored from a copy.
+
+| Mutant | Result |
+| --- | --- |
+| M1 the core's 404 is passed through instead of becoming the missing-task answer | killed (2 tests: the answer table and the 404/401 case) |
+| M2 the missing-task sentence gains a trailing full stop | killed (5 tests: the table, the words, the mapping, the not-served rule, the Cloud sentence check) |
+| M3 a route the core does not serve says "not on the core yet" to everyone, readers or not | killed (2 tests: the answer table and the not-served rule) |
+| M4 the script-token refusal of `GET /v1/dev/tasks/<id>/evidence` goes back before the task lookup (the pre-review M1 leak) | killed (2 tests: the answer table row and the "stranger script token" equality case) |
+
+# WORKER-DELIVERY-IDENTITY steps 0 and (b-plus) — mutant evidence
+
+Each mutant was applied singly to the production file in the lane worktree, the named tests were run, and the file was restored from a copy (restored files re-run green in the final focused run). Only assertion failures count as kills.
+
+| Mutant / production location | Mutation | Failing tests | Result |
+|---|---|---|---|
+| M1 packages/broker/src/aws/ec2-delivery.ts (the check before the POST) | The `verifyMachine` condition made constant false, so the POST always goes out | tests/contract/worker-delivery-identity.test.ts | 12 of 12 failed (POST made, row not lost, operation not failed) |
+| M2 packages/worker/src/invoke-auth.ts (expiry before workspace, REDACT review F4) | Expiry check moved back after the workspace and generation checks | tests/contract/worker-invoke-auth.test.ts | 2 failed (expired token for another workspace / generation answers wrong_workspace / wrong_generation) |
+| M3 packages/broker/src/aws/machine-check.ts `machineMismatch` | The workspace tag comparison removed | tests/unit/machine-check.test.ts, tests/contract/worker-delivery-identity.test.ts | 5 failed |
+| M4 packages/broker/src/aws/session-reconciler.ts (step 0 i) | The same-run `markLostNow` after terminating an unresponsive worker removed | tests/contract/session-reconciler.test.ts | 1 failed (row still READY, operation still running after the terminating run) |
+| M5 packages/broker/src/aws/instance-state-change.ts | `running` added to the ending states | tests/unit/instance-state-change.test.ts | 2 failed |
+
+## WORKER-DELIVERY-IDENTITY — second mutant round (Sonnet pre-review S3), base 1f2303930 plus the S1/S4/S6 delta in the commit that adds this entry
+
+Each mutant applied singly to the production file in the lane worktree, run against tests/unit/machine-check.test.ts, tests/contract/worker-delivery-identity.test.ts, tests/unit/worker-delivery-identity-machines.test.ts and tests/unit/instance-state-change.test.ts (53 tests green unmutated), then restored from a copy. Only assertion failures count as kills.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| packages/broker/src/aws/worker-machines/session-worker-machines.ts `health` | The machine check before the ping removed | killed, 3 failed |
+| same file, `deliver` | The machine check before the POST removed | killed, 3 failed |
+| packages/broker/src/aws/machine-check.ts `machineMismatch` | `address_changed` branch removed | killed, 3 failed |
+| same | `not_running` branch removed | killed, 13 failed |
+| same, `ask` | The Describe-error branch returns "no such machine" (gone) instead of the retryable refusal | killed, 2 failed |
+| packages/broker/src/aws/ec2-delivery.ts | `failOperation` call removed from the gone branch | killed, 7 failed |
+| packages/broker/src/aws/instance-state-change.ts | `source !== "aws.ec2"` check removed | killed, 1 failed |
+| same | instance id shape check removed | killed, 1 failed |
+| packages/broker/src/aws/sessions.ts `findReadyByInstance` | Filter AND id match both removed (first READY row returned) | killed, 7 failed |
+| same | Only the id match removed, or only the filter removed | survive by design: each is a second guard for the other (equivalent mutants); the new "finds the one READY session among many" and full-envelope tests kill the two-together mutant above |
+
+New tests in this round: createEc2MachineReader through a real EC2Client over EC2's XML wire format (running, terminated with no address, InvalidInstanceID.NotFound, throttle/malformed/unauthorized as failures to ask, request filters), the FULL EventBridge state-change envelope, and the dispatcher wiring refusing an unset State table.
+
+## WORKER-DELIVERY-IDENTITY — third round (Opus review S1)
+
+In packages/broker/src/aws/machine-check-aws.ts `failOperation`, the `failActiveOperation` call for a cancel was made constant-false and tests/unit/machine-check.test.ts run: the cancel case failed (the targeted task stayed CANCEL_REQUESTED, the workspace stayed BUSY). Restored from a copy; green again.
+
+## WORKER-DELIVERY-IDENTITY — WDI-SETUP (project setup runs under the machine check)
+
+Each mutant applied singly, tests/unit/machine-check.test.ts, tests/contract/worker-delivery-identity.test.ts and tests/contract/project-setup-session.test.ts run, restored from a copy.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| machine-check.ts `expectedWorkspaceTag` | The setup runtime must carry the workspace's tag (instead of none) | killed, 2 failed |
+| machine-check.ts the grace branch for a setup row with no instance id | Removed (such a row is refused) | killed, 2 failed |
+| machine-check.ts `markRowLost` | A gone setup machine's session is never marked | killed, 5 failed |
+| machine-check-aws.ts `failOperation` | The setup branch removed (the run is not ended) | killed, 1 failed (first run survived because the delivery test injected the function; a test through `dispatcherMachineChecks` was added) |
+| sessions.ts `ProjectSetupSessionManager.ensureSession` | The session's instance not passed to the delivery | killed, 8 failed |
+
+## WORKER-DELIVERY-IDENTITY — WDI-SETUP follow-up (instance id passed by the tooling, grace end date, reserved-word fix)
+
+Each mutant applied singly to the production file, tests/unit/machine-check.test.ts, runtime-installation-registrar.test.ts, runtime-installation-cli.test.ts and dynamo-expressions-reserved-words.test.ts run, restored from a copy. All killed.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| runtime-installation.ts `requireIssuedInstance` | A registration with no instance id accepted | killed, 1 failed |
+| runtime-installation.ts `issueRuntimeInstallChallenge` | A standard-profile challenge without an instance accepted | killed, 1 failed |
+| machine-check.ts the setup grace branch | The grace end date removed (grace never ends) | killed, 1 failed |
+| packages/cli/src/admin/runtime-installation.ts | The CLI sends a standard-profile challenge without an instance id | killed, 1 failed |
+| dispatcher.ts project setup `markFailed` | The `#error` alias put back to the unaliased `error` | killed, 2 failed |
+
+## WORKER-DELIVERY-IDENTITY — leftovers after the Opus delta (S5/S1 guard, S6 subnet)
+
+Each mutant applied singly, tests/unit/machine-check.test.ts, tests/contract/worker-delivery-identity.test.ts and tests/unit/worker-delivery-identity-machines.test.ts run, restored from a copy. All killed.
+
+| Mutant / production location | Mutation | Result |
+|---|---|---|
+| machine-check.ts `machineMismatch` | The subnet comparison removed (an instance of the right id and address in another VPC passes) | killed, 3 failed |
+| machine-check-aws.ts `failOperation` | A cancel fails the active operation even when this call did not move the row | killed, 1 failed |
+| same | A cancel fails the active operation even when it is not the cancel's target | killed, 1 failed |
+| ec2-delivery.ts `machineToCheck` | A setup run held to the wrong subnets | killed, 2 failed |

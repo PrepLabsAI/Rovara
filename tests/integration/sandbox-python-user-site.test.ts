@@ -11,7 +11,7 @@ import { promisify } from "node:util";
 import { ProjectDefinitionSchema, type ProjectCommand, type ProjectDefinition } from "@agentx/contracts";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { prepareWorkspace } from "../../packages/worker/src/prepare.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 import { TaskSandbox } from "../../packages/worker/src/task-sandbox.js";
 
 const run = promisify(execFile);

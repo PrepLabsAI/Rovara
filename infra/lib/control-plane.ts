@@ -1146,8 +1146,6 @@ export class ControlPlaneStack extends Stack {
       developerSignIn.function.addEnvironment("ADMIN_CLAIM", adminClaim.valueAsString);
       developerSignIn.function.addEnvironment("ADMIN_VALUES", adminValues.valueAsString);
       addBrokerSetting(broker, naming, "taskPeopleChanges", taskParameters.taskPeopleChangesEnabled.valueAsString);
-      addBrokerSetting(broker, naming, "taskPeoplePublicInvitations", taskParameters.taskPeoplePublicInvitationsEnabled.valueAsString);
-      addBrokerSetting(broker, naming, "taskPeoplePrivateInvitations", taskParameters.taskPeoplePrivateInvitationsEnabled.valueAsString);
       addBrokerSetting(broker, naming, "workflowDependencies", taskParameters.workflowDependenciesEnabled.valueAsString);
       // Sign in with ChatGPT (#338): seals each developer's ChatGPT tokens in the State table. A
       // connection belongs to a signed-in developer, so it exists only where developer sign-in

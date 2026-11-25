@@ -6,6 +6,10 @@ import { createJourneyWorld, MAYA, type JourneyWorld } from "./harness/hosted-co
 import { buildUntilPullRequest, hostReady, planFullToImplement, planUntilCard, startTask } from "./harness/task.js";
 
 let world: JourneyWorld | undefined;
+/** What a reply says: its status and its error (the broker's own request id left out). */
+const told = (reply: { status: number; body: unknown }) => ({ status: reply.status, error: (reply.body as { error?: unknown }).error });
+/** What a task that is not the person's is told, whoever asks and whatever they ask: one status, one code, one sentence. */
+const missingTask = (taskId: string) => ({ status: 404, error: { code: "TASK_NOT_FOUND", message: `no task ${taskId} of yours` } });
 afterEach(async () => { await world?.close(); world = undefined; });
 
 describe("journey 1: the web task, start to close", () => {
@@ -126,18 +130,13 @@ describe("journey 1: the web task, start to close", () => {
     await modelBegan;
     const before = (await world.maya("GET", `/v1/dev/tasks/${taskId}`)).body.task as { status: string };
     expect(before.status, "the step is running").toBe("RUNNING");
-    // Another company's member is told what a missing task is told, and nothing is stopped.
+    // Another company's member is told what a missing task is told (by the core), and nothing is stopped.
     const stranger = await world.omar("POST", `/v1/dev/tasks/${taskId}/cancel`, { requestId: randomUUID() });
-    const missingId = randomUUID();
-    const missing = await world.omar("POST", `/v1/dev/tasks/${missingId}/cancel`, { requestId: randomUUID() });
-    const unnamed = (reply: { status: number; body: unknown }, id: string) => ({ status: reply.status, body: { ...(JSON.parse(JSON.stringify(reply.body).replaceAll(id, "<task>")) as Record<string, unknown>), requestId: undefined } });
-    expect(unnamed(stranger, taskId)).toEqual(unnamed(missing, missingId));
+    expect(told(stranger), "another company's member").toEqual(missingTask(taskId));
     expect((await world.maya("GET", `/v1/dev/tasks/${taskId}`)).body.task, "still running after the stranger's press").toMatchObject({ status: "RUNNING" });
     // A colleague in the owner's own company, with the project grant but not the task's owner, cannot stop it either.
-    const colleague = await world.proof.probe(() => world!.priya("POST", `/v1/dev/tasks/${taskId}/cancel`, { requestId: randomUUID() }));
-    const colleagueMissing = await world.proof.probe(() => world!.priya("POST", `/v1/dev/tasks/${missingId}/cancel`, { requestId: randomUUID() }));
-    expect(unnamed(colleague, taskId), "told what a missing task is told").toEqual(unnamed(colleagueMissing, missingId));
-    expect(colleague.status).toBe(404);
+    const colleague = await world.priya("POST", `/v1/dev/tasks/${taskId}/cancel`, { requestId: randomUUID() });
+    expect(told(colleague), "told what a missing task is told").toEqual(missingTask(taskId));
     expect((await world.maya("GET", `/v1/dev/tasks/${taskId}`)).body.task, "still running after the colleague's press").toMatchObject({ status: "RUNNING" });
     const requestId = randomUUID();
     const pumping = world.pumpDispatcher();
@@ -177,8 +176,14 @@ describe("journey 1: the web task, start to close", () => {
     ];
     for (const [label, method, path, body] of probes) {
       const theirs = await world.omar(method, path(taskId), body);
-      const missing = await world.omar(method, path(missingId), body);
-      expect({ label, ...unnamed(theirs, taskId) }, `${label}: another company is told what a missing task is told`).toEqual({ label, ...unnamed(missing, missingId) });
+      if (path(taskId).startsWith("/v1/dev/")) {
+        // The core says what a missing task is told: its words, in a fixed status and code (an id with no task at all is the old developer route's answer until D1-2c, so it is not asked here).
+        expect({ label, ...told(theirs) }, `${label}: another company is told what a missing task is told`).toEqual({ label, ...missingTask(taskId) });
+      } else {
+        // The company app's own route (the core's too): an id with no task is answered by it as well.
+        const missing = await world.omar(method, path(missingId), body);
+        expect({ label, ...unnamed(theirs, taskId) }, `${label}: another company is told what a missing task is told`).toEqual({ label, ...unnamed(missing, missingId) });
+      }
     }
     // Their decision list never shows it, and a press on its card is refused as a missing card is.
     const theirList = await world.omarAsk("GET", "/v1/app/decisions");

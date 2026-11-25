@@ -12,7 +12,7 @@ import { EVAL_HEALTH_RESULT_PATH, EVAL_HEALTH_RUN_MAX_MS, PrepareEvalHealthSchem
 import { createProcessCandidateGit } from "./e2e-candidate-source.js";
 import type { PreparationManifest } from "./prepare.js";
 import { setupWorkspaceKey } from "./setup-network.js";
-import type { DockerCli } from "./swebench/containers.js";
+import type { DockerCli } from "./docker-cli.js";
 import { withEvalPinnedCandidate } from "./verification/eval-plan-source.js";
 import { runEvalHealthJob, type EvalHealthJobPorts } from "./verification/eval-health-job.js";
 import { evalEnvironmentWithGateway, evalFinalCheckForTask, evalHostSourcesFor } from "./verification/eval-wiring.js";

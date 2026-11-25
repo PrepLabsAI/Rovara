@@ -63,7 +63,7 @@ function fleetDeps(): NonNullable<CodeModuleDeps["workerMachines"]> {
   const world = createSessionMachinesWorld();
   return {
     sessions: world.sessions, companyOfWorkspace: async () => COMPANY_A, binding: async () => BINDING,
-    stopInstance: async () => ({ gone: true }), sign: (message: Uint8Array) => world.sign(message), post: async () => ({ status: 200, body: "{}" }), ping: async () => undefined,
+    stopInstance: async () => ({ gone: true }), sign: (message: Uint8Array) => world.sign(message), post: async () => ({ status: 200, body: "{}" }), ping: async () => undefined, verifyMachine: async () => ({ ok: true }),
   };
 }
 

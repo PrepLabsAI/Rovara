@@ -12,7 +12,7 @@ import {
   hostedFakesLauncherFor, startGeneralFakesHelper, writeGeneralFakesRunFiles, type GeneralFakesLaunchNetwork, type StartGeneralFakesHelperInput,
 } from "../../packages/worker/src/general-fakes-hosted.js";
 import { TASK_SANDBOX_NETWORK } from "../../packages/worker/src/task-sandbox.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 
 const WS = "0123456789abcdef";
 const WORKSPACE = "0b9f6a1e-6c1e-4c53-9d0a-5d3a1d6f2c11";

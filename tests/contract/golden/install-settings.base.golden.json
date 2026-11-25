@@ -1,0 +1,228 @@
+{
+ "operatorParameters": {
+  "access": [],
+  "foundation": [],
+  "identity": [],
+  "runtime": [
+   "E2eAgentModelId",
+   "ModelFallback"
+  ],
+  "control-plane": [
+   "BudgetMonthlyUsd",
+   "BudgetScope",
+   "SlackAppPostedMessages",
+   "SlackThreadTurnsPerMinute",
+   "SlackMemberWorkspaceLimit",
+   "SlackOrganizationWorkspaceLimit",
+   "McpConfirmElicitation",
+   "TaskPeopleChangesEnabled",
+   "TaskPeoplePublicInvitationsEnabled",
+   "TaskPeoplePrivateInvitationsEnabled",
+   "TaskPersonProofEnabled",
+   "WorkflowDependenciesEnabled",
+   "ChannelAdapters",
+   "SlackViaChannel",
+   "CoreTaskCapUsd",
+   "CoreCompanyDayCapUsd",
+   "CorePolicyHook",
+   "CoreLessons",
+   "CoreSystemRuns",
+   "CoreModelGatewayHost",
+   "CoreAgentModel",
+   "TestServices",
+   "TestServiceImages",
+   "SavedEnvironments",
+   "WorkerSandboxEgress",
+   "CoreAttentionEmail",
+   "CoreAttentionEmailHost",
+   "CoreAttentionEmailSender",
+   "CoreAnswersModel",
+   "CoreLearningModel",
+   "CompanySignIn",
+   "CompanySelfServe",
+   "SlackCompanyWorkspaces",
+   "CoreAgentModelChoice"
+  ],
+  "slack": [
+   "SlowTurnMinutes",
+   "ModelFallback",
+   "CompanySignIn",
+   "SlackCompanyWorkspacesState"
+  ]
+ },
+ "namedEnvironmentOnlyParameters": [
+  "McpConfirmElicitation",
+  "ChannelAdapters",
+  "CoreTaskCapUsd",
+  "CoreCompanyDayCapUsd",
+  "CorePolicyHook",
+  "CoreLessons",
+  "CoreSystemRuns",
+  "CoreModelGatewayHost",
+  "CoreAgentModel",
+  "CoreAnswersModel",
+  "CoreLearningModel",
+  "CoreAttentionEmail",
+  "CoreAttentionEmailHost",
+  "CoreAttentionEmailSender",
+  "TestServices",
+  "TestServiceImages",
+  "CoreAgentModelChoice",
+  "WorkerSandboxEgress"
+ ],
+ "brokerSettings": [
+  {
+   "key": "memberWorkspaceLimit",
+   "code": "ml",
+   "variable": "SLACK_MEMBER_WORKSPACE_LIMIT"
+  },
+  {
+   "key": "organizationWorkspaceLimit",
+   "code": "ol",
+   "variable": "SLACK_ORGANIZATION_WORKSPACE_LIMIT"
+  },
+  {
+   "key": "taskPeopleChanges",
+   "code": "tc",
+   "variable": "AGENTX_TASK_PEOPLE_CHANGES_ENABLED"
+  },
+  {
+   "key": "taskPeoplePublicInvitations",
+   "code": "tu",
+   "variable": "AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED"
+  },
+  {
+   "key": "taskPeoplePrivateInvitations",
+   "code": "tv",
+   "variable": "AGENTX_TASK_PEOPLE_PRIVATE_INVITATIONS_ENABLED"
+  },
+  {
+   "key": "workflowDependencies",
+   "code": "wd",
+   "variable": "AGENTX_WORKFLOW_DEPENDENCIES_ENABLED"
+  },
+  {
+   "key": "slackTeamId",
+   "code": "tm",
+   "variable": "SLACK_TEAM_ID"
+  },
+  {
+   "key": "signInSlack",
+   "code": "ss",
+   "variable": "DEVELOPER_SIGNIN_SLACK"
+  },
+  {
+   "key": "signInSlackSince",
+   "code": "sn",
+   "variable": "DEVELOPER_SIGNIN_SLACK_SINCE"
+  },
+  {
+   "key": "oidcSince",
+   "code": "os",
+   "variable": "DEVELOPER_OIDC_SINCE"
+  },
+  {
+   "key": "signInGithub",
+   "code": "gh",
+   "variable": "DEVELOPER_SIGNIN_GITHUB"
+  },
+  {
+   "key": "githubSince",
+   "code": "gs",
+   "variable": "DEVELOPER_GITHUB_SINCE"
+  },
+  {
+   "key": "mcpConfirmElicitation",
+   "code": "mc",
+   "variable": "MCP_CONFIRM_ELICITATION"
+  },
+  {
+   "key": "coreTaskCap",
+   "code": "ct",
+   "variable": "ROVARA_CORE_TASK_CAP_USD"
+  },
+  {
+   "key": "coreCompanyDayCap",
+   "code": "cd",
+   "variable": "ROVARA_CORE_COMPANY_DAY_CAP_USD"
+  },
+  {
+   "key": "coreLessons",
+   "code": "cl",
+   "variable": "ROVARA_CORE_LESSONS"
+  },
+  {
+   "key": "coreSystemRuns",
+   "code": "sy",
+   "variable": "ROVARA_CORE_SYSTEM_RUNS"
+  },
+  {
+   "key": "slackCompanyWorkspaces",
+   "code": "cw",
+   "variable": "SLACK_COMPANY_WORKSPACES",
+   "switchFlag": true
+  },
+  {
+   "key": "coreModelGateway",
+   "code": "gw",
+   "variable": "ROVARA_CORE_MODEL_GATEWAY_URL",
+   "httpsOrigin": true
+  },
+  {
+   "key": "coreAgentModel",
+   "code": "am",
+   "variable": "ROVARA_CORE_AGENT_MODEL"
+  },
+  {
+   "key": "testServices",
+   "code": "td",
+   "variable": "ROVARA_TEST_SERVICES"
+  },
+  {
+   "key": "savedEnvironments",
+   "code": "sv",
+   "variable": "ROVARA_SAVED_ENVIRONMENTS"
+  },
+  {
+   "key": "testServiceImages",
+   "code": "ti",
+   "variable": "ROVARA_TEST_SERVICES_HOSTED_IMAGES"
+  },
+  {
+   "key": "coreAnswersModel",
+   "code": "aa",
+   "variable": "ROVARA_CORE_ANSWERS_MODEL"
+  },
+  {
+   "key": "coreLearningModel",
+   "code": "lm",
+   "variable": "ROVARA_CORE_LEARNING_MODEL"
+  },
+  {
+   "key": "channelAdapters",
+   "code": "ca",
+   "variable": "CHANNEL_ADAPTERS"
+  },
+  {
+   "key": "companySignIn",
+   "code": "si",
+   "variable": "COMPANY_SIGNIN",
+   "switchFlag": true
+  },
+  {
+   "key": "coreAttentionEmail",
+   "code": "ae",
+   "variable": "ROVARA_ATTENTION_EMAIL"
+  },
+  {
+   "key": "coreAgentModelChoice",
+   "code": "mx",
+   "variable": "ROVARA_CORE_AGENT_MODEL_CHOICE"
+  },
+  {
+   "key": "installLayout",
+   "code": "ly",
+   "variable": "AGENTX_INSTALL_LAYOUT"
+  }
+ ]
+}

@@ -16,7 +16,7 @@
 // It starts a PREPARE-ONLY workspace: no task, no model, no key, no branch, no pull request, no approval. The system owner never signs in and never holds a person's rights.
 import { createHash } from "node:crypto";
 import {
-  AGENTX_NAME_PATTERN, SYSTEM_RUN_AUDIT, SYSTEM_RUN_JOB, SystemRunReasonSchema, isFreeSystemRunKind, systemOwnerIdOf, type FreeSystemRunKind, type SystemRunKind, type SystemRunRefusal,
+  AGENTX_NAME_PATTERN, SYSTEM_RUN_AUDIT, SYSTEM_RUN_JOB, SystemRunReasonSchema, systemOwnerIdOf, type FreeSystemRunKind, type SystemRunKind, type SystemRunRefusal,
 } from "@agentx/contracts";
 import { claimAutomaticRun, eventIdOf, releaseAutomaticRun } from "../automatic-runs/cap.js";
 import { startProjectSetupCheck, setupStateOf } from "../setup-agent/check.js";
@@ -62,6 +62,9 @@ export function systemRunRequestId(...parts: readonly string[]): string {
   return `${joined.slice(0, 8)}-${joined.slice(8, 12)}-${joined.slice(12, 16)}-${joined.slice(16, 20)}-${joined.slice(20)}`;
 }
 
+/** The kinds this starter has a start for: the two setup checks. `saved_env_rebuild` is in the closed list (SI-1) but has no start function until SI-2: it is refused before any read, like a kind outside the list. */
+const startable = (kind: unknown): kind is "setup_check" | "nightly_check" => kind === "setup_check" || kind === "nightly_check";
+
 const refused = (reason: SystemRunRefusal): SystemStartResult => ({ outcome: "refused", reason });
 
 export function createSystemStarter(deps: SystemStarterDeps): { start(input: SystemStartInput): Promise<SystemStartResult> } {
@@ -72,8 +75,8 @@ export function createSystemStarter(deps: SystemStarterDeps): { start(input: Sys
   return {
     async start(input) {
       // 1. The request, at runtime (never only by type).
-      if (!isFreeSystemRunKind(input.kind)) return refused("kind_not_allowed");
-      const kind: FreeSystemRunKind = input.kind;
+      if (!startable(input.kind)) return refused("kind_not_allowed");
+      const kind = input.kind;
       const reason = SystemRunReasonSchema.safeParse(input.reason);
       if (!reason.success || typeof input.project !== "string" || !AGENTX_NAME_PATTERN.test(input.project) || typeof input.requestId !== "string" || !UUID.test(input.requestId)) return refused("invalid_request");
       const project = input.project;

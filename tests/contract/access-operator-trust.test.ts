@@ -171,10 +171,10 @@ describe("operatorTrustProblem: what the CLI and upgrade refuse before any deplo
     env: "staging", region: "us-east-1", account: ACCOUNT, models: { orchestrator: "a", classifier: "b", worker: "c" }, identity: { mode: "cognito" },
     github: { privateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:k-AbCdEf" }, callbackSigningKey: "k".repeat(32), release: { version: "1.0.0" }, ...extra,
   } as unknown as InstallAnswers);
-  it("stackParameters is the backstop for every caller: the access stack never gets a refused pair, and the id goes through only when set", () => {
+  it("stackParameters is the backstop for every caller: the access stack never gets a refused pair, and the id is always sent (empty when none: F1 L1a-1 review R2, so the one carry rule cannot keep an old id)", () => {
     const params = (extra: Partial<InstallAnswers>) => stackParameters("access", answers(extra), {}, { packages: false });
-    expect(params({})).toEqual({ PermissionsBoundaryArn: "", OperatorPrincipalArn: "" });
-    expect(params({ operatorPrincipalArn: sameRole })).toEqual({ PermissionsBoundaryArn: "", OperatorPrincipalArn: sameRole });
+    expect(params({})).toEqual({ PermissionsBoundaryArn: "", OperatorPrincipalArn: "", OperatorExternalId: "" });
+    expect(params({ operatorPrincipalArn: sameRole })).toEqual({ PermissionsBoundaryArn: "", OperatorPrincipalArn: sameRole, OperatorExternalId: "" });
     expect(params({ operatorPrincipalArn: otherRole, operatorExternalId: EXT })).toEqual({ PermissionsBoundaryArn: "", OperatorPrincipalArn: otherRole, OperatorExternalId: EXT });
     expect(() => params({ operatorPrincipalArn: `arn:aws:iam::${ACCOUNT}:root` })).toThrow(/whole account/u);
     expect(() => params({ operatorPrincipalArn: otherRole })).toThrow(/needs an external id/u);

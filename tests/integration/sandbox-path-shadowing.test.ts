@@ -6,7 +6,7 @@ import { chmod, mkdir, mkdtemp, realpath, rm, stat, writeFile } from "node:fs/pr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import type { DockerCli } from "../../packages/worker/src/docker-cli.js";
 import { SANDBOX_PYTHON_USER_BASE_DIRECTORY, TaskSandbox } from "../../packages/worker/src/task-sandbox.js";
 
 const IMAGE = "123456789012.dkr.ecr.us-west-2.amazonaws.com/agentx-staging/worker@sha256:" + "d".repeat(64);

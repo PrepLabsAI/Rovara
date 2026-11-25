@@ -33,7 +33,7 @@ import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
 import { fileOpsExec, type FileOpsTarget } from "./file-ops-exec.js";
 import { daemonProxyFromEnvironment, gatewayEgressFor, sandboxNetworkFromEnvironment } from "./task-sandbox.js";
 import type { CommandResult } from "./readiness.js";
-import { createDockerCli, type DockerCli } from "./swebench/containers.js";
+import { createDockerCli, type DockerCli } from "./docker-cli.js";
 import { hiddenWorkspaceDirectories, isMaskVolumeName } from "./workspace-state.js";
 import { assertNoInstallSecrets } from "./install-secrets.js";
 

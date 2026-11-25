@@ -27,7 +27,7 @@ import { readSetupProposalAnswer, type SetupDraftRepository } from "./setup-draf
 import type { SetupScan } from "./setup-scan.js";
 import type { TrackedPaths } from "./setup-citations.js";
 import { GATEWAY_RESOLVER_DIRECTORY, MASK_OPTIONS, SANDBOX_INIT, TASK_SANDBOX_NETWORK, TASK_SANDBOX_USER, TaskSandbox, gatewayEgressFor, sandboxNetworkFromEnvironment, type TaskSandboxOptions } from "./task-sandbox.js";
-import { createDockerCli, type DockerCli } from "./swebench/containers.js";
+import { createDockerCli, type DockerCli } from "./docker-cli.js";
 
 /** The agent's tools: read-only file tools and the shell. No write tool, no edit tool. Passed to the session as `agentTools`. */
 export const SETUP_AGENT_TOOLS = ["read", "bash", "grep", "find", "ls"] as const;

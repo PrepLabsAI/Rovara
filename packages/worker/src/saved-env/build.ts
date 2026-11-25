@@ -61,7 +61,7 @@ import {
 import { proveEnvironment } from "../prove.js";
 import { defaultRealPath, sharesWorkspace, type FreshSandbox } from "../setup-agent-prove.js";
 import { runIsolatedGit } from "../isolated-repository.js";
-import type { DockerCli } from "../swebench/containers.js";
+import type { DockerCli } from "../docker-cli.js";
 import { blobKeyHash, environmentKeyFromRepositories, hashWorkspaceFile, isRegularBlobMode, type KeyRepository } from "./key.js";
 import { DEFAULT_LINK_POLICY, rewriteWorkspaceLinks, type LinkPolicy } from "./links.js";
 import { compareTrackedFiles, countNonStandardFlags, minimalGitConfig, originUrlIsSafe, originUrlOf, parseLsTree, readGitConfig, unsafeGitEntries, type TreeEntry } from "./tree-check.js";
