@@ -223,11 +223,11 @@ describe("the core's handlers on the deployed API", () => {
   // RD-2.0: the task page's four new reads are mounted once; the read rule decides who may read, and a person it admits is answered the fixed ROUTE_NOT_SERVED refusal (fail closed) until each lane fills its handler.
   describe("the task page's new reads (RD-2.0)", () => {
     const READS = ["spec", "checks", "changes", "timeline"] as const;
-    // RD-2a filled the spec read (tests/unit/rd2a-spec-read.test.ts is its oracle: a real task answers, a missing, another company's and an unreadable one answer the same refusal). The others stay stubs until their lanes fill them.
-    const STUBS = ["checks", "changes", "timeline"] as const;
     const notServed = { error: { code: "ROUTE_NOT_SERVED", message: ROUTE_NOT_SERVED_MESSAGE } };
-    // A read leaves this list when its lane fills the handler (RD-2b2: changes; its own oracle test is tests/unit/rd2b2-changes-read.test.ts).
-    const STUBS = READS.filter((read) => read !== "changes");
+    // A read leaves the stub list when its lane fills the handler; each lane adds its name here and keeps the others (union).
+    // RD-2a: spec (tests/unit/rd2a-spec-read.test.ts is its oracle), RD-2b1: checks (rd2b1-checks-read.test.ts), RD-2b2: changes (rd2b2-changes-read.test.ts).
+    const FILLED: readonly string[] = ["spec", "checks", "changes"];
+    const STUBS = READS.filter((read) => !FILLED.includes(read));
 
     it("answers a reader of the task ROUTE_NOT_SERVED, the row's own example refusal; a missing task and another company's are the same missing-task answer; nothing is written", async () => {
       const { world, app, companyOf, remember } = await world2();

@@ -1329,3 +1329,32 @@ The changes handler reads `context.decision` (the mount asked `decideTaskRead`);
 | R3 | the mount does not forward `authorize` (the diff route cannot ask the rule) | "pages the pull request's files through the deployment's diff route": the route mock asks `authorize("diff")` and its answer is the task; without it no page is read |
 
 A share's answer on the changes read is the table's 403 TASK_PART_NOT_SHOWN (rd2b2 "has no shared-reader rule of its own", and the 18 x 14 table). An earlier mutant of this lane that built the pull request page reader while the part was false survived because the sources object was replaced by `{}` anyway; the sources are now built in one function (`sourcesOf`) so there is nothing redundant to mutate.
+
+## RD-2b1 - the task page's checks read (on RD-2.0 a65c40ce7)
+
+Production guards this lane adds: the task read's own rule first (`loadReadableTask`) and the retention check on each linked file in `core-host/task-checks-routes.ts`; the plan version choice (the approved one); and, in `core/task-view/checks.ts`, the current-code rules (a result or a pack for other code is Out of date or ignored), the state derivation (known failing, couldn't verify, flaky, running), the claim mapping, the review rows (blocking findings only, accepted flag, failure marker), the failure budget, the links check and the plain-words rule. Each mutation applied singly to the working tree and restored; all in tests/unit/rd2b1-checks-read.test.ts.
+
+| Mutant / location | Mutation | Failing test |
+|---|---|---|
+| M1 routes: access rule | `loadReadableTask` replaced by a bare task read | "the task read's own rule" (another company, colleague and admin read the task) and "two companies' packs stay apart" |
+| M2 checks.ts `verifiedOf` | a result for other code read as current | "a result for other code ... is Out of date" |
+| M3 checks.ts pack gate | a pack for other code accepted | same test (a foreign pack's before/after shows) |
+| M4 routes: retention | a file gone from the store still "available" | "the kept pack: ... 'expired'" |
+| M5 routes: size check | other bytes under the name still "available" | same test ("withheld") |
+| M6 checks.ts `rowStateOf` | `already_failing` no longer Known failing | "passed, failed, flaky, known failing, couldn't verify ..." |
+| M7 checks.ts `rowStateOf` | a missing program no longer Couldn't verify | same test |
+| M8 checks.ts reviews | non-blocking remarks listed as findings | "the Code and Security review rows" |
+| M9 checks.ts reviews | `accepted` always false | same test |
+| M10 checks.ts failures | the ten-failure budget never spent | "lists the failing tests with their likely cause, ten across all rows" |
+| M11 checks.ts links | links built for another pack used | "the output tail is a link ... 'withheld'" (other pack case) |
+| M12 checks.ts acceptance | every check listed for every claim | "each plan claim lists the checks that prove it", "a check the plan proves ...", the scenario test and the owner read |
+| M13 routes: plan version | the approved version ignored (latest read) | "the claims come from the plan version the owner approved" |
+| M14 checks.ts scenarios | the end-to-end aggregate shown beside its scenarios | "the aggregate end-to-end result is shown as its scenarios" |
+| M15 checks.ts words | text not made plain | "every text from a repository, a worker or a model is made plain" |
+| M16 checks.ts `rowStateOf` | Running read as Not run yet | states test and the Out-of-date/Running case |
+| M17 checks.ts flaky | flaky never read | states test |
+| M18 checks.ts `verifiedOf` | an Out of date row shows the current commit | "a result for other code ... is Out of date" (ranOn is only the time) |
+| M19 routes: plan | an unreadable plan answered silently | "a plan that cannot be read says so" |
+| M20 checks.ts reviews | a review's failure marker ignored | "the Code and Security review rows" |
+
+All 20 killed; the restored tree passes. Evidence applies to this lane's commit (parent a65c40ce7); the final-head gate and review belong to 9d.
