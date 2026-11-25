@@ -16,7 +16,7 @@
 // merge of the agent's findings.
 import { resolve } from "node:path";
 import {
-  AgentXError, isBudgetExhaustedMessage, SETUP_RUN_REFUSED_MESSAGES, STANDIN_WRITER_WORDS, SetupRunSummarySchema, agentXError, effectiveSetupAgentLimits, setupProposalAnswerOf, upkeepPauseReasonOfText, type SetupAgentLimits, type SetupCarryOver, type UpkeepPauseReason, type EvalDependencyList, type SetupEvalDiscoveryReport, type SetupJournalEntry, type SetupProposal,
+  AgentXError, gatewayStopOfText, isBudgetExhaustedMessage, SETUP_RUN_REFUSED_MESSAGES, STANDIN_WRITER_WORDS, SetupRunSummarySchema, agentXError, effectiveSetupAgentLimits, setupProposalAnswerOf, upkeepPauseReasonOfText, type SetupAgentLimits, type SetupCarryOver, type UpkeepPauseReason, type EvalDependencyList, type SetupEvalDiscoveryReport, type SetupJournalEntry, type SetupProposal,
   type SetupRunSummary,
 } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
@@ -246,7 +246,7 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
   /** Why the gateway paused nightly upkeep under this run, when its fixed sentence was what refused a call (L4-SR2). */
   let upkeepPause: UpkeepPauseReason | undefined;
   /** L4-T5: set when a company admin turned setup runs off under this run, so the end says what to do and not "Try again". */
-  let cannot: "company_off" | undefined;
+  let cannot: SetupRunSummary["cannot"];
   /** The command place of each journal entry a person's command wrote (so a website it hit is asked for with the command's place, from which the broker finds who typed it). */
   const seqOfEntry = new Map<number, number>();
 
@@ -316,6 +316,8 @@ export async function runSetupAgent(input: SetupRunInput): Promise<SetupRunResul
         // L4-SR2: the gateway's upkeep cap refused a call of an unattended repair draft (HTTP 422 `upkeep_paused`, read from its fixed sentence). The run ends and says why; the broker only takes the word from an unattended draft.
         const paused = upkeepPauseReasonOfText(outcome?.errorMessage) ?? upkeepPauseReasonOfText(failure?.message);
         if (paused !== undefined) { upkeepPause ??= paused; governor.stop("infrastructure"); void session?.abort().catch(() => undefined); }
+        // DEC 254zzz491: the gateway refused the call because the company has no monthly AI limit. The run ends at once (trying again changes nothing) and the end says what to fix, in the shared words.
+        else if (gatewayStopOfText(outcome?.errorMessage) !== undefined || gatewayStopOfText(failure?.message) !== undefined) { cannot ??= gatewayStopOfText(outcome?.errorMessage) ?? gatewayStopOfText(failure?.message); governor.stop("infrastructure"); void session?.abort().catch(() => undefined); }
         else if (budgetExhaustedFromMarker(outcome?.errorMessage) !== undefined || isBudgetExhaustedMessage(failure?.message)) governor.stop("budget_used");
         else if (failure instanceof AgentXError && failure.code === "MODEL_NOT_ALLOWED") governor.stop("infrastructure");
       }

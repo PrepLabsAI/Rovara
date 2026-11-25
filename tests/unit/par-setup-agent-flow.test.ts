@@ -335,6 +335,33 @@ describe("a setup run, from the owner's request to the use of what it found", ()
     }
   });
 
+  it("DEC 254zzz491: a run for a company with no monthly AI limit fails with the shared sentence, whole, however the worker ended it", async () => {
+    const SENTENCE = "No monthly AI limit is set for your company. Set one in Admin, AI and spending.";
+    const summary = await launch();
+    const summaryRun = await startRun(summary);
+    await summary.callback(summaryRun.job, "result", { status: "SUCCEEDED", result: { setupRunSummary: { ...SUMMARY, stop: "infrastructure", partial: true, cannot: "company_limit_not_set" } } });
+    expect((await summary.api(ROUTE)).body).toMatchObject({ status: "failed", stop: "infrastructure", failure: SENTENCE });
+    const errored = await launch();
+    const erroredRun = await startRun(errored);
+    await errored.callback(erroredRun.job, "result", { status: "FAILED", error: agentXError("MODEL_NOT_ALLOWED", SENTENCE).message });
+    expect((await errored.api(ROUTE)).body).toMatchObject({ status: "failed", stop: "infrastructure", failure: SENTENCE });
+    // The second stop (Rovara AI not confirmed): its own sentence, whole, by the summary and by a FAILED operation.
+    const NOT_CONFIRMED = "Choose how Rovara pays for AI: confirm Rovara AI, billed to your company, up to your monthly limit, or connect your own AI key.";
+    const confirmed = await launch();
+    const confirmedRun = await startRun(confirmed);
+    await confirmed.callback(confirmedRun.job, "result", { status: "SUCCEEDED", result: { setupRunSummary: { ...SUMMARY, stop: "infrastructure", partial: true, cannot: "rovara_ai_not_confirmed" } } });
+    expect((await confirmed.api(ROUTE)).body).toMatchObject({ status: "failed", stop: "infrastructure", failure: NOT_CONFIRMED });
+    const confirmedErr = await launch();
+    const confirmedErrRun = await startRun(confirmedErr);
+    await confirmedErr.callback(confirmedErrRun.job, "result", { status: "FAILED", error: agentXError("MODEL_NOT_ALLOWED", NOT_CONFIRMED).message });
+    expect((await confirmedErr.api(ROUTE)).body).toMatchObject({ status: "failed", stop: "infrastructure", failure: NOT_CONFIRMED });
+    // A longer text that only contains the sentence is an ordinary fault.
+    const longer = await launch();
+    const longerRun = await startRun(longer);
+    await longer.callback(longerRun.job, "result", { status: "FAILED", error: `${agentXError("MODEL_NOT_ALLOWED", SENTENCE).message} more` });
+    expect((await longer.api(ROUTE)).body).toMatchObject({ status: "failed", stop: "infrastructure", failure: "The setup run could not go on. Try again." });
+  });
+
   it("L4-T5: a run a company admin turned off says so and what to do; the same stop without that cause says to try again, and the cause on any other stop changes nothing", async () => {
     const off = await launch();
     const offRun = await startRun(off);

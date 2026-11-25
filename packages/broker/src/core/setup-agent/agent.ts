@@ -18,7 +18,7 @@ import { workspaceKeys } from "../task-flow/workspace-location.js";
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
-  isBudgetExhaustedMessage, SETUP_HOST_WAIT_MAX_HOURS, SETUP_RUN_LIMIT_STOPS, SETUP_RUN_REFUSED_MESSAGES, SetupRunSummarySchema, agentXError, change, SetupCarryOverSchema, effectiveSetupAgentLimits, isSetupRunLimitStop, oneLineText, sanitizeSetupProposal, standInWriterCard, when,
+  GATEWAY_STOP_FAILURES, gatewayStopOfText, isBudgetExhaustedMessage, SETUP_HOST_WAIT_MAX_HOURS, SETUP_RUN_LIMIT_STOPS, SETUP_RUN_REFUSED_MESSAGES, SetupRunSummarySchema, agentXError, change, SetupCarryOverSchema, effectiveSetupAgentLimits, isSetupRunLimitStop, oneLineText, sanitizeSetupProposal, standInWriterCard, when,
   type DocumentStore, type JsonValue, type OrgId, type SetupAgentLimits, type SetupAgentWire, type SetupCarryOver, type SetupProposal, type SetupRunEndWord, type SetupRunRefusal, type SetupRunSummary, type SetupVerification, type StandInWriterCard, type StoredDocument, type TransactItem,
 } from "@agentx/contracts";
 import { taskKey } from "../task-flow/keys.js";
@@ -53,6 +53,8 @@ export const SETUP_AGENT_FAILURES = {
   noModelProxy: "This Rovara install can't count the AI spending of a setup run. Ask whoever runs this Rovara install to connect it, then run the setup again.",
   isolationUnavailable: "This Rovara install's machines can't run a setup safely yet. Ask whoever runs this Rovara install, then run the setup again.",
   company_off: "A company admin turned setup runs off, so this one was stopped. Ask a company admin to turn them back on, then run the setup again.",
+  // DEC 254zzz491: the gateway's company stops (no monthly AI limit): the shared sentence, whole (Cloud matches it inside the failure to show its fix-it card).
+  ...GATEWAY_STOP_FAILURES,
 } as const;
 
 /** The sentence the run is asked: the project's own name and nothing from a repository, the same for every run of a project. */
@@ -133,6 +135,17 @@ export interface SetupAgentView {
  * (a recorded end the view then shows); the status view never turns a run into "failed" on a clock while its worker is still heard from, so this bound must not shrink with the park limit. */
 const RUN_GONE_BACKSTOP_WAIT_HOURS = 24;
 
+/**
+ * The summary as the OUTWARD setup view sends it (`setupAgentState`, what the routes answer): without `cannot` and `pause`. Released Cloud reads the view with its own strict summary schema, which has neither key, so a run's reason
+ * (`company_off`, a gateway stop) travels only as the failure SENTENCE (`SETUP_AGENT_FAILURES`), and an upkeep pause is not shown on the Setup tab. `readState` keeps both: the repair draft reads `pause` from it to stop and notify.
+ */
+function outwardSummary<T extends { cannot?: unknown; pause?: unknown }>(summary: T): Omit<T, "cannot" | "pause"> {
+  const rest: Partial<T> = { ...summary };
+  delete rest.cannot;
+  delete rest.pause;
+  return rest as Omit<T, "cannot" | "pause">;
+}
+
 /** What a run may take at the longest before it reads as gone: its wall clock, the backstop wait above, and an hour of grace for the end to be reported. Past it with no result the run reads as failed. */
 function staleAfterMs(limits: SetupAgentLimits): number {
   return (limits.wallClockMin + RUN_GONE_BACKSTOP_WAIT_HOURS * 60 + 60) * 60_000;
@@ -158,7 +171,12 @@ export interface SetupAgentReadDeps {
 
 /** Where the project's run stands, read now. See the file header: the pointer, then the task. */
 export async function setupAgentState(deps: SetupAgentReadDeps, project: string, latestRevision: number): Promise<SetupAgentView> {
-  return (await readState(deps, project, latestRevision)).view;
+  return outwardView((await readState(deps, project, latestRevision)).view);
+}
+
+/** A view as the routes send it (see `outwardSummary`): every answer that carries a read view goes through this, the Stop answer included. */
+function outwardView(view: SetupAgentView): SetupAgentView {
+  return view.summary === undefined ? view : { ...view, summary: outwardSummary(view.summary) };
 }
 
 export async function readState(deps: SetupAgentReadDeps, project: string, latestRevision: number): Promise<{ view: SetupAgentView; pointer?: SetupAgentPointer }> {
@@ -281,12 +299,15 @@ export function resultOf(task: Pick<TaskRecord, "startingRevision" | "preparedBa
     // L4-T5: a worker that refused to start for a reason trying again cannot change says so in its own fixed sentence; the broker answers with what to fix.
     const refused = outcome.status === "FAILED" ? refusalOf(outcome.error) : undefined;
     if (refused !== undefined) return failed("infrastructure", SETUP_AGENT_FAILURES[refused], kept);
+    // DEC 254zzz491: a run the gateway refused for a company with no monthly AI limit says so in the shared words (the worker's own summary says it too, above), whichever way the end came.
+    const stopped = outcome.status === "FAILED" ? gatewayStopOfText(outcome.error) : undefined;
+    if (stopped !== undefined) return failed("infrastructure", SETUP_AGENT_FAILURES[stopped], kept);
     const stop = outcome.status !== "CANCELLED" && isBudgetExhaustedMessage(outcome.error) ? "budget_used" : "infrastructure";
     return failed(stop, SETUP_AGENT_FAILURES[stop], kept);
   }
   const { proposal, summary } = learned;
   // The worker ended the run itself without a person's stop (a fault): what it learned is kept, with the fixed sentence for a run that could not go on.
-  if (summary?.stop === "infrastructure") return failed("infrastructure", summary.cannot === "company_off" ? SETUP_AGENT_FAILURES.company_off : SETUP_AGENT_FAILURES.infrastructure, kept);
+  if (summary?.stop === "infrastructure") return failed("infrastructure", summary.cannot === undefined ? SETUP_AGENT_FAILURES.infrastructure : SETUP_AGENT_FAILURES[summary.cannot], kept);
   if (summary === undefined || !WORKER_STOPS.has(summary.stop)) return failed("infrastructure", SETUP_AGENT_FAILURES.unreadable);
   // Two stops mean there is nothing to confirm: setup needs a code change, or it changed tracked files (which are never kept).
   if (summary.stop === "needs_code_change") return failed("needs_code_change", SETUP_AGENT_FAILURES.needs_code_change, { summary });
@@ -456,7 +477,7 @@ export async function stopSetupAgent(deps: SetupAgentDeps, project: string, rawB
   const state = await readState(deps, project, latest.revision);
   // A run that reads as stale ("failed", never reported an end) may still have a live task: Stop reaches it too, so the owner is never left with a run they cannot end.
   const staleButLive = state.view.status === "failed" && state.view.failure === SETUP_AGENT_FAILURES.stale && state.view.summary === undefined;
-  if ((state.view.status !== "running" && !staleButLive) || state.pointer === undefined) return { status: 200, view: await verifiedView(deps, latest.definition, state.view) };
+  if ((state.view.status !== "running" && !staleButLive) || state.pointer === undefined) return { status: 200, view: await verifiedView(deps, latest.definition, outwardView(state.view)) };
   if (deps.starter === undefined) throw agentXError("NOT_FOUND", "setting up a project with Rovara is not set up in this deployment");
   // Who pressed Stop is written BEFORE the cancel (the first stop stands), so the end can tell a person's stop from a cancel the system made; a write that fails cancels nothing.
   await deps.store.update({

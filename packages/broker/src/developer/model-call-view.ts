@@ -4,7 +4,7 @@
 // payloads (`modelCall`, `heartbeat`). This file turns each into one fixed sentence. A sentence is built only from allow-listed tokens and numbers: the failure class and signal
 // (the same allow-list a model check uses), the provider's request id, an attempt count, a delay and a duration. It never reads the provider's message, the model's thinking, the
 // final error text, any prompt or any other free text, so none of them can reach a person through this view. Anything it cannot read as one of these shapes is not shown.
-import { E2E_MODEL_FAILURE_CLASSES, E2E_MODEL_FAILURE_SIGNAL_PATTERN, MODEL_PROVIDERS, type DeveloperTaskEvent, type E2EModelFailureClass, type ModelProvider } from "@agentx/contracts";
+import { E2E_MODEL_FAILURE_CLASSES, GATEWAY_STOPS, gatewayStopOfSignal, E2E_MODEL_FAILURE_SIGNAL_PATTERN, MODEL_PROVIDERS, type DeveloperTaskEvent, type E2EModelFailureClass, type ModelProvider } from "@agentx/contracts";
 import { MODEL_QUOTA_SIGNAL, MODEL_QUOTA_VIEW_NEXT, MODEL_QUOTA_VIEW_TEXT, RUN_PRICE_REFUSED_MESSAGE, RUN_PRICE_REFUSED_SIGNAL, classifyProviderFailure } from "@agentx/model-runtime/provider-failure";
 
 type View = Pick<DeveloperTaskEvent, "kind" | "text">;
@@ -118,6 +118,8 @@ function retryFinished(success: boolean, attempt: number | undefined): View {
 
 /** A failed `modelCall` note: the gateway's run price refusal (the worker's stable signal on HTTP 409) is a stop with its own plain sentence, never "unknown cause"; any other failure is read by its class. */
 function failedCall(call: Record<string, unknown>): View {
+  const stop = gatewayStopOfSignal(call.signal, call.status);
+  if (stop !== undefined) return { kind: "error", text: GATEWAY_STOPS[stop].message };
   if (call.signal === RUN_PRICE_REFUSED_SIGNAL && call.status === 409) return { kind: "error", text: RUN_PRICE_REFUSED_MESSAGE };
   // The gateway's fixed quota answer (the worker's stable signal on a limit, HTTP 429): the AWS quota is used up or 0, in Code's own words. Any other shape is read by its class below.
   if (call.signal === MODEL_QUOTA_SIGNAL && call.status === 429 && call.class === "limit-or-rate-limited") {

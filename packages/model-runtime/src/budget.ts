@@ -1,6 +1,6 @@
 // A spent AI budget, as the model proxy reports it (docs/learnings/model-proxy-spike.md, question 3) and as the task
 // ends because of it. Pi's own error drops the proxy's body, so the body is read once, classified and discarded here.
-import { ROVARA_AI_PAUSED_MESSAGE, budgetExhaustedWords } from "@agentx/contracts";
+import { GATEWAY_STOPS, GATEWAY_STOP_CODES, ROVARA_AI_PAUSED_MESSAGE, budgetExhaustedWords } from "@agentx/contracts";
 import { RUN_PRICE_REFUSED_MESSAGE } from "./provider-failure.js";
 
 /**
@@ -66,6 +66,8 @@ export const modelNotAllowedMarker = (text: string): string => `Model not allowe
 export function modelNotAllowedFromMarker(message: string | undefined): ModelNotAllowedError | undefined {
   if (message === ROVARA_AI_PAUSED_MESSAGE) return new ModelNotAllowedError(ROVARA_AI_PAUSED_MESSAGE);
   if (message === RUN_PRICE_REFUSED_MESSAGE) return new ModelNotAllowedError(RUN_PRICE_REFUSED_MESSAGE);
+  const stop = GATEWAY_STOP_CODES.find((code) => GATEWAY_STOPS[code].message === message);
+  if (stop !== undefined) return new ModelNotAllowedError(GATEWAY_STOPS[stop].message);
   const text = message === undefined ? undefined : NOT_ALLOWED_MARKER.exec(message)?.[1];
   return text === undefined ? undefined : new ModelNotAllowedError(text);
 }
