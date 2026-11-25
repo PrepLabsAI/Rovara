@@ -59,6 +59,12 @@ function requireChecksOperation(operation: ChecksOperation, what: string): E2EWo
 /** What a worker is told when the round it holds is an audit replay or a grounding round, kinds nothing starts or records any more (the words a lapsed round always got). */
 const RETIRED_ROUND_WORDS = { replay: "the replay round is no longer the one that was started", grounding: "the grounding round is no longer the one that was started" } as const;
 
+/** Refuses a round of a retired kind (an audit replay or a grounding round) in fixed words, before anything is read or written. */
+function refuseRetiredRound(reference: E2EWorkflowAdmissionRef): void {
+  if (reference.purpose === "replay") throw agentXError("STALE_FENCE", RETIRED_ROUND_WORDS.replay);
+  if (reference.purpose === "grounding") throw agentXError("STALE_FENCE", RETIRED_ROUND_WORDS.grounding);
+}
+
 const readBodySchema = z.object({ stage: z.literal("read"), offset: z.number().int().nonnegative(), sha256: SHA256 }).strict();
 
 /**
@@ -73,8 +79,7 @@ export async function readE2EAdmissionChunk(stores: UploadStores, readers: Round
     throw agentXError("CALLBACK_FORBIDDEN", "E2E admission read is outside its immutable reference");
   }
   // Fixed words, before anything is read: the refusal does not depend on what is stored, and nothing a caller names widens what a worker may read.
-  if (reference.purpose === "replay") throw agentXError("STALE_FENCE", RETIRED_ROUND_WORDS.replay);
-  if (reference.purpose === "grounding") throw agentXError("STALE_FENCE", RETIRED_ROUND_WORDS.grounding);
+  refuseRetiredRound(reference);
   const task = await readers.task(reference.taskId);
   const startedFor = (record: StartedRoundRecord | undefined, extra: boolean): boolean => record !== undefined && record.state === "STARTED" && record.operationId === operation.id
     && record.roundId === reference.roundId && record.admissionSha256 === reference.admissionRef.sha256 && extra;
@@ -187,6 +192,8 @@ export async function handleE2EEvidenceUpload(stores: UploadStores, operation: C
 
 async function evidenceUploadStep(stores: UploadStores, operation: ChecksOperation, rawBody: unknown, staged: string[]): Promise<Record<string, JsonValue>> {
   const admissionRef = requireChecksOperation(operation, "E2E evidence uploads");
+  // The same refusal as the admission read: a retired round takes no evidence, so it leaves no upload row, staging chunk or evidence object.
+  refuseRetiredRound(admissionRef);
   const body = parseUploadBody(evidenceBodySchema, rawBody, "E2E evidence upload");
   // A chunk of an application upload continues a row whose init was judged against the decoded admission and carries its digest (which must still be the operation's): it does not read, hash and
   // parse a multi-megabyte admission again for each 64 KiB. Anything else takes the full path below.

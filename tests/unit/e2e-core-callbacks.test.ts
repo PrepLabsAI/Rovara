@@ -368,6 +368,26 @@ const throughS3Rules = (inner: ObjectStorage): ObjectStorage => {
   };
 };
 
+describe("the evidence upload of a retired round", () => {
+  // The upload takes no evidence for an audit replay or a grounding round (nothing starts or records them): refused in the admission read's words at every stage, before anything is written.
+  it.each([["replay", "the replay round is no longer the one that was started", { sourceRoundId: randomUUID(), attempt: 2 }],
+    ["grounding", "the grounding round is no longer the one that was started", { baseCommitSha: "a".repeat(40), attempt: 1, planArtifactSha256: "9".repeat(64) }]] as const)(
+    "refuses a %s round at init, chunk and finalize, and writes nothing", async (purpose, words, more) => {
+      const w = await world({ ref: { kind: "application", purpose, ...more } });
+      const before = JSON.stringify((await w.store.query({ pk: workspacePartition(T1_COMPANY, workspaceId) })).items);
+      const operation = await w.operation();
+      const refused = async (body: Record<string, unknown>) => handleE2EEvidenceUpload(w.stores, operation, body).then(() => undefined, (caught: unknown) => caught);
+      const digest = "d".repeat(64);
+      for (const body of [{ stage: "init", groupRunId: runIds[0], totalBytes: 10, chunkCount: 1, sha256: digest },
+        { stage: "chunk", groupRunId: runIds[0], uploadId: randomUUID(), index: 0, bytesBase64: "AAAA", sha256: digest },
+        { stage: "finalize", groupRunId: runIds[0], uploadId: randomUUID(), sha256: digest }]) {
+        expect(await refused(body)).toMatchObject({ code: "STALE_FENCE", message: `STALE_FENCE: ${words}` });
+      }
+      expect(JSON.stringify((await w.store.query({ pk: workspacePartition(T1_COMPANY, workspaceId) })).items)).toBe(before);
+      expect(await w.keysWith("workflow-e2e-staging/")).toEqual([]);
+    });
+});
+
 describe("the evidence upload on the real object storage's rules", () => {
   it("writes only metadata the S3 adapter accepts, for every group's evidence and the aggregate", async () => {
     const w = await world({ objectsOf: throughS3Rules });
