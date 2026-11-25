@@ -6913,7 +6913,7 @@ function buildBrokerHandler(callbackSigningKey: string) {
     ...(slackCompany === undefined ? {} : { chatThreads: hostedSlackThreads({ workspaces: slackCompany.workspaces, log: brokerLogLine, ...(slackCompany.companies === undefined ? {} : { person: createSlackPersonResolver({ workspaces: slackCompany.workspaces, store: slackCompany.workspaces.store, companies: slackCompany.companies }) }) }) }),
   });
   builtCoreRoot = coreRoot;
-  // Lane L12: while the switch serves, the core's /v1/app/* routes too (coreApp); off, neither is set and the developer configuration is as before.
+  // Lane L12: where a core is wired, the core's /v1/app/* routes too (coreApp); without one, neither is set and the developer configuration is as before.
   const developer = linkingOnly || signIn === undefined ? undefined : withCoreRoutes(signIn, coreRoot);
   return createAwsBrokerHandler({
     core: coreRoot,

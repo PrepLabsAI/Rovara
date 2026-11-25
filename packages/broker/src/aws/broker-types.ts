@@ -268,7 +268,7 @@ export interface AwsBrokerDependencies {
  * export from `turnRecordsTableName` unless one is injected.
  */
 export type AwsBrokerInput = Omit<AwsBrokerDependencies, "catalogs"> & {
-  /** Lane E2 step 6: the core engine's root (aws/core-engine-root.ts). Absent, or its switch off: the broker never reaches the core. */
+  /** Lane E2 step 6: the core engine's root (aws/core-engine-root.ts). Absent (no core wired on this install): the broker never reaches the core. */
   core?: BrokerCoreRoot;
   catalogs?: CatalogCache<ScopeDiscovery>;
   connectorCredentials?: ConnectorCredentialsConfiguration;

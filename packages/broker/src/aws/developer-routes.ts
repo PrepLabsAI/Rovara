@@ -173,7 +173,7 @@ export interface DeveloperApiConfiguration {
   channelMembers(request: ChannelMembersRequest): Promise<ChannelMembersResponse>;
   /** Lane E2: the core's own handlers for a task stamped `core` (engine-boundary.ts), as the deployment composes them. Absent: a core task reads exactly like a missing one. */
   coreTasks?: CoreTaskEntry;
-  /** Lane L12: the core's own /v1/app/* routes (aws/core-app-routes.ts), set only while the core switch serves. Absent: every /v1/app/* path answers "route not found", reading nothing. */
+  /** Lane L12: the core's own /v1/app/* routes (aws/core-app-routes.ts), set only where a core is wired. Absent: every /v1/app/* path answers "route not found", reading nothing. */
   coreApp?: CoreAppEntry;
   /** Guided onboarding PR 16: whether archiving this company's project takes effect (its new tasks start on the core engine, which reads the archived state). Absent: an archive is refused. */
   projectArchiveTakesEffect?: (companyId: string) => boolean;
@@ -225,7 +225,7 @@ export interface DeveloperApiConfiguration {
   linearConnect?: LinearConnectWiring;
   /** R1 + L1: a member links their own Linear account, and the company's admin lists and removes links (linear-account-link-routes.ts). Absent (or no company layer): those routes are unknown. */
   linearLink?: LinearLinkWiring;
-  /** L2-4: the company's hosted intake (the first team pick seeds the ticket updates); its waiting-ticket routes are the core's (core-host/intake-routes.ts). Set only while the core switch serves and Linear is wired. */
+  /** L2-4: the company's hosted intake (the first team pick seeds the ticket updates); its waiting-ticket routes are the core's (core-host/intake-routes.ts). Set only where a core is wired and Linear is wired. */
   coreIntake?: HostedIntake;
   /** Guided onboarding PR 14 (DEC 254n item 1): the company engine model route (company-engine-model-routes.ts). Absent (no model gateway, or no company layer): the route is unknown. */
   companyEngineModel?: CompanyEngineModelWiring; companyLearningModel?: CompanyLearningModelWiring; companyEgress?: CompanyEgressWiring; // L4-EGR (company-egress-routes.ts): Rovara's outbound addresses; absent (or no company layer): the route is unknown. Kept on this line so the forwarding sites below do not move.
@@ -2597,7 +2597,7 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
 
 /**
  * Lane L12: the core engine's own /v1/app/* routes. Like /v1/dev/*, no API Gateway authorizer runs on them: a method and path with no row in the route table (APP_ROUTES), or any
- * /v1/app/* path while the core switch is off (no `coreApp`), is refused before anyone is authenticated; otherwise the broker verifies the developer token, checks the row's scope and
+ * /v1/app/* path where no core is wired (no `coreApp`), is refused before anyone is authenticated; otherwise the broker verifies the developer token, checks the row's scope and
  * hands the signed-in caller (with its verified sign-in method) to the core, which takes the company from live membership. The core's answer is returned as it is (its status and body), never cached.
  */
 export async function routeAppRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<BrokerResponse> {

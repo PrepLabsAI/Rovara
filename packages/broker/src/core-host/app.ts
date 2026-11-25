@@ -60,7 +60,7 @@ export interface CoreHostApp {
 /** What a scheduled run leaves of its function's time for the run's own end (logging, the answer): its budget is the time left less this. */
 export const JOB_EXIT_MARGIN_MS = 20_000;
 
-/** Fixed refusal: a dispatch-only root cannot run merge tracking without the merge switch blockers. */
+/** Fixed refusal: a dispatch-only root cannot run merge tracking without the wiring guard's checks (honest CI, the required services). */
 export const DISPATCH_ONLY_MERGE_TRACKING_REFUSED = "the dispatch-only core runtime cannot include merge tracking";
 
 export class DispatchOnlyMergeTrackingError extends Error {
