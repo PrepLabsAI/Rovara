@@ -178,15 +178,17 @@ describe("journey 1: the web task, start to close", () => {
     const before = await w.exchangeGrant(workspaceId, push.invocation.operationId, grant, "push");
     expect({ status: before.status, credential: Boolean(before.body.credential) }, "live: given").toEqual({ status: 200, credential: true });
     const pumping = w.pumpDispatcher();
-    // TODO(STOP-DURING-PUBLISH, the lane that is being built): when it lands, send this press as an ordinary one (drop `proof.probe`), assert it answers 200 and the operation CANCELLED, and delete the FINDING below.
-    // The press is a probe because of the finding below: the core's answer to it is a 400, which the real-core proof would call the old handler's.
-    const stopped = await w.proof.probe(() => w.maya("POST", `/v1/dev/tasks/${taskId}/cancel`, { requestId: randomUUID() })).finally(pumping);
+    // TODO(STOP-DURING-PUBLISH, the lane that is being built): when it lands, assert this press answers 200 and the operation CANCELLED, and delete the FINDING below.
+    const stopped = await w.maya("POST", `/v1/dev/tasks/${taskId}/cancel`, { requestId: randomUUID() }).finally(pumping);
     // FINDING (not this lane's): today the press on a running push is answered 400 CONFIG_INVALID "pull request stage must be ready" (the workflow cannot take the "You stopped this step" block at that stage), after the
     // operation was already asked to stop. What this journey holds is the safety property: whatever the answer, the operation is no longer live, and its grant buys nothing.
     expect(["CANCEL_REQUESTED", "CANCELLED"], `the press was answered ${String(stopped.status)}`).toContain(String(w.harness.db.find((row) => row.entityType === "OPERATION" && row.id === push.invocation.operationId)[0]!.status));
     const after = await w.exchangeGrant(workspaceId, push.invocation.operationId, grant, "push");
     expectRefusedWithTheGrantsId(w, [after], ["push"]);
-    w.proof.assertAllCore();
+    // The real-core proof, with the FINDING's press named as the ONE request the core's entries did not answer (the route refuses it with its own error, a 400): any other stray fails, and so does the press once the core answers it.
+    expect(() => w.proof.assertAllCore(), "the real-core check names exactly the press of the FINDING").toThrow(new RegExp(`^the old handler answered, not the core: POST /v1/dev/tasks/${taskId}/cancel -> 400$`, "u"));
+    expect(w.proof.seen.some((request) => request.kind === "person" && request.answeredByCore), "the core answered person-facing requests").toBe(true);
+    expect(w.proof.seen.some((request) => request.kind === "callback" && request.answeredByCore), "the core answered the worker's callbacks").toBe(true);
   }, 240_000);
 
   it("journey 5 (Git exchange, clone): after the owner's Stop, the preparing worker's grant buys no clone credential; the refusal is logged with the grant's id", async () => {
