@@ -7,7 +7,8 @@
 //  - model text is redacted; nothing of the task shows in the refusal.
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { canonicalPlanJson, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type PlanDocument, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
+import type { AgentXError} from "@agentx/contracts";
+import { agentXError, canonicalPlanJson, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type PlanDocument, type ProjectDefinition, type WorkflowSnapshot } from "@agentx/contracts";
 import { TaskSpecReadSchema } from "@preplabsai/rovara-code-api";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
@@ -64,12 +65,12 @@ interface SpecBody { taskId: string; path: string; layers: Layer[]; decisions: A
 const errorCodeOf = (answer: { body: string } | undefined): unknown => (JSON.parse(answer!.body) as { error: { code: unknown } }).error.code;
 const sha = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
 
-async function world() {
+async function world(options: { canRead?: TaskFlowDeps["access"]["canRead"] } = {}) {
   const fake = createFakeWorld();
   await registerProject(fake, FAKE_COMPANY);
   await registerProject(fake, OTHER);
   const readers = new Set<string>();
-  const app = appWith(fake, hostedRule(readers));
+  const app = appWith(fake, { ...hostedRule(readers), ...(options.canRead === undefined ? {} : { canRead: options.canRead }) });
   const members = new Map<string, CompanyMembership>();
   const companyOf = vi.fn(async (caller: DeployedCaller) => members.get(`${caller.principal.personId}|${caller.principal.companyId}`));
   const person = (personId: string, companyId: string): DeployedCaller => {
@@ -104,6 +105,10 @@ async function world() {
     await edit(taskId, (workflow) => ({ ...workflow, artifacts: [...workflow.artifacts, artifact], ...(options.stage === "waiting" ? { stage: "PLAN_REVIEW", state: "WAITING" } : {}) }));
     return artifact.sha256;
   };
+  const close = async (taskId: string) => {
+    const stored = (await fake.store.get(taskKey(taskId)))!;
+    await fake.store.put({ item: { ...stored, closedAt: "2026-11-25T13:00:00.000Z" } });
+  };
   const decide = async (taskId: string, decision: "APPROVE" | "REQUEST_CHANGES" | "REJECT", artifactDigest: string, extra: Record<string, unknown> = {}) =>
     edit(taskId, (workflow) => ({
       ...workflow,
@@ -121,7 +126,7 @@ async function world() {
     readsAsRow("tasks.spec", parsed);
     return parsed.spec;
   };
-  return { fake, app, routes, readers, person, taskOf, record, edit, write, decide, comment, read, spec, blobs };
+  return { fake, app, routes, readers, person, taskOf, record, edit, write, decide, comment, close, read, spec, blobs };
 }
 
 const quickPlan = (overrides: Partial<PlanDocument> = {}) => planDocument(overrides);
@@ -284,7 +289,10 @@ describe("GET /v1/dev/tasks/{id}/spec", () => {
     const taskId = await w.taskOf(owner, "QUICK");
     await w.write(taskId, "plan", quickPlan({ title: "Version one" }));
     const bad = await w.write(taskId, "plan", quickPlan({ title: "Version two" }), { stage: "waiting", tamper: true });
-    const tampered = layerOf(await w.spec(owner, taskId), "steps")!;
+    const answer = await w.spec(owner, taskId);
+    const tampered = layerOf(answer, "steps")!;
+    // A decision is not invited on bytes nobody can read.
+    expect(answer.waitingDocumentDigest).toBeUndefined();
     expect(tampered).toMatchObject({ state: "unreadable", version: 2, versions: [1, 2], sha256: bad, approved: false });
     expect(tampered["content"]).toBeUndefined();
     expect(JSON.stringify(tampered)).not.toContain("Version one");
@@ -363,5 +371,145 @@ describe("GET /v1/dev/tasks/{id}/spec", () => {
     await w.write(taskId, "plan", quickPlan(), { stage: "waiting" });
     await w.comment(taskId, { document: "plan", version: 1, schemaVersion: 7, aFieldFromTheFuture: { nested: true } });
     expect(layerOf(await w.spec(owner, taskId), "steps")!["commentCount"]).toBe(1);
+  });
+
+  it("an approved plan whose stored bytes no longer verify is unreadable and not claimed approved; the digest it waited on is not offered", async () => {
+    const w = await world();
+    const owner = w.person(OWNER_ID, FAKE_COMPANY);
+    const taskId = await w.taskOf(owner, "QUICK");
+    await w.decide(taskId, "APPROVE", await w.write(taskId, "plan", quickPlan(), { stage: "waiting", tamper: true }));
+    const spec = await w.spec(owner, taskId);
+    expect(layerOf(spec, "steps")).toMatchObject({ state: "unreadable", approved: false });
+    expect(spec.decisions).toEqual([]);
+    expect(spec.waitingDocumentDigest).toBeUndefined();
+  });
+
+  it("reads only the document itself: no self-check record, no evidence, no check summary (a failure of that extra work cannot hide a document whose bytes verify)", async () => {
+    const w = await world();
+    const owner = w.person(OWNER_ID, FAKE_COMPANY);
+    const taskId = await w.taskOf(owner, "QUICK");
+    await w.write(taskId, "plan", quickPlan(), { stage: "waiting" });
+    const task = await w.record(taskId);
+    const keys: string[] = [];
+    const answer = await specOf({ store: w.fake.store, read: async (key, max) => { keys.push(key); const bytes = await w.blobs.get(key, max); return bytes === undefined ? undefined : new TextDecoder().decode(bytes); } }, task);
+    expect(keys).toEqual([task.workflow!.artifacts[0]!.objectKey]);
+    expect(answer.spec.layers![0]).toMatchObject({ state: "waiting" });
+  });
+
+  it("bigger-than-Quick is for a Quick task only: a Full task with a big coding plan lists none", async () => {
+    const w = await world();
+    const owner = w.person(OWNER_ID, FAKE_COMPANY);
+    const taskId = await w.taskOf(owner, "FULL");
+    await w.edit(taskId, (workflow) => ({ ...workflow, reviewPhase: "IMPLEMENTATION_PLAN" }));
+    await w.write(taskId, "plan", planDocument({ claims: [{ id: "1", text: "Add the table.", evidence: [{ kind: "code", path: "infra/db/migrations/0042_orders.sql", startLine: 1, endLine: 4, note: "New migration." }] }] }), { stage: "waiting" });
+    const spec = await w.spec(owner, taskId);
+    expect(layerOf(spec, "steps")).toMatchObject({ state: "waiting" });
+    expect(spec.biggerThanQuick).toBeUndefined();
+  });
+
+  it("a closed task waits on nothing: the layer is just written and no digest is waited on", async () => {
+    const w = await world();
+    const owner = w.person(OWNER_ID, FAKE_COMPANY);
+    const taskId = await w.taskOf(owner, "QUICK");
+    await w.write(taskId, "plan", quickPlan(), { stage: "waiting" });
+    await w.close(taskId);
+    const spec = await w.spec(owner, taskId);
+    expect(layerOf(spec, "steps")!["state"]).toBe("written");
+    expect(spec.waitingDocumentDigest).toBeUndefined();
+  });
+
+  it("only this task's own, well-formed comments are counted: another task's row under this key, and a row with a wrong type, are not", async () => {
+    const w = await world();
+    const owner = w.person(OWNER_ID, FAKE_COMPANY);
+    const taskId = await w.taskOf(owner, "QUICK");
+    await w.write(taskId, "plan", quickPlan(), { stage: "waiting" });
+    await w.comment(taskId, { document: "plan", version: 1 });
+    await w.comment(taskId, { document: "plan", version: 1, taskId: randomUUID() });
+    await w.comment(taskId, { document: "plan", version: "1" });
+    await w.comment(taskId, { document: 7, version: 1 });
+    await w.comment(taskId, { document: "plan", version: 1, author: "somebody" });
+    expect(layerOf(await w.spec(owner, taskId), "steps")!["commentCount"]).toBe(1);
+  });
+
+  it("a person's reply in a thread is a comment and counts, with the top-level one (the rule the tally keeps)", async () => {
+    const w = await world();
+    const owner = w.person(OWNER_ID, FAKE_COMPANY);
+    const taskId = await w.taskOf(owner, "QUICK");
+    await w.write(taskId, "plan", quickPlan(), { stage: "waiting" });
+    const top = randomUUID();
+    await w.comment(taskId, { document: "plan", version: 1, commentId: top });
+    await w.comment(taskId, { document: "plan", version: 1, parentId: top });
+    expect(layerOf(await w.spec(owner, taskId), "steps")).toMatchObject({ commentCount: 2, resolvedCommentCount: 0 });
+  });
+
+  it("comments are read page by page and the read stops at the task's comment limit", async () => {
+    const w = await world();
+    const owner = w.person(OWNER_ID, FAKE_COMPANY);
+    const taskId = await w.taskOf(owner, "QUICK");
+    await w.write(taskId, "plan", quickPlan(), { stage: "waiting" });
+    const task = await w.record(taskId);
+    const row = (index: number) => ({ pk: `DEVTASK#${taskId}`, sk: `COMMENT#${String(index)}`, taskId, document: "plan", version: 1, author: { kind: "person" } });
+    const reads = { read: async () => undefined };
+    // Three pages of two, then done.
+    const small = vi.fn(async (query: { cursor?: string }) => { const page = Number(query.cursor ?? "0"); return { items: [row(page * 2), row(page * 2 + 1)], ...(page < 2 ? { cursor: String(page + 1) } : {}) }; });
+    expect((await specOf({ store: { query: small }, ...reads }, task)).spec.layers![0]!.commentCount).toBe(6);
+    // A store that never stops: the read stops at 300 rows (the limit it asks for shrinks with what it has read).
+    const limits: number[] = [];
+    const endless = vi.fn(async (query: { cursor?: string; limit: number }) => {
+      limits.push(query.limit);
+      if (limits.length > 10) throw new Error("the read did not stop");
+      return { items: Array.from({ length: Math.min(100, query.limit) }, (_, index) => row(limits.length * 1000 + index)), cursor: String(limits.length) };
+    });
+    expect((await specOf({ store: { query: endless as never }, ...reads }, task)).spec.layers![0]!.commentCount).toBe(300);
+    expect(limits).toEqual([300, 200, 100]);
+  });
+
+  it("a document whose object is not in this task's own folder is unreadable, even when its bytes match the digest", async () => {
+    const w = await world();
+    const owner = w.person(OWNER_ID, FAKE_COMPANY);
+    const taskId = await w.taskOf(owner, "QUICK");
+    const plan = quickPlan();
+    await w.write(taskId, "plan", plan, { stage: "waiting" });
+    const text = canonicalPlanJson(plan);
+    const elsewhere = `private/${"b".repeat(64)}/someone-elses-workspace/plan-v1.json`;
+    await w.blobs.put(elsewhere, new TextEncoder().encode(text), { contentType: "application/json", metadata: {}, retention: PLAN_RETENTION }, { overwrite: true });
+    await w.edit(taskId, (workflow) => ({ ...workflow, artifacts: workflow.artifacts.map((artifact) => ({ ...artifact, objectKey: elsewhere })) }));
+    const steps = layerOf(await w.spec(owner, taskId), "steps")!;
+    expect(steps["state"]).toBe("unreadable");
+    expect(steps["content"]).toBeUndefined();
+  });
+
+  it("a coding plan written before the task went the Full way is history even when it was sent back or rejected (superseded wins over the decision)", async () => {
+    const w = await world();
+    const owner = w.person(OWNER_ID, FAKE_COMPANY);
+    for (const decision of ["REQUEST_CHANGES", "REJECT"] as const) {
+      const taskId = await w.taskOf(owner, "FULL");
+      await w.decide(taskId, decision, await w.write(taskId, "plan", quickPlan()));
+      expect(layerOf(await w.spec(owner, taskId), "steps")!["state"], decision).toBe("superseded");
+    }
+  });
+
+  describe("the People list's own read rule (a host that says `canRead`)", () => {
+    const denied = (): AgentXError => agentXError("TASK_ACCESS_DENIED", "no");
+    const canRead: TaskFlowDeps["access"]["canRead"] = async (principal, task) => {
+      if (principal.personId === "person-denied-0000000001") throw denied();
+      return principal.personId === task.developerId || principal.personId === READER_ID;
+    };
+    it("admits who the host's read rule admits, and a person the rule refuses reads exactly as a missing task", async () => {
+      const w = await world({ canRead });
+      const owner = w.person(OWNER_ID, FAKE_COMPANY);
+      const reader = w.person(READER_ID, FAKE_COMPANY);
+      const refused = w.person("person-denied-0000000001", FAKE_COMPANY);
+      const other = w.person(COLLEAGUE_ID, FAKE_COMPANY);
+      const taskId = await w.taskOf(owner, "QUICK");
+      expect((await w.read(owner, taskId))?.statusCode).toBe(200);
+      expect((await w.read(reader, taskId))?.statusCode).toBe(200);
+      const missing = await w.read(owner, randomUUID());
+      for (const who of [refused, other]) {
+        const answer = await w.read(who, taskId);
+        expect(answer?.statusCode).toBe(404);
+        expect(JSON.parse(answer!.body)).toEqual(JSON.parse(missing!.body));
+      }
+    });
   });
 });

@@ -1224,3 +1224,25 @@ Production guards this lane adds: the task read's own rule in `core-host/task-sp
 | M15 layerOf | a Markdown document is read as structured | "a document stored as Markdown ..." |
 
 All 15 killed; the restored tree passes (the new file 15 tests). Evidence applies to this lane's commit; the final-head gate and review belong to 9d.
+
+### RD-2a follow-up (Sonnet pre-review: the six surviving mutants, S1, S2, S4) - 13 more, all killed (tests/unit/rd2a-spec-read.test.ts, run singly)
+
+The document read is now narrower (the bytes and digest only, `loadWorkflowDocument` plus the plan's redaction; no check summary or self-check read), `waitingDocumentDigest` is withheld when the waited-on layer is unreadable, and design-question ids are redacted too.
+
+| Mutant | Mutation | Killed by |
+|---|---|---|
+| N1 specOf | digest offered although the waited-on layer is unreadable | "unreadable ... " (tampered) and "an approved plan whose stored bytes no longer verify ..." |
+| N2 layerOf | a read beyond the document (self-check style key) | "reads only the document itself ..." |
+| N3 specOf | bigger-than-Quick on any path | "bigger-than-Quick is for a Quick task only ..." |
+| N4 atGate | closed task still counts as at its gate | "a closed task waits on nothing ..." |
+| N5 commentCounts | a row of another task under this key counted | "only this task's own, well-formed comments ..." |
+| N6 commentCounts | untyped document or version counted | same |
+| N7 commentCounts | no paging (first page only) | "comments are read page by page ..." |
+| N8 commentCounts | no read limit | same (the endless store throws) |
+| N9 stateOf | superseded loses to a rejection or change request | "a coding plan written before the task went the Full way is history ..." |
+| N10 layerOf | an unreadable layer still claims `approved` | "an approved plan whose stored bytes no longer verify ..." |
+| N11 commentCounts | thread replies not counted | "a person's reply in a thread is a comment and counts ..." |
+| N12 layerOf | the task's own object folder check removed | "a document whose object is not in this task's own folder is unreadable ..." |
+| N13 core/task-flow/reads.ts (not this lane's file; mutated and restored) | `TASK_ACCESS_DENIED` from `canRead` not mapped to not-found | "the People list's own read rule ..." |
+
+Not mutation-tested: `redactText` on the design question's `id`, `recommended` and option ids (the stored schema caps them at 16 characters, so no secret pattern fits; the redaction is for the literal rule only).

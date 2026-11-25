@@ -10,7 +10,8 @@
 // The caller has already read the task with the task read's own rule (`loadReadableTask`); nothing here checks who is asking.
 import { TASK_COMMENT_ITEMS_MAX, planHasSetupChanges, redactText, type DocumentStore, type PlanDocument, type WorkflowArtifact, type WorkflowSnapshot } from "@agentx/contracts";
 import type { TaskSpecRead } from "@preplabsai/rovara-code-api";
-import { readTaskPlanDocument } from "../../aws/task-plan-document.js";
+import { redactedPlan } from "../../aws/task-plan-document.js";
+import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
 import { planIsTooBig } from "../../developer/plan-one-screen.js";
 import { currentDocumentType, waitingDocumentDigest } from "../decisions/workflow-subject.js";
 import { planFiles } from "../decisions/plan-facts.js";
@@ -55,7 +56,7 @@ function stateOf(task: TaskRecord, workflow: WorkflowSnapshot, document: Documen
   return atGate(task) && currentDocumentType(workflow) === document ? "waiting" : "written";
 }
 
-/** Live comments of people, per document and version, and how many of them a decision already took (tolerant: read by the members used here only). */
+/** Live comments of people (a person's reply in a thread is a comment and counts, as does a top-level one), per document and version, and how many of them a decision already took (tolerant: read by the members used here only). */
 async function commentCounts(store: SpecReads["store"], taskId: string): Promise<Map<string, { count: number; resolved: number }>> {
   const counts = new Map<string, { count: number; resolved: number }>();
   let cursor: string | undefined;
@@ -93,8 +94,8 @@ function openQuestionsOf(workflow: WorkflowSnapshot): Decision[] {
   const round = review?.rounds.at(-1);
   if (review === undefined || review.status !== "waiting_answers" || round === undefined || round.answers !== undefined) return [];
   return (round.questions ?? []).map((question) => ({
-    id: question.id, question: redactText(question.unclear), recommended: question.recommended, layer: "approach", status: "needs_you",
-    options: question.options.map((option) => ({ id: option.id, label: redactText(option.label), consequence: redactText(option.consequence) })),
+    id: redactText(question.id), question: redactText(question.unclear), recommended: redactText(question.recommended), layer: "approach", status: "needs_you",
+    options: question.options.map((option) => ({ id: redactText(option.id), label: redactText(option.label), consequence: redactText(option.consequence) })),
   }));
 }
 
@@ -117,11 +118,17 @@ async function layerOf(reads: SpecReads, task: TaskRecord, workflow: WorkflowSna
   };
   // A document stored as Markdown (before structured plans) has no canonical form to serve: its state and numbers stand, its content is absent.
   if (latest.format !== "structured") return { layer: head, state };
+  // ONLY what the spec needs: the stored bytes, checked against the recorded digest and against this task's own object folder. (The plan route also builds a check summary and reads the self-check record; a failure
+  // of that extra work must not hide a document whose bytes verify.) Any failure here is "unreadable" on purpose, and an older version is never read instead.
+  const unreadable = { layer: { ...head, state: "unreadable", approved: false }, state: "unreadable" } as const;
   try {
-    const served = await readTaskPlanDocument(task, (key, max) => reads.read(key, max), { document, version: latest.version });
-    return { layer: { ...head, content: served.content as Layer["content"] /* the wire schema is looser than the stored recursive claim type */ }, state, plan: served.content, approval };
+    if (!latest.objectKey.startsWith(`private/${task.ownerKey}/${task.workspaceId}/`)) return unreadable;
+    const loaded = await loadWorkflowDocument((key, max) => reads.read(key, max), latest, {});
+    if (loaded === undefined || loaded.format !== "structured") return unreadable;
+    const plan = redactedPlan(loaded.plan);
+    return { layer: { ...head, content: plan as Layer["content"] /* the wire schema is looser than the stored recursive claim type */ }, state, plan, approval };
   } catch {
-    return { layer: { ...head, state: "unreadable", approved: false }, state: "unreadable" };
+    return unreadable;
   }
 }
 
@@ -139,7 +146,9 @@ export async function specOf(reads: SpecReads, task: TaskRecord): Promise<{ spec
   ];
   const steps = built.find((entry) => entry.layer.document === "plan");
   const bigger = workflow.path === "QUICK" && steps?.plan !== undefined && (["waiting", "written", "changes_requested"] as SpecLayerState[]).includes(steps.state) ? biggerThanQuickOf(steps.plan) : [];
-  const digest = atGate(task) ? waitingDocumentDigest(workflow) : undefined;
+  // Not offered for a document the page cannot show: a decision on bytes nobody can read is not one to invite.
+  const waitedOn = built.find((entry) => entry.layer.document === currentDocumentType(workflow));
+  const digest = atGate(task) && waitedOn?.state !== "unreadable" ? waitingDocumentDigest(workflow) : undefined;
   return {
     spec: {
       taskId: task.taskId, path: workflow.path === "FULL" ? "full" : "quick", layers: built.map((entry) => entry.layer), decisions,

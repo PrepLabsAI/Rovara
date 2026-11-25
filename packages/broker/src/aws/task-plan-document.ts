@@ -60,7 +60,7 @@ export async function readTaskPlanDocument(
 }
 
 /** The plan with secrets removed from every string in it, the way the task page and the Markdown copy show it. */
-function redactedPlan(plan: PlanDocument): PlanDocument {
+export function redactedPlan(plan: PlanDocument): PlanDocument {
   const walk = (value: unknown): unknown => {
     if (typeof value === "string") return redactText(value);
     if (Array.isArray(value)) return value.map(walk);
