@@ -27,6 +27,7 @@
 //     names and person ids only; audit rows never carry the Linear id or name.
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
+import { sessionBindingOf } from "../developer/session-binding.js";
 import { AgentXError, agentXError, companyLog, OrgIdSchema, type DocumentStore } from "@agentx/contracts";
 import { listAccountLinks, personAccountLink, linkAccount, unlinkAccount } from "../core/people/account-links.js";
 import { Membership, membershipKey } from "./company-check.js";
@@ -125,14 +126,14 @@ export async function routeLinearAccountLink(ctx: LinearLinkContext, caller: Dev
 
 interface Own {
   ctx: LinearLinkContext;
-  who: { companyId: string; personId: string; sessionId: string };
+  who: { companyId: string; personId: string; sessionBinding: string };
   log: (entry: Record<string, unknown>) => void;
 }
 
 async function ownRoute(ctx: LinearLinkContext, member: z.infer<typeof Membership>, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   // Only the Rovara web app's own sign-in client (full access AND marked `webApp` by the operator).
   if (caller.webApp !== true) throw agentXError("FORBIDDEN", LINK_WEB_ONLY);
-  const own: Own = { ctx, who: { companyId: member.companyId, personId: caller.developerId, sessionId: caller.sessionId }, log: companyLog(member.companyId, ctx.wiring.log) };
+  const own: Own = { ctx, who: { companyId: member.companyId, personId: caller.developerId, sessionBinding: sessionBindingOf(caller.sessionId) }, log: companyLog(member.companyId, ctx.wiring.log) };
   if (url.pathname === LINEAR_ME_PATH && request.method === "GET") return readOwn(own);
   if (url.pathname === LINEAR_ME_PATH && request.method === "DELETE") return unlinkOwn(own, request);
   if (url.pathname === LINK && request.method === "POST") return startLink(own, request);

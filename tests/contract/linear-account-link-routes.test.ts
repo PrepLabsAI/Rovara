@@ -16,6 +16,7 @@ import { linearAccountResolver, linearCommentAuthorResolver, linearLinkResolver 
 import { accountLinkAuditPk, accountLinkOf, linkAccount, personAccountLink } from "../../packages/broker/src/core/people/account-links.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { COMPANY_A_ID as A, COMPANY_B_ID as B } from "../../packages/testing/src/isolation/two-company.js";
+import { sessionBindingOf } from "../../packages/broker/src/developer/session-binding.js";
 
 const ADA = "a".repeat(64), BEA = "b".repeat(64), CAL = "c".repeat(64), ROOT = "f".repeat(64), DEE = "e".repeat(64);
 const MAYA: FakeLinearUser = { id: "11111111-0000-4000-8000-000000000001", name: "Maya Lee" };
@@ -98,7 +99,7 @@ describe("start", () => {
     });
     expect(answer.body.expiresAt).toBe(new Date(w.now() + 600_000).toISOString());
     const hash = createHash("sha256").update(state).digest("hex");
-    expect(w.db.get(`LINEAR_LINK#${hash}`, "META")).toMatchObject({ entityType: "LINEAR_LINK_STATE", companyId: A, personId: ADA, provider: "linear-link", status: "live", sessionId: "web-aaaa" });
+    expect(w.db.get(`LINEAR_LINK#${hash}`, "META")).toMatchObject({ entityType: "LINEAR_LINK_STATE", companyId: A, personId: ADA, provider: "linear-link", status: "live", sessionBinding: sessionBindingOf("web-aaaa") });
     expect(w.db.get(`LINEAR_CONNECT#${hash}`, "META")).toBeUndefined();
     expect(w.stored()).not.toContain(state);
     expect(answer.raw).not.toContain(LINEAR_CLIENT_SECRET);
@@ -425,5 +426,38 @@ describe("the resolver (change 10)", () => {
     await linkAccount(w.links, { companyId: A, provider: "linear", tenant: WORKSPACE_B.id, accountId: NICO.id, personId: BEA, display: "", linkedAt: new Date(w.now()).toISOString() });
     expect(await hosted(A, { provider: "linear", tenant: "", accountId: NICO.id })).toBeUndefined();
     expect(await strict(A, { provider: "linear", tenant: WORKSPACE_B.id, accountId: NICO.id })).toBeUndefined();
+  });
+});
+
+// Session-id-at-rest: the sign-in session id is the browser's login cookie, so the link state row keeps a digest of it (never the id), and the spend compares digests.
+describe("the session at rest", () => {
+  const COOKIE = "cookie-0123456789abcdef-secret";
+  const rowOf = (w: World, state: string) => w.db.get(`LINEAR_LINK#${createHash("sha256").update(state).digest("hex")}`, "META")!;
+  it("mints a digest of the session and never the id; the same session spends it, another session does not", async () => {
+    const w = await connectedWorld(); w.as(ADA, A, "member", true, COOKIE);
+    const started = await w.start();
+    const state = started.body.state as string;
+    const code = () => w.linear.approve(started.body.authorizeUrl as string, WORKSPACE_A, MAYA);
+    const row = rowOf(w, state);
+    expect(row).toMatchObject({ sessionBinding: sessionBindingOf(COOKIE) });
+    expect(row).not.toHaveProperty("sessionId");
+    expect(JSON.stringify(row)).not.toContain(COOKIE);
+    w.as(ADA, A, "member", true, "another-session");
+    expect((await w.claim({ state, code: code() })).body.error).toEqual(uniform.error);
+    expect(rowOf(w, state)).toMatchObject({ status: "live" });
+    w.as(ADA, A, "member", true, COOKIE);
+    expect((await w.claim({ state, code: code() })).status).toBe(200);
+    expect(JSON.stringify(rowOf(w, state))).not.toContain(COOKIE);
+  });
+  it("a row an older build wrote (the raw id, no digest) is refused with the start-again words and is not spent", async () => {
+    const w = await connectedWorld(); w.as(ADA, A, "member", true, COOKIE);
+    const started = await w.start();
+    const state = started.body.state as string;
+    const { sessionBinding: _digest, ...rest } = rowOf(w, state); void _digest;
+    w.db.set({ ...rest, sessionId: COOKIE });
+    const answer = await w.claim({ state, code: w.linear.approve(started.body.authorizeUrl as string, WORKSPACE_A, MAYA) });
+    expect({ status: answer.status, error: answer.body.error }).toEqual(uniform);
+    expect(rowOf(w, state)).toMatchObject({ status: "live", sessionId: COOKIE });
+    expect(await accountOf(w, A, WORKSPACE_A, MAYA)).toBeUndefined();
   });
 });
