@@ -15,6 +15,7 @@ import type { OrgId } from "@agentx/contracts";
 import type { TestEnvDeps } from "../test-env/deps.js";
 import { readKnownFailingMarks, knownFailingTaskBranches, verificationResultsEnabled } from "../test-env/known-failing.js";
 import { usableNightlyBaseline } from "../test-env/nightly-usable.js";
+import { NEEDS_SERVICE_ITEM_PREFIX } from "./test-result-items.js";
 import {
   autoFixDecision, classifyBlockedWorkflow, E2E_PROJECT_CHECK_ID, SANDBOX_MODEL_HOSTS_ITEM_ID, isValidTestId,
   type AutoFixBudget, type AutoFixCode, type AutoFixFacts, type EvidencePack, type TestingBlockedReason, type TestingCodeReason, type TestingPartialReason, type TestingReason, type TestingResult,
@@ -267,7 +268,8 @@ export function classifyTestingResult(input: ResultInput): ResultOutcome {
     else if (item.kind === "scenario") partial.push("scenario_not_tested");
     else if (item.kind === "check") partial.push("check_not_run");
     // FIX-0518: the laptop's opt-out line ("model hosts allowed in the test sandbox by project setting") is a fixed note about where the tests ran, not a sign that details could not be read: it is shown, and the verdict stays.
-    else if (item.kind === "environment") { if (item.id !== SANDBOX_MODEL_HOSTS_ITEM_ID) partial.push("evidence_unreadable"); }
+    // TEST-RESULT-HONESTY: "looks like a check needs Postgres" is a fixed note about a failure (shown with it), not a sign that details could not be read.
+    else if (item.kind === "environment") { if (item.id !== SANDBOX_MODEL_HOSTS_ITEM_ID && !item.id.startsWith(NEEDS_SERVICE_ITEM_PREFIX)) partial.push("evidence_unreadable"); }
     else if (item.kind === "mocked_service" && needReal.has(item.id)) partial.push("real_service_not_tested");
   }
   if (evidenceChecks.some((check) => check.after === "unknown" || check.after === "not_run")) partial.push("check_not_run");
