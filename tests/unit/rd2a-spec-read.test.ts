@@ -40,9 +40,11 @@ const STATES = ["not_written", "waiting", "approved", "changes_requested", "reje
 const STATUSES = ["proposed", "agreed", "changed_by_reviewer", "needs_you"];
 
 /** The company's rule as a deployment wires it: the task's own person, and the named readers, may read it. A colleague who is neither gets "no such task". */
-function hostedRule(readers: Set<string>): TaskFlowDeps["access"] {
+function hostedRule(readers: Set<string>, proves = true): TaskFlowDeps["access"] {
   return {
     ...createOwnerTaskAccess(),
+    // The hosted rule re-reads the live project grant on every request (decision.sourceCode); a laptop rule (`proves` false) proves nothing, so a plan's paths are not served there.
+    ...(proves ? { provesProjectGrant: true as const } : {}),
     async checkStart() { return { allowed: true }; },
     async canAct(principal, task) { return principal.personId === task.developerId || readers.has(principal.personId); },
   };
@@ -65,12 +67,12 @@ interface SpecBody { taskId: string; path: string; layers: Layer[]; decisions: A
 const errorCodeOf = (answer: { body: string } | undefined): unknown => (JSON.parse(answer!.body) as { error: { code: unknown } }).error.code;
 const sha = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
 
-async function world(options: { canRead?: TaskFlowDeps["access"]["canRead"] } = {}) {
+async function world(options: { canRead?: TaskFlowDeps["access"]["canRead"]; proves?: boolean } = {}) {
   const fake = createFakeWorld();
   await registerProject(fake, FAKE_COMPANY);
   await registerProject(fake, OTHER);
   const readers = new Set<string>();
-  const app = appWith(fake, { ...hostedRule(readers), ...(options.canRead === undefined ? {} : { canRead: options.canRead }) });
+  const app = appWith(fake, { ...hostedRule(readers, options.proves), ...(options.canRead === undefined ? {} : { canRead: options.canRead }) });
   const members = new Map<string, CompanyMembership>();
   const companyOf = vi.fn(async (caller: DeployedCaller) => members.get(`${caller.principal.personId}|${caller.principal.companyId}`));
   const person = (personId: string, companyId: string): DeployedCaller => {
@@ -336,6 +338,63 @@ describe("GET /v1/dev/tasks/{id}/spec", () => {
     expect(TaskSpecReadSchema.safeParse({ ...answer, spec: { ...answer.spec, aNewMember: 1 } }).success).toBe(true);
   });
 
+  describe("the plan's PATHS are source code (decision.sourceCode), S2 of the on-next pre-review", () => {
+    const cited = () => planDocument({
+      claims: [{ id: "1", text: "Check the token.", evidence: [{ kind: "code", path: "src/auth/session.ts", startLine: 3, endLine: 9, anchor: "const total = addUpTheCart()", note: "Reads the token." }, { kind: "quote", text: "A customer said so.", author: "Pat" }],
+        children: [{ id: "1.1", text: "Add the table.", evidence: [{ kind: "code", path: "infra/db/migrations/0042_orders.sql", startLine: 1, endLine: 4, note: "New migration." }] }] }],
+    });
+    type Cited = { evidence: Array<Record<string, unknown>>; children: Array<{ evidence: Array<Record<string, unknown>> }> };
+    const claimOf = (spec: SpecBody): Cited => (layerOf(spec, "steps")!["content"] as { claims: Cited[] }).claims[0]!;
+
+    it("a reader whose decision carries source code is served the cited places; a reader without it is served the plan's words, a code citation says it is withheld, and no path, line or anchor is in the answer", async () => {
+      const proving = await world();
+      const owner = proving.person(OWNER_ID, FAKE_COMPANY);
+      const quick = await proving.taskOf(owner, "QUICK");
+      await proving.write(quick, "plan", cited(), { stage: "waiting" });
+      expect(claimOf(await proving.spec(owner, quick)).evidence[0]).toMatchObject({ kind: "code", path: "src/auth/session.ts", startLine: 3, endLine: 9, anchor: "const total = addUpTheCart()" });
+
+      // A host that proves no live grant (a laptop) never has source code, so the same owner is not served the places.
+      const laptop = await world({ proves: false });
+      const own = laptop.person(OWNER_ID, FAKE_COMPANY);
+      const task = await laptop.taskOf(own, "QUICK");
+      await laptop.write(task, "plan", cited(), { stage: "waiting" });
+      const answer = await laptop.read(own, task);
+      expect(answer?.statusCode).toBe(200);
+      const body = answer!.body;
+      for (const hidden of ["src/auth/session.ts", "infra/db/migrations/0042_orders.sql", "addUpTheCart", "startLine", "endLine", "anchor"]) expect(body, hidden).not.toContain(hidden);
+      const claim = claimOf((JSON.parse(body) as { spec: SpecBody }).spec);
+      expect(claim.evidence).toEqual([{ kind: "code", withheld: true, note: "Reads the token." }, { kind: "quote", text: "A customer said so.", author: "Pat" }]);
+      expect(claim.children[0]!.evidence).toEqual([{ kind: "code", withheld: true, note: "New migration." }]);
+      // The plan's own words stay as written.
+      expect((JSON.parse(body) as { spec: SpecBody }).spec.layers[0]!["content"]).toMatchObject({ claims: [{ text: "Check the token.", children: [{ text: "Add the table." }] }] });
+      // Every other member of the plan is the same with or without the places.
+      const full = claimOf(await proving.spec(owner, quick));
+      expect({ ...full, evidence: undefined, children: undefined }).toEqual({ ...claim, evidence: undefined, children: undefined });
+    });
+
+    it("the tier's reasons for a Quick plan that looks bigger than Quick keep their sentence and drop the files named after the colon, for a reader without source code", async () => {
+      const laptop = await world({ proves: false });
+      const owner = laptop.person(OWNER_ID, FAKE_COMPANY);
+      const quick = await laptop.taskOf(owner, "QUICK");
+      await laptop.write(quick, "plan", planDocument({ claims: [
+        { id: "1", text: "Add the table.", evidence: [{ kind: "code", path: "infra/db/migrations/0042_orders.sql", startLine: 1, endLine: 4, note: "New migration." }] },
+        { id: "2", text: "Check the token.", evidence: [{ kind: "code", path: "src/auth/session.ts", startLine: 1, endLine: 9, note: "Reads the token." }] },
+      ] }), { stage: "waiting" });
+      const reasons = (await laptop.spec(owner, quick)).biggerThanQuick!.reasons;
+      expect(reasons).toEqual(["Changes infrastructure, IAM or data files.", "Touches sensitive paths."]);
+      expect(JSON.stringify(reasons)).not.toMatch(/migrations|session\.ts/u);
+    });
+
+    it("the spec of a share-admitted reader can never carry the places: a person admitted with no live grant proved (decision.sourceCode false) is served the plan's words only", async () => {
+      const task = await (async () => { const w = await world({ proves: false }); const o = w.person(OWNER_ID, FAKE_COMPANY); const id = await w.taskOf(o, "QUICK"); await w.write(id, "plan", cited(), { stage: "waiting" }); return { w, o, id, record: await w.record(id) }; })();
+      const reads = { store: task.w.fake.store, read: async (key: string, max: number) => { const bytes = await task.w.blobs.get(key, max); return bytes === undefined ? undefined : new TextDecoder().decode(bytes); } };
+      const without = JSON.stringify(await specOf(reads, task.record, { paths: false }));
+      const withIt = JSON.stringify(await specOf(reads, task.record, { paths: true }));
+      expect(withIt).toContain("src/auth/session.ts");
+      expect(without).not.toContain("src/auth/session.ts");
+    });
+  });
+
   it("who may read: the owner and a reader the host admits do; a colleague, another company's person and a missing task get the same refusal, and it names nothing", async () => {
     const w = await world();
     const owner = w.person(OWNER_ID, FAKE_COMPANY);
@@ -360,7 +419,7 @@ describe("GET /v1/dev/tasks/{id}/spec", () => {
   });
 
   it("a task with no workflow snapshot has no layers (nothing invented)", async () => {
-    const answer = await specOf({ store: { query: async () => ({ items: [] }) }, read: async () => undefined }, { taskId: randomUUID() } as never);
+    const answer = await specOf({ store: { query: async () => ({ items: [] }) }, read: async () => undefined }, { taskId: randomUUID() } as never, { paths: true });
     expect(answer.spec.layers).toEqual([]);
     expect(answer.spec.decisions).toEqual([]);
     expect(Object.keys(answer.spec).sort()).toEqual(["decisions", "layers", "taskId"]);
@@ -393,7 +452,7 @@ describe("GET /v1/dev/tasks/{id}/spec", () => {
     await w.write(taskId, "plan", quickPlan(), { stage: "waiting" });
     const task = await w.record(taskId);
     const keys: string[] = [];
-    const answer = await specOf({ store: w.fake.store, read: async (key, max) => { keys.push(key); const bytes = await w.blobs.get(key, max); return bytes === undefined ? undefined : new TextDecoder().decode(bytes); } }, task);
+    const answer = await specOf({ store: w.fake.store, read: async (key, max) => { keys.push(key); const bytes = await w.blobs.get(key, max); return bytes === undefined ? undefined : new TextDecoder().decode(bytes); } }, task, { paths: true });
     expect(keys).toEqual([task.workflow!.artifacts[0]!.objectKey]);
     expect(answer.spec.layers![0]).toMatchObject({ state: "waiting" });
   });
@@ -404,7 +463,7 @@ describe("GET /v1/dev/tasks/{id}/spec", () => {
     const taskId = await w.taskOf(owner, "QUICK");
     await w.write(taskId, "plan", quickPlan(), { stage: "waiting" });
     const task = await w.record(taskId);
-    const answer = await specOf({ store: w.fake.store, read: async () => { throw new Error("the store is down"); } }, task);
+    const answer = await specOf({ store: w.fake.store, read: async () => { throw new Error("the store is down"); } }, task, { paths: true });
     expect(answer.spec.layers![0]).toMatchObject({ layer: "steps", state: "unreadable", approved: false, version: 1 });
     expect(answer.spec.layers![0]!.content).toBeUndefined();
     expect(answer.spec.decisions).toEqual([]);
@@ -467,7 +526,7 @@ describe("GET /v1/dev/tasks/{id}/spec", () => {
     const reads = { read: async () => undefined };
     // Three pages of two, then done.
     const small = vi.fn(async (query: { cursor?: string }) => { const page = Number(query.cursor ?? "0"); return { items: [row(page * 2), row(page * 2 + 1)], ...(page < 2 ? { cursor: String(page + 1) } : {}) }; });
-    expect((await specOf({ store: { query: small }, ...reads }, task)).spec.layers![0]!.commentCount).toBe(6);
+    expect((await specOf({ store: { query: small }, ...reads }, task, { paths: true })).spec.layers![0]!.commentCount).toBe(6);
     // A store that never stops: the read stops at 300 rows (the limit it asks for shrinks with what it has read).
     const limits: number[] = [];
     const endless = vi.fn(async (query: { cursor?: string; limit: number }) => {
@@ -475,7 +534,7 @@ describe("GET /v1/dev/tasks/{id}/spec", () => {
       if (limits.length > 10) throw new Error("the read did not stop");
       return { items: Array.from({ length: Math.min(100, query.limit) }, (_, index) => row(limits.length * 1000 + index)), cursor: String(limits.length) };
     });
-    expect((await specOf({ store: { query: endless as never }, ...reads }, task)).spec.layers![0]!.commentCount).toBe(300);
+    expect((await specOf({ store: { query: endless as never }, ...reads }, task, { paths: true })).spec.layers![0]!.commentCount).toBe(300);
     expect(limits).toEqual([300, 200, 100]);
   });
 

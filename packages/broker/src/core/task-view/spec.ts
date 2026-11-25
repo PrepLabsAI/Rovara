@@ -8,7 +8,7 @@
 //  - Stored comments are read tolerantly (arch rule 8): by the few members read here, never through the strict schema, so a field a later version adds cannot make a comment vanish from the count.
 //  - No comparison against error message text (arch rule 6): what failed is told from the stored snapshot (the artifact's own `format`), not from the words of an error.
 // The mount has already asked the one read rule (`decideTaskRead`, core/task-flow/read-rule.ts); nothing here checks who is asking.
-import { TASK_COMMENT_ITEMS_MAX, planHasSetupChanges, redactText, type DocumentStore, type PlanDocument, type WorkflowArtifact, type WorkflowSnapshot } from "@agentx/contracts";
+import { TASK_COMMENT_ITEMS_MAX, planHasSetupChanges, redactText, type DocumentStore, type PlanClaim, type PlanDocument, type WorkflowArtifact, type WorkflowSnapshot } from "@agentx/contracts";
 import type { TaskSpecRead } from "@preplabsai/rovara-code-api";
 import { redactedPlan } from "../../aws/task-plan-document.js";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
@@ -99,13 +99,30 @@ function openQuestionsOf(workflow: WorkflowSnapshot): Decision[] {
   }));
 }
 
-/** Why a Quick plan looks bigger than Quick, in fixed sentences from the same readers the plan card uses (the files it names and the tier rules, the setup change, the one-screen size). Empty when it does not. */
-function biggerThanQuickOf(plan: PlanDocument): string[] {
+/**
+ * A plan's PATHS are source code (the read rule's decision, `decision.sourceCode`, the same as the changes read's): the places a claim cites (path, lines and the exact line of code it anchors on). Without the proof they are not served:
+ * a code citation keeps only its own note and says it is withheld; the plan's own words (claims, work items, risks, decisions) stay as written.
+ */
+function claimsWithoutPaths(claims: readonly PlanClaim[]): PlanClaim[] {
+  return claims.map((claim) => ({
+    ...claim,
+    ...(claim.evidence === undefined ? {} : { evidence: claim.evidence.map((item) => (item.kind === "code" ? { kind: "code" as const, withheld: true, ...(item.note === undefined ? {} : { note: item.note }) } : item)) as PlanClaim["evidence"] }),
+    ...(claim.children === undefined ? {} : { children: claimsWithoutPaths(claim.children) }),
+  }));
+}
+const planWithoutPaths = (plan: PlanDocument): PlanDocument => ({ ...plan, claims: claimsWithoutPaths(plan.claims) });
+
+/** The tier's sentences name up to two files after a colon ("Changes infrastructure, IAM or data files: a.tf, b.tf and 3 more."): without the proof the sentence stands and the files do not. */
+const PATH_SENTENCES = [/^(Changes infrastructure, IAM or data files): .*\.$/u, /^(Touches sensitive paths): .*\.$/u, /^(Touches infrastructure, IAM or data): .*\.$/u];
+const withoutPathsIn = (reason: string): string => { for (const pattern of PATH_SENTENCES) { const found = pattern.exec(reason); if (found !== null) return `${found[1]!}.`; } return reason; };
+
+/** Why a Quick plan looks bigger than Quick, in fixed sentences from the same readers the plan card uses (the files it names and the tier rules, the setup change, the one-screen size). Empty when it does not. Files are named only where the reader may see source code. */
+function biggerThanQuickOf(plan: PlanDocument, paths: boolean): string[] {
   const reasons = riskTierOf("approve_plan", { plan: { files: planFiles(plan), untestedClaims: 0, unread: false, setupChange: planHasSetupChanges(plan) } }).reasons;
-  return [...reasons, ...(planIsTooBig(plan) ? ["The plan is longer than fits on one screen."] : [])].map(redactText);
+  return [...(paths ? reasons : reasons.map(withoutPathsIn)), ...(planIsTooBig(plan) ? ["The plan is longer than fits on one screen."] : [])].map(redactText);
 }
 
-async function layerOf(reads: SpecReads, task: TaskRecord, workflow: WorkflowSnapshot, document: Document, layer: string, comments: Awaited<ReturnType<typeof commentCounts>>): Promise<{ layer: Layer; state: SpecLayerState; plan?: PlanDocument; approval?: ReturnType<typeof decisionOn> }> {
+async function layerOf(reads: SpecReads, task: TaskRecord, workflow: WorkflowSnapshot, document: Document, layer: string, comments: Awaited<ReturnType<typeof commentCounts>>, paths: boolean): Promise<{ layer: Layer; state: SpecLayerState; plan?: PlanDocument; approval?: ReturnType<typeof decisionOn> }> {
   const versions = workflow.artifacts.filter((artifact) => artifact.type === document).sort((left, right) => left.version - right.version);
   const latest = versions.at(-1);
   const state = stateOf(task, workflow, document, latest);
@@ -126,26 +143,30 @@ async function layerOf(reads: SpecReads, task: TaskRecord, workflow: WorkflowSna
     const loaded = await loadWorkflowDocument((key, max) => reads.read(key, max), latest, {});
     if (loaded === undefined || loaded.format !== "structured") return unreadable;
     const plan = redactedPlan(loaded.plan);
-    return { layer: { ...head, content: plan as Layer["content"] /* the wire schema is looser than the stored recursive claim type */ }, state, plan, approval };
+    const served = paths ? plan : planWithoutPaths(plan);
+    return { layer: { ...head, content: served as Layer["content"] /* the wire schema is looser than the stored recursive claim type */ }, state, plan, approval };
   } catch {
     return unreadable;
   }
 }
 
+/** What the reader may be shown beyond the plan's words: `paths` is the read rule's `decision.sourceCode` (a live project grant proved on this request, or the owner's share of the code): the code a plan cites by place. Required, so no caller forgets to ask. */
+export interface SpecShown { paths: boolean }
+
 /** The task's spec. `task` is a task the caller may read; a task with no workflow snapshot has no layers. */
-export async function specOf(reads: SpecReads, task: TaskRecord): Promise<{ spec: Spec }> {
+export async function specOf(reads: SpecReads, task: TaskRecord, shown: SpecShown): Promise<{ spec: Spec }> {
   const workflow = task.workflow;
   if (workflow === undefined) return { spec: { taskId: task.taskId, layers: [], decisions: [] } };
   const comments = await commentCounts(reads.store, task.taskId);
   const wanted = LAYERS.filter((entry) => workflow.path === "FULL" || entry.document === "plan");
   const built = [];
-  for (const entry of wanted) built.push(await layerOf(reads, task, workflow, entry.document, entry.layer, comments));
+  for (const entry of wanted) built.push(await layerOf(reads, task, workflow, entry.document, entry.layer, comments, shown.paths));
   const decisions = [
     ...built.flatMap((entry) => entry.plan === undefined || entry.state === "superseded" ? [] : decisionsOf(entry.plan, entry.layer.layer ?? "", entry.state, entry.approval)),
     ...openQuestionsOf(workflow),
   ];
   const steps = built.find((entry) => entry.layer.document === "plan");
-  const bigger = workflow.path === "QUICK" && steps?.plan !== undefined && (["waiting", "written", "changes_requested"] as SpecLayerState[]).includes(steps.state) ? biggerThanQuickOf(steps.plan) : [];
+  const bigger = workflow.path === "QUICK" && steps?.plan !== undefined && (["waiting", "written", "changes_requested"] as SpecLayerState[]).includes(steps.state) ? biggerThanQuickOf(steps.plan, shown.paths) : [];
   // Offered only for a document the page can show (its bytes were read and verified): no invitation to decide on bytes nobody can read, or that were never checked (a Markdown-era document).
   const waitedOn = built.find((entry) => entry.layer.document === currentDocumentType(workflow));
   const digest = atGate(task) && waitedOn?.layer.content !== undefined ? waitingDocumentDigest(workflow) : undefined;

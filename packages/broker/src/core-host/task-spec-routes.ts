@@ -8,6 +8,6 @@ import type { BrokerResponse } from "../handler.js";
 import type { TaskScreenContext } from "./task-screen-routes.js";
 
 export async function readTaskSpec(context: TaskScreenContext): Promise<BrokerResponse> {
-  const answer = await specOf({ store: context.flow.deps.store, read: textReaderOf(context.blobs) }, context.decision.task);
+  const answer = await specOf({ store: context.flow.deps.store, read: textReaderOf(context.blobs) }, context.decision.task, { paths: context.decision.sourceCode });
   return { statusCode: 200, headers: { "content-type": "application/json" }, body: JSON.stringify(answer) };
 }
