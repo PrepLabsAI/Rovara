@@ -501,6 +501,37 @@ describe("the changes route on the core host", () => {
     expect(closed.body).not.toContain("+x");
   });
 
+  it("the diff read's own rule is asked before the cache (S3 of the on-next pre-review): a person the diff read refuses is given no page, hit or miss, even where the changes read admits them with source code; a rule that fails is a no; the rule is asked once per answer", async () => {
+    const route = vi.fn(async () => ({ statusCode: 200, headers: {}, body: JSON.stringify({ files: [{ path: "src/leak.ts", additions: 1, deletions: 0, patch: "+x" }], more: false }) }));
+    const rules = { route, sharedReader: async () => undefined, peoplePage: async () => undefined };
+    const h = await host({ taskRules: rules });
+    await h.setWorkflow({ pullRequests: [{ ...pullRequest(7), headSha: "d".repeat(40) }] });
+    const record = (await readTask(h.runtime.flow.deps, h.task.taskId))!;
+    const decision: TaskReadDecision = { task: record, mode: "owner", money: false, sourceCode: true, codeDetails: true, decidedByReadRule: true };
+    const asked: string[] = [];
+    const contextOf = (diff: "admit" | "refuse" | "fail") => ({
+      flow: h.runtime.flow, blobs: h.objects, caller: { principal: localOwnerPrincipal({ companyId: FAKE_COMPANY, personId: "owner-person" }) }, taskId: h.task.taskId, request: get(`/v1/dev/tasks/${h.task.taskId}/changes`), taskRules: rules, decision,
+      authorize: async (read: string) => { asked.push(read); if (read === "diff" && diff === "refuse") throw agentXError("TASK_NOT_FOUND", "no such task"); if (read === "diff" && diff === "fail") throw new Error("people store down"); return decision; },
+    });
+    const cache = createPageCache({ ttlMs: 1000, max: 5 });
+    // The reader the diff read admits fills the cache (the fake diff route does not ask the rule itself, so only the read's own check is counted).
+    const open = await readTaskChangesWith(contextOf("admit"), { cache });
+    expect(JSON.parse(open.body)).toMatchObject({ changes: { files: [{ path: "src/leak.ts" }] } });
+    expect(asked).toEqual(["diff"]);
+    expect(route).toHaveBeenCalledTimes(1);
+    // The cache holds the page; a person whose diff read says no is not handed it, and the code host is not asked either.
+    for (const diff of ["refuse", "fail"] as const) {
+      const closed = await readTaskChangesWith(contextOf(diff), { cache });
+      expect(JSON.parse(closed.body).changes.files, diff).toEqual([]);
+      expect(closed.body, diff).not.toContain("leak.ts");
+    }
+    expect(route).toHaveBeenCalledTimes(1);
+    // A pull request with several pages asks the rule once, not once per page.
+    asked.length = 0;
+    await readTaskChangesWith(contextOf("admit"), { cache });
+    expect(asked).toEqual(["diff"]);
+  });
+
   it("asks the code host once for the same pages: a reload and a request at the same time share them, a failed page is never remembered", async () => {
     let calls = 0;
     const route = vi.fn(async (input: Parameters<NonNullable<CoreDevWiring["taskRules"]>["route"]>[0]) => {

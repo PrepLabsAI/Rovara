@@ -68,7 +68,12 @@ function pageReader(context: TaskScreenContext, task: TaskRecord, cache: PageCac
       return undefined;
     }
   };
-  return (pullRequest, page) => {
+  // The diff route asks the rule for "diff" itself, but only when a page is fetched: a page served from the cache never reaches it. So the read asks it here, once per answer and before the cache, and a person the "diff" read
+  // refuses is given no page, hit or miss: the changes read can never show more of the code than the diff read does, even if the two reads are one day admitted differently. A rule that fails is a "no".
+  let diffAllowed: Promise<boolean> | undefined;
+  const mayReadDiff = (): Promise<boolean> => (diffAllowed ??= authorize("diff", task).then(() => true, () => false));
+  return async (pullRequest, page) => {
+    if (!(await mayReadDiff())) return undefined;
     const head = headOf(pullRequest);
     return head === undefined ? fetchPage(pullRequest, page) : cache.once(pageCacheKey(flow.deps.companyId, task.taskId, pullRequest, head, page), () => fetchPage(pullRequest, page));
   };
