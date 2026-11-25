@@ -166,6 +166,14 @@ describe("sessions and refresh tokens (FR-005)", () => {
     expect(db.get(`SESSION#${session.sessionId}`, "META")).toMatchObject({ endsAt, expiresAt: endsAt + 86_400 });
   });
 
+  it("write no refresh-token row for a browser review sign-in", async () => {
+    const endsAt = T0 / 1000 + 30 * 86_400;
+    const result = await store.createBrowserSession({ developerId, amr: "slack", reviewExpiresAt: endsAt, endsAt });
+    expect(Object.keys(result)).toEqual(["session"]);
+    expect(await store.getSession(result.session.sessionId)).toMatchObject({ amr: "slack", endsAt, reviewExpiresAt: endsAt });
+    expect([...db.items.values()].filter((item) => String(item.pk).startsWith("REFRESH#"))).toEqual([]);
+  });
+
   it("rotate: the old token becomes reused, the new one active, and the end date stays put", async () => {
     const { refreshToken } = await store.createSession({ developerId, amr: "slack" });
     const lookup = await store.lookupRefresh(refreshToken);

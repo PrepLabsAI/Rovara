@@ -9,6 +9,7 @@ import { z } from "zod";
 import { IMPLICIT_COMPANY_ID, OrgIdSchema } from "@agentx/contracts";
 import type { CompanySignInStore } from "./company-membership.js";
 import { companyMayMint, mintSession } from "./session-mint.js";
+import { sessionLogId } from "./session-log-id.js";
 import type { DeveloperSignInStore, SessionRecord } from "./store.js";
 import { issueAccessToken, type TokenSigner } from "./tokens.js";
 
@@ -130,7 +131,7 @@ export interface CanarySessionDependencies {
   counter: Pick<CanaryMintStore, "reserve" | "record" | "recorded" | "clear">;
   signer: TokenSigner;
   now: () => number;
-  /** Fixed fields only: event, sessionId, developerId, code. */
+  /** Fixed fields only: event, session (sessionLogId, never the id), developerId, code. */
   log: (entry: Record<string, unknown>) => void;
 }
 
@@ -173,7 +174,7 @@ export function createCanarySession(deps: CanarySessionDependencies): (event: un
         (row) => issueAccessToken(deps.signer, { issuer: c.issuer, subject: row.developerId, amr: row.amr, env: c.environment, sessionId: row.sessionId, now: deps.now() }),
         (row) => { started = row; });
       await counter.record(slot, session.sessionId);
-      deps.log({ event: "signin.canary_session", sessionId: session.sessionId, developerId: c.developerId });
+      deps.log({ event: "signin.canary_session", session: sessionLogId(session.sessionId), developerId: c.developerId });
       return { ok: true, token: access.token, expiresAt: session.endsAt * 1000, sessionId: session.sessionId, memberCount };
     } catch (error) {
       // Never a partial session: a row written whose token or record failed is revoked before answering.
