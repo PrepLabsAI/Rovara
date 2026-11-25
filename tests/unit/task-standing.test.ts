@@ -6,7 +6,7 @@
 //   3. the served shape's tolerant reader: an action id this build does not know is skipped, never a failure; and standing is reachable from no stored schema.
 import { describe, expect, it } from "vitest";
 import {
-  AgentSessionRecordSchema, SessionSummarySchema, TASK_ACTION_IDS, TaskStandingReaderSchema, TaskStatusSchema, WorkflowSnapshotSchema, WORKFLOW_BLOCK_REASONS, createWorkflowSnapshot, mergeTrackingDecisionDigest, mergeTrackingKey, readLooseOffers,
+  AgentSessionRecordSchema, OWNER_LEFT_PROJECT_WORDS, SessionSummarySchema, TASK_ACTION_IDS, TaskStandingReaderSchema, TaskStatusSchema, WorkflowSnapshotSchema, WORKFLOW_BLOCK_REASONS, createWorkflowSnapshot, mergeTrackingDecisionDigest, mergeTrackingKey, readLooseOffers,
   type TaskStandingMembers,
 } from "@agentx/contracts";
 import { z } from "zod";
@@ -241,6 +241,25 @@ describe("taskStandingFor: a plan waits for approval", () => {
     const world = await seed({ workflow: planWaiting(), access: access() });
     const served = (await taskStandingFor(envOf(world), PERSONAS(world)["owner"]!, await taskOf(world.h)))!.standing;
     expect(served.pill.key).toBe("needs_you");
+  });
+});
+
+describe("taskStandingFor: nobody who owns the task still has its project (TASK-TAKEOVER PR A)", () => {
+  it("waits on a project admin: a reader who is not an admin reads Needs a project admin and who it waits on; a live company admin is the person it asks", async () => {
+    const noOwner = WorkflowSnapshotSchema.parse({ ...blockedReview(), stage: "IMPLEMENT", state: "BLOCKED", blockReason: OWNER_LEFT_PROJECT_WORDS });
+    const world = await seed({ workflow: noOwner, access: access() });
+    const task = await taskOf(world.h);
+    const who = PERSONAS(world);
+    const colleague = (await taskStandingFor(envOf(world), who["colleague"]!, task))!.standing;
+    expect(colleague.pill).toMatchObject({ key: "needs_role", words: "Needs a project admin" });
+    expect(colleague.waitingOn).toEqual({ role: "project_admin", words: "project admin" });
+    const admin = (await taskStandingFor(envOf(world), who["liveAdmin"]!, task))!.standing;
+    expect(admin.pill.key).toBe("needs_you");
+    expect(admin.waitingOn).toBeUndefined();
+    // Any other stopped step still reads as before: it waits on the task owner.
+    const other = WorkflowSnapshotSchema.parse({ ...blockedReview(), stage: "IMPLEMENT", state: "BLOCKED", blockReason: "the step stopped" });
+    const otherWorld = await seed({ workflow: other, access: access() });
+    expect((await taskStandingFor(envOf(otherWorld), PERSONAS(otherWorld)["colleague"]!, await taskOf(otherWorld.h)))!.standing.pill.words).toBe("Needs the task owner");
   });
 });
 

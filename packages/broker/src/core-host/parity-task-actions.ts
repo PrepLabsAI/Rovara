@@ -67,7 +67,7 @@ export async function runParityTaskAction(deps: TaskFlowDeps, options: TaskActio
   if (waitingForSpend(workflow)) throw agentXError("CONFIG_INVALID", WAITING_FOR_SPEND);
   const flow = fencedFlow(deps, acting.items ?? []);
   if (action === "workflow/publish-retry") {
-    await publishRetry(flow, task, request.expectedRevision);
+    await publishRetry(flow, task, request.expectedRevision, caller.principal.personId);
     return;
   }
   if (!("instructions" in request)) throw agentXError("CONFIG_INVALID", "instructions: required");
@@ -82,12 +82,12 @@ export async function runParityTaskAction(deps: TaskFlowDeps, options: TaskActio
   await retryStep(flow, options, caller, task, request, acting.actorId);
 }
 
-async function publishRetry(deps: TaskFlowDeps, task: TaskRecord, expectedRevision: number | undefined): Promise<void> {
+async function publishRetry(deps: TaskFlowDeps, task: TaskRecord, expectedRevision: number | undefined, by: string): Promise<void> {
   const workflow = task.workflow!;
   if (!workflowPublicationRetryable(workflow) || workflow.candidate === undefined) throw agentXError("CONFIG_INVALID", "Rovara can retry opening the pull request only after the checks and reviews passed and before it is open");
   if (expectedRevision !== workflow.revision) stale("this retry is out of date; refresh the task and try again");
   await requireMayStartWork(deps, task);
-  started(await startPublication(deps, { taskId: task.taskId, workflowRevision: workflow.revision }, { ownerRetry: true }), AFTER_START.publication);
+  started(await startPublication(deps, { taskId: task.taskId, workflowRevision: workflow.revision, by }, { ownerRetry: true }), AFTER_START.publication);
 }
 
 async function retryStep(deps: TaskFlowDeps, options: TaskActionsOptions, caller: TaskCaller, task: TaskRecord, request: ContinueDeveloperTaskRequest, actorId: string): Promise<void> {
@@ -98,16 +98,16 @@ async function retryStep(deps: TaskFlowDeps, options: TaskActionsOptions, caller
     if (request.expectedRevision === undefined) throw agentXError("CONFIG_INVALID", "refresh the task and include its current revision before retrying verification");
     const selection = checkSelection(workflow, request);
     await admitRound(deps, options, { task, caller, requestId: request.requestId });
-    started(await startChecksRerun(deps, { taskId: task.taskId, workflowRevision: workflow.revision }, { requestId: request.requestId, actorId, ...selection, manual: request }), AFTER_START.checks);
+    started(await startChecksRerun(deps, { taskId: task.taskId, workflowRevision: workflow.revision, by: caller.principal.personId }, { requestId: request.requestId, actorId, ...selection, manual: request }), AFTER_START.checks);
     return;
   }
   await admitRound(deps, options, { task, caller, requestId: request.requestId });
-  const row = { taskId: task.taskId, workflowRevision: workflow.revision };
+  const row = { taskId: task.taskId, workflowRevision: workflow.revision, by: caller.principal.personId };
   if (workflow.stage === "IMPLEMENT") {
     started(await startImplementation(deps, row, request), AFTER_START.coding);
   } else if (workflow.stage === "PLAN") {
-    await retryPlanning(deps, task, request);
-  } else await retryBlockedStep(deps, task.taskId, request.expectedRevision);
+    await retryPlanning(deps, task, request, caller.principal.personId);
+  } else await retryBlockedStep(deps, task.taskId, request.expectedRevision, undefined, caller.principal.personId);
 }
 
 /**
@@ -133,13 +133,13 @@ async function replayedStep(deps: TaskFlowDeps, task: TaskRecord, requestId: str
   throw agentXError("IDEMPOTENCY_CONFLICT", "this request ID was already used for another action on this task");
 }
 
-async function retryPlanning(deps: TaskFlowDeps, task: TaskRecord, request: ContinueDeveloperTaskRequest): Promise<void> {
+async function retryPlanning(deps: TaskFlowDeps, task: TaskRecord, request: ContinueDeveloperTaskRequest, by: string): Promise<void> {
   const workspace = await readWorkspace(deps, task.workspaceId);
   if (workspace === undefined) throw agentXError("WORKSPACE_NOT_READY", "The workspace is not ready yet. Try again in a moment.");
   const workflow = task.workflow!;
   const { blockReason: _reason, ...base } = workflow;
   void _reason;
-  started((await acceptStepWithNotes(deps, { task, workspace, requestId: request.requestId, prompt: request.instructions, workflowMode: "PLAN", workflow: { current: workflow, next: { ...base, revision: workflow.revision + 1, state: "RUNNING", updatedAt: iso(deps) } }, payload: { planFormat: "structured", ...(workflow.reviewPhase === undefined ? {} : { workflowPhase: workflow.reviewPhase }) }, requires: ["task.workflowMode", "task.structuredPlans"] })).result, AFTER_START.planning);
+  started((await acceptStepWithNotes(deps, { by, task, workspace, requestId: request.requestId, prompt: request.instructions, workflowMode: "PLAN", workflow: { current: workflow, next: { ...base, revision: workflow.revision + 1, state: "RUNNING", updatedAt: iso(deps) } }, payload: { planFormat: "structured", ...(workflow.reviewPhase === undefined ? {} : { workflowPhase: workflow.reviewPhase }) }, requires: ["task.workflowMode", "task.structuredPlans"] })).result, AFTER_START.planning);
 }
 
 function checkSelection(workflow: WorkflowSnapshot, request: { selectedOptionalCheckIds?: string[] | undefined; selectedProposedCheckIds?: string[] | undefined }): { policy: NonNullable<WorkflowSnapshot["checkPolicy"]> } {

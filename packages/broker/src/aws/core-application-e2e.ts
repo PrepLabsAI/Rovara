@@ -42,7 +42,9 @@ export function wireHostedApplicationE2E(input: { flow: TaskFlowDeps; objects: O
     cancelBaseline: async (task, operationId) => { await cancelTask(flow, task.taskId, operationId); },
   });
   const selection: ApplicationE2ESeams["rounds"]["selection"] = async (...args) => {
-    const authority = await creator(args[0]);
+    // The current owner's authority (the person the task runs for now), as the round's admission reads it.
+    const access = await flow.access.checkStep(args[0]);
+    const authority = access.allowed ? await creator({ ...args[0], developerId: access.owner?.personId ?? args[0].developerId }) : undefined;
     if (authority === undefined) throw new Error("the original creator has no current company and project authority");
     const selected = await reader.selection(...args);
     return { ...selected, items: [...selected.items, ...authority.items] };

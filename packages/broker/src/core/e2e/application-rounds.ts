@@ -126,8 +126,10 @@ async function approvedPlan(deps: ApplicationRoundsDeps, task: ApplicationTask) 
 
 async function creatorOf(deps: ApplicationRoundsDeps, task: ApplicationTask) {
   const access = await deps.flow.access.checkStep(task);
-  const creator = access.allowed ? await deps.creator(task) : undefined;
-  if (creator === undefined || creator.companyId !== task.companyId || task.companyId !== deps.flow.companyId || creator.proof.developerId !== task.developerId
+  // The proof is the CURRENT owner's (the person the task runs for now); a task nobody has taken over is its starter's, as before.
+  const ownerId = access.allowed ? access.owner?.personId ?? task.developerId : task.developerId;
+  const creator = access.allowed ? await deps.creator({ ...task, developerId: ownerId }) : undefined;
+  if (creator === undefined || creator.companyId !== task.companyId || task.companyId !== deps.flow.companyId || creator.proof.developerId !== ownerId
     || creator.proof.project !== task.project || creator.items.length === 0 || creator.items.some((item) => item.kind !== "check")) throw applicationRoundRefusal("The original creator has no current company and project authority.");
   return { ...creator, items: [...creator.items, ...(access.allowed ? access.items ?? [] : [])] };
 }

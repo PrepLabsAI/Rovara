@@ -70,7 +70,8 @@ describe("task person runtime factory", () => {
     const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
     const injected = ports();
     const checker = runtime(admission, injected);
-    await checker.checkTaskPerson(nativeTask(), nativeDeveloperId);
+    // ARCH RULING (b): a person admitted through the channel binding alone is channel-only (never an owner).
+    await expect(checker.checkTaskPerson(nativeTask(), nativeDeveloperId)).resolves.toMatchObject({ eligible: true, channelMember: true, channelOnly: true });
 
     await expect(checker.stateAuthorityWitnessForOwnerActor(nativeTask(), taskOwnerKey(nativeDeveloperId, taskId))).resolves.toMatchObject({
       taskId, developerId: nativeDeveloperId, project: "payments-api", access: "channel",
@@ -101,6 +102,7 @@ describe("task person runtime factory", () => {
     const checker = runtime(admission, injected);
     const eligibility = await checker.checkTaskPerson(nativeTask(), nativeDeveloperId);
     expect(eligibility).toMatchObject({ eligible: true, channelMember: false });
+    expect(eligibility.channelOnly).not.toBe(true);
     await expect(checker.stateAuthorityWitnessForOwnerActor(nativeTask(), taskOwnerKey(nativeDeveloperId, taskId))).resolves.toBeUndefined();
 
     await expect(checker.stateAuthorityWitnessForEligiblePerson(nativeTask(), nativeDeveloperId)).resolves.toMatchObject({

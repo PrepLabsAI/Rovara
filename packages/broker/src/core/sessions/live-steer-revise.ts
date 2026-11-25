@@ -9,7 +9,7 @@
 import { z } from "zod";
 import {
   LIVE_STEER_REAPPROVAL_REASON, LIVE_STEER_TEXT_MAX_CHARS, WORKFLOW_REVISE_PLAN_DECISION_REASON, WorkflowTransitionError, agentXError, change, redactText, revisePlanWithLiveChange, when, workflowReviseOffered,
-  type OrgId, type SessionId, type TransactItem,
+  type OrgId, type SessionId, type TransactItem, type WorkflowOwnerAuthority,
 } from "@agentx/contracts";
 import type { TaskFlowDeps } from "../task-flow/deps.js";
 import { dispatchRowItem } from "../task-flow/dispatch-rows.js";
@@ -30,13 +30,24 @@ export const REVISE_PLAN_REFUSALS = Object.freeze({
   stale: "this action is out of date; refresh the task and try again",
 });
 
+/** Who the revision is recorded under: the pressing owner as the host's rule names them (with the authority and the People fence of their move), else the workflow's own owner. */
+function actorOf(acting: { actorId: string; authority?: WorkflowOwnerAuthority | undefined; items?: readonly TransactItem[] | undefined } | undefined, ownerId: string): { actorId: string; authority: WorkflowOwnerAuthority | undefined; items: readonly TransactItem[] } {
+  return { actorId: acting?.actorId ?? ownerId, authority: acting?.authority, items: acting?.items ?? [] };
+}
+
 const oneLine = (text: string): string => redactText(text).replace(/\s+/gu, " ").trim().slice(0, LIVE_STEER_TEXT_MAX_CHARS).trim();
 
 /**
  * The owner's press of "Revise the plan". Answers when planning is running with the owner's change (or, for a repeat of the same request, as it already was). Throws, writing nothing, when the press is out of date or the task is
  * not stopped for a change the plan can take in.
  */
-export async function revisePlanWithLiveMessage(deps: TaskFlowDeps, orgId: OrgId, sessionId: SessionId, input: { taskId: string; ownerDeveloperId: string }, value: unknown): Promise<"started" | "repeated"> {
+export async function revisePlanWithLiveMessage(deps: TaskFlowDeps, orgId: OrgId, sessionId: SessionId, input: {
+  taskId: string; ownerDeveloperId: string;
+  /** The owner as the host's rule names them for this press (`TaskAccess.ownerActing`: the person who presses, as the task's current owner, with the People fence): the change is recorded under THEIR actor, not the starter's. Absent: the workflow's own owner. */
+  acting?: { actorId: string; authority?: WorkflowOwnerAuthority | undefined; items?: readonly TransactItem[] | undefined } | undefined;
+  /** The person who pressed (their principal's id): the planning step the press makes due is charged to them. Absent: nobody is named (the starter's task). */
+  by?: string | undefined;
+}, value: unknown): Promise<"started" | "repeated"> {
   const { taskId } = input;
   const parsed = RevisePlanRequestSchema.safeParse(value);
   if (!parsed.success) throw agentXError("CONFIG_INVALID", REVISE_PLAN_REFUSALS.invalid);
@@ -70,9 +81,10 @@ export async function revisePlanWithLiveMessage(deps: TaskFlowDeps, orgId: OrgId
     parts.push(text);
   }
   const at = iso(deps);
+  const actor = actorOf(input.acting, workflow.ownerId);
   let next;
   try {
-    next = revisePlanWithLiveChange(workflow, { requestId: request.requestId, actorId: workflow.ownerId, now: at });
+    next = revisePlanWithLiveChange(workflow, { requestId: request.requestId, actorId: actor.actorId, now: at }, actor.authority);
   } catch (error) {
     if (error instanceof WorkflowTransitionError) throw agentXError("CONFIG_INVALID", error.message);
     throw error;
@@ -80,7 +92,8 @@ export async function revisePlanWithLiveMessage(deps: TaskFlowDeps, orgId: OrgId
   const items: TransactItem[] = [
     // The owner's words as the change to make: the same item a request for changes writes, which the planner's prompt reads under the owner's asks.
     { kind: "put", item: { ...planFeedbackKey(taskId, next.revision), entityType: "PLAN_FEEDBACK", text: parts.length === 1 ? parts[0]! : parts.map((part) => `- ${part}`).join(" "), createdAt: at } },
-    dispatchRowItem(deps, taskId, next.revision, "PLAN", at),
+    dispatchRowItem(deps, taskId, next.revision, "PLAN", at, at, undefined, undefined, undefined, input.by),
+    ...actor.items,
     // The record is spent by this press (and only by it): a second press, even a newer request, finds it used.
     { kind: "update", key: liveSteerChangeKey(taskId), ops: [change.set("usedBy", request.requestId)], condition: when.and(when.eq("workflowRevision", workflow.revision), when.notExists("usedBy")) },
   ];

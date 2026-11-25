@@ -45,7 +45,9 @@ export function uuidFrom(text: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${((parseInt(hex[16] ?? "0", 16) & 0x3) | 0x8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
-export interface RowRef { taskId: string; workflowRevision: number; firstEvent?: string }
+export interface RowRef { taskId: string; workflowRevision: number; firstEvent?: string; /** The person whose press started this step in this request: it is charged to them. */ by?: string | undefined }
+/** The press on a row, as the part of a step's input that carries it (nothing when nobody pressed). */
+export const byOf = (row: RowRef): { by?: string } => (row.by === undefined ? {} : { by: row.by });
 
 /** The task a row stands for, when it is still open at the revision the row was written for; the workspace, when it can take a step. */
 export interface Located { task: TaskRecord & { workflow: WorkflowSnapshot }; workspace: WorkspaceRecord }
@@ -268,7 +270,7 @@ export async function startImplementation(deps: TaskFlowDeps, row: RowRef, manua
     kind: "setup_paused", orgId: deps.companyId, taskId: task.taskId, ...(task.sessionId === undefined ? {} : { sessionId: task.sessionId }), at: receivedAt, text: SETUP_WARNING_TIMELINE,
   }, next.revision);
   const accepted = await acceptStepWithNotes(deps, {
-    task, workspace, requestId, prompt: withTestRule(prompt, next), workflowMode: "IMPLEMENT",
+    ...byOf(row), task, workspace, requestId, prompt: withTestRule(prompt, next), workflowMode: "IMPLEMENT",
     workflow: { current: workflow, next: operationId === undefined ? next : workflowWithCurrentGraphOperation(next, operationId, graph?.invocation) },
     extra: [resolveRowItem(deps, task.taskId, row.workflowRevision), ...(feedback?.items ?? []), ...warned], payload,
     requires: [
@@ -362,7 +364,7 @@ export async function startChecksRerun(deps: TaskFlowDeps, row: RowRef, retry: {
   const browserRecipe = capture ? await deps.browserEvidence?.recipe(task).catch(() => undefined) : undefined;
   const payload = jsonOf({ ...(evalRequest === undefined ? {} : { evalRequest }), ...(evalPromptLocations === undefined ? {} : { evalPromptLocations }), ...(readiness.length === 0 ? {} : { readiness }), ...(testPlan === undefined ? {} : { testEnvironment: testPlan.plan }), ...(capture ? { evidenceCapture: true } : {}), ...(generalFakes === undefined ? {} : { generalFakes }), ...(browserRecipe === undefined ? {} : { browserEvidence: browserRecipe }), ...baseOf(task, workflow) });
   const accepted = await acceptStep(deps, {
-    task, workspace, requestId: manualRequestId(retry.manual, "agentx-checks", task.taskId, workflow.revision), prompt: withOwnerInstructions("Run the task's selected checks again on the current code. Do not edit files.", retry.manual), workflowMode: "CHECKS",
+    ...byOf(row), task, workspace, requestId: manualRequestId(retry.manual, "agentx-checks", task.taskId, workflow.revision), prompt: withOwnerInstructions("Run the task's selected checks again on the current code. Do not edit files.", retry.manual), workflowMode: "CHECKS",
     workflow: { current: workflow, next }, extra: [resolveRowItem(deps, task.taskId, row.workflowRevision)], payload,
     requires: ["task.workflowMode", ...(readiness.length === 0 ? [] : ["task.readiness"]), ...(payload["workflowBase"] === undefined ? [] : ["task.workflowBase"]), ...(capture ? [EVIDENCE_CAPTURE_FEATURE] : []), ...(browserRecipe === undefined ? [] : [BROWSER_EVIDENCE_FEATURE, ...(browserRecipe.video === undefined ? [] : [BROWSER_EVIDENCE_VIDEO_FEATURE])]), ...(testPlan === undefined ? [] : testPlan.requires), ...(generalFakes === undefined ? [] : [GENERAL_FAKES_FEATURE])],
     // A run the broker asked for an eval may ask for its trusted eval plan (DEC 253c `eval-plan`); no other run's capability names it.
@@ -474,7 +476,7 @@ export async function startReview(deps: TaskFlowDeps, row: RowRef, options: Revi
     ...(second.field === undefined ? {} : { workflowSecondReviewer: jsonOf(second.field) }),
   });
   const accepted = await acceptStep(deps, {
-    task, workspace, requestId: request.requestId, prompt: reviewPrompt({ candidateDigest: candidate.digest, roles }), workflowMode: "REVIEW",
+    ...byOf(row), task, workspace, requestId: request.requestId, prompt: reviewPrompt({ candidateDigest: candidate.digest, roles }), workflowMode: "REVIEW",
     workflow: { current: workflow, next }, extra: [resolveRowItem(deps, task.taskId, row.workflowRevision), ...request.extra], payload, ...(second.record === undefined ? {} : { secondReviewPlan: second.record }), ...(second.firstEvent === undefined ? {} : { firstEvent: second.firstEvent }),
     requires: ["task.workflowMode", "task.workflowReview", ...(checks === undefined ? [] : ["task.workflowReviewChecks"]), ...(plan === undefined ? [] : ["task.workflowReviewPlan"]), ...(payload["workflowReviewRisk"] === undefined ? [] : ["task.workflowReviewRisk"]), ...(roles.length === 2 ? [] : ["task.workflowReviewers"])],
   }).catch(async (error: unknown) => {

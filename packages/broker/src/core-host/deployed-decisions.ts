@@ -189,7 +189,42 @@ function waitingDocument(task: TaskRecord): { workflow: WorkflowSnapshot; artifa
 }
 
 /**
- * The approval gate of one company's deployed core: over the company's approvers point (with the policy hook's wrapper the registry was sealed with), where the task's own person is the only decider of its documents.
+ * Whether the principal is an owner of the task NOW, and as whom the engine records them: the company's live owner rule (`TaskAccess.ownerActing`: the task's own person, or a People owner under the live proof, with the
+ * project grant). A throw (People or the proof unreadable) is no owner: nothing is decided on a guess. `authority` and `items` (the People revision fence) go to the decision's transaction. Only meaningful where the host
+ * gave the rule; the engine records one actor under the owner id it knows: the person's own owner key, and a rule that names another actor is not believed.
+ */
+async function ownerActingFor(deps: TaskFlowDeps, principal: Principal, task: { taskId: string; developerId: string; project: string; ownerKey: string }): Promise<NonNullable<Awaited<ReturnType<NonNullable<TaskFlowDeps["access"]["ownerActing"]>>>> | undefined> {
+  const access = deps.access;
+  if (access.ownerActing === undefined || typeof principal.personId !== "string") return undefined;
+  try {
+    const acting = await access.ownerActing(principal, task);
+    if (acting === undefined) return undefined;
+    const own = taskOwnerKey(principal.personId, task.taskId);
+    return acting.authority === undefined ? (acting.actorId === task.ownerKey && own === task.ownerKey ? acting : undefined) : (acting.actorId === own ? acting : undefined);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether a plan card shows its money to this viewer: a company admin, the task's starter, or the person the task's next step is charged to (its current owner once it was handed or taken over; a read that fails shows none).
+ */
+async function moneyShownTo(deps: TaskFlowDeps, task: TaskRecord, viewer: { principal: Principal; admin: boolean }): Promise<boolean> {
+  if (viewer.admin || taskOwnerView(task)?.developerId === viewer.principal.personId) return true;
+  const payer = await deps.access.checkStep(task).catch(() => undefined);
+  return payer?.allowed === true && payer.owner?.personId === viewer.principal.personId;
+}
+
+/** The decision gate's own owner rule for a verified approver: the company's live owner rule for this approver, on the task and workflow as the decision reads them (anything unreadable is no owner). */
+function approverOwnerActing(deps: TaskFlowDeps, companyId: OrgId): NonNullable<NonNullable<DecisionServiceOptions["workflowSubject"]>["ownerActing"]> {
+  return async (approver, task, workflow) => {
+    if (approver.companyId !== companyId || typeof approver.personId !== "string" || typeof task["developerId"] !== "string" || typeof task["project"] !== "string") return undefined;
+    return await ownerActingFor(deps, approver, { taskId: workflow.taskId, developerId: task["developerId"], project: task["project"], ownerKey: workflow.ownerId });
+  };
+}
+
+/**
+ * The approval gate of one company's deployed core: over the company's approvers point (with the policy hook's wrapper the registry was sealed with), where the task's own person, or a People owner the live owner rule names, decides its documents.
  * One definition for the decision cards and for what only READS the gate (HW5: the plan card's `requirement`), so both ask the same gate, the same approvers and the same rule for who decides.
  */
 export function hostedDecisionService(input: { deps: TaskFlowDeps; registry: AdapterRegistry; companyId: OrgId; now: () => Date }): DecisionService {
@@ -200,6 +235,8 @@ export function hostedDecisionService(input: { deps: TaskFlowDeps; registry: Ada
     workflowSubject: {
       actorFor: (approver, workflow) => (approver.companyId === companyId && typeof approver.personId === "string" && taskOwnerKey(approver.personId, workflow.taskId) === workflow.ownerId
         ? { actorId: workflow.ownerId, role: "TASK_OWNER" } : undefined),
+      // The task's CURRENT owner decides, not only its starter: a person the task was handed or taken over to, or a co-owner, read live (as the web's cards do).
+      ...(deps.access.ownerActing === undefined ? {} : { ownerActing: approverOwnerActing(deps, companyId) }),
     },
   });
 }
@@ -231,24 +268,7 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
   const nowMs = (): number => (deps.now?.() ?? new Date()).getTime();
   const log = (entry: Record<string, unknown>): void => { try { options.log?.(entry); } catch { /* a log never changes an answer */ } };
 
-  /**
-   * Whether the principal is an owner of the task NOW, and as whom the engine records them: the company's live owner rule (`TaskAccess.ownerActing`: the task's own person, or a People co-owner under the
-   * live proof, with the project grant). A throw (People or the proof unreadable) is no owner: nothing is decided on a guess. `authority` and `items` (the People revision fence) go to the decision's
-   * transaction. Only meaningful where the host gave the rule; `isOwner` keeps the task's own person otherwise.
-   */
-  const ownerActingOf = async (principal: Principal, task: { taskId: string; developerId: string; project: string; ownerKey: string }): Promise<NonNullable<Awaited<ReturnType<NonNullable<typeof deps.access.ownerActing>>>> | undefined> => {
-    const access = deps.access;
-    if (access.ownerActing === undefined || typeof principal.personId !== "string") return undefined;
-    try {
-      const acting = await access.ownerActing(principal, task);
-      if (acting === undefined) return undefined;
-      // The engine records one actor under the owner id it knows: the person's own owner key. A rule that names another actor is not believed.
-      const own = taskOwnerKey(principal.personId, task.taskId);
-      return acting.authority === undefined ? (acting.actorId === task.ownerKey && own === task.ownerKey ? acting : undefined) : (acting.actorId === own ? acting : undefined);
-    } catch {
-      return undefined;
-    }
-  };
+  const ownerActingOf = (principal: Principal, task: { taskId: string; developerId: string; project: string; ownerKey: string }) => ownerActingFor(deps, principal, task);
   const isOwner = async (principal: Principal, task: TaskRecord): Promise<boolean> => (deps.access.ownerActing === undefined
     ? task.developerId === principal.personId
     : (await ownerActingOf(principal, { taskId: task.taskId, developerId: task.developerId, project: task.project, ownerKey: task.workflow?.ownerId ?? task.ownerKey })) !== undefined);
@@ -261,12 +281,7 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
       // Who decides as the task's owner: read live for each verified approver (`ownerOf`), never from the proof alone.
       actorFor: (approver, workflow) => (approver.companyId === companyId && typeof approver.personId === "string" && taskOwnerKey(approver.personId, workflow.taskId) === workflow.ownerId
         ? { actorId: workflow.ownerId, role: "TASK_OWNER" } : undefined),
-      ...(deps.access.ownerActing === undefined ? {} : {
-        ownerActing: async (approver, task, workflow) => {
-          if (approver.companyId !== companyId || typeof approver.personId !== "string" || typeof task["developerId"] !== "string" || typeof task["project"] !== "string") return undefined;
-          return await ownerActingOf(approver, { taskId: workflow.taskId, developerId: task["developerId"], project: task["project"], ownerKey: workflow.ownerId });
-        },
-      }),
+      ...(deps.access.ownerActing === undefined ? {} : { ownerActing: approverOwnerActing(deps, companyId) }),
     },
   };
   const decisions = createDecisionService(decisionOptions);
@@ -297,7 +312,7 @@ export function deployedDecisionCards(options: DeployedDecisionCardsOptions): De
     if (artifact.format === "structured" && loaded?.format !== "structured") return undefined;
     const facts = planFactsOf(loaded, workflow);
     const base = {
-      revealMoney: viewer.admin || taskOwnerView(task)?.developerId === viewer.principal.personId,
+      revealMoney: await moneyShownTo(deps, task, viewer),
       subjectId: task.taskId, taskId: task.taskId, project: task.project, title: task.title, createdAt: artifact.createdAt, contentVersion: artifact.sha256,
       binding: { revision: workflow.revision, artifactDigest: artifact.sha256 }, openPath: taskOpenPath(task),
     };

@@ -34,8 +34,8 @@ export function designRowFor(workflow: WorkflowSnapshot): "CRITIQUE" | "CRITIC_R
 }
 
 /** A CRITIQUE row for a round a person approved to run without a price: carries who approved, which is the only way a round starts from the cost hold. */
-export function designRowItem(deps: Pick<TaskFlowDeps, "companyId">, taskId: string, revision: number, kind: "CRITIQUE" | "CRITIC_REPLAN", now: string, costApprovedBy?: string): Extract<TransactItem, { kind: "put" }> {
-  const row = dispatchRowItem(deps, taskId, revision, kind, now);
+export function designRowItem(deps: Pick<TaskFlowDeps, "companyId">, taskId: string, revision: number, kind: "CRITIQUE" | "CRITIC_REPLAN", now: string, costApprovedBy?: string, by?: string): Extract<TransactItem, { kind: "put" }> {
+  const row = dispatchRowItem(deps, taskId, revision, kind, now, now, undefined, undefined, undefined, by);
   return costApprovedBy === undefined ? row : { ...row, item: { ...row.item, costApprovedBy } };
 }
 

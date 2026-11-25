@@ -1,10 +1,11 @@
 import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
 import { describe, expect, it } from "vitest";
-import { change, LIVE_STEER_REAPPROVAL_REASON, WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema } from "@agentx/contracts";
+import { change, when, LIVE_STEER_REAPPROVAL_REASON, WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema } from "@agentx/contracts";
 import * as services from "../../packages/broker/src/services/index.js";
 import { taskKey, workspaceKey, operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { fromDocument, toDocument, type WorkspaceRecord } from "../../packages/broker/src/core/task-flow/records.js";
 import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
+import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
 import { blockTaskWorkflow, planFeedbackKey } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { liveSteerChangeKey } from "../../packages/broker/src/core/sessions/live-steer-reapproval.js";
 import { messageKey } from "../../packages/broker/src/core/sessions/steer.js";
@@ -65,5 +66,26 @@ describe("host session actions over injected ports", () => {
     expect(revised.stage).toBe("PLAN");
     expect(await actions.revisePlanWithLiveMessage(COMPANY, sessionId, input, request)).toBe("repeated");
     expect((await readTask(h.deps, task.taskId))!.workflow).toEqual(revised);
+  });
+
+  it("records the revision under the pressing owner when the host's owner rule names one (a task handed over or taken over), not under the starter, and fences the People revision (TASK-TAKEOVER PR A)", async () => {
+    const { h, task, actions } = await setup();
+    const sessionId = "ses_bbbbbbbbbbbbbbbbbbbb";
+    const messageId = "msg_bbbbbbbbbbbbbbbbbbbb";
+    const successor = "d".repeat(64);
+    const at = h.deps.now!().toISOString();
+    const workflow = WorkflowSnapshotSchema.parse({ ...(await readTask(h.deps, task.taskId))!.workflow, revision: 9, stage: "IMPLEMENT", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.liveSteerReapprovalRevise,
+      artifacts: [{ id: "plan-v1", type: "plan", version: 1, sha256: "c".repeat(64), producer: "planner", objectKey: "plan.md", createdAt: at }] });
+    await h.store.update({ key: taskKey(task.taskId), ops: [change.set("workflow", toDocument(workflow))] });
+    await h.store.put({ item: { ...liveSteerChangeKey(task.taskId), workflowRevision: 9, messageIds: [messageId] } });
+    await h.store.put({ item: { ...messageKey({ orgId: COMPANY, sessionId }, messageId), orgId: COMPANY, sessionId, messageId, kind: "steer", source: "app", author: { developerId: successor, name: "Successor" }, text: "Also record the request id.", createdAt: at, rev: 1, delivery: { state: "delivered", at, reason: LIVE_STEER_REAPPROVAL_REASON } } });
+    const fence = { kind: "check" as const, key: { pk: "people-fence", sk: "REV" }, condition: when.eq("revision", 3) };
+    const actor = taskOwnerKey(successor, task.taskId);
+    await h.store.put({ item: { ...fence.key, revision: 3 } });
+    const acting = { actorId: actor, authority: { actorId: actor, ownerIds: [actor] }, items: [fence] };
+    expect(await actions.revisePlanWithLiveMessage(COMPANY, sessionId, { taskId: task.taskId, ownerDeveloperId: successor, acting }, { requestId: newRequestId(), expectedRevision: 9 })).toBe("started");
+    const revised = (await readTask(h.deps, task.taskId))!.workflow!;
+    expect(revised.decisions.at(-1)).toMatchObject({ decision: "REQUEST_CHANGES", actorId: actor });
+    expect(revised.decisions.at(-1)!.actorId).not.toBe(workflow.ownerId);
   });
 });

@@ -13,6 +13,7 @@ import {
   commentIdInAuthor,
   commentRefInAuthor,
   planSummaryLines,
+  ownerNeedsGrantHistoryWords,
   redactText,
   reviewCleared,
   workflowApplicationRetryOffered,
@@ -597,14 +598,21 @@ function formatDecisionHistoryText(
   return `${who} skipped ${name}`;
 }
 
-function parsePeopleHistoryEvent(value: unknown): { actorDeveloperId: string; targetDeveloperId: string; createdAt: string; afterRole: string } {
+function parsePeopleHistoryEvent(value: unknown): { actorDeveloperId: string; targetDeveloperId: string; createdAt: string; afterRole: string; via?: string } {
   const event = value as Record<string, unknown>;
   if (event.entityType !== "TASK_PEOPLE_EVENT" || event.schemaVersion !== 1 || typeof event.actorDeveloperId !== "string"
     || typeof event.targetDeveloperId !== "string" || typeof event.createdAt !== "string" || !Number.isFinite(Date.parse(event.createdAt))
     || typeof event.afterRole !== "string" || !PEOPLE_EVENT_ROLES.has(event.afterRole)) {
     throw agentXError("RUNTIME_UNAVAILABLE", "Task People history is invalid");
   }
-  return { actorDeveloperId: event.actorDeveloperId, targetDeveloperId: event.targetDeveloperId, createdAt: event.createdAt, afterRole: event.afterRole };
+  return { actorDeveloperId: event.actorDeveloperId, targetDeveloperId: event.targetDeveloperId, createdAt: event.createdAt, afterRole: event.afterRole, ...(typeof event.via === "string" ? { via: event.via } : {}) };
+}
+
+/** One People event as the task page's history says it. A read's own demotion of an owner who holds no grant of their own (task-people.ts `reconcile`, `via: "needs_grant"`) names no actor. */
+function peopleEventLine(event: { afterRole: string; via?: string }, actor: string, target: string): string {
+  if (event.via === "needs_grant" && event.afterRole === "commenter") return ownerNeedsGrantHistoryWords(target);
+  if (event.afterRole === "denied") return `${actor} removed access for ${target}`;
+  return `${actor} made ${target} ${event.afterRole}`;
 }
 
 async function loadPeopleHistoryEntries(
@@ -625,8 +633,7 @@ async function loadPeopleHistoryEntries(
       const event = parsePeopleHistoryEvent(value);
       const actor = personName(taskOwnerKey(event.actorDeveloperId, taskId));
       const target = personName(taskOwnerKey(event.targetDeveloperId, taskId));
-      const text = event.afterRole === "denied" ? `${actor} removed access for ${target}` : `${actor} made ${target} ${event.afterRole}`;
-      entries.push({ at: event.createdAt, text });
+      entries.push({ at: event.createdAt, text: peopleEventLine(event, actor, target) });
     }
     start = response.LastEvaluatedKey;
   } while (start !== undefined);

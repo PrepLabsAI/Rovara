@@ -44,8 +44,11 @@ export interface TaskPersonIdentityDependencies extends TaskPersonWebProofReader
   developerRecord(developerId: string): Promise<DeveloperRecord | undefined>;
   /** Current channels bound to the target project. */
   projectChannelIds(project: string): Promise<readonly string[]>;
-  /** Existing project policy and grants, evaluated against only the supplied fresh membership. */
-  targetProjectAccess(subject: ProjectAccessSubject, project: string, freshMemberOf: readonly string[]): Promise<void>;
+  /**
+   * Existing project policy and grants, evaluated against only the supplied fresh membership. Resolves when the person may use the project now, saying HOW: `granted` (an individual project grant) or
+   * `channel` (only through one of the project's Slack channels). A test fake may resolve with nothing: not channel-only.
+   */
+  targetProjectAccess(subject: ProjectAccessSubject, project: string, freshMemberOf: readonly string[]): Promise<"granted" | "channel" | void>;
   /** Exact caller already authenticated by the enclosing route. Never supplied by system-created callers. */
   trustedCaller?: Pick<DeveloperCaller, "developerId" | "amr" | "name" | "slackUserId">;
 }
@@ -200,7 +203,7 @@ async function persistIdentity(
   }
 }
 
-type Qualification = { eligible: true; channelMember: boolean; name: string } | { eligible: false; channelMember: boolean };
+type Qualification = { eligible: true; channelMember: boolean; channelOnly: boolean; name: string } | { eligible: false; channelMember: boolean };
 
 async function qualifyCurrent(
   deps: TaskPersonIdentityDependencies,
@@ -233,15 +236,16 @@ async function qualifyCurrent(
     || (task.share !== undefined && task.share.teamId !== deps.slackTeamId)
     || new Set(memberOf).size !== memberOf.length || memberOf.some((channelId) => !requested.has(channelId))) return unavailable();
   const channelMember = task.share === undefined || memberOf.includes(task.share.channelId);
+  let access: "granted" | "channel" | void;
   try {
-    await deps.targetProjectAccess(subject, task.project, memberOf);
+    access = await deps.targetProjectAccess(subject, task.project, memberOf);
   } catch (error) {
     if (error instanceof Error && (error as Error & { code?: string }).code === "PROJECT_ACCESS_DENIED") {
       return { eligible: false, channelMember };
     }
     return unavailable();
   }
-  return { eligible: true, channelMember, name: safeName(parsed.data.user.name, parsed.data.user.id) };
+  return { eligible: true, channelMember, channelOnly: access === "channel", name: safeName(parsed.data.user.name, parsed.data.user.id) };
 }
 
 async function qualify(
@@ -421,7 +425,7 @@ export async function checkTaskPersonIdentity(
   deps: TaskPersonIdentityDependencies,
   task: DeveloperTaskRecord,
   developerId: string,
-): Promise<{ subject: ProjectAccessSubject; identity: TaskPersonIdentity; eligible: boolean; channelMember: boolean }> {
+): Promise<TaskPersonIdentityCheck> {
   if (!HEX64.test(developerId)) return refuse();
   const stored = await currentTask(deps, task.taskId);
   if (stored.project !== task.project || stored.developerId !== task.developerId || stored.provider !== task.provider || stored.slackUserId !== task.slackUserId) return refuse();
@@ -466,7 +470,10 @@ async function taskCreatorIdentity(deps: TaskPersonIdentityDependencies, stored:
   }
 }
 
-async function checkTaskPersonAgainstStored(deps: TaskPersonIdentityDependencies, stored: DeveloperTaskRecord, developerId: string, task = stored) {
+/** What the identity check says about one person; `channelOnly` (ARCH RULING (b)): admitted through a project Slack channel with no individual grant of their own. */
+export interface TaskPersonIdentityCheck { subject: ProjectAccessSubject; identity: TaskPersonIdentity; eligible: boolean; channelMember: boolean; channelOnly?: boolean }
+
+async function checkTaskPersonAgainstStored(deps: TaskPersonIdentityDependencies, stored: DeveloperTaskRecord, developerId: string, task = stored): Promise<TaskPersonIdentityCheck> {
   let identity = await registryBySubject(deps, stored.taskId, developerId);
   if (identity === undefined) {
     const caller = deps.trustedCaller;
@@ -505,7 +512,7 @@ async function checkTaskPersonAgainstStored(deps: TaskPersonIdentityDependencies
   if (status === "ineligible") return { subject, identity, eligible: false, channelMember: false };
   const proof = await qualifyCurrent(deps, stored, subject);
   return proof.eligible
-    ? { subject, identity: { ...identity, name: proof.name }, eligible: true, channelMember: proof.channelMember }
+    ? { subject, identity: { ...identity, name: proof.name }, eligible: true, channelMember: proof.channelMember, channelOnly: proof.channelOnly }
     : { subject, identity, eligible: false, channelMember: proof.channelMember };
 }
 
