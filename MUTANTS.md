@@ -1305,3 +1305,15 @@ Production guards this lane adds: the read rule (`readableTask` is `loadReadable
 | N11 | the cache remembers a failed page | "keeps a page for its time ..." and the fallback test |
 
 11 of 11 killed.
+
+### RD-2b2 round 3 (Opus permissions pass leftovers S1-S4), `tests/unit/rd2b2-changes-read.test.ts`
+
+| Mutant | Mutation | Killed by |
+|---|---|---|
+| P1 | pull requests past the 10 read not counted in filesNotListed | "counts pull requests past the most read ..." |
+| P2 | a pull request with an unusable repository id not counted | same |
+| P3 | a pull request address with control or direction characters served | "serves a pull request address only when ..." |
+| P4 | the company left out of the cache key (two companies could share a page) | "a pull request with no recorded head is never cached ... and the key names the company" |
+| P5 | a pull request with no recorded head cached | same |
+
+5 of 5 killed.

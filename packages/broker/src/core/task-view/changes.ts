@@ -273,11 +273,16 @@ async function readPullRequest(state: PageState, sources: ChangesSources, pullRe
 async function pagesOf(task: ChangesTask, sources: ChangesSources, why: WhyContext): Promise<PageState> {
   const state: PageState = { files: [], notListed: 0, read: false, patchChars: 0, pagesLeft: CHANGES_PAGES_MAX, deadline: Date.now() + (sources.budgetMs ?? CHANGES_TIME_BUDGET_MS), unreadable: 0 };
   const seen = new Set<string>();
-  for (const pullRequest of (task.workflow?.pullRequests ?? []).slice(0, CHANGES_PULL_REQUESTS_MAX)) {
+  const recorded = task.workflow?.pullRequests ?? [];
+  // Pull requests past the most read are counted, never silently left out.
+  state.notListed += Math.max(0, recorded.length - CHANGES_PULL_REQUESTS_MAX);
+  for (const pullRequest of recorded.slice(0, CHANGES_PULL_REQUESTS_MAX)) {
     const repository = plainLine(pullRequest.repositoryId, NAME_MAX);
     const key = `${pullRequest.repositoryId}#${pullRequest.number}`;
-    if (repository === undefined || seen.has(key) || sources.pullRequestPage === undefined) continue;
+    if (sources.pullRequestPage === undefined || seen.has(key)) continue;
     seen.add(key);
+    // A repository id with nothing usable in it cannot be asked for: counted like a pull request whose first page cannot be read.
+    if (repository === undefined) { state.unreadable += 1; continue; }
     // With the cap already full a further pull request is not read; it is counted.
     if (state.files.length >= CHANGES_FILES_MAX) { state.notListed += 1; continue; }
     await readPullRequest(state, sources, pullRequest, repository, why);
@@ -322,7 +327,7 @@ function pullRequestsOf(task: ChangesTask): TaskChangesView["pullRequests"] {
   for (const pullRequest of task.workflow?.pullRequests ?? []) {
     const repository = plainLine(pullRequest.repositoryId, NAME_MAX);
     if (repository === undefined || listed.some((entry) => entry.repository === repository && entry.number === pullRequest.number) || listed.length >= CHANGES_PULL_REQUESTS_MAX) continue;
-    listed.push({ repository, number: pullRequest.number, ...(typeof pullRequest.url === "string" && /^https:\/\/[^\s]{1,2000}$/u.test(pullRequest.url) ? { url: pullRequest.url } : {}) });
+    listed.push({ repository, number: pullRequest.number, ...(typeof pullRequest.url === "string" && /^https:\/\/[^\s]{1,2000}$/u.test(pullRequest.url) && pullRequest.url.replace(UNSAFE_CHARACTERS, " ") === pullRequest.url ? { url: pullRequest.url } : {}) });
   }
   return listed;
 }

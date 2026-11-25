@@ -41,14 +41,17 @@ export function mayReadSourceCode(): boolean {
 /** Pages are kept for a short while (45 s) so a reload does not ask the code host again; see task-changes-cache.ts. */
 const PAGES = createPageCache({ ttlMs: 45_000, max: 30 });
 
+/** The cache key of one page: the company, the task, the pull request, its head and the page (a push is a new key; another company's never shares one). */
+export const pageCacheKey = (companyId: string, taskId: string, pullRequest: { repository: string; number: number }, head: string, page: number): string =>
+  `${companyId}|${taskId}|${pullRequest.repository}#${pullRequest.number}@${head}|${page}`;
+
 /** One page of one pull request's files through the deployment's diff route; `undefined` when it cannot be read (not wired, refused, the code host down, an answer of another shape). */
 function pageReader(context: TaskScreenContext, task: TaskRecord, cache: PageCache): ((pullRequest: { repository: string; number: number }, page: number) => Promise<PullRequestPage | undefined>) | undefined {
   const { taskRules, caller, flow } = context;
   if (taskRules === undefined) return undefined;
-  const headOf = (pullRequest: { repository: string; number: number }): string => {
-    const recorded = task.workflow?.pullRequests?.find((entry) => entry.repositoryId === pullRequest.repository && entry.number === pullRequest.number);
-    return recorded?.headSha ?? recorded?.candidateDigest ?? "";
-  };
+  // The head the task recorded for the pull request; without one nothing is cached (a new push could not be told from the old one).
+  const headOf = (pullRequest: { repository: string; number: number }): string | undefined =>
+    task.workflow?.pullRequests?.find((entry) => entry.repositoryId === pullRequest.repository && entry.number === pullRequest.number)?.headSha;
   const fetchPage = async (pullRequest: { repository: string; number: number }, page: number): Promise<PullRequestPage | undefined> => {
     const path = `/v1/dev/tasks/${task.taskId}/diff`;
     const query = `repository=${encodeURIComponent(pullRequest.repository)}&number=${pullRequest.number}&page=${page}`;
@@ -72,7 +75,10 @@ function pageReader(context: TaskScreenContext, task: TaskRecord, cache: PageCac
       return undefined;
     }
   };
-  return (pullRequest, page) => cache.once(`${flow.deps.companyId}|${task.taskId}|${pullRequest.repository}#${pullRequest.number}@${headOf(pullRequest)}|${page}`, () => fetchPage(pullRequest, page));
+  return (pullRequest, page) => {
+    const head = headOf(pullRequest);
+    return head === undefined ? fetchPage(pullRequest, page) : cache.once(pageCacheKey(flow.deps.companyId, task.taskId, pullRequest, head, page), () => fetchPage(pullRequest, page));
+  };
 }
 
 /** The task's current plan, for the "why"; a plan that is missing, old or cannot be verified is no plan (the why is then empty). */

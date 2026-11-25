@@ -20,7 +20,7 @@ import { DIFF_PATCH_TOO_LONG, type TaskDiffResponse } from "../../packages/broke
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { createCompanyArtifactReader } from "../../packages/broker/src/core-host/company-artifact-reader.js";
-import { readTaskChangesWith } from "../../packages/broker/src/core-host/task-changes-routes.js";
+import { pageCacheKey, readTaskChangesWith } from "../../packages/broker/src/core-host/task-changes-routes.js";
 import { createPageCache } from "../../packages/broker/src/core-host/task-changes-cache.js";
 import { createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
@@ -152,6 +152,26 @@ describe("the changes view: a pull request's files", () => {
     expect(JSON.stringify(first)).not.toContain("ghp_secret");
     const later = await taskChangesOf(taskWith({ pullRequests: [pullRequest(7)] }), { pullRequestPage: serving([{ files: [file("a.ts")], more: true }, undefined]).read });
     expect(later).toMatchObject({ source: "pull_request", checkedAgainstCodeHost: true, files: [{ path: "a.ts" }], filesNotListed: 1 });
+  });
+});
+
+describe("the changes view: pull requests that are not read", () => {
+  it("counts pull requests past the most read and ones with no usable repository id, so the answer never reads as complete", async () => {
+    const many = Array.from({ length: 12 }, (_, index) => pullRequest(index + 1));
+    const source = serving([{ files: [file("a.ts")], more: false }]);
+    const view = await taskChangesOf(taskWith({ pullRequests: many }), { pullRequestPage: source.read });
+    expect(source.asked.length).toBe(10);
+    expect(view.filesNotListed).toBe(2);
+    const odd = await taskChangesOf(taskWith({ pullRequests: [pullRequest(7), { ...pullRequest(8), repositoryId: "\u0007\u202e " }] }), { pullRequestPage: serving([{ files: [file("a.ts")], more: false }]).read });
+    expect(odd).toMatchObject({ files: [{ path: "a.ts" }], filesNotListed: 1 });
+  });
+
+  it("serves a pull request address only when it has no control or direction characters", async () => {
+    for (const url of ["https://github.com/example/demo/pull/7\u202e", "https://github.com/example/demo/pull/7\u0007x", "https://github.com/example/demo/pull/\u200e7"]) {
+      const view = await taskChangesOf(taskWith({ pullRequests: [{ ...pullRequest(7), url }] }), {});
+      expect(view.pullRequests, url).toEqual([{ repository: "demo", number: 7 }]);
+    }
+    expect((await taskChangesOf(taskWith({ pullRequests: [pullRequest(7)] }), {})).pullRequests[0]).toHaveProperty("url");
   });
 });
 
@@ -477,7 +497,7 @@ describe("the changes route on the core host", () => {
       return { statusCode: 200, headers: {}, body: JSON.stringify({ files: [{ path: `src/p${page}.ts`, additions: 1, deletions: 0, patch: "+x" }], more: page < 2 }) };
     });
     const h = await host({ taskRules: { route, readsAsReader: async () => false } });
-    await h.setWorkflow({ pullRequests: [pullRequest(7)] });
+    await h.setWorkflow({ pullRequests: [{ ...pullRequest(7), headSha: "e".repeat(40) }] });
     const ask = () => h.routes.route(get(`/v1/dev/tasks/${h.task.taskId}/changes`), h.owner);
     const [first, second] = await Promise.all([ask(), ask()]);
     expect(first!.body).toBe(second!.body);
@@ -488,6 +508,19 @@ describe("the changes route on the core host", () => {
     await h.setWorkflow({ pullRequests: [{ ...pullRequest(7), headSha: "d".repeat(40) }] });
     await ask();
     expect(calls).toBe(4);
+  });
+
+  it("a pull request with no recorded head is never cached (a new push could not be told apart), and the key names the company", async () => {
+    let calls = 0;
+    const route = vi.fn(async () => { calls += 1; return { statusCode: 200, headers: {}, body: JSON.stringify({ files: [{ path: "a.ts", additions: 1, deletions: 0 }], more: false }) }; });
+    const h = await host({ taskRules: { route, readsAsReader: async () => false } });
+    await h.setWorkflow({ pullRequests: [pullRequest(7)] });
+    await h.routes.route(get(`/v1/dev/tasks/${h.task.taskId}/changes`), h.owner);
+    await h.routes.route(get(`/v1/dev/tasks/${h.task.taskId}/changes`), h.owner);
+    expect(calls).toBe(2);
+    const pr = { repository: "demo", number: 7 };
+    expect(pageCacheKey(FAKE_COMPANY, TASK_ID, pr, "h".repeat(40), 1)).not.toBe(pageCacheKey(OTHER, TASK_ID, pr, "h".repeat(40), 1));
+    expect(pageCacheKey(FAKE_COMPANY, TASK_ID, pr, "h".repeat(40), 1)).not.toBe(pageCacheKey(FAKE_COMPANY, TASK_ID, pr, "i".repeat(40), 1));
   });
 
   it("a diff answer that is not a 200 is not used, even with a page-shaped body, and nothing of it is served", async () => {
