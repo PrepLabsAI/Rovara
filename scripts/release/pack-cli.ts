@@ -79,7 +79,7 @@ const LICENSE_FILE = /^(licen[cs]e|copying|notice)(\.[a-z0-9]+)?$/i;
 /**
  * The node_modules packages esbuild put into the bundle, read from its metafile: each package's
  * directory is the path up to its name after the last `node_modules/` (a nested copy is its own
- * entry). Workspace packages (@agentx/*) resolve to packages/*, never node_modules, so they are
+ * entry). Workspace packages (@agentx/*, @rovara/*, @preplabsai/*) resolve to packages/*, never node_modules, so they are
  * not third-party and are left out.
  */
 export function bundledPackageDirectories(metafile: Metafile, root: string): Map<string, string> {

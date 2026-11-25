@@ -62,7 +62,7 @@ export const SHARD_DIRECTORIES: readonly { name: string; directories: readonly s
   { name: "worker", directories: ["packages/worker"] },
   { name: "verifier", directories: ["packages/verifier"] },
   { name: "contracts", directories: ["packages/contracts"] },
-  { name: "small-packages", directories: ["packages/gateway", "packages/mcp", "packages/model-runtime", "packages/orchestrator", "packages/slack-service", "packages/testing"] },
+  { name: "small-packages", directories: ["packages/code-api", "packages/gateway", "packages/mcp", "packages/model-runtime", "packages/orchestrator", "packages/slack-service", "packages/testing"] },
   { name: "infra-scripts", directories: ["infra", "scripts"] },
 ];
 

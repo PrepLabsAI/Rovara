@@ -671,7 +671,7 @@ describe("no route returns the value", () => {
       else expect(source, file).not.toMatch(/\.read\(|GetSecretValue|getSecret/u);
     }
     // And the route table of the install has no other row on this path than the three.
-    const routeTable = textOf(join(root, "broker/src/aws/dev-route-scopes.ts"));
+    const routeTable = textOf(join(root, "code-api/src/routes.ts"));
     expect(routeTable.match(/path: "\/v1\/app\/company\/package-registries[^"]*"/gu)).toEqual(Array(3).fill('path: "/v1/app/company/package-registries"'));
   });
 });

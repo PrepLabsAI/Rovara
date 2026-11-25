@@ -1,8 +1,8 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { AGENTX_PROTOCOL_VERSION } from "../packages/contracts/src/protocol.js";
-import { CONTROL_PLANE_FOUNDATION_PARAMETERS } from "../packages/contracts/src/session.js";
+// Nothing from packages/ is imported at the top of this file: the release builds run `npm ci` and then this script on a fresh checkout, with no `dist/` anywhere, and contracts source reaches
+// workspace packages through their built `dist/` (F3 cut 1). The two contracts constants it needs are loaded after the build step below.
 import {
   Runner,
   assertDigestImage,
@@ -23,6 +23,8 @@ import {
   type StackDescription,
 } from "./release-common.js";
 
+// Set by releaseProduction once the build has run (see the comment at the top of this file); deployControlPlane runs only after that.
+let CONTROL_PLANE_FOUNDATION_PARAMETERS: readonly string[] = [];
 const DEFAULT_REPOSITORY = "agentx-worker-production";
 const CONTROL_PLANE_STACK = "AgentXControlPlane";
 const FOUNDATION_STACK = "AgentXProductionFoundation";
@@ -47,6 +49,7 @@ export const WORKER_IMAGE_INPUTS = [
   "package-lock.json",
   "tsconfig.json",
   "tsconfig.base.json",
+  "packages/code-api",
   "packages/contracts",
   "packages/model-runtime",
   "packages/verifier",
@@ -72,6 +75,7 @@ export const SLACK_ORCHESTRATOR_IMAGE_INPUTS = [
   "package-lock.json",
   "tsconfig.json",
   "tsconfig.base.json",
+  "packages/code-api",
   "packages/contracts",
   "packages/model-runtime",
   "packages/verifier/package.json",
@@ -245,6 +249,8 @@ export async function releaseProduction(
   verifyRepositoryImage(runner, options, workerImage);
 
   runner.run("npm", ["run", "build"]);
+  const { AGENTX_PROTOCOL_VERSION } = await import("../packages/contracts/src/protocol.js");
+  ({ CONTROL_PLANE_FOUNDATION_PARAMETERS } = await import("../packages/contracts/src/session.js"));
   if (!stackExists(runner, options.region, CONTROL_PLANE_STACK)) {
     throw new Error("AgentXControlPlane must exist before the worker settings are released");
   }

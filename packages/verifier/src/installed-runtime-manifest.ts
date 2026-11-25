@@ -46,6 +46,7 @@ export async function observeInstalledRuntimeManifestForHost(platform: string, a
   };
 
   await addFile("package-lock.json");
+  await addTree("packages/code-api/dist");
   await addTree("packages/contracts/dist");
   await addTree("packages/verifier/dist");
   await addTree("packages/verifier/assets");
