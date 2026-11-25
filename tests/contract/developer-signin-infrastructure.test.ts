@@ -26,6 +26,7 @@ import { withoutNatEgressControlPlane } from "../support/egress-addresses-templa
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { unpackedBrokerVariables, withoutBrokerNamesParameter } from "../support/broker-environment-template.js";
 import { withoutGithubSignIn } from "../support/github-signin-template.js";
+import { withoutCanarySession } from "../support/canary-session-template.js";
 import { withoutSavedEnvImages } from "../support/saved-env-images-template.js";
 import { withoutSavedEnvSwitch } from "../support/saved-env-switch-template.js";
 import { withoutBrokerSlackPoster } from "../support/broker-slack-poster-template.js";
@@ -176,7 +177,8 @@ beforeAll(() => {
   brokerArnEstimate = (policy.node.tryGetContext(ARN_ESTIMATE_CONTEXT) as number | undefined) ?? 150;
   brokerEstimate = document.statements.reduce((total, statement) => total + statement._estimateSize({ actionEstimate: 20, arnEstimate: brokerArnEstimate }), 0);
   longestNamed = withoutSlackCompanyMode(controlPlane(buildAgentXApp({ agentxEnv: LONGEST_ENV }), `agentx-${LONGEST_ENV}-control-plane`)) as TemplateJson;
-  legacy = withoutMachineGone(controlPlane(buildAgentXApp(), "AgentXControlPlane"));
+  // CANARY-SESSION: the legacy template as every pin below recorded it (tests/support/canary-session-template.ts asserts and takes out the canary function; canary-session-infrastructure.test.ts proves it).
+  legacy = withoutCanarySession(withoutMachineGone(controlPlane(buildAgentXApp(), "AgentXControlPlane")));
 }, 300_000);
 
 // DEC 254zzz284: the only new authority is the broker's membership transaction fence.

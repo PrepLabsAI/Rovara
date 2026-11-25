@@ -24,7 +24,7 @@ import { AnswerModelRefused, type AnswerAccess, type AnswerCodeSource, type Answ
 import { createAnswerRate } from "./rate.js";
 import { createAnswerThreads, type ThreadTurn } from "./thread.js";
 import { TOOL_WORDS, createToolbox } from "./tools.js";
-import { answerTaskFrame, type AnswerTasks } from "./task-context.js";
+import { answerTaskContext, type AnswerTasks } from "./task-context.js";
 import { checkAnswer, refusingSecrets, type AnswerCheck } from "./verify.js";
 
 export interface AnswerServiceDeps {
@@ -290,7 +290,8 @@ export function createAnswerService(deps: AnswerServiceDeps) {
       } catch { await rate.give(personId); failed("repository_unavailable"); throw unavailable(); }
       const remembered = await threads.turns(project, threadId, scope).catch(() => { failed("thread_unavailable"); return [] as ThreadTurn[]; });
       const thread = remembered.filter((turn) => turn.record.taskId === taskId);
-      const taskFrame = task === undefined ? undefined : await answerTaskFrame(deps.store, deps.companyId, task, deps.tasks!, deps.now()).catch(() => undefined);
+      const taskContext = task === undefined ? undefined : await answerTaskContext(deps.store, deps.companyId, task, deps.tasks!, deps.now()).catch(() => undefined);
+      const taskFrame = taskContext?.frame;
       const toolbox = budget.toolbox ?? createToolbox({ project, heads,
         wiki: {
           readIndex: (...args) => diagnosedRead("wiki_search_unavailable", () => deps.wiki.readIndex(...args)),
@@ -365,7 +366,7 @@ export function createAnswerService(deps: AnswerServiceDeps) {
       }
 
       // The check: every place again, at the bound commit.
-      const checked = final === undefined ? undefined : await checkAnswer({ final, heads, task: taskFrame === undefined ? undefined : { taskId: taskId!, shown: taskFrame }, read: (...args) => diagnosedRead("citation_read_unavailable", () => code.read(...args)) });
+      const checked = final === undefined ? undefined : await checkAnswer({ final, heads, task: taskContext === undefined ? undefined : { taskId: taskId!, shown: taskContext.shown }, read: (...args) => diagnosedRead("citation_read_unavailable", () => code.read(...args)) });
       const written = checked?.written ?? 0;
       const keptCount = checked?.kept.length ?? 0;
       let outcome: AnswerOutcome;

@@ -23,6 +23,7 @@ import { fromDocument, toDocument, type WorkspaceRecord } from "../task-flow/rec
 import { iso, log, newId } from "../task-flow/support.js";
 import { releaseAdmission } from "../task-flow/admission.js";
 import { prepareWatchItem } from "../task-flow/prepare-watch.js";
+import { releaseSlots } from "../test-env/saved-env-slots.js";
 
 /** The longest a preparation may be PREPARING before the check reads as failed. The preparation watch ends it at the same limit (`PREPARATION_TIMEOUT_MS`, task-flow/prepare-watch.ts; a test holds the two equal). */
 export const SETUP_CHECK_STUCK_MS = 50 * 60_000;
@@ -217,7 +218,10 @@ export async function closeSetupCheck(deps: TaskFlowDeps, workspaceId: string): 
     if (!closed.applied) return false;
     if (workspace.machine !== undefined) await deps.machines.terminate(workspace.machine.machineId).catch((error: unknown) => log(deps, { event: "setup_check.terminate_failed", error: error instanceof Error ? error.name : "unknown" }));
     await releaseAdmission(deps, workspace.machineReservationId);
-    if (workspace.status === "READY" && record["candidate"] !== true && typeof record["project"] === "string" && typeof record["revision"] === "number") {
+    // A saved image's rebuild gives its two slots back on every end (it succeeded, failed, was stopped, timed out or was refused its machine): this is the one place every end passes. Never throws.
+    if (record["purpose"] === "saved_env_rebuild" && typeof record["jobId"] === "string") await releaseSlots(deps.store, deps.companyId, record["jobId"]);
+    // A record with a `purpose` is not the project's own check (a saved image's rebuild, say): it never resumes the project's setup-paused tasks, whatever the project's mark says.
+    if (workspace.status === "READY" && record["candidate"] !== true && record["purpose"] === undefined && typeof record["project"] === "string" && typeof record["revision"] === "number") {
       const { resumeSetupPausedTasks } = await import("./auto-resume.js");
       await resumeSetupPausedTasks(deps, record["project"], { kind: "check_passed", revision: record["revision"], workspaceId }).catch((error: unknown) => log(deps, { event: "setup_check.resume_failed", error: error instanceof Error ? error.name : "unknown" }));
     }
@@ -228,8 +232,11 @@ export async function closeSetupCheck(deps: TaskFlowDeps, workspaceId: string): 
   }
 }
 
-/** The check record of a workspace with no task (what closes the workspace and its machine when its preparation ends), for a start that is not a project's own check (the opt-in eval health run). */
-export function setupCheckRecordItem(deps: Pick<TaskFlowDeps, "companyId">, input: { project: string; workspaceId: string; revision: number; nowMs: number }): TransactItem {
+/**
+ * The check record of a workspace with no task (what closes the workspace and its machine when its preparation ends), for a start that is not a project's own check (the opt-in eval health run, a saved image's
+ * rebuild). `purpose` says what the workspace is for: a record that has one never resumes the project's setup-paused tasks when it closes (`closeSetupCheck`).
+ */
+export function setupCheckRecordItem(deps: Pick<TaskFlowDeps, "companyId">, input: { project: string; workspaceId: string; revision: number; nowMs: number; purpose?: "saved_env_rebuild"; /** The rebuild job the workspace is for: its slots are given back when the workspace closes. */ jobId?: string }): TransactItem {
   const now = new Date(input.nowMs).toISOString();
-  return { kind: "put", item: { ...setupCheckRecordKey(deps.companyId, input.workspaceId), entityType: "SETUP_CHECK", companyId: deps.companyId, project: input.project, workspaceId: input.workspaceId, revision: input.revision, candidate: false, createdAt: now, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(input.nowMs / 1000) + 31 * 86_400 }, condition: when.absent() };
+  return { kind: "put", item: { ...setupCheckRecordKey(deps.companyId, input.workspaceId), entityType: "SETUP_CHECK", companyId: deps.companyId, project: input.project, workspaceId: input.workspaceId, revision: input.revision, candidate: false, ...(input.purpose === undefined ? {} : { purpose: input.purpose }), ...(input.jobId === undefined ? {} : { jobId: input.jobId }), createdAt: now, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(input.nowMs / 1000) + 31 * 86_400 }, condition: when.absent() };
 }

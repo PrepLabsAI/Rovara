@@ -55,8 +55,9 @@ describe("the health route's grants (A13)", () => {
     expect(egressAlarmNames.every((name) => allNames.includes(name))).toBe(true);
     const stacks = buildAgentXApp({ agentxEnv: "live25d" }).node.children.filter((child): child is Stack => Stack.isStack(child));
     // The automatic renewal's alarms exist only where its CDK context is on (AR-2).
-    expect([...alarmNamesOf({})].sort()).toStrictEqual(HEALTH_ALARM_SUFFIXES.filter((suffix) => !suffix.startsWith("RuntimeRequalify")).map((suffix) => `agentx-live25d-${suffix}`).sort());
-    expect([...alarmNamesOf({ "agentx:autoRequalify": "enabled" })].sort()).toStrictEqual(HEALTH_ALARM_SUFFIXES.map((suffix) => `agentx-live25d-${suffix}`).sort());
+    expect([...alarmNamesOf({})].sort()).toStrictEqual(HEALTH_ALARM_SUFFIXES.filter((suffix) => !suffix.startsWith("RuntimeRequalify") && !suffix.startsWith("CanarySession")).map((suffix) => `agentx-live25d-${suffix}`).sort());
+    // CANARY-SESSION: its three alarms are the legacy (beta) install's alone; a named environment has none (listed so the probe reads them where they exist, conditional so their absence is expected).
+    expect([...alarmNamesOf({ "agentx:autoRequalify": "enabled" })].sort()).toStrictEqual(HEALTH_ALARM_SUFFIXES.filter((suffix) => !suffix.startsWith("CanarySession")).map((suffix) => `agentx-live25d-${suffix}`).sort());
     expect(stacks.flatMap((stack) => Object.keys(Template.fromStack(stack).findResources("AWS::CloudWatch::CompositeAlarm")))).toEqual([]);
   }, 120_000);
 
@@ -201,6 +202,8 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/core/setup-agent/keys.ts", "packages/broker/src/core/setup-agent/check.ts", "packages/broker/src/core/setup-agent/command.ts", "packages/broker/src/core/setup-agent/host-ask.ts",
       // The project's test environment: the proposal and approval bookkeeping, the saved-environment markers (a closed workspace's row and the rebuild-due marker), the candidate setup check's row and the nightly status rows expire after their own retention.
       "packages/broker/src/core/test-env/deps.ts", "packages/broker/src/core/test-env/saved-env-markers.ts", "packages/broker/src/core/test-env/night-status.ts",
+      // SI-2: a saved-image rebuild's start record (kept 30 days) and its slot rows (a day past their lease) are small bookkeeping rows that expire on their own; no durable record shares their keys.
+      "packages/broker/src/core/test-env/saved-env-run.ts", "packages/broker/src/core/test-env/saved-env-slots.ts",
       // Tickets that ask for work: a ticket's item (30 days while it waits, 400 once started), the event and change claims (30 and 7 days), the owner's notices (30 days), the poll's hourly read counts (2 hours), Rovara's notes of its own writes, and the ticket updates' claims and counts.
       "packages/broker/src/core/intake/store.ts", "packages/broker/src/core/intake/poll.ts", "packages/broker/src/core/intake/notices.ts", "packages/broker/src/core/intake/own-writes.ts", "packages/broker/src/core/ticket-updates/handler.ts",
       // L4-LP: the ticket updates' claims and counts moved unchanged into claims.ts; the ticket thread's state row (400 days) and the task log's rows (400 days) are new rows with their own retention.

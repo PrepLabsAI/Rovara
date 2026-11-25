@@ -10,7 +10,7 @@
 // unit price if the minutes are to be shown as dollars. Until then these minutes are COUNTED and ATTRIBUTED, and what bounds them is the project's monthly count of automatic runs (default 100) and one-at-a-time.
 import { createHash } from "node:crypto";
 import {
-  AUTOMATIC_RUN_MAX_MS, AGENTX_NAME_PATTERN, OrgIdSchema, SystemRunKindSchema, companyScoped, queryAll, when, type DocumentKey, type OrgId, type SystemRunKind,
+  AUTOMATIC_RUN_MAX_MS, AGENTX_NAME_PATTERN, OrgIdSchema, SAVED_ENV_BUILD_WATCH_MS, SystemRunKindSchema, companyScoped, queryAll, when, type DocumentKey, type OrgId, type SystemRunKind,
 } from "@agentx/contracts";
 import { upkeepExpiryOf } from "../upkeep/keys.js";
 import { workspaceKeys } from "../task-flow/workspace-location.js";
@@ -67,7 +67,7 @@ export async function readSystemRunUsage(deps: UsageDeps, input: { month?: strin
     if (input.project !== undefined && row["project"] !== input.project) continue;
     const kind = SystemRunKindSchema.safeParse(row["kind"]);
     if (!kind.success || typeof row["workspaceId"] !== "string") continue;
-    const minutes = await minutesOf(deps, row["workspaceId"], typeof row["startedAt"] === "string" ? row["startedAt"] : undefined);
+    const minutes = await minutesOf(deps, row["workspaceId"], typeof row["startedAt"] === "string" ? row["startedAt"] : undefined, kind.data);
     report.runs += 1;
     report.minutes += minutes;
     const project = (report.byProject[row["project"]] ??= { runs: 0, minutes: 0 });
@@ -78,8 +78,11 @@ export async function readSystemRunUsage(deps: UsageDeps, input: { month?: strin
   return report;
 }
 
+/** The longest a run of this kind is counted: a check's own age limit, and for a saved image's rebuild the limit of its watch (2 h 45 min: a build legitimately takes longer than a check's two hours). */
+export const maxMinutesMsOf = (kind: SystemRunKind): number => (kind === "saved_env_rebuild" ? SAVED_ENV_BUILD_WATCH_MS : AUTOMATIC_RUN_MAX_MS);
+
 /** Whole minutes (rounded up: a started minute is a minute) from the workspace's creation to its close, or to now while it is open; never more than the run's own age limit. */
-async function minutesOf(deps: UsageDeps, workspaceId: string, startedAt: string | undefined): Promise<number> {
+async function minutesOf(deps: UsageDeps, workspaceId: string, startedAt: string | undefined, kind: SystemRunKind): Promise<number> {
   try {
     const found = await deps.store.get((await workspaceKeys({ store: deps.store, companyId: deps.companyId }, workspaceId)).workspaceKey);
     if (found === undefined || found["companyId"] !== deps.companyId) return 0;
@@ -87,7 +90,7 @@ async function minutesOf(deps: UsageDeps, workspaceId: string, startedAt: string
     if (!Number.isFinite(start)) return 0;
     const closed = typeof found["closedAt"] === "string" ? Date.parse(found["closedAt"]) : NaN;
     const end = Number.isFinite(closed) ? closed : nowMs(deps);
-    return Math.ceil(Math.max(0, Math.min(end - start, AUTOMATIC_RUN_MAX_MS)) / 60_000);
+    return Math.ceil(Math.max(0, Math.min(end - start, maxMinutesMsOf(kind))) / 60_000);
   } catch {
     return 0;
   }

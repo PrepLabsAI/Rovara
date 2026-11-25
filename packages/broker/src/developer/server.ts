@@ -68,6 +68,7 @@ import { mergeSurvivor } from "../aws/install-company.js";
 import { ProviderNotConfiguredError, ProviderUnavailableError, slackWorkspaceHint, type ProviderIdentity, type ProviderResult, type SignInProvider } from "./providers.js";
 import type { SlackDirectory } from "./slack-directory.js";
 import { createSignInLinks } from "./sign-in-links.js";
+import { companyMayMint as mayMint, mintSession } from "./session-mint.js";
 import { endedByAdmin, startedBeforeMethodOn, type AuthRequestRecord, type CodeGrant, type DeveloperRecord, type DeveloperSignInStore, type SessionRecord } from "./store.js";
 import { issueAccessToken, pkceChallengeMatches, type TokenSigner, type PublicSigningJwk, type SigningKeyPurpose } from "./tokens.js";
 import type { CompanySignInStore } from "./company-membership.js";
@@ -323,36 +324,9 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     if (selected === undefined) return undefined;
     return [...enabledMethods(deps).filter((method) => method === "slack"), "oidc"];
   };
-  /**
-   * Recheck live membership at each mint. The stored company only selects the method. DEC 254b (a), 254e: a session (OIDC or Slack) for a company
-   * other than the built-in one must match how that company signs in NOW: marked `installMethod` exactly when the company has no issuer of its own.
-   */
-  async function companyMayMint(personId: string, amr: DeveloperSignInMethod, companyId: string | undefined, registered: SignInClientRecord | undefined, legacy = false, installMethod?: true): Promise<boolean> {
-    if (deps.company === undefined) return true;
-    try {
-      if (installMethod === true && (companyId === undefined || companyId === IMPLICIT_COMPANY_ID)) return false;
-      // DEC 254h: GitHub is only ever the shared method: outside the built-in company its session must carry that mark.
-      if (amr === "github" && installMethod !== true && companyId !== undefined && companyId !== IMPLICIT_COMPANY_ID) return false;
-      if (companyId !== undefined && companyId !== IMPLICIT_COMPANY_ID) {
-        if (await deps.company.hasOwnIssuer(companyId)) {
-          // A company with its own sign-in: never the shared method; its Slack only while the install workspace is bound to it (as before).
-          if (installMethod === true || (amr === "slack" && await slackCompany() !== companyId)) return false;
-        } else if (installMethod !== true) return false;
-      }
-      // DEC 254e: for Slack too, the company is the session's (membership checked below), never the workspace's binding.
-      const candidate = companyId ?? IMPLICIT_COMPANY_ID;
-      if (!OrgIdSchema.safeParse(candidate).success || (companyId !== undefined && companyId !== candidate)) return false;
-      let member = await deps.company.membership(personId);
-      if (member === undefined && legacy && candidate === IMPLICIT_COMPANY_ID) {
-        const joined = await deps.company.join({ personId, companyId: IMPLICIT_COMPANY_ID });
-        if (joined.ok) member = joined.membership;
-      }
-      // DEC 253z: no membership row at all, no company asked for, the web app: a session with no company, rechecked here at each mint.
-      if (member === undefined && companyId === undefined) return await companylessMayMint(personId, amr, registered);
-      // Company is live membership; a registered audience cannot cross its owner.
-      return member !== undefined && member.revokedAt === undefined && member.companyId === candidate
-        && (registered === undefined || registered.installLevel === true || member.companyId === (registered.companyId ?? IMPLICIT_COMPANY_ID));
-    } catch { return false; }
+  /** Recheck live membership at each mint (session-mint.ts holds the check: the canary's session function runs the same code). */
+  function companyMayMint(personId: string, amr: DeveloperSignInMethod, companyId: string | undefined, registered: SignInClientRecord | undefined, legacy = false, installMethod?: true): Promise<boolean> {
+    return mayMint({ company: deps.company, slackCompany, companyless: companylessMayMint }, personId, amr, companyId, registered, legacy, installMethod);
   }
   /**
    * DEC 253z: a person with no company may hold a session only from the install's own OIDC sign-in, to the install-level web app with full access,
@@ -907,9 +881,9 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     if (!methods.includes(redeemed.amr)) return oauthError(400, "invalid_grant", `${methodLabel(redeemed.amr)} sign-in was turned off in this environment; start signing in again`);
     const developer = await store.getDeveloper(redeemed.developerId);
     if (developer === undefined || developer.revoked) return oauthError(400, "invalid_grant", "your Rovara sign-in was turned off by an administrator; contact an administrator");
-    const { session, refreshToken } = await store.createSession(redeemed);
-    deps.log({ event: "signin.session_started", method: redeemed.amr, developerId: redeemed.developerId, sessionId: session.sessionId, ...(client === undefined ? {} : { clientId: client.clientId }) });
-    return tokens(await accessToken(session, client), refreshToken);
+    const { refreshToken, access } = await mintSession(store, redeemed, (session) => accessToken(session, client),
+      (session) => deps.log({ event: "signin.session_started", method: redeemed.amr, developerId: redeemed.developerId, sessionId: session.sessionId, ...(client === undefined ? {} : { clientId: client.clientId }) }));
+    return tokens(access, refreshToken);
   }
 
   async function refreshTokenGrant(form: URLSearchParams, methods: DeveloperSignInMethod[], client: SignInClientRecord | undefined): Promise<HttpResult> {

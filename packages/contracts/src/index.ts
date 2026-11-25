@@ -62,6 +62,7 @@ export * from "./workflow-dependencies-node.js";
 export * from "./display-name.js";
 export * from "./environments.js";
 export * from "./api-address.js";
+export * from "./canary-session-placement.js";
 export * from "./core-engine-infra.js";
 export * from "./dispatch-timing.js";
 export * from "./broker-environment.js";

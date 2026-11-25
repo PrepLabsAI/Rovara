@@ -39,6 +39,11 @@ const SHARED_SITES: Site[] = [
   { where: "Output", name: "SlackInteractivityUrl", path: "/v1/slack/interactions" },
 ];
 /** The named control plane's own: the broker itself is given the adapter URLs whole, and the Linear webhook route (named environments only) has its output. */
+const LEGACY_ONLY_SITES: Site[] = [
+  // CANARY-SESSION: the beta canary's session function (legacy layout only; it exists only while its settings are given, but its variable is in the template) signs for the same issuer.
+  { where: "DeveloperSignInCanarySessionFunction", name: "DEVELOPER_TOKEN_ISSUER", path: "/v1/auth" },
+  { where: "DeveloperSignInCanarySessionFunction", name: "CANARY_ISSUER", path: "/v1/auth" },
+];
 const NAMED_ONLY_SITES: Site[] = [
   { where: "Broker", name: "BUILT_IN_ADAPTER_CALLBACK_URL", path: "/v1/slack/channel-events" },
   { where: "Broker", name: "BUILT_IN_ADAPTER_COMMANDS_URL", path: "/v1/slack/channel-commands" },
@@ -50,7 +55,7 @@ const synthesized = (env: string | undefined, id: string): Stack => {
   return app.node.children.find((child): child is Stack => Stack.isStack(child) && child.node.id === id)!;
 };
 
-for (const layout of [{ label: "the legacy control plane", env: undefined, sites: SHARED_SITES }, { label: "the named control plane", env: "staging", sites: [...SHARED_SITES, ...NAMED_ONLY_SITES] }] as const) {
+for (const layout of [{ label: "the legacy control plane", env: undefined, sites: [...SHARED_SITES, ...LEGACY_ONLY_SITES] }, { label: "the named control plane", env: "staging", sites: [...SHARED_SITES, ...NAMED_ONLY_SITES] }] as const) {
   describe(`${layout.label}: PublicApiUrl`, () => {
     const template: ResolvableTemplate = templateOf(Template.fromStack(synthesized(layout.env, "AgentXControlPlane")));
     const unset = resolvedValues(template);
