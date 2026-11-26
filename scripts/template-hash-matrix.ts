@@ -35,7 +35,7 @@ export interface ContextSet { name: string; context: Context }
 
 const RELEASE_ENV = ENVIRONMENT_PLACEHOLDER;
 const GATEWAY = "gateway.example";
-const OPTIONAL_LEGACY: Context = { agentxBetaAccess: "enabled", agentxBetaDomain: "enabled", agentxInstaller: "enabled", agentxCiRunner: "enabled", agentxEval: "enabled" };
+const OPTIONAL_LEGACY: Context = { agentxBetaAccess: "enabled", agentxBetaDomain: "enabled", agentxInstaller: "enabled", agentxCiRunner: "enabled" };
 const REQUALIFY: Context = { "agentx:autoRequalify": "enabled", "agentx:autoRequalifySchedule": "enabled", "agentx:autoRequalifyHourUtc": "5", "agentx:e2eQualificationTransport": "enabled" };
 
 export function contextSets(): ContextSet[] {
@@ -55,21 +55,21 @@ export function contextSets(): ContextSet[] {
   sets.push({ name: "optional:legacy:all", context: { agentxRegion: "us-west-2", ...OPTIONAL_LEGACY, ...REQUALIFY } });
   sets.push({ name: "optional:legacy:requalify", context: { agentxRegion: "us-west-2", ...REQUALIFY } });
   sets.push({ name: "optional:legacy:gateway", context: { agentxRegion: "us-west-2", CoreModelGatewayHost: GATEWAY } });
-  for (const key of ["agentxInstaller", "agentxCiRunner", "agentxBetaAccess", "agentxBetaDomain", "agentxEval"]) sets.push({ name: `optional:legacy:${key}`, context: { agentxRegion: "us-west-2", [key]: "enabled" } });
+  for (const key of ["agentxInstaller", "agentxCiRunner", "agentxBetaAccess", "agentxBetaDomain"]) sets.push({ name: `optional:legacy:${key}`, context: { agentxRegion: "us-west-2", [key]: "enabled" } });
   sets.push({ name: "named:staging", context: { agentxEnv: "staging", agentxRegion: "us-west-2" } });
   sets.push({ name: "named:staging:gateway", context: { agentxEnv: "staging", agentxRegion: "us-west-2", CoreModelGatewayHost: GATEWAY } });
   sets.push({ name: "named:staging:legacy-synth", context: { agentxEnv: "staging", agentxSynthesizer: "legacy", agentxRegion: "us-west-2" } });
   sets.push({ name: "named:staging:oidc", context: { agentxEnv: "staging", agentxRegion: "us-west-2", agentxIdentity: "oidc" } });
   sets.push({ name: "named:staging:cognito", context: { agentxEnv: "staging", agentxRegion: "us-west-2", agentxIdentity: "cognito" } });
   sets.push({ name: "named:staging:requalify", context: { agentxEnv: "staging", agentxRegion: "us-west-2", ...REQUALIFY } });
-  sets.push({ name: "named:staging:optional", context: { agentxEnv: "staging", agentxRegion: "us-west-2", agentxInstaller: "enabled", agentxCiRunner: "enabled", agentxEval: "enabled", ...REQUALIFY } });
+  sets.push({ name: "named:staging:optional", context: { agentxEnv: "staging", agentxRegion: "us-west-2", agentxInstaller: "enabled", agentxCiRunner: "enabled", ...REQUALIFY } });
   sets.push({ name: "named:staging:oidc:gateway:requalify", context: { agentxEnv: "staging", agentxRegion: "us-west-2", agentxIdentity: "oidc", CoreModelGatewayHost: GATEWAY, ...REQUALIFY } });
   sets.push({ name: "pipeline:staging", context: { agentxReleasePipeline: "staging", agentxRegion: "us-west-2" } });
   sets.push({ name: "pipeline:staging:named", context: { agentxReleasePipeline: "staging", agentxEnv: "staging", agentxRegion: "us-west-2" } });
   // scripts/validate-iam-policies.ts SCAN_CONTEXTS, copied: that file runs an AWS gate when imported.
   sets.push({ name: "iam:legacy", context: { agentxRegion: "us-west-2" } });
-  sets.push({ name: "iam:legacy-optional", context: { agentxRegion: "us-west-2", agentxBetaAccess: "enabled", agentxBetaDomain: "enabled", agentxInstaller: "enabled", agentxCiRunner: "enabled", agentxEval: "enabled", "agentx:autoRequalify": "enabled", "agentx:autoRequalifySchedule": "enabled", "agentx:e2eQualificationTransport": "enabled" } });
-  sets.push({ name: "iam:named", context: { agentxEnv: "staging", agentxRegion: "us-west-2", "agentx:autoRequalify": "enabled", "agentx:autoRequalifySchedule": "enabled", "agentx:e2eQualificationTransport": "enabled", agentxInstaller: "enabled", agentxCiRunner: "enabled", agentxEval: "enabled" } });
+  sets.push({ name: "iam:legacy-optional", context: { agentxRegion: "us-west-2", agentxBetaAccess: "enabled", agentxBetaDomain: "enabled", agentxInstaller: "enabled", agentxCiRunner: "enabled", "agentx:autoRequalify": "enabled", "agentx:autoRequalifySchedule": "enabled", "agentx:e2eQualificationTransport": "enabled" } });
+  sets.push({ name: "iam:named", context: { agentxEnv: "staging", agentxRegion: "us-west-2", "agentx:autoRequalify": "enabled", "agentx:autoRequalifySchedule": "enabled", "agentx:e2eQualificationTransport": "enabled", agentxInstaller: "enabled", agentxCiRunner: "enabled" } });
   sets.push({ name: "iam:release-pipeline", context: { agentxReleasePipeline: "staging", agentxRegion: "us-west-2" } });
   return sets;
 }

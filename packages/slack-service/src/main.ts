@@ -33,10 +33,9 @@ import { runConsumer } from "./slack-consumer.js";
 import { createSlackAdapterClient } from "./slack-adapter-client.js";
 import { slackChannelRequests } from "./slack-channel.js";
 import { processSlackRequest } from "./slack-processor.js";
-import { createEvalBatchWatchApi, withSlackThreadRoutes, type SlackThreadServiceApi } from "./slack-thread-api.js";
+import { withSlackThreadRoutes, type SlackThreadServiceApi } from "./slack-thread-api.js";
 import { createSignedServiceFetch } from "./signing-fetch.js";
 import { createThreadApi } from "./thread-api.js";
-import { runEvalBatchWatcher } from "./eval-batch-watcher.js";
 import { HANDOFF_MILLISECONDS, activeTurnFromItem, turnNoteFromItem } from "./interrupted-turn.js";
 import { classifierTimeoutMs, createHostedClassifier, createHostedRequestRouter, createHostedSlackRuntime, gateDecisionLogFields, runHostedTurn } from "./runtime.js";
 import { classifierForTurn, refusalWords, requestRouterFor, resolveTurnModels, turnRefusalWords } from "./slack-company-models.js";
@@ -443,25 +442,6 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
   });
 }
 
-// Spec 052 Task 6: posts each eval batch's progress and summary in its thread until the service stops.
-const batchWatcher = runEvalBatchWatcher({
-  api: createEvalBatchWatchApi({
-    controlPlaneUrl,
-    signedFetchFor: (scope) => createSignedServiceFetch({ region, credentials, ...(scope === undefined ? {} : { thread: scope.thread, userId: scope.userId }) }),
-  }),
-  slack: {
-    async post(thread, threadTs, text) {
-      const ts = await slackDelivery.post(thread, threadTs, text);
-      if (ts === undefined) throw new Error("Slack chat.postMessage answered no message timestamp");
-      return ts;
-    },
-    delete: (thread, ts) => slackDelivery.delete(thread, ts),
-  },
-  log,
-  logError: (event, fields) => console.error(JSON.stringify({ component: "slack-orchestrator", level: "error", event, ...fields })),
-  signal: controller.signal,
-});
-
 let adapterSecret: { value: Promise<string | undefined>; loadedAt: number } | undefined;
 /** The Slack adapter's signing secret, reread at most once a minute so a rotation takes effect. */
 function slackAdapterSecret(name: string): Promise<string | undefined> {
@@ -622,8 +602,6 @@ function processRequest(message: SlackRequestMessage, context: Parameters<typeof
   }, context);
 }
 await channelConsumer;
-// The watcher stops at its next pause; a pass still waiting on Slack or the broker is not waited for long (issue 157).
-await Promise.race([batchWatcher, new Promise((resolve) => setTimeout(resolve, 2_000).unref())]);
 log("service.stopped", {});
 // Issue 157: a handed-off turn may still be winding down in this process; its message already
 // belongs to the new task, so nothing here may run on until SIGKILL. Logs go to stdout, which is

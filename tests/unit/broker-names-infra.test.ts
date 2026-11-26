@@ -78,12 +78,12 @@ describe("addDerivedBrokerVariable", () => {
     // Not marked legacy: whole, whatever the value.
     addDerivedBrokerVariable(fn, legacyNaming(), "AGENTX_ALARM_PREFIX", "agentx-");
     // Marked legacy, and identical: nothing passed (the broker derives it).
-    addDerivedBrokerVariable(fn, legacyNaming(), "SWEBENCH_SETTINGS_PREFIX", "/agentx/production/");
+    addDerivedBrokerVariable(fn, legacyNaming(), "AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID", "agentx-production-project-setup-runtime-v1");
     // Marked legacy, but a different value: whole.
     addDerivedBrokerVariable(fn, legacyNaming(), "CHANNEL_ADAPTER_SECRET_PREFIX", "agentx/elsewhere/");
     const variables = variablesOf(stack, fn);
     expect(variables.AGENTX_ALARM_PREFIX).toBe("agentx-");
-    expect(variables).not.toHaveProperty("SWEBENCH_SETTINGS_PREFIX");
+    expect(variables).not.toHaveProperty("AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID");
     expect(variables.CHANNEL_ADAPTER_SECRET_PREFIX).toBe("agentx/elsewhere/");
   });
 

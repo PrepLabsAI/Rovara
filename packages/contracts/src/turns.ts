@@ -72,9 +72,8 @@ export const TurnObservationSchema = z.object({
  * that could not be used (another member's, no longer pending, expired, or claimed by another
  * event), so nothing ran. `confirmation_cancelled`: the requester cancelled a pending confirmation.
  * `yes_to_all_granted`: a "yes to all" with no pending confirmation only granted it. `swebench_run`
- * (spec 043): an `eval swebench` command, answered or run outside any workspace. `eval_batch` (spec
- * 052): an `eval batch` form, answered or started outside any workspace. Like the workspace
- * dispositions, none of these ran the orchestrator or counts in turn metrics.
+ * and `eval_batch` (specs 043, 052; the commands were removed in #1539) stay so older turn records
+ * still read. Like the workspace dispositions, none of these ran the orchestrator or counts in turn metrics.
  */
 export const TurnDispositionSchema = z.enum([
   "answered", "failed", "abandoned", "workspace_close", "workspace_limit", "workspace_closed", "workspace_unavailable",

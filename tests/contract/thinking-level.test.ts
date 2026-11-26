@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
-  ModelRefSchema, ModelSelectionSchema, ProjectModelsSchema, SwebenchRunnerConfigSchema, SwebenchRunSchema,
-  SwebenchStartRequestSchema, TaskUsageTelemetrySchema, ThinkingLevelSchema, WorkerInvocationSchema, createTaskUsageTelemetry,
+  ModelRefSchema, ModelSelectionSchema, ProjectModelsSchema,
+  TaskUsageTelemetrySchema, ThinkingLevelSchema, WorkerInvocationSchema, createTaskUsageTelemetry,
 } from "@agentx/contracts";
 
 const LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"];
@@ -43,15 +43,6 @@ describe("thinking level contracts (spec 053)", () => {
     expect(WorkerInvocationSchema.safeParse({ ...base, payload: { ...payload, model: { ...sonnet, thinkingLevel: "medium" } } }).success).toBe(true);
     expect(WorkerInvocationSchema.safeParse({ ...base, payload: { ...payload, model: sonnet } }).success).toBe(true);
     expect(WorkerInvocationSchema.safeParse({ ...base, payload: { ...payload, model: { ...sonnet, thinkingLevel: "max" } } }).success).toBe(false);
-  });
-
-  it("the eval model fields accept a level", () => {
-    const withLevel = { ...sonnet, thinkingLevel: "high" };
-    expect(SwebenchStartRequestSchema.shape.model.safeParse(withLevel).success).toBe(true);
-    expect(SwebenchRunSchema.shape.model.safeParse(withLevel).success).toBe(true);
-    expect(SwebenchRunnerConfigSchema.shape.model.safeParse(withLevel).success).toBe(true);
-    expect(SwebenchRunSchema.shape.model.safeParse({ ...sonnet, thinkingLevel: "max" }).success).toBe(false);
-    expect(SwebenchRunnerConfigSchema.shape.model.safeParse(sonnet).success).toBe(true);
   });
 
   it("usage telemetry records an optional level", () => {

@@ -289,7 +289,6 @@ export const CONTROL_PLANE_LAMBDAS = {
   dispatcher: { logicalId: "DispatcherD4A12972", entry: "packages/broker/src/aws/dispatcher.ts" },
   "outbox-publisher": { logicalId: "OutboxPublisherD572F72E", entry: "packages/broker/src/aws/outbox-publisher.ts" },
   "slack-ingress": { logicalId: "SlackIngress5C88FFA0", entry: "packages/broker/src/aws/slack-ingress.ts" },
-  "eval-batch-tick": { logicalId: "EvalBatchTickA4585B04", entry: "packages/broker/src/aws/eval-batch-tick.ts" },
   "developer-sign-in": { logicalId: "DeveloperSignInFunction10B62B05", entry: "packages/broker/src/aws/developer-identity.ts" },
   "developer-task-notifier": { logicalId: "DeveloperTaskNotifierFunction551419CC", entry: "packages/broker/src/aws/developer-task-notifier.ts" },
   "channel-ingress": { logicalId: "ChannelApiIngress9235D30E", entry: "packages/broker/src/aws/channel-api-lambda.ts" },

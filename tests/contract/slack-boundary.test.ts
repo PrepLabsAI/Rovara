@@ -22,7 +22,7 @@ const CORE = [
 ];
 
 /** Slack's own modules in the orchestrator service, besides every `slack-*.ts`; main.ts composes both sides. */
-const SLACK_MODULES = new Set(["main", "turn-records", "eval-batch-watcher", "eval-batch-command", "swebench-command", "request-routing", "task-question", "page-comment", "user-names", "signing-fetch"]);
+const SLACK_MODULES = new Set(["main", "turn-records", "request-routing", "task-question", "page-comment", "user-names", "signing-fetch"]);
 
 /**
  * Files outside the core and Slack's modules that import a Slack-named contract today. Lower it when one goes; a new

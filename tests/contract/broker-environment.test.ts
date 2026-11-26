@@ -182,7 +182,6 @@ for (const env of ["staging", "a1234567890123456789"] as const) {
       const dispatcher = Object.fromEntries(Object.entries(brokerOf(template, "Dispatcher")).map(([key, value]) => [key, resolver.text(value)]));
       expect(hydrated).toMatchObject({
         CONNECTOR_SECRET_PREFIX: naming.connectorSecretPrefix,
-        SWEBENCH_SETTINGS_PREFIX: naming.ec2.workerSettingsPrefix,
         AGENTX_E2E_AGENT_SETTINGS_PREFIX: naming.ec2.workerSettingsPrefix,
         AGENTX_ALARM_PREFIX: naming.alarmName(""),
         AGENTX_METRICS_NAMESPACE: naming.metricsNamespace,

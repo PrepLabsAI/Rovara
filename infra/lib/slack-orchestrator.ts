@@ -261,17 +261,6 @@ export class SlackOrchestratorStack extends Stack {
       metricName: "TurnMetricsEmitFailed",
       metricValue: "1",
     });
-    // Spec 052 Ruling 31: the batch watcher's failures, every eval_batch_watch.* error line; the control
-    // plane's EvalBatchWatcherErrors alarm reads the metric.
-    logGroup.addMetricFilter("EvalBatchWatcherFailedMetric", {
-      filterPattern: logs.FilterPattern.all(
-        logs.FilterPattern.stringValue("$.event", "=", "eval_batch_watch.*"),
-        logs.FilterPattern.stringValue("$.level", "=", "error"),
-      ),
-      metricNamespace: naming.metricsNamespace,
-      metricName: "EvalBatchWatcherFailed",
-      metricValue: "1",
-    });
     // FR-045: the Slack service's alarms. The topic is the control plane's; its policy already lets any alarm in
     // this account publish. #1131: every deployment, production (the legacy template) included.
     {

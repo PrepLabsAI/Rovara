@@ -214,7 +214,6 @@ export const LEGACY_INSTALL_LAYOUT = "legacy";
 /** Every variable the broker derives. The infrastructure checks, at synthesis, that each `text` value is the one it would have passed (infra/lib/broker-names.ts). */
 export const DERIVED_BROKER_VARIABLES: readonly DerivedBrokerVariable[] = [
   { variable: "CONNECTOR_SECRET_PREFIX", kind: "text", value: environmentConnectorSecretPrefix },
-  { variable: "SWEBENCH_SETTINGS_PREFIX", kind: "text", value: environmentSettingsPrefix, legacy: true },
   { variable: "AGENTX_E2E_AGENT_SETTINGS_PREFIX", kind: "text", value: environmentSettingsPrefix },
   { variable: "AGENTX_ALARM_PREFIX", kind: "text", value: environmentAlarmPrefix },
   { variable: "AGENTX_METRICS_NAMESPACE", kind: "text", value: environmentMetricsNamespace },

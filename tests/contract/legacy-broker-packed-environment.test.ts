@@ -20,7 +20,7 @@ const BEFORE = [
   "DEVELOPER_SIGNIN_TABLE_NAME", "DEVELOPER_TOKEN_ISSUER", "EC2_WORKER_LAUNCH_TEMPLATE_ID", "EC2_WORKER_SUBNETS", "GITHUB_APP_CREDENTIAL_REF", "GITHUB_APP_ID",
   "GITHUB_APP_PRIVATE_KEY_SECRET_ARN", "HEALTH_DEAD_LETTER_QUEUES", "MCP_CONFIRM_ELICITATION", "OIDC_ISSUER", "PROVISIONER_ARN", "SLACK_MEMBER_WORKSPACE_LIMIT",
   "SLACK_ORCHESTRATOR_ROLE_ARN", "SLACK_ORGANIZATION_WORKSPACE_LIMIT", "SLACK_REQUEST_QUEUE_URL", "SLACK_TEAM_ID", "SLACK_THREADS_TABLE_NAME", "STATE_TABLE_NAME",
-  "SWEBENCH_SETTINGS_PREFIX", "TURN_RECORDS_TABLE_NAME",
+  "TURN_RECORDS_TABLE_NAME",
 ];
 /** F1 L1a-1 deleted the two invitation switches (the parameters and their packed settings tu and tv): the broker no longer has these two of the 45. Nothing read either variable. */
 const RETIRED = ["AGENTX_TASK_PEOPLE_PRIVATE_INVITATIONS_ENABLED", "AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED"];
@@ -142,8 +142,7 @@ describe("production's broker, packed (#1149)", () => {
       expect(env.ROVARA_PUBLIC_API_URL).toBe("");
       expect(env.DELETER_ARN).toMatch(/^arn:aws:states:us-east-1:123456789012:stateMachine:PHYS-SessionsDeleter/u);
       expect(Object.keys(JSON.parse(env.HEALTH_DEAD_LETTER_QUEUES!) as Json)).toEqual(["dispatch", "slack-requests", "developer-notices", "developer-notice-stream", "channel-events"]);
-      // The four derivations identical to production's own values.
-      expect(env.SWEBENCH_SETTINGS_PREFIX).toBe("/agentx/production/");
+      // The three derivations identical to production's own values.
       expect(env.CHANNEL_ADAPTER_SECRET_PREFIX).toBe("agentx/production/");
       expect(env.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID).toBe("agentx-production-project-setup-runtime-v1");
       expect(env.AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID).toBe("agentx-production-e2e-mock-runtime-v1");

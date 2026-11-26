@@ -1,30 +1,23 @@
 // Spec 062 Phase 5b: the Slack adapter's side of the request processor. processSlackRequest runs a Slack thread's
 // request through the surface-neutral core (processor.ts) with what only Slack has: its subject and format, the
-// Details button on a reply, the hidden turn record, and the eval batch and SWE-bench commands.
+// Details button on a reply and the hidden turn record.
 import {
   detailsButtonValue,
   detailsReplyBlocks,
-  parseEvalBatchCommand,
-  parseSwebenchCommand,
   slackThreadSubject,
   type SlackRequestMessage,
   type SlackThread,
   type TurnRecord,
 } from "@agentx/contracts";
-import { deterministicUuid } from "./ids.js";
-import { TurnHandedOffError } from "./interrupted-turn.js";
-import { runEvalBatchCommand } from "./eval-batch-command.js";
 import {
   processConversationRequest,
   type FinishedTurn,
   type ProcessorDependencies as ConversationDependencies,
   type ProcessorMessage,
   type ServiceLog,
-  type SurfaceCommand,
 } from "./processor.js";
 import { SLACK_FORMAT } from "./slack-format.js";
 import type { SlackThreadServiceApi } from "./slack-thread-api.js";
-import { runSwebenchCommand } from "./swebench-command.js";
 import { buildTurnRecord, emitTurnMetrics, type TurnRecordSink } from "./turn-records.js";
 
 export * from "./processor.js";
@@ -61,7 +54,6 @@ export function processSlackRequest(
     api: () => api,
     subjectOf: dependencies.subjectOf ?? slackThreadSubject,
     format: dependencies.format ?? SLACK_FORMAT,
-    commands: slackCommands(api, message),
     ...(details === undefined || turnRecords === undefined ? {} : { postReplyEnd: detailsReply(details, log) }),
     ...(turnRecords === undefined ? {} : { onFinished: (turn: FinishedTurn<SlackThread>) => recordTurn(turnRecords, log, turn) }),
   }, options);
@@ -95,51 +87,6 @@ function detailsReply(postDetails: NonNullable<ProcessorDependencies["postDetail
       return "not_posted";
     }
   };
-}
-
-/** Slack's eval batch (spec 052) and SWE-bench (spec 043) commands, on this request's client. */
-function slackCommands(api: SlackThreadServiceApi, message: ProcessorMessage<SlackThread>): ReadonlyArray<SurfaceCommand<SlackThread>> {
-  const evalBatch: SurfaceCommand<SlackThread> = (request) => {
-    const command = parseEvalBatchCommand(request.text);
-    if (command === undefined) return undefined;
-    return {
-      disposition: "eval_batch",
-      run: async (context) => {
-        // Spec 052 FR-002: a batch is recorded and announced here; the batch watcher posts the rest.
-        if (api.startEvalBatch === undefined) throw new Error("eval batches are unavailable in this deployment");
-        await runEvalBatchCommand(command, {
-          startEvalBatch: (input) => api.startEvalBatch!(input),
-          ...(api.listProjectModels === undefined ? {} : { listProjectModels: () => api.listProjectModels!() }),
-          ...(api.updateEvalBatchWatch === undefined ? {} : { updateEvalBatchWatch: (batchId, revision, change) => api.updateEvalBatchWatch!(batchId, revision, change) }),
-        }, { post: context.post, redelivered: context.redelivered, ...(context.now === undefined ? {} : { now: context.now }), log: context.log });
-      },
-    };
-  };
-  const swebench: SurfaceCommand<SlackThread> = (request) => {
-    const command = parseSwebenchCommand(request.text);
-    if (command === undefined) return undefined;
-    return {
-      disposition: "swebench_run",
-      run: async (context) => {
-        if (api.startSwebenchRun === undefined || api.getSwebenchRun === undefined) throw new Error("SWE-bench runs are unavailable in this deployment");
-        if (context.handoff?.aborted === true) throw new TurnHandedOffError();
-        // Issue 157: the wait is handed off at the deadline like a turn; the redelivery resumes the same run.
-        await context.untilHandoff(runSwebenchCommand(command, {
-          startSwebenchRun: (input) => api.startSwebenchRun!(input),
-          getSwebenchRun: (runId) => api.getSwebenchRun!(runId),
-          ...(api.listProjectModels === undefined ? {} : { listProjectModels: () => api.listProjectModels!() }),
-        }, {
-          // The same run for a redelivered event.
-          requestId: deterministicUuid(`${message.eventId}:swebench`),
-          post: context.post,
-          // A redelivered event resumes waiting for the run it started; the thread already has its notice.
-          announce: !context.redelivered,
-          ...(context.sleep === undefined ? {} : { sleep: context.sleep }),
-        }));
-      },
-    };
-  };
-  return [evalBatch, swebench];
 }
 
 /**
