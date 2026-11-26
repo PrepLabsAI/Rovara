@@ -8,6 +8,7 @@ import { Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { AgentXError, SIGN_IN_LINK_TEXT, SLACK_OIDC_ISSUER, type WorkspaceInstance } from "@agentx/contracts";
+import { MEMBERSHIP_READ_FAILED_WORDS } from "../../packages/broker/src/core/membership-read.js";
 import { membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import type { DeveloperTaskActions } from "../../packages/broker/src/aws/developer-task-actions.js";
 import { routeDeveloperRequest } from "../../packages/broker/src/aws/developer-routes.js";
@@ -518,6 +519,34 @@ describe("a failed read of the person's membership under an owner's sign-in-link
     expect(failed, JSON.stringify(failed.body)).toMatchObject({ status: 503, body: { error: { code: "RUNTIME_UNAVAILABLE" } } });
     expect(w.linkRows(), "nothing was removed").toHaveLength(1);
     expect((await w.api("DELETE", `/v1/dev/company/members/${P}/sign-ins/slack`, owner)).status, "the retry is served").toBe(200);
+  });
+
+  it("a MALFORMED membership row is a refusal (a fact about the row), never a permanent 503; and the same for the unlink's own-membership read", async () => {
+    const w = world();
+    const p = await w.githubMember();
+    expect((await w.link(p, "slack", { slack: "U0LINKME1", team: TEAM })).status).toBe(200);
+    const owner = (await w.signIn("owner")).access!;
+    const key = membershipKey(P);
+    const row = w.db.get(key.pk, key.sk)!;
+    w.db.set({ ...row, role: "not-a-role" });
+    const refused = await w.api("DELETE", `/v1/dev/company/members/${P}/sign-ins/slack`, owner);
+    expect(refused, JSON.stringify(refused.body)).toMatchObject({ status: 403, body: { error: { code: "FORBIDDEN", message: SIGN_IN_LINK_TEXT.forbidden } } });
+    expect(w.linkRows(), "nothing was removed").toHaveLength(1);
+    // The unlink's own read of the person's membership (the second site) is reached by the person's own session, so the row goes malformed after the reads that come before it:
+    // for each position, a malformed row is never the failed-READ answer (the membership words), and at least one position is the unlink's own fixed "unavailable" refusal (its own words, as for a missing row).
+    const answers = new Set<string>();
+    for (let after = 1; after <= 8; after += 1) {
+      const v = world();
+      const q = await v.githubMember();
+      expect((await v.link(q, "slack", { slack: "U0LINKME1", team: TEAM })).status).toBe(200);
+      const good = v.db.get(key.pk, key.sk)!;
+      let reads = 0;
+      v.db.injectFault({ command: "GetCommand", match: (input) => { const at = input.Key as { pk: string; sk: string }; if (at.pk === key.pk && at.sk === key.sk && ++reads === after) v.db.set({ ...good, role: "not-a-role" }); return false; }, error: { name: "NeverThrown" }, times: 1000 });
+      const own = await v.api("DELETE", "/v1/dev/me/sign-ins/slack", q);
+      expect(JSON.stringify(own.body), `after ${after}`).not.toContain(MEMBERSHIP_READ_FAILED_WORDS);
+      answers.add(JSON.stringify(own.body));
+    }
+    expect([...answers].some((body) => body.includes(SIGN_IN_LINK_TEXT.unavailable)), [...answers].join("\n")).toBe(true);
   });
 });
 

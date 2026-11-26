@@ -61,6 +61,16 @@ describe("the mint check", () => {
     const raced = legacy(db, "raced");
     db.injectFault({ command: "TransactWriteCommand", error: { name: "ConditionalCheckFailedException", message: "lost the race" }, times: 1 });
     expect(await companyMayMint(deps, raced, "oidc", IMPLICIT_COMPANY_ID, undefined, true), "a lost race re-reads and finds no seat: refused").toBe(false);
+    // A CANCELLED transaction is a lost race only when a condition failed; a cancellation for any other reason (throttled, conflicting) is a failed write.
+    const cancelled = legacy(db, "cancelled");
+    for (const Code of ["ThrottlingError", "TransactionConflict"]) {
+      db.injectFault({ command: "TransactWriteCommand", error: { name: "TransactionCanceledException", message: Code, cancellationReasons: [{ Code }, { Code: "None" }] }, times: 1 });
+      await expect(companyMayMint(deps, cancelled, "oidc", IMPLICIT_COMPANY_ID, undefined, true), Code).rejects.toSatisfy(isMembershipReadFailure);
+    }
+    expect(await companyMayMint(deps, cancelled, "oidc", IMPLICIT_COMPANY_ID, undefined, true), "the retry seats the person").toBe(true);
+    const lost = legacy(db, "lost");
+    db.injectFault({ command: "TransactWriteCommand", error: { name: "TransactionCanceledException", message: "condition", cancellationReasons: [{ Code: "ConditionalCheckFailed" }, { Code: "None" }] }, times: 1 });
+    expect(await companyMayMint(deps, lost, "oidc", IMPLICIT_COMPANY_ID, undefined, true), "a cancellation WITH a failed condition is the real lost race: refused").toBe(false);
   });
 
   it("a legacy-seat person at a refresh: a failed read or write inside the join is the retryable failure, never 'may not mint'", async () => {

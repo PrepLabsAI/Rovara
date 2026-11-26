@@ -134,7 +134,7 @@ export class CompanySignInStore {
       } });
       try { await this.input.documentClient.send(new TransactWriteCommand({ TransactItems: writes })); }
       catch (error) {
-        if (!conditional(error)) throw error;
+        if (!lostTheSeatRace(error)) throw error;
         const won = await this.membership(input.personId);
         return won === undefined ? refused() : this.memberResult(won, input.companyId);
       }
@@ -458,3 +458,6 @@ export class CompanySignInStore {
 /** The store's own words for a membership row that reads and is MALFORMED (a fact about the row: a refusal), as opposed to a read or write that FAILED (membership-read.ts). */
 const UNAVAILABLE_WORDS = "company sign-in unavailable";
 export const isUnreadableMembershipRow = (error: unknown): boolean => error instanceof Error && error.message === UNAVAILABLE_WORDS;
+
+/** A seat write lost a RACE only when a condition failed (a ConditionalCheckFailed reason); a cancelled transaction for any other reason (throttled, conflicting) is a failed write: a retryable failure, never "no" (membership-read.ts). */
+const lostTheSeatRace = (error: unknown): boolean => error instanceof Error && (error.name === "ConditionalCheckFailedException" || (error.name === "TransactionCanceledException" && ((error as { CancellationReasons?: Array<{ Code?: string }> }).CancellationReasons ?? []).some((reason) => reason.Code === "ConditionalCheckFailed")));

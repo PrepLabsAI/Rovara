@@ -335,8 +335,8 @@
     },
     {
       "path": "tests/contract/membership-read-signin-paths.test.ts",
-      "minimumTests": 8,
-      "reason": "MEMBERSHIP-READ-FAILS-SAFE: the sign-in server's mint paths: the code grant answers 503 with the code still usable, the companyless check and the legacy seat throw the retryable failure instead of ending a session. The floor is the file's 8 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "minimumTests": 9,
+      "reason": "MEMBERSHIP-READ-FAILS-SAFE: the sign-in server's mint paths: the code grant answers 503 with the code still usable, the companyless check and the legacy seat throw the retryable failure instead of ending a session. The floor is the file's 9 runnable declarations, and deleting or trimming one is a reviewed edit.",
       "decision": "DEC 254zzz522; DEC 254zzz459"
     },
     {
