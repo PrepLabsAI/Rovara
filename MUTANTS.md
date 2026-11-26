@@ -1271,3 +1271,17 @@ Run against: the two journeys (removed-member-answer, membership-read-families),
 | session-mint.ts isUnreadableMembershipRow | A malformed row is a retryable failure again | killed, 1 failed |
 
 Not mutated (no test; internal rethrows listed in REMOVED-MEMBER-ANSWER-FINDINGS.md rows 22 to 26): the script-token creator's grant check, the task action registry's owner read, the session list's owner-left words, the sign-in links admin check, the broker's task-company administrator check.
+
+
+## MEMBERSHIP-READ-FAILS-SAFE re-check round (head 59b5b8d8f)
+
+Each mutant was applied to the committed file, the named test files run alone, then the file restored with git checkout.
+
+| Mutant / production location | Mutation | Test file that kills it | Result |
+|---|---|---|---|
+| company-membership.ts line 137 (legacy-seat write) | `throw error` back to `return refused()` | membership-read-signin-paths | killed, 1 failed |
+| dev-routes.ts 1029 (test-environment approve) | `.catch(orIfNotMembershipFailure(false))` back to `.catch(() => false)` | core-host-test-environment-approval | killed, 1 failed |
+| dev-routes.ts 1053 (saved-env image) | same | core-host-saved-env-image-route | killed, 1 failed |
+| dev-routes.ts 1080 (script-token create) | same | core-host-dev-routes | killed, 1 failed |
+| sign-in-links.ts adminOver (row 25) | the rethrow removed | sign-in-links | killed, 1 failed |
+| broker.ts administratorOfTaskCompany (row 26) | the rethrow removed | admin-name-route-guard | killed, 1 failed |
