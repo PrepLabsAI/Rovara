@@ -231,6 +231,12 @@ async function isCompanyAdminNow(input: HostedSetupRunInput, project: string): P
 }
 
 /** The audit record of one act, naming the person and why they were allowed. */
+/** What a confirm's audit row adds: the item ids the person ticked although the page said they do not match the code (what was REQUESTED, bounded), and how many. Nothing when there are none. */
+export function confirmAuditDetails(body: { useAnyway?: readonly string[] | undefined }): Record<string, string> {
+  const anyway = body.useAnyway ?? [];
+  return anyway.length === 0 ? {} : { useAnyway: anyway.join(",").slice(0, 1_000), useAnywayCount: String(anyway.length) };
+}
+
 function auditEvent(input: HostedSetupRunInput, action: string, eventId: string, project: string, basis: SetupRunBasis, details: Record<string, string | boolean>): AuditEvent {
   return {
     eventId, companyId: input.companyId, at: new Date(input.now()).toISOString(), actor: { type: "person", id: input.principal.personId }, action,
@@ -543,7 +549,7 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
       }
       if (tail === "confirm") {
         const body = parsed(SetupConfirmBodySchema, raw);
-        await recorded(input, auditEvent(input, "setup_run.confirm_requested", `setup_run.confirm:${companyId}:${project}:${personId}:${body.requestId}`, project, basis, { requestId: body.requestId }));
+        await recorded(input, auditEvent(input, "setup_run.confirm_requested", `setup_run.confirm:${companyId}:${project}:${personId}:${body.requestId}`, project, basis, { requestId: body.requestId, ...confirmAuditDetails(body) }));
         return json(200, await confirmSetupAgent(deps, project, body, personId));
       }
       if (tail === "discard") {

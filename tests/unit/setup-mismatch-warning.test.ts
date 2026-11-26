@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { setupItemsOf, type SetupProposal, type SetupVerification } from "@agentx/contracts";
 import { verifyProposalDetailed } from "../../packages/broker/src/core/setup-agent/proposal-verify.js";
 import { chooseCandidateItems, verdictsWithUseAnyway, SetupConfirmBodySchema } from "../../packages/broker/src/core/setup-agent/apply.js";
+import { classifySetupChange } from "../../packages/broker/src/core/setup-agent/setup-risk.js";
 import type { CitationFileReader } from "../../packages/broker/src/core/citations/citation-check.js";
 
 const SHA = "a".repeat(40);
@@ -84,3 +85,32 @@ describe("a person may tick a row that does not match the code (useAnyway)", () 
     expect(SetupConfirmBodySchema.safeParse({ ...base, other: 1 }).success).toBe(false);
   });
 });
+
+describe("what the approver is shown for a row ticked anyway", () => {
+  const base = { revision: 1, setup: [], readiness: [] };
+  const candidateOf = (made: ReturnType<typeof chooseCandidateItems>["made"]) => ({ revision: 2, setup: made.setup ?? [], readiness: made.readiness ?? [] });
+  it("the commands are the typed ones and the risk is read from the command change alone, the same as for a verified row (the verdict never changes it)", () => {
+    const proposal = proposalOf({ setup: [row("s", ADAPTED_ROW, QUOTES)] });
+    const lifted = chooseCandidateItems(proposal, { s: "unverified" }, definition, ["s"], ["s"]).made;
+    const confirmed = chooseCandidateItems(proposal, { s: "verified" }, definition, ["s"]).made;
+    expect(lifted.setup).toEqual(confirmed.setup);
+    expect(lifted.setup!.map((command) => [command.executable, ...command.args].join(" "))).toEqual(["python3 -m venv .venv", ".venv/bin/pip install -r requirements.txt", ".venv/bin/python -m src.db"]);
+    expect(classifySetupChange(base, candidateOf(lifted))).toEqual(classifySetupChange(base, candidateOf(confirmed)));
+    expect(classifySetupChange(base, candidateOf(lifted))).toEqual({ risk: "low", changes: [{ area: "setup_commands", risk: "low" }] });
+  });
+  it("a command that gains an environment entry is still high risk, whatever its verdict", () => {
+    const withEnv = { revision: 2, setup: [{ cwd: "repo/demo", executable: "make", args: [], timeoutSeconds: 900, env: { TOKEN: "x" } }], readiness: [] };
+    expect(classifySetupChange(base, withEnv).risk).toBe("high");
+  });
+});
+
+describe("a cited quote that is not in the file (a `fails` verdict) today", () => {
+  it("is also unverified with no command named, and a ticked-anyway tick still lifts it: pinned until the owner decides whether it may be ticked", async () => {
+    const result = await verify(proposalOf({ setup: [row("fabricated", ["npm ci"], ["words that are not in the file at all"])] }));
+    expect(result.items["fabricated"]).toBe("unverified");
+    expect(result.unmatched).toBeUndefined();
+    const proposal = proposalOf({ setup: [row("fabricated", ["npm ci"], ["x"])] });
+    expect(chooseCandidateItems(proposal, { fabricated: "unverified" }, definition, ["fabricated"], ["fabricated"]).made.unchecked).toEqual(["fabricated"]);
+  });
+});
+

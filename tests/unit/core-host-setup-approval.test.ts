@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   change, orgProjectCatalogKey, projectMetaKey, projectRevisionKey, systemOwnerIdOf, type AuditEvent, type JsonValue, type OrgId, type OrgRole, type ProjectDefinition,
 } from "@agentx/contracts";
+import { confirmAuditDetails } from "../../packages/broker/src/core-host/setup-run-routes.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
@@ -310,6 +311,22 @@ describe("hosted setup approval: confirm and discard", () => {
     expect(await world.store.get(projectRevisionKey(FAKE_COMPANY, "payments", 2))).toBeUndefined();
     const developer = person("p-dev", FAKE_COMPANY, "member", { payments: "developer" });
     expect((await call(post(`${RUN}/confirm`, { requestId: randomUUID(), expectedRevision: 1 }), developer)).status).toBe(403);
+  });
+
+  it("the confirm's audit row says which ticked items the person used although they did not match the code (ids and count), and nothing extra when none", async () => {
+    const { person, call, audit } = await setupWorld();
+    const admin = person("p-admin", FAKE_COMPANY, "admin");
+    const plain = randomUUID();
+    const anyway = randomUUID();
+    await call(post(`${RUN}/confirm`, { requestId: plain, expectedRevision: 1, itemIds: ["a"] }), admin);
+    await call(post(`${RUN}/confirm`, { requestId: anyway, expectedRevision: 1, itemIds: ["a", "b"], useAnyway: ["b"] }), admin);
+    const rows = audit.filter((event) => event.action === "setup_run.confirm_requested");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.details).not.toHaveProperty("useAnyway");
+    expect(rows[0]!.details).not.toHaveProperty("useAnywayCount");
+    expect(rows[1]!.details).toMatchObject({ requestId: anyway, useAnyway: "b", useAnywayCount: "1" });
+    expect(confirmAuditDetails({ useAnyway: Array.from({ length: 400 }, (_, i) => `item-${String(i)}`) }).useAnyway).toHaveLength(1_000);
+    expect(confirmAuditDetails({})).toEqual({});
   });
 
   it("discards a waiting candidate for a maintainer (audited), freeing the project; a project user cannot", async () => {
