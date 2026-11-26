@@ -11,7 +11,7 @@
 import {
   CheckReportSchema, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_LEFTOVER_PROCESSES_MESSAGE, WORKFLOW_NO_CODE_CHANGE_MESSAGE, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE,
   WORKFLOW_RULE_FILES_UNVERIFIED_MESSAGE, WORKFLOW_SETUP_CHANGED_FILES_MESSAGE, WorkflowSnapshotSchema, WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON,
-  WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, blockWorkflow, createCandidateManifest, endWorkflowCiFixUnrelated, noChangeFindingsFrom, recordWorkflowVerification,
+  BROWSER_RUNNER_WORDS, WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, blockWorkflow, createCandidateManifest, endWorkflowCiFixUnrelated, noChangeFindingsFrom, recordWorkflowVerification,
   submitWorkflowReview, workflowIsReviewOnly, workflowPullRequestTrees, workflowReviewRoles, workflowSelectedChecks,
   blockingFindings, change, secondReviewBlockFinding, type CandidateRepository, type TransactItem, type UpdateOp, type WorkflowSnapshot,
   flakyHoldFactOf,
@@ -83,7 +83,7 @@ export async function commitAndContinue(deps: TaskFlowDeps, task: TaskRecord, ne
 
 // ---- coding, and a rerun of the checks
 
-function blockReasonOfFailedRun(mode: "IMPLEMENT" | "CHECKS", ended: Ended, workflow: WorkflowSnapshot): string {
+export function blockReasonOfFailedRun(mode: "IMPLEMENT" | "CHECKS", ended: Ended, workflow: WorkflowSnapshot): string {
   const error = ended.error;
   // The owner's live message asked for a change outside the approved plan, so coding stopped: the owner decides (Revise the plan when the plan can take it in, else Retry coding or a new task).
   if (mode === "IMPLEMENT" && isReapprovalStop(error)) return liveSteerCodingStop(workflow, error);
@@ -93,6 +93,8 @@ function blockReasonOfFailedRun(mode: "IMPLEMENT" | "CHECKS", ended: Ended, work
   if (error?.includes(WORKFLOW_LEFTOVER_PROCESSES_MESSAGE) === true) return WORKFLOW_BLOCK_REASONS.leftoverProcesses;
   // The checks' fresh dev container ran its setup and that changed the project's files: the checks did not run on them.
   if (error?.includes(WORKFLOW_SETUP_CHANGED_FILES_MESSAGE) === true) return WORKFLOW_BLOCK_REASONS.setupChangedFiles;
+  // BROWSER-SKIP-HONESTY: the dispatch ended the checks because the worker lists no browser checks: the words are kept (behind the runtime prefix, which keeps the owner's actions: retry, and no send-back to coding).
+  if (mode === "CHECKS" && error === BROWSER_RUNNER_WORDS.workerNotRun) return `${WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX}${BROWSER_RUNNER_WORDS.workerNotRun}`;
   return runEndedReason(mode, ended.status);
 }
 

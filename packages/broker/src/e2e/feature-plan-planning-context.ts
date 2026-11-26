@@ -54,7 +54,7 @@ export type FeatureE2EPlanningContext = {
  * now, an application with no source-owned package or native project identity to bind its account and source references to, or an account with no usable registered
  * definition (`no-account-definition`: none was written when the setup was approved, or the latest has expired or is not what the approved contract says).
  */
-export type FeatureE2EUnavailableReason = "runtime-unavailable" | "no-launch-recipe" | "needs-project-contract" | "runtime-not-ready" | "no-source-identity" | "no-account-definition";
+export type FeatureE2EUnavailableReason = "runtime-unavailable" | "no-launch-recipe" | "needs-project-contract" | "runtime-not-ready" | "no-browser-runner" | "no-source-identity" | "no-account-definition";
 
 export type FeatureE2EPlanningContextResult = FeatureE2EPlanningContext | { status: "unknown"; reason: string };
 
@@ -190,7 +190,8 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
       // A signed-out visitor needs no registered account, so an inferred launch recipe is enough for it (Ruling AZ); every signed-in target still needs the project contract.
       if (isE2EQualifiedRuntimeProfileId(profileId) && target.accountProfileId !== E2E_ANONYMOUS_ACCOUNT_PROFILE_ID
         && !e2eApplicationRecipeIsProjectContract(snapshot, target.applicationId, application.recipe)) return "needs-project-contract";
-      if (readyRuntimeFor(target) === undefined) return isE2EQualifiedRuntimeProfileId(profileId) ? "runtime-not-ready" : "runtime-unavailable";
+      // BROWSER-SKIP-HONESTY: a qualified profile with no READY row of any kind for the project: the install has no browser runner (said so, instead of "wait for the runtime").
+      if (readyRuntimeFor(target) === undefined) return isE2EQualifiedRuntimeProfileId(profileId) ? (readyRuntimes.length === 0 ? "no-browser-runner" : "runtime-not-ready") : "runtime-unavailable";
       return isE2EQualifiedRuntimeProfileId(profileId) && accountRefFor(target.applicationId, target.accountProfileId) === undefined ? "no-account-definition" : undefined;
     };
     const runtimeRefs = targets.flatMap((target) => {

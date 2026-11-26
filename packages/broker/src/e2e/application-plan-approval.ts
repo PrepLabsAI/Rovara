@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import {
-  E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema, E2EPolicySchema, E2E_AGENT_UNAVAILABLE_REASONS, Ec2RuntimeBindingSchema, canonicalJson,
+  BROWSER_RUNNER_WORDS, E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema, E2EPolicySchema, E2E_AGENT_UNAVAILABLE_REASONS, Ec2RuntimeBindingSchema, canonicalJson,
   E2E_ANONYMOUS_ACCOUNT_PROFILE_ID, E2E_RUNTIME_EXPIRED_CODE, deriveE2ESyntheticRuntimeAccountRef, e2eAnonymousRuntimeAccountRef, E2EApplicationIdentityMissingError, e2eApplicationMetadataSourceRefs, e2eRuntimeKindMatchesTarget, inspectE2EApplicationRepository, isE2EQualifiedRuntimeProfileId, readE2EApplicationProjectContract,
   withE2EAnonymousTargets, type E2EApplicationPlanIntent, type E2EApplicationProjectContract, type E2EApplicationSelectionRecord, type E2ERegisteredRuntime, type E2ERuntimeAccountRef, type E2ERuntimeAvailability,
   type E2ESetupProposal, type E2ESourceSnapshot, type Ec2RuntimeBinding, type PlanApprovalRef,
@@ -39,6 +39,8 @@ export type ApplicationPlanApprovalInput = {
    * with when it expired, instead of the generic "no runtime is READY"; RUN-3). Absent when the broker did not look, which leaves the generic reason.
    */
   expiredRuntimes?: ReadonlyArray<{ kind: "web" | "api"; profileId: string; expiresAt: string }>;
+  /** How many READY rows the project has in all, before a caller kept only the kinds a round runs (BROWSER-SKIP-HONESTY: none, and none expired, is an install with no browser runner). Absent: `registeredRuntimes` is all of them. The words need `expiredRuntimes` too: only a caller that looked for expired rows can say there is none. */
+  registeredRuntimeCount?: number;
   runtimeCatalogId: string;
   runtimeBinding: Ec2RuntimeBinding;
   now: number;
@@ -167,6 +169,14 @@ export type ApplicationDerivation = ReturnType<typeof deriveE2EApplicationFeatur
  * expired or unreadable definition, none registered), so only approving the checks again, or the setup being approved again, helps. Anything else has no scope and the
  * reason says what changed.
  */
+/**
+ * BROWSER-SKIP-HONESTY: the reason when a target's runtime row is not READY. No READY row of any kind and none expired (the caller looked) means the install never qualified a runtime, so it has no browser runner:
+ * said plainly, not as a row id. Anything else keeps the generic reason it was given.
+ */
+function noReadyRuntimeReason(input: Pick<ApplicationPlanApprovalInput, "registeredRuntimes" | "registeredRuntimeCount" | "expiredRuntimes">, generic: string): string {
+  return input.expiredRuntimes?.length === 0 && (input.registeredRuntimeCount ?? input.registeredRuntimes.length) === 0 ? BROWSER_RUNNER_WORDS.notRun : generic;
+}
+
 export type ApplicationRefusalScope = "plan" | "runtime" | "accounts";
 export type ApplicationPlanApproval =
   { ok: true; selection: E2EApplicationSelectionRecord; derivation: ApplicationDerivation;
@@ -266,7 +276,7 @@ export function evaluateApplicationPlanApproval(input: ApplicationPlanApprovalIn
       if (row === undefined) {
         const expired = input.expiredRuntimes?.find((item) => item.kind === target.kind && item.profileId === ref.runtimeProfileId);
         if (expired !== undefined) return refuse(runtimeExpiredReason(target.kind, ref.runtimeProfileId, expired.expiresAt, ` so target ${ref.targetId} cannot run application scenarios now`), "runtime");
-        return refuse(`no ${target.kind} runtime of profile ${ref.runtimeProfileId} is READY for this project's runtime binding, so target ${ref.targetId} cannot run application scenarios now`, "runtime");
+        return refuse(noReadyRuntimeReason(input, `no ${target.kind} runtime of profile ${ref.runtimeProfileId} is READY for this project's runtime binding, so target ${ref.targetId} cannot run application scenarios now`), "runtime");
       }
       if (row.bindingDigest !== bindingDigest) return refuse(`the ${target.kind} runtime of profile ${ref.runtimeProfileId} is bound to another runtime binding than this project's`, "runtime");
       if (row.state === "READY" && Date.parse(row.expiresAt) <= input.now) return refuse(runtimeExpiredReason(target.kind, ref.runtimeProfileId, row.expiresAt, ` so target ${ref.targetId} cannot run application scenarios now`), "runtime");
