@@ -842,7 +842,7 @@ function brokerEventHandler(core: AwsBrokerInput["core"], dependencies: AwsBroke
     retryProjectSetupAsAdministrator,
     routeSetupProposal, routeSetupApproval, registerProject, adminModelChecks,
     prepareWorkspace, putSlackBinding, deleteSlackBinding, cancelWorkspaceTask,
-    stopWorkspace, adminTaskShareMode,
+    adminTaskShareMode,
   };
   return async (event: HttpApiV2Event | SlackWorkspaceOperatorEvent | SlackStopTaskEvent | SlackTaskAuthorizationEvent | SlackTaskPeopleConfirmEvent | SlackTaskPeopleReadEvent | SlackTaskPeopleChangeEvent | SlackTaskPeopleTakeOwnershipEvent | SlackWorkflowStartEvent | SlackWorkflowDecisionEvent | SlackWorkflowRetryEvent | SlackWorkflowReviewRetryEvent | SlackWorkflowSendBackEvent | SlackWorkflowResolveFindingsEvent | SlackWorkflowCloseEvent | AdminChangePressEvent | { source: "agentx.github-webhook-recovery" } | { source: "agentx.github-binding-backfill"; continuation?: number } | { source: "agentx.github-binding-claim"; installationId: number; companyId: string } | { source: "agentx.workflow-dispatch-recovery" } | { source: "agentx.workflow-merge-recovery" }, context?: { awsRequestId?: string; getRemainingTimeInMillis?: () => number }): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
     const coreOrOperator = await dispatchCoreAndOperatorEvent(core, dependencies, adminChanges, event, context, operatorHooks);
@@ -5061,19 +5061,6 @@ async function acceptCancellation(
 ) {
   const workspace = await requireOwnedWorkspace(dependencies, identity, workspaceId);
   return requestCancellation(dependencies, workspace, targetOperationId, requesterOf(identity));
-}
-
-async function stopWorkspace(
-  dependencies: AwsBrokerDependencies,
-  identity: AuthenticatedIdentity,
-  workspaceId: string,
-) {
-  const workspace = await requireWorkspace(dependencies, workspaceId);
-  await requireAdministrator(dependencies, identity, workspace.projectName);
-  if (workspace.status !== "READY" || workspace.activeOperationId) {
-    throw agentXError("WORKSPACE_BUSY", "cancel or finish active work before stopping compute");
-  }
-  throw agentXError("RUNTIME_UNAVAILABLE", "manual compute stop is not supported; idle sessions stop automatically");
 }
 
 /** Only a coding task is cancelled: stopping a prepare or a publish midway could leave half a clone or push. */
