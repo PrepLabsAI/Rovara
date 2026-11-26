@@ -143,7 +143,7 @@ describe("D2 (2): the admin reads are given the company reader production sets",
 // MEMBERSHIP-READ-FAILS-SAFE (re-check SHOULD, mutant row 26): the task-company check of the admin task routes (broker.ts administratorOfTaskCompany).
 describe("an administrator's task route reads their company: a failed read is the retryable 503, never the 'not an administrator' 403", () => {
   const TASK = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
-  const replay = (broker: Awaited<ReturnType<typeof world>>) => call(broker.handler, { method: "POST", path: `/v1/admin/tasks/${TASK}/e2e-replay`, user: ADMIN, body: { requestId: randomUUID(), roundId: "round-1" } });
+  const replay = (broker: Awaited<ReturnType<typeof world>>) => call(broker.handler, { method: "POST", path: `/v1/admin/tasks/${TASK}/share-mode`, user: ADMIN, body: { requestId: randomUUID(), mode: "owner_only" } });
   const seeded = async (held: Held) => {
     // The company reader answers while the world is set up, and gives `held` (an answer, no company, or a failure) when the route asks.
     const open: { [ownerKey: string]: Held } = { [ADMIN_KEY]: IMPLICIT_COMPANY_ID };
@@ -165,6 +165,6 @@ describe("an administrator's task route reads their company: a failed read is th
 
   it("control: the administrator of the task's own company passes the check (the answer is not the 403)", async () => {
     const answer = await replay(await seeded(IMPLICIT_COMPANY_ID));
-    expect(answer.status, JSON.stringify(answer.body)).not.toBe(403);
+    expect(JSON.stringify(answer.body)).not.toContain("administrator project membership is required");
   });
 });

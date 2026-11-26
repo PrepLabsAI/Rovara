@@ -4,6 +4,7 @@
 import { describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { developerTaskRouteDependencies, type DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
+import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { companyRouteHarness, PERSON, TASK } from "../support/company-route-harness.js";
 
 const caller: DeveloperCaller = { developerId: PERSON, sessionId: "session", amr: "slack", name: "Test Person", slackUserId: "U0SHARED" };
@@ -12,6 +13,8 @@ describe("an old-engine task's own person, held by the bound channel (no grant),
   it("is held, or told the retryable 503 for the failed read: never 'not your task' (mayStart false)", async () => {
     const h = companyRouteHarness();
     h.project(undefined, "channel"); h.task(TASK);
+    // The harness stamps every task as the core's (D1-2); this path is the unstamped task's, so the stamp is taken off.
+    h.db.delete(coreTaskMarkKey(TASK).pk, coreTaskMarkKey(TASK).sk);
     const state = { count: 0, failAt: 0 };
     h.deps.companies = { companyOf: async () => { state.count += 1; if (state.count === state.failAt) throw new Error("the store failed"); return IMPLICIT_COMPANY_ID; } };
     const ask = () => developerTaskRouteDependencies(h.deps, caller).taskReaderPerson!(PERSON, "shared-project", undefined, { ownTask: true, taskId: TASK });
