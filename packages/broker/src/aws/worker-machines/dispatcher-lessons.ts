@@ -50,12 +50,14 @@ class SignalsSpent extends Error {}
 const SIGNALS_KEPT_MAX = 200;
 type Learned = NonNullable<TaskFlowDeps["learned"]>;
 /**
- * What a step may be given. Lessons: a step of the five lesson modes, for a worker that lists the feature (the plan check's lessons are part of the knowledge briefing: an older worker is sent exactly what it always was).
- * Rovara skills (SKILLS-TO-WORKERS): plan and build steps only (as `lessons/host-glue.ts` `skillsFor`), for a worker that lists the feature, whether or not the project has any lesson.
+ * What a step may be given. Lessons: only while the install's lessons switch covers the company (`lessonsOn`), a step of the five lesson modes, for a worker that lists the feature (the plan check's lessons are part of the
+ * knowledge briefing: an older worker is sent exactly what it always was).
+ * Rovara skills (SKILLS-TO-WORKERS, DEC 254zzz577 a): plan and build steps only (as `lessons/host-glue.ts` `skillsFor`), for a worker that lists the feature, whether or not the project has any lesson, WHATEVER the install's lessons
+ * switch and the project's learning mode say: a published skill is a two-person decision of its own.
  */
-function partsOfStep(data: { workflowMode?: string | undefined; features: readonly string[] }): { lessons: boolean; skills: boolean } {
+function partsOfStep(data: { workflowMode?: string | undefined; features: readonly string[] }, lessonsOn: boolean): { lessons: boolean; skills: boolean } {
   const mode = data.workflowMode ?? "";
-  const lessons = ["UNDERSTAND", "PLAN", "PLAN_CRITIQUE", "IMPLEMENT", "REVIEW"].includes(mode) && data.features.includes(LEARNED_CONTEXT_FEATURE) && (mode !== "PLAN_CRITIQUE" || data.features.includes(KNOWLEDGE_CONTEXT_FEATURE));
+  const lessons = lessonsOn && ["UNDERSTAND", "PLAN", "PLAN_CRITIQUE", "IMPLEMENT", "REVIEW"].includes(mode) && data.features.includes(LEARNED_CONTEXT_FEATURE) && (mode !== "PLAN_CRITIQUE" || data.features.includes(KNOWLEDGE_CONTEXT_FEATURE));
   return { lessons, skills: (mode === "PLAN" || mode === "IMPLEMENT") && data.features.includes(ROVARA_SKILLS_FEATURE) };
 }
 const withSkills = <T extends object>(answer: T, skills: readonly RovaraSkillFile[]): T & { rovaraSkills?: RovaraSkillFile[] } => skills.length === 0 ? answer : { ...answer, rovaraSkills: [...skills] };
@@ -80,7 +82,9 @@ export interface DispatcherLessonsOptions {
 export function createDispatcherLearned(options: DispatcherLessonsOptions): Learned {
   const signalsKept = new Map<string, ProjectSignals>();
   return async (input) => {
-    if (!switchCovers(options.lessonsSwitch, options.companyId)) return {};
+    const lessonsOn = switchCovers(options.lessonsSwitch, options.companyId);
+    // Neither the lessons (switch off for this company) nor a worker that lists the skills feature: nothing to read, nothing asked of the store.
+    if (!lessonsOn && !(Array.isArray(input?.features) && input.features.includes(ROVARA_SKILLS_FEATURE))) return {};
     let stopped = false;
     let failed = false;
     let reads = 0;
@@ -116,7 +120,7 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
       if (!Array.isArray(input?.features) || input.features.length > 64) refuse();
       const request = Request.safeParse(input);
       if (!request.success || !OrgIdSchema.safeParse(options.companyId).success) refuse();
-      const { lessons: wantsLessons, skills: wantsSkills } = partsOfStep(request.data);
+      const { lessons: wantsLessons, skills: wantsSkills } = partsOfStep(request.data, lessonsOn);
       if (!wantsLessons && !wantsSkills) return {};
       const memo = new Map<string, Promise<StoredDocument | undefined>>();
       const client = { send: async (command: GetCommand) => {
@@ -166,20 +170,22 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
       };
       const parts = createHostedLessonParts({ companyId: company, people, readTask: ownTask });
       const settings = documentLearningSettings(store);
+      // The project's live skills, from the SAME selector the laptop path uses, for THIS task's own company and project (read from the workspace record and the task above, never from the request). Never throws. They are read
+      // BESIDE the lessons, on a clock and a share of reads of their own (`DISPATCHER_SKILLS_LIMITS`, through `options.store` directly): the lessons' reads, counters and 2.5 s run clock never see them, and the answer waits
+      // for them at most as long as their own clock (it starts here, so by the time the lessons are done it is usually over). Whatever the learning mode and the lessons switch say, they are given.
+      const skillsRun: Promise<RovaraSkillFile[]> = wantsSkills ? readHostedLiveSkills({ store: options.store, company, project: task.project, alive: () => !stopped && !failed }) : Promise.resolve([]);
+      const finish = async (answer: object) => { const skills = await skillsRun; check(); return withSkills(answer, skills); };
+      if (!wantsLessons) return finish({});
       const resolved = await resolveLearning(settings, company, task.project);
       check();
       // This read-only input has already checked its own company switch. It does not
       // depend on the broker process having installed the learning-model global gate.
       if (!modeAllows(resolved.chosenMode, "load")) {
         if (resolved.chosenMode === "Off" && await whyLearningOff(settings, company, task.project) === "unreadable") refuse();
-        return {};
+        return finish({});
       }
-      // The project's live skills, from the SAME selector the laptop path uses, for THIS task's own company and project (read from the workspace record and the task above, never from the request). Never throws.
-      const skills = wantsSkills ? await readHostedLiveSkills({ store: options.store, company, project: task.project, alive: () => !stopped && !failed }) : [];
-      check();
-      if (!wantsLessons) return withSkills({}, skills);
       const rawSet = await store.get(lessonSetKey(company, task.project));
-      if (rawSet === undefined) return withSkills({}, skills);
+      if (rawSet === undefined) return finish({});
       if (rawSet["members"] === null || typeof rawSet["members"] !== "object" || Object.keys(rawSet["members"]).length > DISPATCHER_LESSONS_LIMITS.lessons) refuse();
       const set = SetRecord.safeParse(rawSet);
       if (!set.success) refuse();
@@ -282,10 +288,10 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
           } catch { /* no record: the report of this step is dropped, as it was before */ } finally { if (recordTimer !== undefined) clearTimeout(recordTimer); }
         }
       }
-      return withSkills(selected.chosen.length === 0 && knowledgeContext === undefined ? {} : {
+      return finish(selected.chosen.length === 0 && knowledgeContext === undefined ? {} : {
         ...(selected.chosen.length === 0 ? {} : { learnedContext: { v: 1, setVersion: set.data.setVersion, stage, lessons: selected.chosen } }),
         ...(knowledgeContext === undefined ? {} : { knowledgeContext }),
-      }, skills);
+      });
     };
     try {
       return await Promise.race([run(), new Promise<never>((_resolve, reject) => {

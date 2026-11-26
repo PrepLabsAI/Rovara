@@ -75,12 +75,17 @@ describe("read-only dispatcher lessons", () => {
     w.send.mockClear();
     // Even though the supplied options say on, only the deployment's switch decides.
     const uncovered = hostedDispatcherFlow(env, { ...w.options, companyId: B });
-    // L4-HW3: lessons are not covered, so no learned reader; the standing seam is still declared (the company's rules and How we work pinned on the task need no lessons) and holds no team rules.
-    expect(uncovered).toMatchObject({ modelAccess: null, learned: null });
+    // L4-HW3: lessons are not covered, so the reader gives no lessons (it answers `{}` for a lessons-only request without reading anything: below); the standing seam is still declared (the company's rules and How we work pinned on the task need no lessons) and holds no team rules.
+    // SKILLS-TO-WORKERS (DEC 254zzz577 a): the company's runtime still has the reader, because published skills reach plan and build steps whatever the lessons switch says.
+    expect(uncovered).toMatchObject({ modelAccess: null });
+    expect(typeof uncovered?.learned).toBe("function");
+    expect(await uncovered!.learned!({ ...request, workflowMode: "PLAN" } as typeof request)).toEqual({});
     expect(typeof uncovered?.standingInstructions?.forOperation).toBe("function");
     for (const raw of [undefined, "off"]) {
       const off = hostedDispatcherFlow(raw === undefined ? {} : { ROVARA_CORE_LESSONS: raw }, w.options);
-      expect(off).toMatchObject({ modelAccess: null, learned: null });
+      expect(off).toMatchObject({ modelAccess: null });
+      expect(typeof off?.learned).toBe("function");
+      expect(await off!.learned!({ ...request, workflowMode: "PLAN" } as typeof request)).toEqual({});
       expect(typeof off?.standingInstructions?.forOperation).toBe("function");
       expect(await off!.standingInstructions!.forOperation({ project: "p", mode: "PLAN" })).toBeUndefined();
     }

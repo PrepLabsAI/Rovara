@@ -7,11 +7,12 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { KNOWLEDGE_CONTEXT_FEATURE, LEARNED_CONTEXT_FEATURE, ROVARA_SKILLS_FEATURE, WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, companyScoped, lessonSetKey, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition } from "../../packages/contracts/src/index.js";
+import { KNOWLEDGE_CONTEXT_FEATURE, LEARNED_CONTEXT_FEATURE, ROVARA_SKILLS_FEATURE, WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, companyScoped, learningModeLockKey, lessonSetKey, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition } from "../../packages/contracts/src/index.js";
 import { hostedDispatcherFlow } from "../../packages/broker/src/aws/worker-machines/dispatcher-core.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { DocumentLessonStore } from "../../packages/broker/src/lessons/document-store.js";
 import { setLearnedLessonsGate } from "../../packages/broker/src/lessons/policy.js";
+import { writeLearningMode } from "../../packages/broker/src/lessons/document-settings.js";
 import type { HostedLessonPeople } from "../../packages/broker/src/lessons/hosted-people.js";
 import { liveSkillsForStep, renderSkill } from "../../packages/broker/src/lessons/skills.js";
 import { taskKey, taskPointerKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
@@ -60,7 +61,7 @@ const ask = (w: { learned: (input: never) => Promise<{ rovaraSkills?: Array<{ na
 const namesOf = (answer: { rovaraSkills?: Array<{ name: string }> }): string[] => (answer.rovaraSkills ?? []).map((skill) => skill.name);
 
 /** The hosted world of `tests/unit/aws-dispatcher-lessons.test.ts`, plus one PUBLISHED skill written straight into the store: head (live version 1), version 1 with two approvals, and the `set` row. */
-async function world(opts: { lessons?: boolean; skill?: boolean } = {}) {
+async function world(opts: { lessons?: boolean; skill?: boolean; /** the install's CoreLessons setting (default: on for company A) */ coreLessons?: string; /** the project's learning mode (default: none stored, which is Suggest) */ mode?: "Off" | "Collect" | "Suggest" | "On" } = {}) {
   setLearnedLessonsGate(() => true);
   const store = new MemoryDocumentStore();
   await store.put({ item: { ...projectRevisionKey(A, PROJECT, 1), definition: definition as unknown as JsonValue } });
@@ -81,7 +82,8 @@ async function world(opts: { lessons?: boolean; skill?: boolean } = {}) {
   const send = vi.fn(async (command: { input: { Key: { pk: string; sk: string } } }) => ({ Item: await store.get(command.input.Key) }));
   const options = { companyId: A, lessonsSwitch: { mode: "on" as const }, documentClient: { send } as never, tableName: "state", store, people, now: () => now };
   // The reader exactly as the deployed dispatcher builds it: `hostedDispatcherFlow` with the install's lessons switch on for this company.
-  const flow = hostedDispatcherFlow({ ROVARA_CORE_LESSONS: `on:${A}` }, options);
+  if (opts.mode !== undefined) await writeLearningMode(store, { workspaceId: A, project: PROJECT }, opts.mode, now);
+  const flow = hostedDispatcherFlow(opts.coreLessons === undefined ? { ROVARA_CORE_LESSONS: `on:${A}` } : opts.coreLessons === "unset" ? {} : { ROVARA_CORE_LESSONS: opts.coreLessons }, options);
   if (flow === undefined || typeof flow.learned !== "function") throw new Error("the hosted dispatcher has no learned reader");
   return { store, learned: flow.learned };
 }
@@ -263,5 +265,62 @@ describe("what the hosted dispatcher's reader may give a step as skills (scoping
     const skills = await workerStep("IMPLEMENT", { rovaraSkills: answer.rovaraSkills });
     expect(await readSkillBody(skills, SKILL_NAME)).toBe(SKILL_TEXT);
     expect(await readSkillBody(skills, "billing-only")).toBe("No skill called billing-only in this agent.");
+  });
+});
+
+// DEC 254zzz577 option (a): an APPROVED (published) skill ALWAYS reaches a plan or build step, whatever the project's learning mode and the install's CoreLessons setting; the lessons stay gated by both, as before.
+describe("skills are not behind the learning mode or the CoreLessons switch (lessons still are)", () => {
+  it.each(["Off", "Collect", "Suggest", "On"] as const)("project learning mode %s: plan and build steps get the published skill", async (mode) => {
+    const w = await world({ mode });
+    for (const workflowMode of ["PLAN", "IMPLEMENT"]) expect(namesOf(await ask(w, workflowMode)), `${mode} ${workflowMode}`).toEqual([SKILL_NAME]);
+  });
+
+  it("lessons stay gated by the mode: Off and Collect give no lesson (and no knowledge), Suggest and On give it", async () => {
+    for (const mode of ["Off", "Collect"] as const) {
+      const w = await world({ mode });
+      for (const workflowMode of ["PLAN", "IMPLEMENT"]) {
+        const answer = await w.learned({ workspaceId: WS, operationId: randomUUID(), workflowMode, features: WORKER_FEATURES });
+        expect(answer.learnedContext, `${mode} ${workflowMode}`).toBeUndefined();
+        expect(answer.knowledgeContext, `${mode} ${workflowMode}`).toBeUndefined();
+        expect(namesOf(answer), `${mode} ${workflowMode}`).toEqual([SKILL_NAME]);
+      }
+    }
+    for (const mode of ["Suggest", "On"] as const) {
+      const w = await world({ mode });
+      const answer = await w.learned({ workspaceId: WS, operationId: randomUUID(), workflowMode: "PLAN", features: WORKER_FEATURES });
+      expect(answer.learnedContext?.lessons.map((lesson) => lesson.id), mode).toEqual(["les_aaaa1111"]);
+      expect(namesOf(answer), mode).toEqual([SKILL_NAME]);
+    }
+  });
+
+  it("the company's lock on the mode (Off) does not take the skills away either", async () => {
+    const w = await world();
+    await w.store.put({ item: { ...learningModeLockKey(A), entityType: "LESSON_MODE_LOCK", mode: "off", updatedAt: now } });
+    const answer = await w.learned({ workspaceId: WS, operationId: randomUUID(), workflowMode: "PLAN", features: WORKER_FEATURES });
+    expect(answer.learnedContext).toBeUndefined();
+    expect(namesOf(answer)).toEqual([SKILL_NAME]);
+  });
+
+  it("the install's CoreLessons switch off (unset, 'off', or naming only another company): plan and build steps still get the skill, and no lesson", async () => {
+    for (const coreLessons of ["unset", "off", "on:org_bbbbbbbbbbbbbbbbbbbb"]) {
+      const w = await world({ coreLessons });
+      for (const workflowMode of ["PLAN", "IMPLEMENT"]) {
+        const answer = await w.learned({ workspaceId: WS, operationId: randomUUID(), workflowMode, features: WORKER_FEATURES });
+        expect(answer.learnedContext, `${coreLessons} ${workflowMode}`).toBeUndefined();
+        expect(answer.knowledgeContext, `${coreLessons} ${workflowMode}`).toBeUndefined();
+        expect(namesOf(answer), `${coreLessons} ${workflowMode}`).toEqual([SKILL_NAME]);
+      }
+      // The other scoping rules hold with the switch off: no skill for a step that is not plan or build, nor for a worker without the feature.
+      expect((await ask(w, "REVIEW")).rovaraSkills, coreLessons).toBeUndefined();
+      expect((await ask(w, "PLAN", [LEARNED_CONTEXT_FEATURE, KNOWLEDGE_CONTEXT_FEATURE])).rovaraSkills, coreLessons).toBeUndefined();
+    }
+  });
+
+  it("with the switch off, a worker that lists only the lessons feature costs the store nothing (no read at all), and a foreign workspace is still refused", async () => {
+    const w = await world({ coreLessons: "unset" });
+    const asked = vi.spyOn(w.store, "get");
+    expect(await w.learned({ workspaceId: WS, operationId: randomUUID(), workflowMode: "PLAN", features: [LEARNED_CONTEXT_FEATURE, KNOWLEDGE_CONTEXT_FEATURE] })).toEqual({});
+    expect(asked).not.toHaveBeenCalled();
+    await expect(w.learned({ workspaceId: "33333333-3333-4333-8333-333333333333", operationId: randomUUID(), workflowMode: "PLAN", features: WORKER_FEATURES })).rejects.toThrow();
   });
 });

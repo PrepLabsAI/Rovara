@@ -145,13 +145,13 @@ export function hostedDispatcherFlow(env: NodeJS.ProcessEnv, learned?: RegistryT
   // runtime always has the seam (no code host, no rules store and no lessons needed). Lessons being off, or not naming the company, only leaves out the team rules.
   const standingOf = (teamRules: boolean): RegistryTaskFlowOptions["standingInstructions"] | null =>
     options === undefined ? null : createStandingInstructions({ companyId: options.companyId, ...(teamRules ? { teamRules: createTeamRulesSource({ store: options.store, companyId: options.companyId }) } : {}) });
+  // SKILLS-TO-WORKERS (DEC 254zzz577 a): a company's runtime ALWAYS has the reader, whatever the install's lessons switch says: the reader gates the lessons itself (switch and project mode) and gives plan and build steps
+  // the project's published skills regardless. Team rules and the lessons' own steps still need the switch to cover this company.
+  if (options !== undefined) return { standingInstructions: standingOf(lessonsSwitch.mode !== "off" && switchCovers(lessonsSwitch, options.companyId)), modelAccess, learned: createDispatcherLearned({ ...options, lessonsSwitch }) };
   if (lessonsSwitch.mode !== "off") {
-    // A narrowed lessons switch must not attach a reader to another company's runtime.
-    if (options !== undefined && !switchCovers(lessonsSwitch, options.companyId)) return { standingInstructions: standingOf(false), modelAccess, learned: null };
-    const reader = options === undefined ? learned : createDispatcherLearned({ ...options, lessonsSwitch });
     // Lessons phase 4: a rule a person made permanent from a proven lesson is read from THIS company's own team-rule row (one `get`, never another company's) and put in front of the steps it applies to as standing
     // instructions, after the company's rules and How we work; with no rules the step is byte for byte what it was. Only where lessons are on for the company and the deployment gave its store.
-    return typeof reader !== "function" ? undefined : { standingInstructions: standingOf(true), modelAccess, learned: reader };
+    return typeof learned !== "function" ? undefined : { standingInstructions: standingOf(true), modelAccess, learned };
   }
   return { standingInstructions: standingOf(false), modelAccess, learned: null };
 }
