@@ -1,7 +1,7 @@
 // TEST-RESULT-HONESTY: the words every summary of a check uses. A pass that skipped tests never reads "Checks passed"; a run in which every test was skipped is "not tested"; a failure that looks like a missing service says what it
 // looks like it needs (a hint). The outputs are the runners' real final lines.
 import { describe, expect, it } from "vitest";
-import { AGENTX_PREAMBLE_VERSION, agentxPreambleSha256, checksReplyPrefix, checksSection, opensWithTestResult, type CheckEntry, type CheckReport } from "../../packages/contracts/src/index.js";
+import { AGENTX_PREAMBLE_VERSION, agentxPreambleSha256, checkResultNote, checksReplyPrefix, checksSection, opensWithTestResult, type CheckEntry, type CheckReport } from "../../packages/contracts/src/index.js";
 import { renderEvent } from "../../packages/broker/src/plugins/channel/slack/format.js";
 import { testResultNotTested } from "../../packages/broker/src/core/proof/test-result-items.js";
 
@@ -95,6 +95,16 @@ describe("the evidence pack's not-tested items", () => {
       { kind: "not_selected", id: "skipped:readiness:1", text: "4 tests skipped in jest", reason: "skipped, not run" },
       { kind: "environment", id: "needs_postgres", text: "A check looks like it needs Postgres: Rovara didn't start one", reason: "service not available" },
     ]);
+  });
+  it("reads skips only from a check that passed, and a missing service only from one that failed", () => {
+    const failed = entry({ after: "failed", class: "failing_no_before", output: `${PYTEST_SOME}${PG_REFUSED}` });
+    expect(checkResultNote(failed).skipped).toBeUndefined();
+    expect(checkResultNote(failed).needs).toEqual(["Postgres"]);
+    expect(testResultNotTested([failed]).map((item) => item.id)).toEqual(["needs_postgres"]);
+    const timedOut = entry({ after: "unknown", class: "not_rerun", output: PYTEST_ALL });
+    expect(checkResultNote(timedOut)).toEqual({ needs: [] });
+    const passed = entry({ output: `${PYTEST_SOME}${PG_REFUSED}` });
+    expect(checkResultNote(passed)).toEqual({ skipped: { skipped: 4, all: false }, needs: [] });
   });
   it("flattens a label that holds control characters", () => {
     expect(testResultNotTested([entry({ label: "pytest‮\n-q", output: PYTEST_ALL })])[0]?.text).toBe("pytest -q: every test was skipped");

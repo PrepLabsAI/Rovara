@@ -12,6 +12,18 @@ export const isFixedEnvironmentNote = (id: string): boolean => id === SANDBOX_MO
 
 const plain = (text: string, max: number): string => text.replace(/[\p{Cc}\p{Cf}]+/gu, " ").replace(/\s+/gu, " ").trim().slice(0, max);
 
+/** What the pack's skipped-test items add up to, for the pull request's heading when the task has no Testing view: the tests skipped in checks that passed, and whether some check ran no test at all. Undefined: nothing was skipped. */
+export function skippedFactsOf(notTested: readonly Pick<EvidenceNotTested, "id" | "kind" | "text">[]): { skipped: number; allSkipped: boolean } | undefined {
+  let skipped = 0;
+  let allSkipped = false;
+  for (const item of notTested) {
+    if (!item.id.startsWith(SKIPPED_ITEM_PREFIX)) continue;
+    if (item.kind === "check") allSkipped = true;
+    else skipped += Number(/^(\d{1,9}) tests? skipped in /u.exec(item.text)?.[1] ?? 0);
+  }
+  return allSkipped || skipped > 0 ? { skipped, allSkipped } : undefined;
+}
+
 export function testResultNotTested(checks: readonly CheckEntry[]): EvidenceNotTested[] {
   const items: EvidenceNotTested[] = [];
   const needed = new Set<string>();
