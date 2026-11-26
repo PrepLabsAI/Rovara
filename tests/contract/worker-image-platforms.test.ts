@@ -1,10 +1,12 @@
-// DEC 254zm (Q2): the release builds the worker image for linux/arm64 AND linux/amd64 as one multi-architecture image (one index digest), so the x86
-// machine sizes can run; every other image, and the private release path, stays arm64 exactly as before.
+// DEC 254zm (Q2): the release can build the worker image for linux/arm64 AND linux/amd64 as one multi-architecture image (one index digest), so the x86
+// machine sizes can run; every other image, and the private release path, stays arm64 exactly as before. #1563: the amd64 half is opt-in
+// (AGENTX_PUBLISH_WORKER_AMD64 == 'true'); off, the worker is one arm64 image, as up to 0.4.0.
 import { spawnSync } from "node:child_process";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import YAML from "yaml";
 import { buildAndPushImage, type ReleaseOptions, type Runner } from "../../scripts/release-common.js";
 
 const workflow = readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8");
@@ -24,17 +26,29 @@ function platformPlan(): string {
   return workflow.slice(start, end + "esac".length);
 }
 
-function platformsOf(image: string): string {
-  const ran = spawnSync("bash", ["-c", `image=${image}\n${platformPlan()}\nprintf '%s' "$platforms"`], { encoding: "utf8" });
+/** The workflow's one line that picks the worker's platforms from AGENTX_PUBLISH_WORKER_AMD64. */
+function workerPlatformsLine(): string {
+  const line = /^\s*(worker_platforms=linux\/arm64; .*)$/m.exec(workflow)?.[1];
+  expect(line, "the workflow picks the worker's platforms").toBeDefined();
+  return line!;
+}
+
+function platformsOf(image: string, amd64 = ""): string {
+  const ran = spawnSync("bash", ["-c", `PUBLISH_WORKER_AMD64=${amd64}\n${workerPlatformsLine()}\nimage=${image}\n${platformPlan()}\nprintf '%s' "$platforms"`], { encoding: "utf8" });
   expect(ran.status, ran.stderr).toBe(0);
   return ran.stdout;
 }
 
 describe("the release build plan", () => {
-  it("builds the worker for both architectures and every other image for arm64 only", () => {
-    expect(platformsOf("worker")).toBe("linux/arm64,linux/amd64");
-    expect(platformsOf("slack")).toBe("linux/arm64");
-    expect(platformsOf("executor")).toBe("linux/arm64");
+  it("builds the worker for both architectures only when AGENTX_PUBLISH_WORKER_AMD64 is exactly true, and every other image for arm64 only", () => {
+    expect(platformsOf("worker", "true")).toBe("linux/arm64,linux/amd64");
+    for (const off of ["", "false", "TRUE", "1"]) expect(platformsOf("worker", off), off).toBe("linux/arm64");
+    for (const amd64 of ["", "true"]) {
+      expect(platformsOf("slack", amd64)).toBe("linux/arm64");
+      expect(platformsOf("executor", amd64)).toBe("linux/arm64");
+    }
+    const images = (YAML.parse(workflow) as { jobs: { images: { steps: Array<{ id?: string; env?: Record<string, string> }> } } }).jobs.images;
+    expect(images.steps.find((step) => step.id === "push")?.env?.PUBLISH_WORKER_AMD64).toBe("${{ vars.AGENTX_PUBLISH_WORKER_AMD64 }}");
   });
 
   it("pushes the worker and slack builds with the plan's platforms and keeps the executor's smoke-tested build arm64 (golden)", () => {
@@ -77,9 +91,8 @@ describe("the release build plan", () => {
     }
   });
 
-  it("runs on an arm64 runner and registers amd64 emulation before buildx, so the worker's amd64 half can build", async () => {
-    const YAML = (await import("yaml")).default;
-    const parsed = YAML.parse(workflow) as { jobs: { images: { "runs-on": string; "timeout-minutes"?: number; steps: Array<{ uses?: string; with?: { platforms?: string } }> } } };
+  it("runs on an arm64 runner and, only with the worker's amd64 half on, registers amd64 emulation before buildx", () => {
+    const parsed = YAML.parse(workflow) as { jobs: { images: { "runs-on": string; "timeout-minutes"?: number; steps: Array<{ if?: string; uses?: string; with?: { platforms?: string } }> } } };
     const images = parsed.jobs.images;
     expect(images["runs-on"]).toBe("blacksmith-4vcpu-ubuntu-2404-arm");
     const qemu = images.steps.findIndex((step) => step.uses?.startsWith("docker/setup-qemu-action@"));
@@ -87,11 +100,12 @@ describe("the release build plan", () => {
     expect(qemu).toBeGreaterThanOrEqual(0);
     expect(qemu).toBeLessThan(buildx);
     expect(images.steps[qemu]!.with?.platforms).toBe("amd64");
+    expect(images.steps[qemu]!.if).toBe("vars.AGENTX_PUBLISH_WORKER_AMD64 == 'true'");
     expect(images["timeout-minutes"]).toBeGreaterThan(0);
   });
 
-  it("checks the worker only, after the registry digest matches, and before the digest is published", () => {
-    expect(workflow).toContain('if [ "$image" = worker ]; then');
+  it("checks the worker only, and only when it was built for both platforms, after the registry digest matches, and before the digest is published", () => {
+    expect(workflow).toContain('if [ "$image" = worker ] && [ "$PUBLISH_WORKER_AMD64" = "true" ]; then');
     expect(workflow.indexOf('"$registry_digest" != "$digest"')).toBeLessThan(workflow.indexOf("imagetools inspect --raw"));
     expect(workflow.indexOf("imagetools inspect --raw")).toBeLessThan(workflow.indexOf('echo "$image=$repo@$registry_digest"'));
   });

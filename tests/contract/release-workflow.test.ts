@@ -96,7 +96,7 @@ describe("release workflow", () => {
     expect(wf.jobs.npm?.permissions).toEqual({ contents: "read", "id-token": "write" });
   });
 
-  it("builds the images with buildx (the worker for arm64 and amd64, see worker-image-platforms.test.ts), pushes one digest per image, and cross-checks the registry digest before publishing", async () => {
+  it("builds the images with buildx (the worker for arm64, and amd64 when AGENTX_PUBLISH_WORKER_AMD64 is true: see worker-image-platforms.test.ts), pushes one digest per image, and cross-checks the registry digest before publishing", async () => {
     const wf = await workflow();
     const steps = wf.jobs.images!.steps;
     const buildxIndex = steps.findIndex((s) => s.uses?.startsWith("useblacksmith/setup-docker-builder"));
@@ -109,7 +109,8 @@ describe("release workflow", () => {
     expect(buildxIndex).toBeLessThan(pushStepIndex);
 
     const workerPlatforms = push.match(/worker\) platforms=([^\s;]+)/)?.[1];
-    expect(workerPlatforms).toBe("linux/arm64,linux/amd64");
+    expect(workerPlatforms).toBe("$worker_platforms");
+    expect(push).toContain('worker_platforms=linux/arm64; if [ "$PUBLISH_WORKER_AMD64" = "true" ]; then worker_platforms=linux/arm64,linux/amd64; fi');
     // Without these, buildx adds attestation entries to the pushed index, and the digest read back would
     // be the index's, not the image's. With them, the worker's index lists exactly its platforms.
     expect(push).toContain("--provenance=false");
@@ -162,6 +163,7 @@ describe("release workflow", () => {
       image: "tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0",
     });
     expect(qemuIndex).toBeLessThan(awsIndex);
+    expect(steps[qemuIndex]?.if).toBe("vars.AGENTX_PUBLISH_WORKER_AMD64 == 'true'");
     const sysctlIndex = index((step) => text(step).includes("sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"));
     for (const found of [nodeIndex, npmIndex, sysctlIndex]) { expect(found).toBeGreaterThanOrEqual(0); expect(found).toBeLessThan(awsIndex); expect(steps[found]!.if).toBe("vars.AGENTX_PUBLISH_EXECUTOR_IMAGE == 'true'"); }
     expect(nodeIndex).toBeLessThan(npmIndex);
