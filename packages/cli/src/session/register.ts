@@ -5,6 +5,7 @@ import type { DeveloperSessionDeps } from "../developer/session.js";
 import { formatSuccess } from "../output.js";
 import type { AppResult } from "./app-request.js";
 import { sessionAnswer, sessionControl, sessionFollow, sessionSay, sessionShare, sessionShow, sessionStart, sessionTakeOver, sessionsList } from "./commands.js";
+import { sessionWatch } from "./watch.js";
 
 export interface SessionCommandContext {
   developerSession: () => DeveloperSessionDeps;
@@ -48,6 +49,14 @@ export function registerSessionCommands(program: Command, context: SessionComman
     .description("show a session: its link, status, owner, cost and what waits for you")
     .argument("<session-id>", "the session's ID, from agentx sessions")
     .action(async (id: string, _options: unknown, command: Command) => printResult(command, await sessionShow(developerSession(), developerEnv(command), id)));
+  session
+    .command("watch")
+    .description("watch what the session's agent is doing: its messages and tool calls as they happen, until the session ends")
+    .argument("<session-id>", "the session's ID, from rovara sessions")
+    .option("--no-follow", "print what has happened so far and stop")
+    .action(async (id: string, options: { follow: boolean }, command: Command) => {
+      await sessionWatch(developerSession(), developerEnv(command), id, { follow: options.follow, json: globalOptions(command).json, write: context.write });
+    });
   for (const follow of [true, false]) {
     session
       .command(follow ? "follow" : "unfollow")
