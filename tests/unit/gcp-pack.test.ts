@@ -3,16 +3,13 @@
 // run profile of each emulator. Nothing here starts a container or reads a network.
 import { describe, expect, it } from "vitest";
 import {
-  GCP_CREDENTIAL_VARIABLES, GCP_FAKE_PROJECT_ID, GCP_PACK, GCP_PACK_FAMILIES, GCP_PACK_SETTING_VARIABLE, IMPLICIT_COMPANY_ID, OWNER_GCP_PACK_IMAGES, OWNER_STARTER_IMAGES, OwnerListEntrySchema, ServiceCatalogSchema, CatalogEntrySchema,
+  GCP_CREDENTIAL_VARIABLES, GCP_FAKE_PROJECT_ID, GCP_PACK, GCP_PACK_FAMILIES, GCP_PACK_SETTING_VARIABLE, OWNER_GCP_PACK_IMAGES, OWNER_STARTER_IMAGES, OwnerListEntrySchema, ServiceCatalogSchema, CatalogEntrySchema,
   gcpPackGroupsOf, isGcpPackFamily, isPulledFromSourceReference, normalizeOwnerList, ownerCatalogOf, ownerGcpPackEntries, ownerGcpPackImagesFor, ownerGcpPackMirrorable, ownerImageReferences, ownerImageRequest, ownerStarterEntries,
   testServiceMirrorRepositories, mirroredStarterEntries, type CatalogEntry, type GcpPackFamily, type TestEnvDependencyCandidate,
 } from "@agentx/contracts";
 import { chooseBacking, effectiveAllowedBackings } from "../../packages/broker/src/core/test-env/backing-choice.js";
 import { proposeDependencies } from "../../packages/broker/src/core/test-env/dependency-proposal.js";
 import { hostedServiceCatalog } from "../../packages/broker/src/aws/hosted-test-services.js";
-import { createOwnerImageService, createOwnerImageStore, resolveOwnerImages } from "../../packages/broker/src/local/test-services-owner-list.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { OwnerDocker } from "../support/owner-docker.js";
 import { boundedReader, runDetectors } from "../../packages/worker/src/env-detect/index.js";
 import { ServiceEnvError, buildServiceEnvironment, type ServiceEnvDependency } from "../../packages/worker/src/service-env.js";
 import { startHelpers, type HelperFiles } from "../../packages/worker/src/service-helpers.js";
@@ -305,31 +302,6 @@ describe("a service the catalog does not have falls back as any other missing se
       expect(dependency.connect.hostAliases).toEqual([GCP_PACK[family].alias]);
       expect(dependency.connect.env.map((item) => item.name).sort()).toEqual([...ENV_NAMES[family]!].sort());
     }
-  });
-});
-
-describe("the laptop's list of images in effect", () => {
-  function setup() {
-    const docker = new OwnerDocker();
-    const store = createOwnerImageStore({ store: new MemoryDocumentStore({ indexes: [] }), companyId: IMPLICIT_COMPANY_ID });
-    const service = createOwnerImageService({ store, docker, now: () => 1_800_000_000_000, companyId: IMPLICIT_COMPANY_ID });
-    return { docker, service };
-  }
-  const resolve = async (environment: NodeJS.ProcessEnv) => {
-    const h = setup();
-    const resolved = await resolveOwnerImages({ service: h.service, environment, docker: h.docker, now: () => 0, pull: "on-first-use" });
-    return { ...resolved, docker: h.docker };
-  };
-
-  it("holds only the starter images by default, and adds the pack's groups when the setting names them", async () => {
-    expect((await resolve({})).entries.map((entry) => entry.family).sort()).toEqual(["mongodb", "mysql", "postgres", "postgres", "redis"]);
-    expect((await resolve({ [GCP_PACK_SETTING_VARIABLE]: "bogus" })).entries.map((entry) => entry.family).sort()).toEqual(["mongodb", "mysql", "postgres", "postgres", "redis"]);
-    const mirrored = await resolve({ [GCP_PACK_SETTING_VARIABLE]: "mirrored" });
-    expect(mirrored.entries.map((entry) => entry.family).sort()).toEqual(["gcs", "mongodb", "mysql", "postgres", "postgres", "redis", "spanner"]);
-    const all = await resolve({ [GCP_PACK_SETTING_VARIABLE]: "mirrored,pulled,bigquery" });
-    expect(all.entries.filter((entry) => isGcpPackFamily(entry.family)).map((entry) => entry.reference).sort()).toEqual(OWNER_GCP_PACK_IMAGES.map((image) => image.reference).sort());
-    // nothing is pulled at `rovara up`: the images come by digest the first time a step needs one
-    expect(all.docker.pulls()).toEqual([]);
   });
 });
 

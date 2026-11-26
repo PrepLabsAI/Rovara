@@ -18,7 +18,7 @@ import { createDesignChoiceSubject } from "../../packages/broker/src/core/design
 import type { Admission, TransactItem } from "@agentx/contracts";
 import { COMPANY, newRequestId } from "../support/task-flow-harness.js";
 import {
-  BASE, SESSION, localDesignReview, answerRound, approve, choose, design, finish, makeGate, mintKeys, nextJob, planned, plannedStructured, sha, taskOf, toDesignPhase, toRound, world, type World,
+  BASE, SESSION, answerRound, approve, choose, design, finish, makeGate, mintKeys, nextJob, planned, plannedStructured, sha, taskOf, toDesignPhase, toRound, world, type World,
 } from "../support/design-review-flow-world.js";
 import { DESIGN_REVIEW_INFO_STRING } from "@agentx/contracts";
 import { createLocalOwnerApprovers, localOwnerPrincipal, LOCAL_SESSION_METHOD } from "../../packages/broker/src/ports/policy-defaults.js";
@@ -325,26 +325,6 @@ describe("a review nobody decided, thirty days after it was parked", () => {
   });
 });
 
-describe("the reviewers' keys of a review that waits", () => {
-  it("are released when it is parked: the model proxy is told to close every key of the rounds already run", async () => {
-    const w = await world({ holdAnswerable: true });
-    const resolveRun = await toPlannerRun(w);
-    w.results.set(`${resolveRun.operation.id}:plan.md`, askingAnswer(await workflowOf(w)));
-    await finish(w, resolveRun.operation, { kind: "ended" });
-    expect(await workflowOf(w)).toMatchObject({ designReview: { status: "waiting_answers" } });
-    const binding = DesignReviewBindingSchema.parse(resolveRun.round1.operation.designReview);
-    const keyIds = binding.reviewers.map((reviewer) => sha(`key:${resolveRun.round1.operation.id}:${reviewer.keySlot}`));
-    const { local, closed } = localDesignReview(w);
-    // Nothing is closed while the owner still has time.
-    await local.sweepWaits();
-    expect(closed).toEqual([]);
-    w.h.clock.advance(8 * DAY);
-    await local.sweepWaits();
-    expect((await workflowOf(w)).designReview).toMatchObject({ status: "waiting_answers" });
-    expect(closed.sort()).toEqual([...keyIds].sort());
-  });
-});
-
 describe("the grade of a cost choice", () => {
   it("is high whatever the amount when the review is about a high-risk area (infrastructure), and by the amount otherwise", async () => {
     const gradeOf = async (reasons: string[]) => {
@@ -377,22 +357,5 @@ describe("what a cost choice leaves behind", () => {
     const after = await workflowOf(w);
     expect(after.stage).toBe("PLAN_REVIEW");
     expect(await w.h.store.get(designWaitRowKey(w.taskId))).toMatchObject({ workflowRevision: after.revision, waitKind: "decision" });
-  });
-});
-
-describe("the run-anyway choice and the answers, as the owner's page makes them", () => {
-
-  it("records the owner's answers under the workflow's own owner id (the person the review's record accepts), through the page's action", async () => {
-    const w = await world({ holdAnswerable: true });
-    const resolveRun = await toPlannerRun(w);
-    w.results.set(`${resolveRun.operation.id}:plan.md`, askingAnswer(await workflowOf(w)));
-    await finish(w, resolveRun.operation, { kind: "ended" });
-    const asking = await workflowOf(w);
-    const { local } = localDesignReview(w);
-    const actions = local.pageActions({ gate: makeGate(w), owner: localOwnerPrincipal({ companyId: COMPANY }) });
-    const answered = await actions.answerQuestions({ taskId: w.taskId, revision: asking.revision, answers: [{ questionId: "q1", optionId: "a" }] });
-    expect(answered).toMatchObject({ ok: true });
-    const after = await workflowOf(w);
-    expect(after.designReview!.rounds[0]!.answers).toMatchObject({ by: { actorId: asking.ownerId } });
   });
 });

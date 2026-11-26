@@ -1,4 +1,4 @@
-// Lead 4 N1: the nightly upkeep ON/OFF switch route, hosted (core-host/upkeep-routes.ts) and on `rovara up` (local/app/upkeep.ts).
+// Lead 4 N1: the nightly upkeep ON/OFF switch route, hosted (core-host/upkeep-routes.ts).
 //   GET /v1/app/projects/{project}/upkeep -> { enabled, canManage }; PUT { requestId, on } -> the same view.
 // Rules under test: off by default; a company owner or admin, or the project's administrator, switches it; any role on the project reads it; everyone else, another company's project, a project the person has no role on,
 // a missing one and a malformed name get the SAME 404; a reader's change is 403; the audit record is written BEFORE the row; the same request id with the same choice is one act, with the other choice a new act;
@@ -6,12 +6,11 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- a JSON answer is read field by field */
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, queryAll, type AuditEvent, type OrgId } from "@agentx/contracts";
+import { queryAll, type AuditEvent, type OrgId } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { routeHostedUpkeep, isUpkeepPath, type HostedUpkeepWiring } from "../../packages/broker/src/core-host/upkeep-routes.js";
 import type { SetupRunStanding } from "../../packages/broker/src/core-host/setup-run-routes.js";
-import { createLocalUpkeep } from "../../packages/broker/src/local/app/upkeep.js";
-import { upkeepIsOn, upkeepSwitchControl } from "../../packages/broker/src/core/upkeep/settings.js";
+import { upkeepSwitchControl } from "../../packages/broker/src/core/upkeep/settings.js";
 import { systemRunsConsentKey } from "../../packages/broker/src/core/system-runs/consent.js";
 import { COMPANY_A, COMPANY_B } from "../support/wiki-build-fixtures.js";
 
@@ -144,47 +143,4 @@ describe("availability: the switch stays hidden until nightly runs really happen
     expect(JSON.parse(answer.body)).toEqual(view(false, "admin", { available: false, systemRunsOn: false, canEnableSystemRuns: false, spend: undefined }));
   });
 
-});
-
-describe("on a laptop: the owner of the install only", () => {
-  const COMPANY = IMPLICIT_COMPANY_ID;
-  const setup = (projects = ["app", "site"], available = true) => {
-    const store = new MemoryDocumentStore();
-    const audited: AuditEvent[] = [];
-    const flow = { store, projects: { latest: async (name: string) => (projects.includes(name) ? { definition: { repositories: [] } } : undefined) } } as never;
-    const upkeep = createLocalUpkeep({ flow, owner: { personId: "owner-1" } as never, ...(available ? { available: () => true } : {}), audit: { stage: () => [], record: async (event: AuditEvent) => { audited.push(event); } }, now: () => T0 });
-    const owner = { principal: { roles: ["owner"], personId: "owner-1", displayName: "Owner" } } as never;
-    const call = async (caller: unknown, method: string, project: string, body?: unknown) => {
-      const answer = await upkeep.routes({ method, path: `/v1/app/projects/${project}/upkeep`, headers: {}, body: body === undefined ? "" : JSON.stringify(body) }, caller as never);
-      return answer === undefined ? undefined : { status: answer.statusCode, body: JSON.parse(answer.body) as Body };
-    };
-    return { store, audited, call, owner };
-  };
-
-  it("reads off by default, switches on and off, audits first, and keeps two projects apart", async () => {
-    const w = setup();
-    const laptop = (enabled: boolean) => ({ enabled, canManage: true, available: true, systemRunsOn: true, canEnableSystemRuns: false, cap: { monthlyUsd: null, canRaise: false } });
-    expect(await w.call(w.owner, "GET", "app")).toEqual({ status: 200, body: laptop(false) });
-    const requestId = randomUUID();
-    expect(await w.call(w.owner, "PUT", "app", { requestId, on: true })).toEqual({ status: 200, body: laptop(true) });
-    expect(await w.call(w.owner, "PUT", "app", { requestId, on: true })).toEqual({ status: 200, body: laptop(true) });
-    expect(w.audited).toHaveLength(1);
-    expect((await w.call(w.owner, "PUT", "app", { requestId, on: false }))?.body.enabled).toBe(false);
-    expect(w.audited).toHaveLength(2);
-    await w.call(w.owner, "PUT", "app", { requestId: randomUUID(), on: true });
-    expect((await w.call(w.owner, "GET", "site"))?.body.enabled).toBe(false);
-    expect(await upkeepIsOn({ store: w.store, companyId: COMPANY }, "app")).toBe(true);
-  });
-
-  it("refuses a script token and anyone who is not the owner, answers 404 for a missing project, and leaves other paths and methods alone", async () => {
-    const w = setup();
-    const token = { principal: { roles: ["owner"], personId: "owner-1" }, scriptToken: { tokenId: "t" } };
-    const guest = { principal: { roles: [], personId: "guest" } };
-    expect((await w.call(token, "PUT", "app", { requestId: randomUUID(), on: true }))?.status).toBe(403);
-    expect((await w.call(guest, "GET", "app"))?.status).toBe(403);
-    expect(await w.call(w.owner, "GET", "missing")).toEqual(NOT_FOUND);
-    expect(await w.call(w.owner, "POST", "app", { requestId: randomUUID(), on: true })).toBeUndefined();
-    expect(await w.call(w.owner, "DELETE", "app")).toBeUndefined();
-    expect(w.audited).toHaveLength(0);
-  });
 });

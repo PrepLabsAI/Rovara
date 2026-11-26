@@ -29,7 +29,6 @@ describe("the test runner's configuration", () => {
     // #1256: and the 256 KiB hostile-file sweep, split from worker-env-detect-hardening (whose fast checks run in every run).
     expect(nightlyOnlyFiles).toContain("tests/unit/worker-env-detect-redos.test.ts");
     expect(nightlyOnlyFiles).not.toContain("tests/unit/worker-env-detect-hardening.test.ts");
-    expect(nightlyOnlyFiles).toContain("tests/unit/local-up-flow.test.ts");
     expect(config.test?.exclude).toEqual(expect.arrayContaining(nightlyOnlyFiles));
     expect(nightlyConfig.test?.include).toEqual([...nightlyOnlyFiles, ...postDeployFiles]);
     expect(nightlyConfig.test?.passWithNoTests).toBe(false);
@@ -40,7 +39,6 @@ describe("the test runner's configuration", () => {
   it("leaves the post-deploy journeys out of every pull request and push run, affected runs included, and runs them nightly", async () => {
     // #1272: six integration journeys (#1350 removed slack-workflow-e2e, which drove the retired spec 056 workflow).
     for (const file of [
-      "tests/unit/stage-selection-adversarial.test.ts",
       "tests/integration/pull-request-publication.test.ts",
       "tests/integration/worker-verification.test.ts",
       "tests/unit/install-qualification-web.test.ts",

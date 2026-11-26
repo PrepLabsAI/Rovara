@@ -18,7 +18,6 @@ import { LESSONS_TELL_LIMIT_MS } from "../../packages/broker/src/core/task-flow/
 import { createTaskActions } from "../../packages/broker/src/core/task-flow/task-actions.js";
 import type { TaskActionsOptions } from "../../packages/broker/src/core/task-flow/owner-round.js";
 import { SECURITY_ACCEPT_ON_THE_PAGE } from "../../packages/broker/src/core/task-flow/security-accept.js";
-import { createOwnerRoutes } from "../../packages/broker/src/local/app/routes.js";
 import { createAllowAllAdmission } from "../../packages/broker/src/ports/policy-defaults.js";
 import {
   NOW, OWNER_KEY, PARSER, REQUEST_A, REQUEST_B, TASK_ID, TOKEN, accessWithoutOwners, blockedReview, code, codingOperations, dispatchRows, operationsOf, parserId, promptOf, report, seed, stateOf, taskOf, tokenId,
@@ -128,22 +127,17 @@ describe("who accepted, and by what way (DECISIONS 201)", () => {
     expect(await acceptedByOf(h.store, TASK_ID, "f".repeat(64))).toEqual({ [tokenId]: "Alice via the task page" });
   });
 
-  it("an AI tool holding the API token may accept a code review finding with a reason, over the laptop's route, as the person; a security finding it may not", async () => {
-    const { h } = await seed({ workflow: both() });
-    const routes = createOwnerRoutes({ flow: h.flow, blobs: {} as never, openPage: async () => undefined, version: "0.0.0-test" });
-    const post = async (payload: unknown) => (await routes({ method: "POST", path: `/v1/dev/tasks/${TASK_ID}/workflow/review-findings`, headers: {}, body: JSON.stringify(payload) }, h.owner))!;
+  it("an AI tool holding the API token may accept a code review finding with a reason, as the person; a security finding it may not", async () => {
+    const { h, caller } = await seed({ workflow: both() });
+    const post = (payload: unknown) => createTaskActions(h.deps).resolveFindings(caller, TASK_ID, payload, "api-token");
     // No reason: refused, and nothing is recorded.
-    const noReason = await post(request([answer(parserId, "ACCEPT", "  "), answer(tokenId, "FIX", "")]));
-    expect(noReason.statusCode).toBe(400);
+    await expect(post(request([answer(parserId, "ACCEPT", "  "), answer(tokenId, "FIX", "")]))).rejects.toMatchObject({ code: "CONFIG_INVALID" });
     expect(await h.store.get({ pk: `DEVTASK#${TASK_ID}`, sk: `FINDING_ACCEPT#${REQUEST_A}` })).toBeUndefined();
-    // A security finding accepted by the token's route: refused in fixed words, and nothing is written.
+    // A security finding accepted with the token: refused in fixed words, and nothing is written.
     const before = await stateOf(h);
-    const security = await post(acceptAll());
-    expect(security.statusCode).toBe(403);
-    expect(JSON.parse(security.body)).toEqual({ error: { code: "FORBIDDEN", message: SECURITY_ACCEPT_ON_THE_PAGE } });
+    await expect(post(acceptAll())).rejects.toMatchObject({ code: "FORBIDDEN", message: expect.stringContaining(SECURITY_ACCEPT_ON_THE_PAGE) as string });
     expect(await stateOf(h)).toEqual(before);
-    const ok = await post(request([answer(parserId, "ACCEPT"), answer(tokenId, "FIX", "Remove the log line.")]));
-    expect(ok.statusCode).toBe(200);
+    await post(request([answer(parserId, "ACCEPT"), answer(tokenId, "FIX", "Remove the log line.")]));
     expect(await h.store.get({ pk: `DEVTASK#${TASK_ID}`, sk: `FINDING_ACCEPT#${REQUEST_A}` })).toMatchObject({ personId: "local-owner", method: "api-token", fingerprints: [parserId] });
     expect((await taskOf(h)).workflow!.acceptedFindings).toHaveLength(1);
   });

@@ -1,4 +1,4 @@
-// L4-EVCI2: propose -> confirm -> stored -> the line on the pull request. The setup card's route (on a laptop: local/app/eval-check.ts) keeps the confirmed check; the `ciEvidence` port that merge tracking reads
+// L4-EVCI2: propose -> confirm -> stored -> the line on the pull request. The setup card's route (core-host/eval-check-routes.ts) keeps the confirmed check; the `ciEvidence` port that merge tracking reads
 // (`evalCheckEvidencePort`) gives it back; a tracking pass then says "Eval (reported by your CI)" in the description. None (or nothing confirmed) leaves a pass exactly what it was, and another company's or
 // project's confirmation never reaches this one. The merge side (what the line says, advisory only) is tests/unit/eval-ci-result.test.ts.
 import { randomUUID } from "node:crypto";
@@ -8,10 +8,11 @@ import { registerMergeActionDecider, trackTask, type MergeTrackingDependencies }
 import { installCiFixDecider, uninstallCiFixDecider } from "../../packages/broker/src/core/ci-fix/ci-fix.js";
 import { ROVARA_STATUS_END, ROVARA_STATUS_START } from "../../packages/broker/src/core/proof/pull-request-body.js";
 import { evalCheckEvidencePort } from "../../packages/broker/src/core/ci-evidence/eval-check-setting.js";
-import { createLocalEvalCheck } from "../../packages/broker/src/local/app/eval-check.js";
+import { routeHostedEvalCheck } from "../../packages/broker/src/core-host/eval-check-routes.js";
 import type { CiDefinitionReader } from "../../packages/broker/src/rovara-code/ci-checks.js";
 import { CLOCK, TASK_ID, mergeWorld, type MergeWorld } from "../support/merge-world.js";
 
+type Card = (request: Parameters<typeof routeHostedEvalCheck>[0]["request"]) => ReturnType<typeof routeHostedEvalCheck>;
 const MIN = 60_000;
 const ACTIONS = String(GITHUB_ACTIONS_APP_ID);
 const EVAL_URL = "https://github.com/acme/app/actions/runs/5/job/77";
@@ -25,7 +26,7 @@ const reader: CiDefinitionReader = {
   read: async () => ({ text: WORKFLOW }),
 };
 
-async function world(withPort = true): Promise<{ w: MergeWorld; deps: MergeTrackingDependencies; card: ReturnType<typeof createLocalEvalCheck>; asked: unknown[] }> {
+async function world(withPort = true): Promise<{ w: MergeWorld; deps: MergeTrackingDependencies; card: Card; asked: unknown[] }> {
   const w = await mergeWorld();
   const at = new Date(CLOCK).toISOString();
   const candidate = createCandidateManifest([{ repositoryId: "app", commitSha: w.prs[0]!.head, treeSha: "b".repeat(40), baseCommitSha: "e".repeat(40) }]);
@@ -50,16 +51,16 @@ async function world(withPort = true): Promise<{ w: MergeWorld; deps: MergeTrack
     ...(withPort ? { ciEvidence: (task: Parameters<typeof port>[0]) => { asked.push(task); return port(task); } } : {}),
     repository: async (...args) => { const home = await w.tracking.repository(...args); return home === undefined ? undefined : { ...home, checkRunner: runner as CheckRunner }; },
   };
-  const card = createLocalEvalCheck({
-    flow: { store: w.store, projects: { latest: async (name: string) => (name === "web" ? { definition: { repositories: [{ name: "app", url: "https://github.com/acme/app", defaultBranch: "main" }] } } : undefined) } } as never,
-    registry: {} as never, audit: { stage: () => [], record: async () => undefined }, now: () => CLOCK, readerFor: async () => reader,
+  const flow = { store: w.store, projects: { latest: async (name: string) => (name === "web" ? { definition: { repositories: [{ name: "app", url: "https://github.com/acme/app", defaultBranch: "main" }] } } : undefined) } } as never;
+  const card: Card = async (request) => routeHostedEvalCheck({
+    request, path: request.path, principal: { companyId: IMPLICIT_COMPANY_ID, personId: "owner-1", displayName: "o", roles: [], provider: "test" }, companyId: IMPLICIT_COMPANY_ID, flow,
+    wiring: { standing: async () => ({ access: "manage", basis: "company-owner" }), readerFor: async () => reader }, audit: { stage: () => [], record: async () => undefined }, now: () => CLOCK,
   });
   return { w, deps, card, asked };
 }
-const owner = { principal: { companyId: IMPLICIT_COMPANY_ID, personId: "owner-1", displayName: "o", roles: ["owner"], provider: "local" } } as never;
-const call = async (card: ReturnType<typeof createLocalEvalCheck>, method: "GET" | "PUT", body?: unknown) => {
-  const answer = await card.routes({ method, path: "/v1/app/projects/web/ci-eval-check", headers: {}, body: body === undefined ? "" : JSON.stringify(body) }, owner);
-  return { status: answer!.statusCode, body: JSON.parse(answer!.body) as Record<string, any> }; // eslint-disable-line @typescript-eslint/no-explicit-any
+const call = async (card: Card, method: "GET" | "PUT", body?: unknown) => {
+  const answer = await card({ method, path: "/v1/app/projects/web/ci-eval-check", headers: {}, body: body === undefined ? "" : JSON.stringify(body) });
+  return { status: answer.statusCode, body: JSON.parse(answer.body) as Record<string, any> }; // eslint-disable-line @typescript-eslint/no-explicit-any
 };
 const setChecks = (w: MergeWorld) => w.prs[0]!.model.setChecks(w.prs[0]!.head, [unit, evals]);
 const body = (w: MergeWorld): string => w.prs[0]!.model.changeRequests[0]!.body ?? "";

@@ -1,7 +1,6 @@
-// What the owner and a tool see of the per-step model setting: the page (everything a model says about itself is escaped), the plain lines for the terminal and an AI tool, and the MCP tool that only reads.
+// What the owner and a tool see of the per-step model setting: the plain lines for the terminal and an AI tool, what a page may send, and the MCP tool that only reads.
 import { describe, expect, it, vi } from "vitest";
 import { ModelSelectionBodySchema, ModelSelectionStateSchema, modelSelectionLines, type ModelSelectionState } from "@agentx/contracts";
-import { renderModelSelection } from "../../packages/broker/src/core/local-pages/models-page.js";
 import { DEVELOPER_TOOLS } from "../../packages/mcp/src/index.js";
 
 const ref = (provider: string, modelId: string) => ({ provider, modelId });
@@ -22,40 +21,6 @@ const state: ModelSelectionState = ModelSelectionStateSchema.parse({
     { model: HOSTILE, company: "other", label: "gateway", priced: false, usable: false },
     { model: ref("anthropic", "claude-sonnet-4-5"), company: "anthropic", label: "sonnet", priced: true, priceUsdPerMillion: { input: 3, output: 15, source: "catalog" }, usable: true },
   ],
-});
-const context = { base: "/s/token", nonce: "nonce", sessionId: "sid", formToken: () => "ft-token" };
-
-describe("the models page", () => {
-  const page = renderModelSelection(context, state);
-
-  it("shows each step with the model it would run on, why, its price, and a form for each group of steps that share a setting", () => {
-    expect(page).toContain("The model each step uses");
-    expect(page).toContain("Understand the request and Plan");
-    expect(page).toContain("the same model as the step it checks");
-    expect(page).toContain("$3.00 in, $15.00 out per million tokens");
-    expect(page).toContain("No model can be called on this computer.");
-    expect(page).toContain("instead of openai/gpt-5 because the first choice could not be used");
-    // One group of steps is one form: the plan steps, the plan check, the build, the two reviews, the pull request.
-    expect([...page.matchAll(/name="op" value="set"/g)]).toHaveLength(5);
-    expect(page).toContain("No run limit is held");
-    // The form for a group carries the revision it was drawn at and a signed token, and is posted under the page's own session.
-    expect(page).toContain('action="/s/token/models/act"');
-    expect(page).toContain('name="revision" value="3"');
-    expect(page).toContain('name="ft" value="ft-token"');
-  });
-
-  it("draws a model's name as text, never as markup, wherever it appears", () => {
-    expect(page).not.toContain("<script");
-    expect(page).toContain("&lt;script&gt;");
-    expect(page).toContain("refused lately");
-    expect(page).toContain("no price");
-  });
-
-  it("offers a way back to the default only for a step that has a setting, and says when a held limit rules out an unpriced model", () => {
-    expect([...page.matchAll(/name="op" value="clear"/g)]).toHaveLength(1);
-    const held = renderModelSelection(context, { ...state, runLimit: { enforced: true } });
-    expect(held).toContain("a model with no price cannot be used");
-  });
 });
 
 describe("the plain lines", () => {

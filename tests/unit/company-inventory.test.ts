@@ -236,7 +236,6 @@ it("pins S3 migration text and every catalog constructor caller, including all w
     "packages/broker/src/core/project-incarnation.ts": [0, 1], // retention reads the existing catalogue witness; no catalogue writer
     "packages/broker/src/core/task-flow/project-source.ts": [0, 1],
     "packages/broker/src/core-host/app/lessons-repos.ts": [0, 1],
-    "packages/broker/src/local/app/lessons.ts": [0, 1],
     "packages/broker/src/core-host/app/projects.ts": [0, 3], // local-only company writer + read (no AWS legacy transaction)
   };
   const found: Record<string, number[]> = {};

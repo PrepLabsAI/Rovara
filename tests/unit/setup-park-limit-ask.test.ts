@@ -4,9 +4,6 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { SETUP_AGENT_FAILURES } from "../../packages/broker/src/core/setup-agent/agent.js";
 import { approvedHostsOf, hostAskDigest, hostDecisionRequestId, listHostAsks, requestHostAsk, type SetupHostAsk } from "../../packages/broker/src/core/setup-agent/host-ask.js";
-import { SETUP_AGENT_LIMITS_DEFAULT } from "@agentx/contracts";
-import { SETUP_OPEN_HOST_NOTE, renderSetupPage } from "../../packages/broker/src/core/local-pages/setup-page.js";
-import type { SetupPageView } from "../../packages/broker/src/core/local-pages/views.js";
 import { HOSTED_IDENTITY_PROVIDER } from "../../packages/broker/src/core-host/hosted-modules.js";
 import type { FakeWorld } from "../support/core-host-fakes.js";
 import { FAKE_COMPANY, RUN, post, setupWorld } from "../support/hosted-setup-world.js";
@@ -50,24 +47,5 @@ describe("the website ask of a run that waited its 2 hours", () => {
     // The setup run again: the website is on the project's list, so the run needs no ask for it.
     const third = await seedRun(world, "payments");
     expect((await requestHostAsk(table(world), { orgId: FAKE_COMPANY, project: "payments", host: HOST, taskId: third, projectDomains: await approvedHostsOf(table(world), FAKE_COMPANY, "payments") })).outcome).toBe("already_allowed");
-  });
-});
-
-describe("the Code setup page for a run that ended on a website with a partial setup", () => {
-  const context = { base: "/local", nonce: "nonce", sessionId: "session", formToken: () => "token" };
-  const page = (over: Partial<SetupPageView>): SetupPageView => ({
-    project: "demo", revision: 1, status: "ready", limits: { ...SETUP_AGENT_LIMITS_DEFAULT }, items: [], verified: false, journal: [], hostAsks: [{ host: HOST, status: "open" }], check: { status: "unchecked" }, approvedHosts: [],
-    summary: { commandsRun: 1, spendCents: 5, elapsedMin: 3, hostAsks: 1, partial: true, stop: "hosts_waiting" }, ...over,
-  } as SetupPageView);
-  it("says a website decision is still open and what to do (the status line alone says only \"finished\")", () => {
-    const html = renderSetupPage(context, page({}));
-    expect(html).toContain("Rovara finished and has a setup to use.");
-    expect(html).toContain(SETUP_OPEN_HOST_NOTE);
-    expect(SETUP_OPEN_HOST_NOTE).toBe("An address decision is still open: allow it, then run the setup again to include it.");
-  });
-  it("says nothing of the kind when no ask is open, when the run ended another way, or when the run did not finish with a setup", () => {
-    expect(renderSetupPage(context, page({ hostAsks: [{ host: HOST, status: "approved", international: false }] }))).not.toContain(SETUP_OPEN_HOST_NOTE);
-    expect(renderSetupPage(context, page({ summary: { commandsRun: 1, spendCents: 5, elapsedMin: 3, hostAsks: 1, partial: true, stop: "time_used" } }))).not.toContain(SETUP_OPEN_HOST_NOTE);
-    expect(renderSetupPage(context, page({ status: "failed" }))).not.toContain(SETUP_OPEN_HOST_NOTE);
   });
 });

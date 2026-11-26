@@ -6,8 +6,6 @@ import {
   IMPLICIT_COMPANY_ID, SETUP_CARRY_OVER_FEATURE, SETUP_CARRY_OVER_MAX_BYTES, SETUP_CARRY_OVER_PROPOSAL_MAX_BYTES, SETUP_JOURNAL_MAX_ENTRIES, SetupAgentWireSchema, SetupCarryOverSchema, WORKER_INVOCATION_FEATURES,
   type SetupJournalEntry, type SetupProposal,
 } from "@agentx/contracts";
-import { renderSetupPage } from "../../packages/broker/src/core/local-pages/setup-page.js";
-import type { SetupPageView } from "../../packages/broker/src/core/local-pages/views.js";
 import { setupAgentWireOf, type SetupAgentPointer, type SetupAgentView } from "../../packages/broker/src/core/setup-agent/agent.js";
 import { buildCarryOver, carriedProposalOf, journalLineOf, setupCarryOverFor } from "../../packages/broker/src/core/setup-agent/carry-over.js";
 import { appendSetupJournal } from "../../packages/broker/src/core/setup-agent/journal.js";
@@ -315,40 +313,5 @@ describe("the agent's prompt", () => {
     const hidden = carryOverLines({ ...carryOver, proposal: "not json \u202e\u200b <b>", journal: { total: 1, lines: ["#1 worked: a\u202eb"], hosts: [] } }).join("\n");
     expect(hidden).not.toMatch(/[\u202e\u200b]/u);
     expect(hidden).not.toContain("<b>");
-  });
-});
-
-describe("the setup page reads a search that found nothing as 'nothing found', not as an exit (DEC 254zzz495, N1)", () => {
-  const context = { base: "/local", nonce: "nonce", sessionId: "session", formToken: () => "token" };
-  const row = (n: number, command: string, exitCode: number | null, tail = ""): SetupPageView["journal"][number] => ({ n, source: "agent", command, exitCode, timedOut: false, flagged: false, tail, blockedHosts: [] });
-  const page = (journal: SetupPageView["journal"]): SetupPageView => ({ project: "demo", revision: 1, status: "ready", limits: { ...LIMITS }, items: [], verified: false, journal, hostAsks: [], check: { status: "unchecked" }, approvedHosts: [] });
-  it("a pure search with exit 1 and no output is muted 'nothing found' with its tooltip, never the red exit", () => {
-    const html = renderSetupPage(context, page([row(1, "grep -rn pytest .", 1)]));
-    expect(html).toContain('<span class="muted" title="The search ran and matched nothing. That is an answer, not a failure.">nothing found</span>');
-    expect(html).not.toContain("exit 1");
-  });
-  it("the real beta command, a search with output, exit 2, and an install still read as before", () => {
-    const html = renderSetupPage(context, page([
-      row(1, 'cd repo/x && source .venv/bin/activate && find . -name "*test*" | grep -v node_modules', 1),
-      row(2, "grep -rn pytest .", 1, "grep: x: Permission denied"),
-      row(3, "rg pytest", 2),
-      row(4, "npm ci", 0),
-    ]));
-    expect(html).not.toContain("nothing found");
-    expect(html.match(/<span class="bad">exit 1<\/span>/gu)).toHaveLength(2);
-    expect(html).toContain('<span class="bad">exit 2</span>');
-    expect(html).toContain('<span class="ok">worked</span>');
-  });
-});
-
-describe("the setup page says a new run starts from what the last run found (only once there is a last run)", () => {
-  const context = { base: "/local", nonce: "nonce", sessionId: "session", formToken: () => "token" };
-  const page = (status: SetupPageView["status"], over: Partial<SetupPageView> = {}): SetupPageView => ({ project: "demo", revision: 1, status, limits: { ...LIMITS }, items: [], verified: false, journal: [], hostAsks: [], check: { status: "unchecked" }, approvedHosts: [], ...over });
-  it("shows the line only when the served view says a new run would carry something over", () => {
-    expect(renderSetupPage(context, page("none"))).not.toContain("starts from what the last run found");
-    for (const status of ["failed", "ready"] as const) {
-      expect(renderSetupPage(context, page(status))).not.toContain("starts from what the last run found");
-      expect(renderSetupPage(context, page(status, { carriesOver: true }))).toContain("A new run starts from what the last run found.");
-    }
   });
 });

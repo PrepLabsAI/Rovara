@@ -113,14 +113,3 @@ describe("the ported core developer actions", () => {
   });
 
 });
-
-it("keeps local Code's approve-on-the-page refusal for tool tokens", async () => {
-  const { createOwnerRoutes, APPROVE_ON_THE_PAGE } = await import("../../packages/broker/src/local/app/routes.js");
-  const { h, caller } = await seed();
-  const before = await stateOf(h);
-  const route = createOwnerRoutes({ flow: h.flow, blobs: {} as never, openPage: async () => undefined, version: "test" });
-  const reply = await route({ method: "POST", path: `/v1/dev/tasks/${TASK_ID}/workflow/decision`, headers: {}, body: JSON.stringify({ requestId: randomUUID(), decision: "APPROVE" }) }, caller);
-  expect(reply?.statusCode).toBe(403);
-  expect(JSON.parse(reply!.body)).toMatchObject({ error: { code: "FORBIDDEN", message: APPROVE_ON_THE_PAGE } });
-  expect(await stateOf(h)).toEqual(before);
-});

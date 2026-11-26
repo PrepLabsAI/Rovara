@@ -159,10 +159,10 @@ describe("NOT wired on hosted today (the gaps, pinned; reverts are wired and pin
     const where = (needle: string): string[] => files.filter((file) => readFileSync(file, "utf8").includes(needle)).map((file) => relative(root, file).split(sep).join("/")).sort();
     expect(where("detectRevertFromMergedChangeRequest")).toEqual(["core/proof/revert/revert-detect.ts", "core/proof/revert/revert-watch.ts"]);
     expect(where("detectRevertFromPushedCommit")).toEqual(["core/proof/revert/revert-detect.ts", "core/proof/revert/revert-watch.ts"]);
-    // The laptop wrapper delegates to the host's `noteReverted`; the glue (one per company, hosted and laptop alike) calls it once for each newly recorded revert.
-    expect(where(".noteReverted(")).toEqual(["lessons/revert-watch-glue.ts", "local/app/lessons.ts"]);
-    // The lessons pass (hosted) and the lessons timer (laptop) are the two places the watch runs.
-    expect(where("createLessonsRevertWatch(")).toEqual(["core-host/lessons.ts", "lessons/revert-watch-glue.ts", "local/app/lessons.ts"]);
+    // The glue (one per company) calls the host's `noteReverted` once for each newly recorded revert.
+    expect(where(".noteReverted(")).toEqual(["lessons/revert-watch-glue.ts"]);
+    // The hosted lessons pass is the place the watch runs.
+    expect(where("createLessonsRevertWatch(")).toEqual(["core-host/lessons.ts", "lessons/revert-watch-glue.ts"]);
   });
 
   it("plan and design comments: a person's 'request changes' at a plan or design gate (their reason is a decision on the task) is not read by the hosted subject, and is not a send-back either", async () => {

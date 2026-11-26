@@ -27,7 +27,7 @@ const REPLAY_FILE_ARM = new Set([
 describe("no repository lessons file, no bulk read of lessons", () => {
   it("the walk really reads the sources (sentinel files are in it)", () => {
     const rels = new Set(files.map((file) => file.rel));
-    for (const rel of ["packages/broker/src/lessons/store.ts", "packages/broker/src/local/app/lessons-routes.ts", "packages/worker/src/publish.ts", "packages/contracts/src/plugins/code-host.ts", "packages/broker/src/plugins/code-host/github/client.ts"]) expect(rels.has(rel), rel).toBe(true);
+    for (const rel of ["packages/broker/src/lessons/store.ts", "packages/broker/src/core-host/knowledge-api.ts", "packages/worker/src/publish.ts", "packages/contracts/src/plugins/code-host.ts", "packages/broker/src/plugins/code-host/github/client.ts"]) expect(rels.has(rel), rel).toBe(true);
   });
 
   it("no source file is named for the lessons file, its guard, or its code-host write", () => {

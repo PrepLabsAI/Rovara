@@ -34,7 +34,7 @@ describe("the setup run's report opens NOTHING (DEC 254zzz43: no automatic propo
     expect(callback).not.toMatch(/eval-wrapper|evalWrapper|EvalWrapper|proposeEvalWrappers|openEvalWrapperPullRequest/u);
     const routes = readFileSync("packages/broker/src/core-host/setup-run-routes.ts", "utf8");
     expect(routes.match(/openEvalWrapperPullRequest\(/gu)).toHaveLength(1);
-    for (const file of ["packages/broker/src/core/setup-agent/eval-discovery.ts", "packages/broker/src/core/setup-agent/eval-card.ts", "packages/broker/src/aws/core-engine-root.ts", "packages/broker/src/local/app/setup-agent.ts"]) {
+    for (const file of ["packages/broker/src/core/setup-agent/eval-discovery.ts", "packages/broker/src/core/setup-agent/eval-card.ts", "packages/broker/src/aws/core-engine-root.ts"]) {
       expect(readFileSync(file, "utf8"), file).not.toMatch(/openEvalWrapperPullRequest/u);
     }
   });

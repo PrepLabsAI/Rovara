@@ -203,11 +203,3 @@ describe("T5 every other path that reaches machines.stop keeps the volume", () =
   });
 });
 
-describe("T4c the Docker adapter (laptop) keeps its folder on stop", () => {
-  it("is pinned by the adapter's own suite: stop never removes the workspace, only terminate does", async () => {
-    const { readFileSync } = await import("node:fs");
-    const source = readFileSync("packages/broker/src/local/docker-worker-machines.ts", "utf8");
-    const stop = source.slice(source.indexOf("async stop("), source.indexOf("async terminate("));
-    expect(stop).not.toMatch(/\brm\(|rmSync|removeWorkspace/u);
-  });
-});

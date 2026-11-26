@@ -21,7 +21,6 @@ import { createDecisionGate } from "../../packages/broker/src/core/decisions/app
 import { createWorkflowDocumentSubject } from "../../packages/broker/src/core/decisions/workflow-subject.js";
 import { DESIGN_CHOICE_KIND, createDesignChoiceSubject, designChoiceDigest } from "../../packages/broker/src/core/design-review/choice-subject.js";
 import { checkDesignApproval, designApprovalRecordItems, designRiskOf } from "../../packages/broker/src/core/design-review/decision.js";
-import { createLocalDesignReview } from "../../packages/broker/src/local/app/design-review.js";
 import { COMPANY, createHarness, newRequestId, type Harness } from "../support/task-flow-harness.js";
 
 export const sha = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
@@ -200,16 +199,3 @@ export async function waitingWithBlocker(w: World): Promise<WorkflowSnapshot> {
   return (await taskOf(w)).workflow;
 }
 
-
-/** The design review as `rovara up` builds it over the harness's flow, with a spy for what the model proxy is told to close (the keys of a round that is released). */
-export function localDesignReview(w: World, options: { model?: string; priced?: boolean } = {}) {
-  const closed: string[] = [];
-  const local = createLocalDesignReview({
-    flow: w.h.deps, blobs: {} as never, registry: { get: () => undefined, names: () => [] } as never, companyId: COMPANY, environment: { ROVARA_DESIGN_REVIEW: "1" },
-    chosen: async () => ({ provider: "anthropic", model: options.model ?? "m1" }),
-    routeOf: (choice) => ({ route: { alias: `${choice.provider}/${choice.model}`, provider: choice.provider, model: choice.model, api: "anthropic-messages" }, workerRoute: { alias: `${choice.provider}/${choice.model}`, api: "anthropic-messages", catalog: choice.model } }),
-    provider: () => (options.priced === false ? undefined : { prices: { currency: "USD", models: { m1: { inputMicrosPerMillionTokens: 3_000_000, outputMicrosPerMillionTokens: 15_000_000 } } } }),
-    slotKeys: () => ({ closeKeys: (ids) => { closed.push(...ids); }, spendUsd: () => 0 }),
-  });
-  return { local, closed };
-}

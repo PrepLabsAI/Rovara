@@ -1,9 +1,8 @@
-// TE-A6 (DEC 254zzf): the task page (Code's proof page) lists the failing tests of a failed check with the change that most likely broke each, or "unknown", as inert text, ten tests across the page. A pack without
-// causes gives the report and page it always did.
+// TE-A6 (DEC 254zzf): the task's proof report lists the failing tests of a failed check with the change that most likely broke each, or "unknown", as inert text, ten tests across the report. A pack without
+// causes gives the report it always did.
 import { describe, expect, it } from "vitest";
 import { EVIDENCE_RENDER_LIMITS, type EvidencePack } from "../../packages/contracts/src/index.js";
 import { createCandidateManifest } from "../../packages/contracts/src/task-workflow-node.js";
-import { renderProof, type PageContext } from "../../packages/broker/src/core/local-pages/pages.js";
 import { failuresOf, proofReportOf } from "../../packages/broker/src/core-host/app/proof-report.js";
 import { v1Pack } from "../support/evidence-v2-fixtures.js";
 
@@ -23,11 +22,10 @@ function packWith(failing: string[], causes?: unknown, second?: { failing: strin
   return pack as unknown as EvidencePack;
 }
 const report = (pack: EvidencePack | undefined) => proofReportOf({ taskId: "t", title: "T", workspaceId: "w" } as never, { revision: 1 } as never, pack);
-const context: PageContext = { base: "/s/x", nonce: "n", sessionId: "s", formToken: () => "ft" };
 const FAILING = ["tests/cart.test.ts::applies discount", "tests/cart.test.ts::rounds"];
 const GOOD = [{ testId: FAILING[0]!, cause: change("src/cart.ts", SHA) }, { testId: FAILING[1]!, cause: { kind: "unknown" as const, reason: "weak_evidence" as const } }];
 
-describe("the failing tests on the task page", () => {
+describe("the failing tests in the proof report", () => {
   it("shows a review that could not run as not run, never passed", () => {
     const candidate = createCandidateManifest([{ repositoryId: "payments", commitSha: SHA, treeSha: "b".repeat(40) }]);
     const workflow = {
@@ -51,17 +49,12 @@ describe("the failing tests on the task page", () => {
       ] }],
       more: 0,
     });
-    const html = renderProof(context, report(packWith(FAILING, GOOD)));
-    expect(html).toContain('id="failing-tests"');
-    expect(html).toContain("<code>tests/cart.test.ts::applies discount</code>: likely broken by a change (commit aaaaaaa) to src/cart.ts");
-    expect(html).toContain("unknown (only weak evidence)");
   });
 
-  it("golden: without causes (or a pack, or a check that did not fail) the report has no failures key and the page has no such section", () => {
+  it("golden: without causes (or a pack, or a check that did not fail) the report has no failures key", () => {
     for (const pack of [packWith(FAILING), undefined, v1Pack()]) {
       const made = report(pack);
       expect(Object.keys(made)).not.toContain("failures");
-      expect(renderProof(context, made)).not.toContain("failing-tests");
     }
     const passed = clone(packWith(FAILING, GOOD)) as unknown as { checks: Array<{ after: string }> };
     passed.checks[0]!.after = "passed";
@@ -79,17 +72,6 @@ describe("the failing tests on the task page", () => {
     const view = report(packWith(first, make(first), { failing: second, causes: make(second) })).failures!;
     expect(view.checks.map((check) => check.tests.length)).toEqual([7, EVIDENCE_RENDER_LIMITS.failureCausesListed - 7]);
     expect(view.more).toBe(3);
-    const html = renderProof(context, report(packWith(first, make(first), { failing: second, causes: make(second) })));
-    expect(html).toContain("and 3 more failing tests with a cause not listed");
-    expect(html.match(/<li><code>/gu)).toHaveLength(EVIDENCE_RENDER_LIMITS.failureCausesListed);
-  });
-
-  it("the page escapes whatever a view holds, even text that was not made plain upstream", () => {
-    const view = { ...report(undefined), failures: { checks: [{ check: "<b>suite</b>", tests: [{ test: "<img src=x onerror=alert(1)>", cause: "<script>alert(1)</script>" }] }], more: 1 } };
-    const html = renderProof(context, view);
-    expect(html).not.toMatch(/<img src=x|<script>alert|<b>suite/u);
-    expect(html).toContain("&lt;img");
-    expect(html).toContain("and 1 more failing test with a cause not listed");
   });
 
 });

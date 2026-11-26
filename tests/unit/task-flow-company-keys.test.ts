@@ -26,7 +26,7 @@ describe("company task-flow keys", () => {
 });
 
 // Only these task-flow modules are in T1; core/company purge remains the independently inventoried T4 path.
-const roots = ["core/task-flow", "core/setup-agent", "core/e2e", "core/proof", "core/build-step", "core/plan", "core/merge", "core/design-review", "core/test-env", "core/sessions", "core/model-gateway", "core/work-breakdown", "services", "local", "e2e"];
+const roots = ["core/task-flow", "core/setup-agent", "core/e2e", "core/proof", "core/build-step", "core/plan", "core/merge", "core/design-review", "core/test-env", "core/sessions", "core/model-gateway", "core/work-breakdown", "services", "e2e"];
 it("rejects raw workspace/operation literals in task-flow modules, including a planted literal", async () => {
   const { readdirSync, readFileSync } = await import("node:fs");
   const ts = (await import("typescript")).default;

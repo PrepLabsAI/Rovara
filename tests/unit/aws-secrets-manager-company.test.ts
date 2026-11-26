@@ -1,12 +1,9 @@
 import type * as Crypto from "node:crypto";
-import { readFile, mkdtemp, realpath, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { readFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { createSecretsManagerSecretStore } from "../../packages/aws-adapters/src/secrets-manager/index.js";
 import { COMPANY_SECRET_PATHS } from "../../packages/aws-adapters/src/secrets-manager/company-names.js";
-import { createLocalConnectionSecrets } from "../../packages/broker/src/local/connection-secrets.js";
-import { createLocalSecretStore } from "../../packages/broker/src/ports/secret-stores.js";
 import { createAdapterRegistry, loadAdapters, parsePluginConfig } from "../../packages/broker/src/ports/adapter-registry.js";
 import { secretsManagerSecretsPlugin, SecretsManagerSettingsSchema } from "../../packages/broker/src/plugins/secrets/aws-secrets-manager/plugin.js";
 import { FakeSecretsManager } from "../support/ports/aws-fakes.js";
@@ -83,16 +80,5 @@ describe("pre-edit byte goldens", () => {
       results.push({kind,...result,calls});
     }
     expect(JSON.stringify(results,null,2)+"\n").toBe(await readFile(new URL("../fixtures/secrets-company-goldens/adapter.json",import.meta.url),"utf8"));
-  });
-  it("keeps implicit-company local put/version/latest/delete bytes", async () => {
-    const directory = await realpath(await mkdtemp(join(process.env.TMPDIR!, "t6-golden-")));
-    try {
-      const store = createLocalConnectionSecrets({directory,secrets:createLocalSecretStore({environment:{}}),companyId:IMPLICIT_COMPANY_ID,env:"local",now:()=>1700000000000});
-      const name = `${PREFIX}org-connectors/${IMPLICIT_COMPANY_ID}/shared-secret`;
-      const version = await store.put(IMPLICIT_COMPANY_ID,name,"local-value");
-      const result = {version,byVersion:await store.read(IMPLICIT_COMPANY_ID,name,version),latest:await store.read(IMPLICIT_COMPANY_ID,name),afterDelete:null as string|null};
-      await store.scheduleDelete(IMPLICIT_COMPANY_ID,name); result.afterDelete = await store.read(IMPLICIT_COMPANY_ID,name) ?? null;
-      expect(JSON.stringify(result,null,2)+"\n").toBe(await readFile(new URL("../fixtures/secrets-company-goldens/local.json",import.meta.url),"utf8"));
-    } finally { await rm(directory,{recursive:true,force:true}); }
   });
 });

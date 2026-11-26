@@ -1,5 +1,5 @@
-// What a task tells the chat thread it was started from: the plan's approval card (by risk) and three milestone lines. The decision gate, the approvers, the chat work seam and the sink are the real ones over the memory
-// store; the chat adapter is a fake and no chat tool is named. A decision pressed in the chat goes through the same gate as the web app's.
+// What a task tells the chat thread it was started from: the plan's approval card (by risk) and three milestone lines. The decision gate, the approvers and the sink are the real ones over the memory
+// store (the work seam that hands a press to the gate is a small one in this file); the chat adapter is a fake and no chat tool is named. A decision pressed in the chat goes through the same gate as the web app's.
 import { describe, expect, it, vi } from "vitest";
 import {
   IMPLICIT_COMPANY_ID, change, createWorkflowSnapshot, submitWorkflowArtifact, type ActorRef, type ChannelDecision, type ChannelEvent, type CodeMilestone, type ConversationRef, type DecisionRisk, type JsonValue, type OrgId, type WorkflowSnapshot,
@@ -11,12 +11,12 @@ import { createDecisionGate } from "../../packages/broker/src/core/decisions/app
 import { createWorkflowDocumentSubject, workflowTaskKey } from "../../packages/broker/src/core/decisions/workflow-subject.js";
 import {
   bindChannelSpace, channelThreadHandler, createChannelSink, decisionRefusalWords, planCardPosted, CARD_TTL_SECONDS, issueChannelLinkCode, linkedPerson, readApprovalCard, recordTaskThread, redeemChannelLinkCode, threadFollows,
-  type ChannelCompanyOf, type ChannelMemberRule,
+  type ChannelCompanyOf, type ChannelMemberRule, type ChannelWork,
 } from "../../packages/broker/src/core/channel/index.js";
 import { createDocumentMilestones } from "../../packages/broker/src/core/milestones/milestones.js";
 import { ticketMomentsOnChange } from "../../packages/broker/src/core/ticket-updates/moments.js";
 import { developerIdOf, taskSessionId } from "../../packages/broker/src/core/sessions/create.js";
-import { createLocalChat } from "../../packages/broker/src/local/app/chat.js";
+import { CHAT_METHOD_PREFIX } from "../../packages/broker/src/core/decisions/strong-methods.js";
 import { createFeatureStore } from "../../packages/broker/src/core/report/feature-store.js";
 
 const ORG = IMPLICIT_COMPANY_ID as OrgId;
@@ -79,8 +79,7 @@ async function world(options: WorldOptions = {}) {
   });
   const gate = createDecisionGate({ store, approvers, audit: createNoopAuditSink(), now: () => new Date(clock.ms), subjects: [createWorkflowDocumentSubject({ store, riskOf: () => risk.value })] });
   const registry = { get: (point: string, name: string) => (point === "channel" && name === "examplechat" ? adapter : undefined) } as never;
-  const chat = createLocalChat({ registry: { get: () => undefined, names: () => [] }, store, companyId: ORG, owner, now, flow: {} as never, gate });
-  const sink = createChannelSink({ channel: "examplechat", adapter, store, orgId: ORG, now, work: chat.work("examplechat"), linkWords: (code) => code, log: () => undefined });
+  const sink = createChannelSink({ channel: "examplechat", adapter, store, orgId: ORG, now, work: gateWork(gate), linkWords: (code) => code, log: () => undefined });
   const deps = { store, orgId: ORG, now };
   await bindChannelSpace(deps, { channel: "examplechat", tenant: "team1", space: "room1" }, "web");
   await redeemChannelLinkCode(deps, OWNER_ID, (await issueChannelLinkCode(deps, ACTOR)).code);
@@ -92,6 +91,23 @@ async function world(options: WorldOptions = {}) {
     ...(options.withGate === false ? {} : { plan: { gate } }),
   });
   return { store, adapter, deliveries, risk, gate, sink, handler, deps };
+}
+
+/** The work seam a host gives the sink: a press goes to the gate as a credential of the chat's own method, for the owner only; no message starts anything here. */
+function gateWork(gate: ReturnType<typeof createDecisionGate>): ChannelWork {
+  const outcomes = { APPROVE: "approve", REJECT: "reject", REQUEST_CHANGES: "request_changes" } as const;
+  return {
+    async message() { throw new Error("no start in this test"); },
+    async decide({ card, decision, personId, fence }) {
+      const outcome = decision.decision === "SKIP" ? undefined : outcomes[decision.decision];
+      if (personId !== OWNER_ID || outcome === undefined) return { status: "refused", reason: "invalid" };
+      const result = await gate.decide({
+        companyId: ORG, kind: card.subject.type, subjectId: card.subject.id, requestId: card.requestId, outcome, seen: { revision: card.revision, artifactDigest: card.artifactDigest }, reason: decision.reason, fence,
+        credentials: [{ method: `${CHAT_METHOD_PREFIX}${card.channel}`, token: `${card.requestId}/${decision.actor.tenant}/${decision.actor.userId}`, claimedAccount: { provider: card.channel, tenant: decision.actor.tenant, accountId: decision.actor.userId } }],
+      });
+      return result.status === "refused" ? { status: "refused", reason: result.reason } : { status: "decided" };
+    },
+  };
 }
 
 const milestone = (kind: CodeMilestone["kind"], extra: Partial<CodeMilestone> = {}, org: OrgId = ORG): CodeMilestone => ({ kind, orgId: org, taskId: TASK, at: "2026-11-12T10:00:00.000Z", text: "x", ...extra });

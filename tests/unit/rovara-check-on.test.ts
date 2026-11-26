@@ -101,13 +101,6 @@ describe("the laptop's tracking", () => {
     expect(w.world.prs[0]!.model.summaryChecks).toEqual([]);
   });
 
-  it("the app's laptop wiring leaves the default in place (it passes no summaryCheck of its own)", () => {
-    const text = readFileSync(new URL("../../packages/broker/src/local/app/app.ts", import.meta.url), "utf8");
-    const line = text.split("\n").find((entry) => entry.includes("createLocalTracking({"))!;
-    expect(line).toBeDefined();
-    expect(line).not.toContain("summaryCheck");
-  });
-
   // Mutant L2: the token client's method list gains the Check write (a personal token cannot write a Check run).
   it("a laptop signed in with a personal token offers no Check, so the pass sends nothing to GitHub", async () => {
     const api = new GitHubFixtureApi(new FakeHostModel({ url: GITHUB_REPO_URL, id: "4242", fullName: "acme/app", webBase: "https://github.com" }), { personalToken: "fixture-personal-token" });

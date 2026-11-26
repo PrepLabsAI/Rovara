@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { agentXError } from "@agentx/contracts";
 import { installContextSources, privateMcpInstallConfig } from "../../../packages/broker/src/context-sources/install.js";
 import { createContextSourceOwnerDependencies } from "../../../packages/broker/src/context-sources/wiring.js";
-import { contextToolsDependencies } from "../../../packages/broker/src/local/app/context-tools.js";
+import { contextToolsDependencies } from "../../../packages/broker/src/services/context-tools.js";
 import { confirmSourceChange, proposeSourceChange, toolSchemaHash } from "../../../packages/broker/src/context-sources/settings.js";
 import { InMemoryConnectionSecrets, memoryStore } from "../../support/connection-fakes.js";
 import { NOW, ORG, SEARCH_TOOL, source } from "./fixtures.js";

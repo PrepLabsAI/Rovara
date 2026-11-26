@@ -2,13 +2,9 @@
 // variant, after the runtime is built and `services()` has run, against a checked-in fixture taken from the current code (tests/fixtures/core-host-parity.json). The failure class this catches, that
 // the journeys cannot see, is a late-bound key that silently stops being set (a feature that quietly switches off) or one that starts being set where a host never had it.
 //
-// The four roots: the test harnesses (`createTaskFlow` and the core runtime over the fake world), the laptop (`rovara up`), the hosted broker (`createBrokerCoreRoot`) and the dispatcher
-// (`createDispatcherCoreHost`). To change a row on purpose, run once with F4_PARITY_WRITE=1 and review the fixture diff (it is NOT a snapshot update: a person reads and approves each changed row).
+// The three roots: the test harnesses (`createTaskFlow` and the core runtime over the fake world), the hosted broker (`createBrokerCoreRoot`) and the dispatcher (`createDispatcherCoreHost`). To change a row on purpose, run once with F4_PARITY_WRITE=1 and review the fixture diff (it is NOT a snapshot update: a person reads and approves each changed row).
 // What the fixture does not say: values (it lists defined keys, not what they hold); that is the journeys' job.
 import { readFileSync, writeFileSync } from "node:fs";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import type * as TypeScript from "typescript";
@@ -23,15 +19,12 @@ import type { CoreRuntime } from "../../packages/broker/src/core-host/core-runti
 import { REQUIRED_CORE_SERVICES } from "../../packages/broker/src/core-host/core-wiring-guard.js";
 import { hostedPrFeedbackRoutes } from "../../packages/broker/src/core-host/pr-feedback-routes.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
-import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
-import { startLocalRuntime } from "../../packages/broker/src/local/runtime.js";
 import { taskKeySigner } from "../../packages/broker/src/core-host/gateway-model-access.js";
 import { createBrokerCoreServices } from "../../packages/broker/src/aws/core-job-services.js";
 import { createHarness } from "../support/task-flow-harness.js";
 import { createFakeWorld, FAKE_COMPANY } from "../support/core-host-fakes.js";
 import { createFakeOfferedModels } from "../support/offered-models-fake.js";
 import { createSessionMachinesWorld, COMPANY_A } from "../support/session-machines-world.js";
-import { FakeDocker } from "../support/local/fake-docker.js";
 import { FakeDynamoDb } from "../support/ports/dynamodb-fake.js";
 import { FakeSqs } from "../support/ports/sqs-fake.js";
 import { FakeS3 } from "../support/ports/aws-fakes.js";
@@ -61,7 +54,7 @@ vi.mock("../../packages/broker/src/aws/worker-machines/core-dispatch-host.js", a
 });
 
 const FIXTURE = new URL("../fixtures/core-host-parity.json", import.meta.url);
-interface Row { /** The deps keys that hold a value after the runtime is built and `services()` has run. */ set: string[]; /** The keys of `universe` that do not. */ unset: string[]; /** The job services (a laptop: the parts of the app) that exist. */ services: string[]; /** The services that do not. */ servicesUnset: string[] }
+interface Row { /** The deps keys that hold a value after the runtime is built and `services()` has run. */ set: string[]; /** The keys of `universe` that do not. */ unset: string[]; /** The job services that exist. */ services: string[]; /** The services that do not. */ servicesUnset: string[] }
 interface Fixture { note: string; universe: string[]; serviceUniverse: string[]; roots: Record<string, Row> }
 const stored: Fixture | undefined = (() => { try { return JSON.parse(readFileSync(FIXTURE, "utf8")) as Fixture; } catch { return undefined; } })();
 const WRITE = process.env["F4_PARITY_WRITE"] === "1";
@@ -104,6 +97,16 @@ afterAll(async () => {
   writeFileSync(FIXTURE, `${JSON.stringify(written, null, 2)}\n`);
 });
 
+// ---- the roots there are
+
+describe("the composition roots", () => {
+  it("pins no laptop root: `rovara up` was removed (#1538), and only the harnesses, the hosted broker and the dispatcher compose the core", () => {
+    const roots = Object.keys(stored?.roots ?? {});
+    expect(roots.length).toBeGreaterThan(0);
+    expect(roots.filter((name) => !/^(?:harness|core-runtime|hosted-broker|dispatcher)\//u.test(name))).toEqual([]);
+  });
+});
+
 // ---- root 1: the test harnesses
 
 describe("root 1: the test harnesses", () => {
@@ -124,34 +127,7 @@ describe("root 1: the test harnesses", () => {
   });
 });
 
-// ---- root 2: the laptop
-
-describe("root 2: the laptop (rovara up)", () => {
-  const roots: string[] = [];
-  afterAll(async () => { for (const root of roots) await rm(root, { recursive: true, force: true }); });
-  const launch = async (environment: NodeJS.ProcessEnv) => {
-    const root = await mkdtemp(join(tmpdir(), "rovara-f4-parity-"));
-    roots.push(root);
-    const stateDirectory = join(root, "state");
-    await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
-    const runtime = await startLocalRuntime({ stateDirectory, cwd: join(root, "project"), environment, gh: async () => undefined, workerImage: "worker:test", docker: new FakeDocker(), version: "9.9.9",
-      machines: new FakeWorkerMachines({ startingChecks: 0 }), timers: false, storage: "memory", openBrowser: async () => undefined });
-    try {
-      // The parts of the app a laptop has (its "services": what the hosted root calls job services).
-      return rowOf(runtime.app.flow.deps, runtime.app, []);
-    } finally { await runtime.stop(); }
-  };
-
-  it.each([
-    ["laptop/default", {}],
-    ["laptop/run-limit-off", { ROVARA_RUN_LIMIT: "0" }],
-    ["laptop/steer-and-notes-off", { ROVARA_LIVE_STEER: "0", ROVARA_STEP_NOTES: "0" }],
-  ] as const)("%s", async (name, environment) => {
-    pin(name, await launch({ ...environment }));
-  }, 120_000);
-});
-
-// ---- root 3: the hosted broker
+// ---- root 2: the hosted broker
 
 const A = FAKE_COMPANY as OrgId;
 const secret = Buffer.alloc(32, 7);
@@ -159,7 +135,7 @@ const gateway = { ROVARA_CORE_MODEL_GATEWAY_URL: "https://gateway.example", ROVA
 const tokens = { taskTokens: () => ({ signer: taskKeySigner(signerOf(makeKey("t".repeat(16)))), issuer: "https://api.example/v1/auth" }) };
 const SERVICES = () => Object.fromEntries(["merge-tracking", "session-sweep", "notify-deliver", "admission-hold-sweep"].map((name) => [name, { pass: async () => ({}) }]));
 
-describe("root 3: the hosted broker (createBrokerCoreRoot): the input variants the review named", () => {
+describe("root 2: the hosted broker (createBrokerCoreRoot): the input variants the review named", () => {
   const rootWith = (env: NodeJS.ProcessEnv, extra: Partial<BrokerCoreRootInputs> = {}) => {
     const world = createFakeWorld();
     world.clock.now = Date.now();
@@ -226,9 +202,9 @@ describe("root 3: the hosted broker (createBrokerCoreRoot): the input variants t
   it("everything on at once", async () => { await built("everything", rootWith({ ROVARA_CORE_LESSONS: "on", [SYSTEM_RUNS_VARIABLE]: "on", ...gateway, ROVARA_CORE_AGENT_MODEL_CHOICE: "on" }, { ...tokens, ...lessonsPeople(), linearIntake, chatThreads, offeredModels: createFakeOfferedModels() })); });
 });
 
-// ---- root 4: the dispatcher
+// ---- root 3: the dispatcher
 
-describe("root 4: the dispatcher (createDispatcherCoreHost)", () => {
+describe("root 3: the dispatcher (createDispatcherCoreHost)", () => {
   const env = (overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv => ({
     CORE_DISPATCH_QUEUE_URL: "https://sqs.us-west-2.amazonaws.com/111122223333/agentx-staging-core-dispatch",
     CORE_DISPATCH_DEAD_LETTER_URL: "https://sqs.us-west-2.amazonaws.com/111122223333/agentx-staging-core-dispatch-dead", STATE_TABLE_NAME: "State",

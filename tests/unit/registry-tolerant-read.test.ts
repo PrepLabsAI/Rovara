@@ -1,7 +1,7 @@
 // REGISTRY-TOLERANT-READ (arch rules 8 and 9). A stored project that holds a generic npm/pypi/maven registry entry (written before the company package token, c1f5aab4c) reads everywhere a stored record is read: task start, the
 // setup readers, the application readiness reader, the dispatcher's prepare. A NEW generic entry is still refused (the input schema). The rules that judge what a person typed are not applied when a record is READ, so each
 // that does safety work where the record is USED is asked again at use and refuses there with a stable id. And no reader quietly serves an older revision when the current one cannot be read.
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
   GENERIC_REGISTRY_REFUSED, IMPLICIT_COMPANY_ID, agentXError, PROJECT_REVISION_UNREADABLE, PROJECT_USE_MESSAGES, ProjectRevisionUnreadableError, PROJECT_USE_RULES, ProjectDefinitionSchema, StoredProjectDefinitionSchema, UNRUNNABLE_EXTERNAL_CHECK_MESSAGE, orgProjectCatalogKey, projectMetaKey, projectRevisionKey,
   projectUseProblems, projectUseRefusal, readStoredProject, type JsonValue,
@@ -13,7 +13,6 @@ import { readSetupApply, setupApplyKey, storeSetupCandidate, type SetupApplyDeps
 import { operationKey, workspaceKey, workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
 import type { WorkspaceRecord } from "../../packages/broker/src/core/task-flow/records.js";
 import { startManualPublication } from "../../packages/broker/src/core/task-flow/manual-publication.js";
-import { registeredRepositoryRecordsOf } from "../../packages/broker/src/local/registered-repositories.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { REQUEST_A, TASK_ID, operationsOf, seed } from "../support/task-actions-world.js";
 import { createHarness, definition, newRequestId, type Harness } from "../support/task-flow-harness.js";
@@ -226,25 +225,6 @@ describe("publish and maintain are held to the same use rules as prepare (arch r
       expect(operation.status, rule).toBe("FAILED");
       expect(JSON.stringify(operation), rule).toContain(`[${rule}]`);
     }
-  });
-});
-
-describe("the laptop's registered repositories leave one unreadable project out (arch rule 9)", () => {
-  it("lists the readable projects' repositories, skips and logs the unreadable one, and still raises any other error", async () => {
-    const h = createHarness();
-    await h.registerProject();
-    await put(h, "broken", 1, { name: "broken", revision: 1 });
-    await point(h, "broken", 1);
-    const lines: string[] = [];
-    const spy = vi.spyOn(console, "log").mockImplementation((line: unknown) => { lines.push(String(line)); });
-    try {
-      const records = await registeredRepositoryRecordsOf(h.store, h.deps.companyId);
-      expect(records.map((record) => record.url)).toEqual([definition.repositories[0]!.url]);
-    } finally { spy.mockRestore(); }
-    const events = lines.flatMap((line) => { try { return [JSON.parse(line) as Record<string, unknown>]; } catch { return []; } }).filter((entry) => entry["event"] === "project.left_out_unreadable_revision");
-    expect(events).toMatchObject([{ project: "broken", rule: "project_revision_unreadable" }]);
-    const failing = { ...h.store, get: async () => { throw new Error("store down"); }, query: h.store.query.bind(h.store) } as typeof h.store;
-    await expect(registeredRepositoryRecordsOf(failing, h.deps.companyId)).rejects.toThrow("store down");
   });
 });
 

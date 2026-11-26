@@ -16,11 +16,6 @@ const all = FOLDERS.flatMap(files);
 const source = (file: string): string => readFileSync(join(ROOT, file), "utf8");
 const importsOf = (text: string): string[] => [...text.matchAll(/from "([^"]+)"/gu)].map((match) => match[1]!);
 
-const BROKER = join(import.meta.dirname, "../../packages/broker/src");
-const LOCAL_FILE = join(BROKER, "local/app/automation.ts");
-function allBrokerFiles(dir: string): string[] {
-  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => (entry.isDirectory() ? (entry.name === "node_modules" || entry.name === "dist" ? [] : allBrokerFiles(join(dir, entry.name))) : entry.name.endsWith(".ts") ? [join(dir, entry.name)] : []));
-}
 
 describe("automation's boundaries", () => {
   it("has files to read", () => {
@@ -50,23 +45,5 @@ describe("automation's boundaries", () => {
   it("starts unattended work through one door", () => {
     const callers = all.filter((file) => /\.starter\.start\(|starter\.start\(/u.test(source(file)));
     expect(callers.map((file) => relative(ROOT, join(ROOT, file)))).toEqual([join("automation", "run-seam.ts")]);
-  });
-});
-
-describe("the install's side of automation", () => {
-  it("imports nothing that decides for a person", () => {
-    const banned = /\/(decisions|merge|second-review|design-review|e2e|build-step)\//u;
-    expect(importsOf(readFileSync(LOCAL_FILE, "utf8")).filter((specifier) => banned.test(specifier))).toEqual([]);
-  });
-
-  it("is the only place a starter is built or a task is started as the automation client", () => {
-    const files = allBrokerFiles(BROKER);
-    const builders = files.filter((file) => /createTaskFlowRunStarter\(|AUTOMATION_CLIENT/u.test(readFileSync(file, "utf8")));
-    expect(builders.map((file) => relative(BROKER, file))).toEqual([join("local", "app", "automation.ts")]);
-    // Inside it, the task flow is started from the starter alone, and the starter is called only by the one door.
-    const text = readFileSync(LOCAL_FILE, "utf8");
-    expect(text.match(/flow\.start\(/gu)).toHaveLength(1);
-    const ours = [...all.map((file) => join(ROOT, file)), LOCAL_FILE];
-    expect(ours.filter((file) => /starter\.start\(/u.test(readFileSync(file, "utf8"))).map((file) => relative(BROKER, file))).toEqual([join("core", "automation", "run-seam.ts")]);
   });
 });

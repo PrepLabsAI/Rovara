@@ -190,7 +190,7 @@ describe("the chat thread: one warning message when the task reaches Build under
   });
 });
 
-// ---- the ticket (Linear on a hosted install, any tracker on a laptop): the same words as the thread
+// ---- the ticket (Linear on a hosted install): the same words as the thread
 
 async function intakeWorld() {
   const h = createHarness({ understandFirst: true });
@@ -540,11 +540,11 @@ describe("the wiring that carries the lines is in place (a guard on the source: 
       expect(text, path).toMatch(/\.\.\.\(setupLine === undefined \? \{\} : \{ setupLine \}\)/u);
     }
   });
-  it("the hosted engine tells the admins of a break and reads the card for ITS company only, and the local app knows when the thread was told", () => {
+  it("the hosted engine tells the admins of a break and reads the card for ITS company only, and the hosted thread notification knows when the thread was told", () => {
     const root = source("packages/broker/src/aws/core-engine-root.ts");
     expect(root).toContain("flow.deps.setupBroken = async (input) => { await upkeep.setupBroken(input); };");
     expect(root).toContain("setupRead: (orgId, project) => (orgId === companyId ? readSetupBrokenNotice(");
-    expect(source("packages/broker/src/local/app/app.ts")).toContain("setupPausedTold: setupPausedPosted({ store }),");
+    expect(source("packages/broker/src/core-host/thread-notification.ts")).toContain("setupPausedTold: setupPausedPosted({ store }),");
   });
   it("the Build warning stores fixed words, never the failing step, in the milestone and the session's timeline", () => {
     const start = source("packages/broker/src/core/build-step/start.ts");

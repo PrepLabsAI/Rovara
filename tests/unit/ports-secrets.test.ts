@@ -1,5 +1,5 @@
 // Owner decision 60 (item R2): the `secrets` socket. Code's adapter reads the environment, a file and the owner's key file; the model keys and the
-// laptop GitHub token are read through it; `keys.json` keeps working, with its permission rule; a `secrets` plug-in replaces Code's.
+// GitHub token are read through it; `keys.json` keeps its permission rule; a `secrets` plug-in replaces Code's.
 import { chmod, mkdir, mkdtemp, open, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,7 +9,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { IMPLICIT_COMPANY_ID, PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, SecretRefSchema, SecretValue, type SecretRef, type SecretStore } from "@agentx/contracts";
 import { createAdapterRegistry, LocalSecretError, asSecretValue, modelKeyReadError, secretsPluginWords, createFileModelKeyStore, createLocalSecretStore, createRegistrySecretStore, createSecretModelKeyStore, SECRET_FILE_MAX_BYTES } from "../../packages/broker/src/ports/index.js";
 import { contextSecretReader } from "../../packages/broker/src/plugins/index.js";
-import { createLocalModelKeyStore, createLocalSecrets } from "../../packages/broker/src/local/runtime.js";
 import { githubTokenCodeHost } from "../../packages/broker/src/plugins/code-host/github/token-code-host.js";
 import { resolveGithubAccess } from "../../packages/broker/src/plugins/code-host/github/token-access.js";
 import { runSecretStoreConformance } from "../support/ports/secret-store-conformance.js";
@@ -138,7 +137,7 @@ describe("Code's secrets adapter", () => {
   });
 });
 
-describe("the model keys and the GitHub token are read through the socket", () => {
+describe("model keys and the GitHub token are read through the socket", () => {
   /** Records every reference asked, and answers from a map keyed by "kind:value". */
   function spy(answers: Record<string, string>): { store: SecretStore; asked: SecretRef[] } {
     const asked: SecretRef[] = [];
@@ -147,31 +146,6 @@ describe("the model keys and the GitHub token are read through the socket", () =
       store: { async read(_company, ref) { asked.push(ref); const [kind, name] = Object.entries(ref)[0]!; const found = answers[`${kind}:${name}`]; return found === undefined ? undefined : new SecretValue(found); } },
     };
   }
-
-  it("asks the environment reference first and the key file entry second, and keeps the environment first", async () => {
-    const { store, asked } = spy({ "key:openai": "from-file", "env:ANTHROPIC_API_KEY": "from-env", "key:anthropic": "from-file-too" });
-    const keys = createLocalModelKeyStore("/not-used", {}, store);
-    expect((await keys.get(IMPLICIT_COMPANY_ID, "anthropic"))?.reveal()).toBe("from-env");
-    expect(asked).toEqual([{ env: "ANTHROPIC_API_KEY" }]);
-    asked.length = 0;
-    expect((await keys.get(IMPLICIT_COMPANY_ID, "openai"))?.reveal()).toBe("from-file");
-    expect(asked).toEqual([{ env: "OPENAI_API_KEY" }, { key: "openai" }]);
-    expect(await keys.get(IMPLICIT_COMPANY_ID, "Not A Provider!")).toBeUndefined();
-    expect(String(await keys.get(IMPLICIT_COMPANY_ID, "openai"))).toBe("[secret]");
-  });
-
-  it("keeps keys.json working with its owner-only rule, and lists the model providers that have a key", async () => {
-    const state = await tempFolder();
-    await writeFile(join(state, "keys.json"), JSON.stringify({ openai: "from-file", github: "gh-from-file" }), { mode: 0o600 });
-    const keys = createLocalModelKeyStore(state, { ANTHROPIC_API_KEY: "from-env" });
-    expect((await keys.get(IMPLICIT_COMPANY_ID, "openai"))?.reveal()).toBe("from-file");
-    expect((await keys.get(IMPLICIT_COMPANY_ID, "anthropic"))?.reveal()).toBe("from-env");
-    expect(await keys.providers(IMPLICIT_COMPANY_ID)).toEqual(["anthropic", "openai"]);
-    await chmod(join(state, "keys.json"), 0o644);
-    await expect(keys.get(IMPLICIT_COMPANY_ID, "openai")).rejects.toThrow(/readable by other users/);
-    // An environment key still answers without touching the loose file, as before.
-    expect((await keys.get(IMPLICIT_COMPANY_ID, "anthropic"))?.reveal()).toBe("from-env");
-  });
 
   it("reads the stored GitHub token as { key: \"github\" } (the key file alone), then GH_TOKEN, GITHUB_TOKEN, then the GitHub CLI", async () => {
     const { store, asked } = spy({ "key:github": "stored" });
@@ -182,7 +156,7 @@ describe("the model keys and the GitHub token are read through the socket", () =
     const none = spy({});
     expect((await resolveGithubAccess({ companyId: IMPLICIT_COMPANY_ID, secrets: none.store, environment: { GITHUB_TOKEN: "t" }, gh: async () => "from-cli" }))?.source).toBe("environment");
     // The model-key store's name for provider github (GITHUB_API_KEY) is not a GitHub sign-in.
-    expect(await resolveGithubAccess({ companyId: IMPLICIT_COMPANY_ID, secrets: createLocalSecrets("/not-used", { GITHUB_API_KEY: "x" }), environment: {}, gh: async () => undefined })).toBeUndefined();
+    expect(await resolveGithubAccess({ companyId: IMPLICIT_COMPANY_ID, secrets: createLocalSecretStore({ environment: { GITHUB_API_KEY: "x" }, keyFile: createFileModelKeyStore("/not-used/keys.json") }), environment: {}, gh: async () => undefined })).toBeUndefined();
   });
 
   it("builds a model key store on any secrets adapter (the shape Cloud's will use)", async () => {

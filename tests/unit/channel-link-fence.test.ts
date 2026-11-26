@@ -11,10 +11,9 @@ import {
 } from "../../packages/broker/src/core/channel/index.js";
 import { withStartFence, withStartFenceExtras } from "../../packages/broker/src/core/task-flow/start-fence.js";
 import { withStartFence as runtimeWithStartFence } from "../../packages/broker/src/core-host/core-runtime.js";
-import { createLocalChat } from "../../packages/broker/src/local/app/chat.js";
 import { createSessionStartExtras } from "../../packages/broker/src/core-host/app/session-start.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
-import { createHarness } from "../support/task-flow-harness.js";
+import { createHarness, newRequestId } from "../support/task-flow-harness.js";
 
 const ORG = IMPLICIT_COMPANY_ID as OrgId;
 const clock = { ms: Date.parse("2026-11-10T10:00:00.000Z") };
@@ -64,18 +63,17 @@ describe("a start for the linked person loses to an unlink that committed first"
     await h.registerProject();
     h.deps.startExtras = withStartFenceExtras(createSessionStartExtras(h.deps.companyId));
     const ownerId = developerIdOf(h.owner.principal);
-    const chat = createLocalChat({ registry: { get: () => undefined, names: () => [] }, store: h.store, companyId: h.deps.companyId, owner: h.owner.principal, now: () => h.clock.now, flow: h.flow, gate: { decide: async () => ({ status: "refused", reason: "invalid" }) } as never });
     const actor: ActorRef = { channel: "examplechat", tenant: "T1", userId: "U1" };
-    const msg = (eventId: string): InboundMessage => ({ version: 2, channel: "examplechat", eventId, text: "Build it", receivedAt: new Date(h.clock.now).toISOString(), actor, conversation: { channel: "examplechat", tenant: "T1", space: "C1", thread: "1" } });
+    const start = (fence: readonly TransactItem[]) => withStartFence(fence, () => h.flow.start({ principal: h.owner.principal, origin: "app", client: "examplechat" }, { project: "payments", instructions: "Build it", requestId: newRequestId(), workflow: true }));
     await link(h.store, ownerId, actor, h.deps.companyId);
-    return { h, chat, ownerId, actor, msg };
+    return { h, ownerId, actor, start };
   };
 
   it("the link removed between the sink's read and the start: nothing is started", async () => {
-    const { h, chat, ownerId, actor, msg } = await harnessed();
+    const { h, ownerId, actor, start } = await harnessed();
     const fence = [channelLinkFence(h.deps.companyId, actor, ownerId)];
     await removeChannelLink({ store: h.store, orgId: h.deps.companyId, now: () => h.clock.now }, actor, ownerId);
-    await expect(chat.work("examplechat").message({ orgId: h.deps.companyId, projectName: "payments", personId: ownerId, message: msg("e2"), fence })).rejects.toThrow();
+    await expect(start(fence)).rejects.toThrow();
     expect((await h.flow.list(h.owner)).tasks).toHaveLength(0);
   });
 

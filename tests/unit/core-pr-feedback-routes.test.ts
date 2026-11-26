@@ -25,7 +25,7 @@ it.each([
 });
 
 
-import { createOwnerRoutes } from "../../packages/broker/src/local/app/routes.js";
+import { createPrFeedbackRoutes } from "../../packages/broker/src/core-host/pr-feedback-routes.js";
 import { reviewedFeedbackWorld } from "../support/pr-feedback-world.js";
 import { dispatchPartition, dispatchRowKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { readTask, workspaceOperations } from "../../packages/broker/src/core/task-flow/reads.js";
@@ -34,14 +34,16 @@ import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-m
 import { blockWorkflow, WORKFLOW_BLOCK_REASONS, WORKFLOW_KEEP_PULL_REQUESTS_NOTE } from "@agentx/contracts";
 import { decidePrFeedback } from "../../packages/broker/src/core/pr-feedback/decide.js";
 
-it.each(["feedback-decision", "feedback-retry", "keep-pull-requests"])("mounted local %s accepts the documented request with one workflow commit", async route => {
+const routesOf = (w: Awaited<ReturnType<typeof reviewedFeedbackWorld>>) => createPrFeedbackRoutes(w.h.deps, async (_caller, taskId) => ({ taskId }));
+
+it.each(["feedback-decision", "feedback-retry", "keep-pull-requests"])("mounted %s accepts the documented request with one workflow commit", async route => {
   const w = await reviewedFeedbackWorld(route === "feedback-retry" ? "BLOCKED" : "COMPLETE");
   if (route === "keep-pull-requests") {
     w.task.workflow!.feedbackReview!.status = "COLLECTING";
     delete w.task.workflow!.feedbackReview!.reviewRef;
     await w.h.store.put({ item: toDocument(w.task) });
   }
-  const routes = createOwnerRoutes({ flow: w.h.flow, blobs: w.registry.require("object-storage"), openPage: async () => undefined, version: "test" });
+  const routes = routesOf(w);
   const body = route === "feedback-decision" ? { ...w.request, decision: "DISMISS", selectedFindingIds: [], ownerNote: WORKFLOW_KEEP_PULL_REQUESTS_NOTE }
     : route === "feedback-retry" ? { reviewDigest: w.request.reviewDigest } : { requestId: w.request.requestId, expectedRevision: w.task.workflow!.revision };
   const transact = vi.spyOn(w.h.store, "transact");
@@ -60,7 +62,7 @@ it.each(["feedback-decision", "feedback-retry", "keep-pull-requests"])("mounted 
   expect((await readTask(w.h.deps, w.task.taskId))!.workflow!.revision).toBe(revision);
 });
 
-it.each(["feedback-decision", "feedback-retry", "keep-pull-requests"])("mounted local %s refuses wrong owner, stale and retired with zero writes", async route => {
+it.each(["feedback-decision", "feedback-retry", "keep-pull-requests"])("mounted %s refuses wrong owner, stale and retired with zero writes", async route => {
   for (const kind of ["wrong-owner", "stale", "retired"] as const) {
     const w = await reviewedFeedbackWorld(route === "feedback-retry" ? "BLOCKED" : "COMPLETE");
     if (kind === "wrong-owner") w.h.deps.access.ownerActing = async () => undefined;
@@ -68,7 +70,7 @@ it.each(["feedback-decision", "feedback-retry", "keep-pull-requests"])("mounted 
     const body = route === "feedback-decision" ? { ...w.request, decision: "DISMISS", selectedFindingIds: [], ownerNote: WORKFLOW_KEEP_PULL_REQUESTS_NOTE, expectedRevision: w.request.expectedRevision - (kind === "stale" ? 1 : 0) }
       : route === "feedback-retry" ? { reviewDigest: kind === "stale" ? "0".repeat(64) : w.request.reviewDigest }
       : { requestId: w.request.requestId, expectedRevision: w.task.workflow!.revision - (kind === "stale" ? 1 : 0) };
-    const routes = createOwnerRoutes({ flow: w.h.flow, blobs: w.registry.require("object-storage"), openPage: async () => undefined, version: "test" });
+    const routes = routesOf(w);
     const transact = vi.spyOn(w.h.store, "transact"), put = vi.spyOn(w.h.store, "put"), update = vi.spyOn(w.h.store, "update");
     const response = await routes({ method: "POST", path: `/v1/dev/tasks/${w.task.taskId}/workflow/${route}`, headers: {}, body: JSON.stringify(body) }, w.h.owner);
     expect(response?.statusCode).toBeGreaterThanOrEqual(400);
@@ -133,7 +135,7 @@ it.each(feedbackActions.flatMap(route => refusalCases.map(kind => ({ route, kind
       for (const ref of w.task.workflow!.feedbackReview!.bundleRefs) ref.taskId = otherTaskId;
       await w.h.store.put({ item: toDocument(w.task) });
     }
-    const routes = createOwnerRoutes({ flow: w.h.flow, blobs: w.registry.require("object-storage"), openPage: async () => undefined, version: "test" });
+    const routes = routesOf(w);
     const reads = vi.spyOn(w.h.store, "get"), queries = vi.spyOn(w.h.store, "query"), many = vi.spyOn(w.h.store, "getMany");
     const writes = [vi.spyOn(w.h.store, "transact"), vi.spyOn(w.h.store, "put"), vi.spyOn(w.h.store, "update"), vi.spyOn(w.h.store, "delete"), w.put];
     const artifacts = vi.spyOn(w.h.deps.artifacts!, "get");
@@ -202,7 +204,7 @@ it.each(feedbackActions)("mounted %s rechecks revoked ownership before the final
   const body = route === "feedback-decision" ? { ...w.request, decision: "DISMISS", selectedFindingIds: [], ownerNote: WORKFLOW_KEEP_PULL_REQUESTS_NOTE }
     : route === "feedback-retry" ? { reviewDigest: w.request.reviewDigest }
     : { requestId: "88888888-8888-4888-8888-888888888888", expectedRevision: task.workflow!.revision };
-  const routes = createOwnerRoutes({ flow: w.h.flow, blobs: w.registry.require("object-storage"), openPage: async () => undefined, version: "test" });
+  const routes = routesOf(w);
   const writes = [vi.spyOn(w.h.store, "transact"), vi.spyOn(w.h.store, "put"), vi.spyOn(w.h.store, "update"), vi.spyOn(w.h.store, "delete"), w.put];
   const start = vi.spyOn(w.h.deps.machines, "start"), queue = vi.spyOn(w.h.deps.queues, "queue");
   w.put.mockClear();
@@ -219,7 +221,7 @@ it("mounted feedback-retry rechecks revoked ownership before reading a failed co
   const ownerActing = vi.fn<NonNullable<typeof w.h.deps.access.ownerActing>>();
   ownerActing.mockResolvedValueOnce({ actorId: w.task.ownerKey }).mockResolvedValueOnce({ actorId: w.task.ownerKey }).mockResolvedValue(undefined);
   w.h.deps.access.ownerActing = ownerActing;
-  const routes = createOwnerRoutes({ flow: w.h.flow, blobs: w.registry.require("object-storage"), openPage: async () => undefined, version: "test" });
+  const routes = routesOf(w);
   const transact = vi.spyOn(w.h.store, "transact").mockResolvedValue({ applied: false, reason: "condition_failed", failed: [0] });
   const writes = [vi.spyOn(w.h.store, "put"), vi.spyOn(w.h.store, "update"), vi.spyOn(w.h.store, "delete"), w.put];
   w.put.mockClear();
@@ -234,7 +236,7 @@ it("mounted feedback-retry rechecks revoked ownership before reading a failed co
 
 it("mounted feedback routes reject malformed JSON and leave other methods and paths untouched", async () => {
   const w = await reviewedFeedbackWorld();
-  const routes = createOwnerRoutes({ flow: w.h.flow, blobs: w.registry.require("object-storage"), openPage: async () => undefined, version: "test" });
+  const routes = routesOf(w);
   const path = `/v1/dev/tasks/${w.task.taskId}/workflow/feedback-decision`;
   const transact = vi.spyOn(w.h.store, "transact");
   const invalid = await routes({ method: "POST", path, headers: {}, body: "{" }, w.h.owner);
@@ -251,7 +253,7 @@ it("mounted failed review Keep accepts the documented DISMISS body with a missin
   w.objects.delete(w.task.workflow!.feedbackReview!.reviewRef!.objectKey);
   const actorId = "c".repeat(64);
   w.h.deps.access.ownerActing = async () => ({ actorId, authority: { actorId, ownerIds: [actorId] } });
-  const routes = createOwnerRoutes({ flow: w.h.flow, blobs: w.registry.require("object-storage"), openPage: async () => undefined, version: "test" });
+  const routes = routesOf(w);
   const body = { ...w.request, decision: "DISMISS", selectedFindingIds: [], ownerNote: WORKFLOW_KEEP_PULL_REQUESTS_NOTE };
   const admit = vi.spyOn(w.h.deps.admission, "admit");
   const response = await routes({ method: "POST", path: `/v1/dev/tasks/${w.task.taskId}/workflow/feedback-decision`, headers: {}, body: JSON.stringify(body) }, w.h.owner);
@@ -263,28 +265,9 @@ it("mounted failed review Keep accepts the documented DISMISS body with a missin
 });
 
 
-it.each(["", "?source=tool"])("a plain machine bearer cannot APPROVE feedback%s or start paid work", async suffix => {
-  const w = await reviewedFeedbackWorld();
-  const routes = createOwnerRoutes({ flow: w.h.flow, blobs: w.registry.require("object-storage"), openPage: async () => undefined, version: "test" });
-  const before = await readTask(w.h.deps, w.task.taskId);
-  const operations = await workspaceOperations(w.h.deps, w.task.workspaceId);
-  const writes = [vi.spyOn(w.h.store, "transact"), vi.spyOn(w.h.store, "put"), vi.spyOn(w.h.store, "update"), vi.spyOn(w.h.store, "delete"), w.put];
-  const work = [vi.spyOn(w.h.deps.admission, "admit"), vi.spyOn(w.h.deps.machines, "start"), vi.spyOn(w.h.deps.machines, "deliver"), vi.spyOn(w.h.deps.queues, "queue")];
-  w.put.mockClear();
-  const send = (action: string) => routes({ method: "POST", path: `/v1/dev/tasks/${w.task.taskId}/workflow/${action}${suffix}`, headers: {}, body: JSON.stringify(w.request) }, w.h.owner);
-  const response = await send("feedback-decision");
-  expect(response?.statusCode).toBe(403);
-  expect(JSON.parse(response!.body) as unknown).toEqual({ error: { code: "FORBIDDEN", message: "A plan is approved on its local review page, by you. Run `rovara open <task>` to open it; an assistant cannot approve for you." } });
-  expect(response).toEqual(await send("decision"));
-  for (const effect of [...writes, ...work]) expect(effect).not.toHaveBeenCalled();
-  expect(await readTask(w.h.deps, w.task.taskId)).toEqual(before);
-  expect(await workspaceOperations(w.h.deps, w.task.workspaceId)).toEqual(operations);
-  expect(await w.h.store.get(dispatchRowKey(w.h.deps.companyId, w.task.taskId, w.task.workflow!.revision + 1))).toBeUndefined();
-});
-
 it("mounted feedback-retry only queues review and starts no paid run", async () => {
   const w = await reviewedFeedbackWorld("BLOCKED");
-  const routes = createOwnerRoutes({ flow: w.h.flow, blobs: w.registry.require("object-storage"), openPage: async () => undefined, version: "test" });
+  const routes = routesOf(w);
   const before = await workspaceOperations(w.h.deps, w.task.workspaceId);
   const work = [vi.spyOn(w.h.deps.machines, "start"), vi.spyOn(w.h.deps.machines, "deliver"), vi.spyOn(w.h.deps.queues, "queue")];
   const response = await routes({ method: "POST", path: `/v1/dev/tasks/${w.task.taskId}/workflow/feedback-retry`, headers: {}, body: JSON.stringify({ reviewDigest: w.request.reviewDigest }) }, w.h.owner);
@@ -307,34 +290,13 @@ it.each(["missing", "another-company", "cannot-act"])("feedback approval keeps t
   if (kind === "another-company") caller.principal.companyId = "org_bbbbbbbbbbbbbbbbbbbb";
   if (kind === "cannot-act") w.h.deps.access.canAct = async () => false;
   const taskId = kind === "missing" ? "99999999-9999-4999-8999-999999999999" : w.task.taskId;
-  const routes = createOwnerRoutes({ flow: w.h.flow, blobs: w.registry.require("object-storage"), openPage: async () => undefined, version: "test" });
+  const routes = routesOf(w);
   const transact = vi.spyOn(w.h.store, "transact"), admit = vi.spyOn(w.h.deps.admission, "admit");
   const response = await routes({ method: "POST", path: `/v1/dev/tasks/${taskId}/workflow/feedback-decision`, headers: {}, body: JSON.stringify(w.request) }, caller);
   expect(response?.statusCode).toBe(404);
   expect(JSON.parse(response!.body) as unknown).toEqual({ error: { code: "TASK_NOT_FOUND", message: "no such task" } });
   expect(transact).not.toHaveBeenCalled();
   expect(admit).not.toHaveBeenCalled();
-});
-
-it.each(["APPROVE", "DISMISS"])("the existing plan %s refusal still requires the page", async decision => {
-  const w = await reviewedFeedbackWorld();
-  const routes = createOwnerRoutes({ flow: w.h.flow, blobs: w.registry.require("object-storage"), openPage: async () => undefined, version: "test" });
-  const response = await routes({ method: "POST", path: `/v1/dev/tasks/${w.task.taskId}/workflow/decision`, headers: {}, body: JSON.stringify({ ...w.request, decision }) }, w.h.owner);
-  expect(response?.statusCode).toBe(403);
-  expect(JSON.parse(response!.body) as unknown).toMatchObject({ error: { code: "FORBIDDEN", message: "A plan is approved on its local review page, by you. Run `rovara open <task>` to open it; an assistant cannot approve for you." } });
-});
-
-it.each([
-  { method: "GET", action: "decision", status: 404, code: "NOT_FOUND", message: "route not found" },
-  { method: "POST", action: "feedback-decision", status: 400, code: "CONFIG_INVALID", message: "the request body is not JSON" },
-])("local $method $action preserves its refusal before any write", async ({ method, action, status, code, message }) => {
-  const w = await reviewedFeedbackWorld();
-  const routes = createOwnerRoutes({ flow: w.h.flow, blobs: w.registry.require("object-storage"), openPage: async () => undefined, version: "test" });
-  const effects = [vi.spyOn(w.h.store, "transact"), vi.spyOn(w.h.store, "put"), vi.spyOn(w.h.store, "update"), vi.spyOn(w.h.store, "delete"), vi.spyOn(w.h.deps.admission, "admit")];
-  const response = await routes({ method, path: `/v1/dev/tasks/${w.task.taskId}/workflow/${action}`, headers: {}, body: "{" }, w.h.owner);
-  expect(response?.statusCode).toBe(status);
-  expect(JSON.parse(response!.body) as unknown).toEqual({ error: { code, message } });
-  for (const effect of effects) expect(effect).not.toHaveBeenCalled();
 });
 
 import { hostedFeedbackWorld, type FeedbackRouteBody } from "../support/hosted-pr-feedback-world.js";
@@ -521,7 +483,6 @@ it("complete hosted feedback selects the company-scoped active operation and ign
   expect(get.mock.calls.some(([key]) => key.pk === `WORKSPACE#${w.task.workspaceId}`)).toBe(false);
 });
 
-import { createPrFeedbackRoutes } from "../../packages/broker/src/core-host/pr-feedback-routes.js";
 it("the direct feedback adapter leaves unsupported methods and paths unowned before any reads", async () => {
   const w = await hostedFeedbackWorld();
   const routes = createPrFeedbackRoutes(w.h.deps, async () => ({ taskId: w.task.taskId }));

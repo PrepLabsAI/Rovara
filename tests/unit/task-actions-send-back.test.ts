@@ -11,7 +11,6 @@ import { createTaskActions } from "../../packages/broker/src/core/task-flow/task
 import { startImplementation } from "../../packages/broker/src/core/build-step/start.js";
 import { ownerNoteItem } from "../../packages/broker/src/core/task-flow/owner-note.js";
 import { OWNER_ROUND_ADMISSION_ACTION } from "../../packages/broker/src/core/task-flow/owner-round.js";
-import { createOwnerRoutes } from "../../packages/broker/src/local/app/routes.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { createAllowAllAdmission } from "../../packages/broker/src/ports/policy-defaults.js";
@@ -164,28 +163,6 @@ describe("send back to coding", () => {
     expect(await stateOf(lost.h)).toEqual(before);
   });
 
-});
-
-describe("the owner's route", () => {
-  const route = async (path: string, who: "owner" | "guest", payload: unknown) => {
-    const { h } = await seed();
-    const routes = createOwnerRoutes({ flow: h.flow, blobs: {} as never, openPage: async () => undefined, version: "0.0.0-test" });
-    const answer = await routes({ method: "POST", path, headers: {}, body: JSON.stringify(payload) }, who === "owner" ? h.owner : h.guest);
-    return { h, answer: answer!, json: JSON.parse(answer!.body) as { task?: { workflow?: { stage: string; state: string } }; error?: { code: string; message: string } } };
-  };
-
-  it("serves send back at /workflow/send-back as the owner, and says no such task to anyone else", async () => {
-    const ok = await route(`/v1/dev/tasks/${TASK_ID}/workflow/send-back`, "owner", body(6));
-    expect(ok.answer.statusCode).toBe(200);
-    expect(ok.json.task?.workflow).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING" });
-    const no = await route(`/v1/dev/tasks/${TASK_ID}/workflow/send-back`, "guest", body(6));
-    expect(no.answer.statusCode).toBe(404);
-    expect(no.json.error?.code).toBe("TASK_NOT_FOUND");
-    expect(await codingOperations(no.h)).toHaveLength(0);
-    // The older "not on this install" answer is gone for this route; the others still say it.
-    const other = await route(`/v1/dev/tasks/${TASK_ID}/workflow/review`, "owner", {});
-    expect(other.json.error?.message).toContain("not on this install yet");
-  });
 });
 
 // Learn on send-back (the lessons hook line): once a person's send-back has committed, the task flow tells the lessons seam (`lessonsSentBack`, filled by the lessons host) with only the task id, best effort.

@@ -1,5 +1,5 @@
 // BROWSER-SKIP-HONESTY (DEC 540): a browser or application round that was skipped or refused because the install has no browser runner (no executor image) says so in plain words on every path, and is never
-// "passed" or left out without a word. One describe per path: dispatch, the block reason the task keeps, round admission, the Testing view, the plan finding, the evidence pack's not-tested list, the local machine.
+// "passed" or left out without a word. One describe per path: dispatch, the block reason the task keeps, round admission, the Testing view, the plan finding.
 import { describe, expect, it } from "vitest";
 import { browserRunnerMissingWords, WORKER_INVOCATION_FEATURES, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WorkflowSnapshotSchema, createWorkflowSnapshot, type JsonValue } from "@agentx/contracts";
 import { workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
@@ -8,7 +8,6 @@ import { blockReasonOfFailedRun } from "../../packages/broker/src/core/build-ste
 import { readTask, workspaceOperations } from "../../packages/broker/src/core/task-flow/reads.js";
 import { acceptStep, readWorkspace } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { createHarness, newRequestId } from "../support/task-flow-harness.js";
-import { browserEvidenceLinesWithSkip, localBrowserEvidenceDeps } from "../../packages/broker/src/local/app/browser-evidence-skip.js";
 import { createHash } from "node:crypto";
 import { planQualityFinding } from "@agentx/contracts";
 import { readFileSync } from "node:fs";
@@ -186,22 +185,6 @@ describe("planning: a project whose qualified runtime has no READY row at all", 
   });
 });
 
-describe("browser evidence asked for by a project's recipe on a machine that cannot take the pictures", () => {
-  const SAID = "Browser evidence not run: this install has no browser runner.";
-  it("says it was not run when a recipe is configured and there is no way to run it (no executor image)", async () => {
-    expect(await browserEvidenceLinesWithSkip({ existing: [], recipeConfigured: true, canRun: undefined })).toEqual([SAID]);
-  });
-  it("says it too when the machine has the setting but cannot run it now, and when asking fails", async () => {
-    expect(await browserEvidenceLinesWithSkip({ existing: [], recipeConfigured: true, canRun: async () => false })).toEqual([SAID]);
-    expect(await browserEvidenceLinesWithSkip({ existing: [], recipeConfigured: true, canRun: async () => { throw new Error("docker is down"); } })).toEqual([SAID]);
-  });
-  it("says nothing without a recipe, nothing extra when the pictures were taken, and nothing when the machine can run it but the pack has no lines yet", async () => {
-    expect(await browserEvidenceLinesWithSkip({ existing: [], recipeConfigured: false, canRun: undefined })).toEqual([]);
-    expect(await browserEvidenceLinesWithSkip({ existing: ["3 pages shown"], recipeConfigured: true, canRun: undefined })).toEqual(["3 pages shown"]);
-    expect(await browserEvidenceLinesWithSkip({ existing: [], recipeConfigured: true, canRun: async () => true })).toEqual([]);
-  });
-});
-
 describe("browserRunnerMissingWords: only a lack of the browser checks, on a worker that knows them", () => {
   const listed = ["task.workflowE2EApplicationPlan", "task.workflowMode"];
   it("answers for the application check family", () => {
@@ -211,32 +194,5 @@ describe("browserRunnerMissingWords: only a lack of the browser checks, on a wor
     expect(browserRunnerMissingWords(["task.workflowE2EAgentSteps.v1"], listed)).toBeUndefined();
     expect(browserRunnerMissingWords(["task.workflowE2EApplicationChecks", "task.readiness"], listed)).toBeUndefined();
     expect(browserRunnerMissingWords(["task.workflowE2EApplicationChecks"], ["task.workflowMode"])).toBeUndefined();
-  });
-});
-
-describe("the laptop's browser evidence seam", () => {
-  const task = { project: "demo" } as never;
-  const recipe = { start: "npm start" } as never;
-  const page = { recipeFor: async () => recipe };
-  const SAID = "Browser evidence not run: this install has no browser runner.";
-  it("has no seam at all when nothing is configured and nothing can run", () => {
-    expect(localBrowserEvidenceDeps({ page: undefined, canRun: undefined, fromConfig: undefined, linesOf: async () => [] })).toBeUndefined();
-  });
-  it("with a recipe in the owner's config and no way to run it: asks no worker for a recipe, and says it was not run", async () => {
-    const seam = localBrowserEvidenceDeps({ page: undefined, canRun: undefined, fromConfig: () => recipe, linesOf: async () => [] })!;
-    expect(await seam.recipe(task)).toBeUndefined();
-    expect(await seam.linesOf(task, "d")).toEqual([SAID]);
-  });
-  it("with a way to run it: asks for the recipe only while the machine can run it, and says nothing extra when the pictures were taken", async () => {
-    const can = localBrowserEvidenceDeps({ page, canRun: async () => true, fromConfig: () => recipe, linesOf: async () => ["2 pages shown"] })!;
-    expect(await can.recipe(task)).toBe(recipe);
-    expect(await can.linesOf(task, "d")).toEqual(["2 pages shown"]);
-    const cannot = localBrowserEvidenceDeps({ page, canRun: async () => false, fromConfig: () => recipe, linesOf: async () => [] })!;
-    expect(await cannot.recipe(task)).toBeUndefined();
-    expect(await cannot.linesOf(task, "d")).toEqual([SAID]);
-  });
-  it("counts a recipe saved on the page as configured too", async () => {
-    const seam = localBrowserEvidenceDeps({ page, canRun: async () => false, fromConfig: () => undefined, linesOf: async () => [] })!;
-    expect(await seam.linesOf(task, "d")).toEqual([SAID]);
   });
 });

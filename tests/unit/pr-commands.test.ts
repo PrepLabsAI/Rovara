@@ -1,6 +1,6 @@
 // Lane L8: commands in pull request comments, against the W0 fakes: a memory document store, and the local-owner approvers fed a fake code host.
 import { describe, expect, it } from "vitest";
-import type { ApprovalOffer } from "../../packages/broker/src/core/local-pages/index.js";
+import type { ApprovalOffer } from "../../packages/broker/src/core/page-views.js";
 import { createPrCommentCommands, type CommentPermission, type LookedUpComment, type PendingOffer, type PrCommentEvent, type PrCommandWorld } from "../../packages/broker/src/core/pr-commands/index.js";
 import { createLocalOwnerApprovers } from "../../packages/broker/src/ports/policy-defaults.js";
 import { ARTIFACT_DIGEST, commentReads, freshComment } from "../support/comment-fakes.js";

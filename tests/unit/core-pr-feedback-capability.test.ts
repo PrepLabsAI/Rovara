@@ -2,7 +2,6 @@ import { expect, it, vi } from "vitest";
 import { feedbackWorld } from "../support/pr-feedback-world.js";
 import { ORG } from "../support/service-host.js";
 import { createPrFeedbackRoutes } from "../../packages/broker/src/core-host/pr-feedback-routes.js";
-import { createOwnerRoutes } from "../../packages/broker/src/local/app/routes.js";
 import { collectTrackedFeedback, withFeedbackMergeReads } from "../../packages/broker/src/core/pr-feedback/service.js";
 import { createMergeTrackingService, createMilestoneService } from "../../packages/broker/src/services/merge-tracking.js";
 import { fixedCodeSettings } from "../../packages/broker/src/core/merge/defaults.js";
@@ -34,12 +33,10 @@ it.each(["sweep", "merge"])("hosted without decision routes: %s starts no paid r
   expect((await w.h.store.query({ pk: dispatchPartition(ORG) })).items).toEqual([]);
 });
 
-it.each(["hosted", "local"])("%s with the real decision handler registered collects and queues review", async kind => {
+it("hosted with the real decision handler registered collects and queues review", async () => {
   const w = await feedbackWorld();
   const service = tracking(w); // Registration must be visible to services already composed.
-  const route = kind === "local"
-    ? createOwnerRoutes({ flow: w.h.flow, blobs: w.registry.require("object-storage"), openPage: async () => undefined, version: "test" })
-    : createPrFeedbackRoutes(w.h.deps, async () => ({ taskId: w.task.taskId }));
+  const route = createPrFeedbackRoutes(w.h.deps, async () => ({ taskId: w.task.taskId }));
   await service.sweep({ budgetMs: 1000 });
   const task = (await readTask(w.h.deps, w.task.taskId))!;
   expect(task.workflow!.feedbackReview?.status).toBe("COLLECTING");

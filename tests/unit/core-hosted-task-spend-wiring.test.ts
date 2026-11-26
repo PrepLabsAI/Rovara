@@ -1,5 +1,5 @@
 // L4-TSU: the broker's hosted core root gives each company's flow its own `taskSpendUsd` (automatic fixing's per-task dollar cap reads it), over that company's own cost ledger. Real broker root, registry and
-// runtimes over fakes. (The dispatcher's runtime is pinned in aws-core-dispatch-host.test.ts; the laptop's own line is pinned at the end of this file.)
+// runtimes over fakes. (The dispatcher's runtime is pinned in aws-core-dispatch-host.test.ts.)
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import type { OrgId } from "@agentx/contracts";
@@ -101,16 +101,10 @@ describe("the broker's core root gives each company's flow a taskCapUsd that is 
   });
 });
 
-describe("the laptop's own taskSpendUsd is unchanged", () => {
-  it("still reads the laptop ledger and treats an unpriced figure as nothing spent; the hosted reader is not used there", () => {
-    const app = readFileSync(new URL("../../packages/broker/src/local/app/app.ts", import.meta.url), "utf8");
-    expect(app).toContain("taskSpendUsd: async (taskId) => costUsdOf(await ledger.taskCost(companyId, taskId)),");
-    expect(app).not.toContain("company-task-spend");
-    expect(app).not.toContain("createCompanyTaskSpend");
+describe("the automatic fix reads the spend and cap a host wires", () => {
+  it("treats a host without taskSpendUsd as nothing spent and asks the host's cap for the round", () => {
     const autofix = readFileSync(new URL("../../packages/broker/src/core/build-step/autofix.ts", import.meta.url), "utf8");
     expect(autofix).toContain("deps.taskSpendUsd === undefined ? 0 : (await deps.taskSpendUsd(task.taskId)) ?? 0");
-    // L4-TA6: and its live cap is the run limit (`taskLimitUsd`, the round cap's own figure), set only while the run limit is held.
-    expect(app).toContain("...(options.runLimit === false ? {} : { taskCapUsd: async (task: TaskRecord) => taskLimitUsd(task) }),");
     expect(autofix).toContain("const capUsd = await autofixCapUsd(deps, task, config.capUsd);");
   });
 });

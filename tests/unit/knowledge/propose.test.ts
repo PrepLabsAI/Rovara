@@ -2,14 +2,8 @@
 // weak-source lesson that waits for a second, independent sighting and then for a person; the company's "Knowledge stays in Rovara" answers one fixed sentence for tools (and the Regulated preset turns it on by default)
 // and does not touch Rovara's own agents; limits are 10 a person a UTC day (tools) and 3 a task (agents); text is untrusted; no model call; company and project scoped.
 import { randomUUID } from "node:crypto";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { KNOWLEDGE_PROPOSALS_FIELD, KNOWLEDGE_PROPOSALS_PER_PERSON_DAY_MAX, KNOWLEDGE_PROPOSALS_PER_TASK_MAX, KNOWLEDGE_PROPOSE_MESSAGES, KNOWLEDGE_PROPOSE_RECEIVED_MESSAGE, KNOWLEDGE_STAYS_SENTENCE } from "@agentx/contracts";
-import { createAdapterRegistry } from "../../../packages/broker/src/ports/adapter-registry.js";
-import { createLocalOwnerApprovers, createLocalOwnerIdentity, createPriceTableMetering, localOwnerPrincipal } from "../../../packages/broker/src/ports/policy-defaults.js";
-import { createMemoryModelKeyStore } from "../../../packages/broker/src/ports/model-key-stores.js";
-import { builtinModelProviderBook } from "../../../packages/broker/src/local/model-proxy/index.js";
-import { createLocalLessons, type LocalLessons } from "../../../packages/broker/src/local/app/lessons.js";
-import { createLessonRoutes } from "../../../packages/broker/src/local/app/lessons-routes.js";
 import { setLearnedLessonsGate } from "../../../packages/broker/src/lessons/policy.js";
 import { approveLesson } from "../../../packages/broker/src/lessons/approve.js";
 import { DocumentPresetStore, writeLearningMode } from "../../../packages/broker/src/lessons/document-settings.js";
@@ -18,50 +12,19 @@ import { proposeLimits } from "../../../packages/broker/src/lessons/knowledge-li
 import { proposedByOf } from "../../../packages/broker/src/lessons/proposal-mark.js";
 import { buildLessonsView } from "../../../packages/broker/src/lessons/view.js";
 import { lessonRecord, draft } from "../lessons/lesson-helpers.js";
-import { COMPANY, createHarness, definition, type Harness } from "../../support/task-flow-harness.js";
+import { COMPANY, OWNER, REPO_BILL, REPO_PAY, hostedKnowledgeWorld, type HostedKnowledgeWorld, type ToolCaller } from "./hosted-world.js";
 
 afterEach(() => setLearnedLessonsGate(undefined));
 
-const REPO_PAY = "https://github.com/example/demo.git";
-const REPO_BILL = "https://github.com/example/billing.git";
 const OTHER_COMPANY = "org_zzzzzzzzzzzzzzzzzzzz";
 const KEY = { workspaceId: COMPANY, project: "payments" };
 
-interface World { h: Harness; lessons: LocalLessons; taskId: string; workspaceId: string; providerCalls: number }
-
-async function world(): Promise<World> {
-  const h = createHarness({ audit: "recording" });
-  await h.registerProject({ ...definition, repositories: [{ ...definition.repositories[0]!, url: REPO_PAY }] });
-  await h.registerProject({ ...definition, name: "billing", repositories: [{ ...definition.repositories[0]!, name: "ledger", url: REPO_BILL }] });
-  const owner = localOwnerPrincipal({ companyId: COMPANY });
-  const registry = createAdapterRegistry();
-  registry.register("storage", "memory", h.store, { isDefault: true });
-  registry.register("queue", "memory", h.queues, { isDefault: true });
-  registry.register("code-host", "github", { kind: "github", repositoryIdentity: async () => ({ id: "77", fullName: "example/demo", private: true }) } as never, { isDefault: true });
-  const state = { calls: 0 };
-  const lessons = createLocalLessons({
-    flow: h.deps, registry, companyId: COMPANY, owner, blobs: { get: async () => undefined } as never, milestones: { register: () => () => undefined },
-    audit: h.deps.audit, admission: h.deps.admission, metering: createPriceTableMetering({ currency: "USD", models: {} }),
-    approvers: createLocalOwnerApprovers({ owner, verifySession: () => false }), identity: createLocalOwnerIdentity({ companyId: COMPANY, linkedAccounts: [{ provider: "github", tenant: "", accountId: "owner-gh" }] }),
-    // A model call of any kind would reach this fetch: none must.
-    model: { choice: async () => ({ provider: "anthropic", model: "claude-test" }), keys: createMemoryModelKeyStore({ anthropic: ["sk", "ant", "test", "never", "real"].join("-") }), providers: builtinModelProviderBook(), fetch: (async () => { state.calls += 1; return new Response("{}", { status: 500 }); }) },
-    enabled: () => true, now: () => h.clock.now, log: () => undefined,
-  });
-  const { task } = await h.flow.start(h.owner, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint\nreturn 200", workflow: true, workflowPath: "QUICK" });
-  return { h, lessons, taskId: task.taskId, workspaceId: task.workspaceId, get providerCalls() { return state.calls; } };
-}
-
-type Caller = Parameters<ReturnType<typeof createLessonRoutes>>[1];
-const route = (w: World) => createLessonRoutes({ lessons: w.lessons, flow: w.h.deps, notices: { queueAdmin: vi.fn(async () => 1) } });
-async function post(w: World, path: string, body: unknown, caller: Caller = w.h.owner): Promise<{ status: number | undefined; body: Record<string, unknown> }> {
-  const answer = await route(w)({ method: "POST", path, headers: {}, body: typeof body === "string" ? body : JSON.stringify(body) }, caller);
-  return { status: answer?.statusCode, body: answer === undefined ? {} : (JSON.parse(answer.body) as Record<string, unknown>) };
-}
-const propose = (w: World, body: unknown, project = "payments", caller?: Caller) => post(w, `/v1/dev/projects/${project}/knowledge/propose`, body, caller);
-const person = (w: World, personId: string): Caller => ({ ...w.h.owner, principal: { ...w.h.owner.principal, personId } });
+type World = HostedKnowledgeWorld;
+const world = (): Promise<World> => hostedKnowledgeWorld();
+const propose = (w: World, body: unknown, project = "payments", caller?: ToolCaller) => w.propose(body, project, caller);
+const person = (_w: World, personId: string): ToolCaller => ({ personId });
 const GOOD = { advice: "Wrap network calls in withRetry", why: "Raw loops drop errors.", when: "writing code that calls the network" };
 const all = (w: World, key = KEY) => w.lessons.runtime.store.list(key);
-const ownerId = (w: World): string => w.lessons.owner.id;
 
 describe("a tool's suggestion is a weak-source lesson that waits, and only a person can make it live", () => {
   it("one sighting is kept as a candidate nobody sees; it is not in the lists, not in a tool's answer and not in a task's lessons", async () => {
@@ -74,18 +37,16 @@ describe("a tool's suggestion is a weak-source lesson that waits, and only a per
     // Candidate, weak, never trusted as a member's word, never on trial and marked for a person for good.
     expect(lesson).toMatchObject({ status: "candidate", reviewRequired: true, approvals: [], title: GOOD.advice, description: GOOD.why });
     expect(lesson.trial).toBeUndefined();
-    expect(lesson.provenance).toMatchObject({ minTrust: "system", memberSignal: false, measured: false, supportTasks: [], authors: [w.h.owner.principal.personId], sources: ["proposed:tool", `member:${w.h.owner.principal.personId}`] });
+    expect(lesson.provenance).toMatchObject({ minTrust: "system", memberSignal: false, measured: false, supportTasks: [], authors: [OWNER], sources: ["proposed:tool", `member:${OWNER}`] });
     expect(lesson.provenance.memberCorrection).not.toBe(true);
     expect(lesson.provenance.claimsSupported).not.toBe(true);
     expect(proposedByOf(lesson)).toBe("tool");
     expect(lesson.body.startsWith("When writing code that calls the network:")).toBe(true);
     // Nobody is shown it: not the lessons tab, and no tool is given it.
-    const view = await buildLessonsView(w.lessons.runtime.routes, { orgId: COMPANY, developerId: ownerId(w) }, "payments");
+    const view = await buildLessonsView(w.lessons.runtime.routes, { orgId: COMPANY, developerId: OWNER }, "payments");
     expect(view.waiting).toHaveLength(0);
     expect(view.active).toHaveLength(0);
     expect(view.queued).toBe(1);
-    // No model was asked about it.
-    expect(w.providerCalls).toBe(0);
   });
 
   it("the same person twice is still one sighting; a second, different person puts it in front of the people who decide, with its source on the card; it is still not active", async () => {
@@ -98,18 +59,16 @@ describe("a tool's suggestion is a weak-source lesson that waits, and only a per
     const [lesson] = await all(w);
     expect(await all(w)).toHaveLength(1);
     expect(lesson).toMatchObject({ status: "pending", approvals: [], reviewRequired: true });
-    expect(lesson!.provenance.authors.sort()).toEqual([w.h.owner.principal.personId, "person-bob"].sort());
-    const view = await buildLessonsView(w.lessons.runtime.routes, { orgId: COMPANY, developerId: ownerId(w) }, "payments");
+    expect(lesson!.provenance.authors.sort()).toEqual([OWNER, "person-bob"].sort());
+    const view = await buildLessonsView(w.lessons.runtime.routes, { orgId: COMPANY, developerId: OWNER }, "payments");
     expect(view.waiting).toHaveLength(1);
     expect(view.waiting[0]).toMatchObject({ proposedBy: "tool", title: GOOD.advice });
     expect(view.active).toHaveLength(0);
-    // Even with neighbours to compare against (the second and third proposals met the first), no model was asked (no judge, no embedder).
-    expect(w.providerCalls).toBe(0);
   });
 
   it("a person's own tool and their own task's agent are one sighting; a different person's tool is the second", async () => {
     const w = await world();
-    const ann = w.h.owner.principal.personId;
+    const ann = OWNER;
     const same = { advice: "Keep jobs idempotent", why: "Retries run twice.", when: "adding a job" };
     await propose(w, same);
     // The owner's own task's agent says the same thing: still one sighting (the owner), so still a held candidate.
@@ -155,7 +114,7 @@ describe("a tool's suggestion is a weak-source lesson that waits, and only a per
     expect(await w.lessons.runtime.store.list(KEY, { statuses: ["active"] })).toHaveLength(0);
     // The owner (not one of the authors) decides one; it is the person's approval that makes it live.
     const chosen = stored[0]!;
-    const done = await approveLesson(w.lessons.runtime.routes, { workspaceId: COMPANY, project: "payments", lessonId: chosen.id, approverId: ownerId(w) });
+    const done = await approveLesson(w.lessons.runtime.routes, { workspaceId: COMPANY, project: "payments", lessonId: chosen.id, approverId: OWNER });
     // A proposal from the owner's own tool makes the owner an author, so the author rule may ask for a second person: here the owner is not an author of the later two.
     expect(done.ok || (!done.ok && ["author_cannot_approve_alone", "second_person_required", "sole_owner_cool_off"].includes(done.code))).toBe(true);
     const live = await w.lessons.runtime.store.list(KEY, { statuses: ["active"] });
@@ -229,7 +188,7 @@ describe("one sighting never reaches the people who decide, whatever else would 
   it("a suggestion that flips an existing lesson stays a held candidate with its link kept (no alert), however many people send it", async () => {
     const w = await world();
     const existing = lessonRecord({
-      id: "les_exist0001", workspaceId: COMPANY, project: "payments", type: "convention", tier: 1, tierReasons: [], approvals: [{ approvalId: "a1", by: "local-owner", at: 1, mode: "one" }], scope: {}, citations: [], citationChecks: [],
+      id: "les_exist0001", workspaceId: COMPANY, project: "payments", type: "convention", tier: 1, tierReasons: [], approvals: [{ approvalId: "a1", by: OWNER, at: 1, mode: "one" }], scope: {}, citations: [], citationChecks: [],
       stages: ["PLAN", "IMPLEMENT"], provenance: { ...draft().provenance, supportTasks: [] }, title: "Always use withRetry for network calls", description: "", body: "When calling the network: Always use withRetry for network calls.",
     });
     await w.lessons.runtime.store.commit(KEY, await w.lessons.runtime.store.setVersion(KEY), [existing], 1);
@@ -238,14 +197,14 @@ describe("one sighting never reaches the people who decide, whatever else would 
     const mine = (await all(w)).filter((l) => l.id !== existing.id);
     expect(mine).toHaveLength(1);
     expect(mine[0]).toMatchObject({ status: "candidate", contradictsWith: existing.id });
-    const view = await buildLessonsView(w.lessons.runtime.routes, { orgId: COMPANY, developerId: ownerId(w) }, "payments");
+    const view = await buildLessonsView(w.lessons.runtime.routes, { orgId: COMPANY, developerId: OWNER }, "payments");
     expect(view.waiting).toHaveLength(0);
     // A second person's copy is curated against what it contradicts (the contradiction route is chosen before a merge with the first suggestion), so it is its own held candidate too: nothing a tool sends that flips a
     // live lesson reaches the weekly review on suggestions alone (a person who disagrees uses the lesson's own page). Nothing is live, nothing waits.
     await propose(w, flip, "payments", person(w, "person-bob"));
     const after = (await all(w)).filter((l) => l.id !== existing.id);
     expect(after.every((l) => l.status === "candidate" && l.reviewRequired === true && l.contradictsWith === existing.id)).toBe(true);
-    expect((await buildLessonsView(w.lessons.runtime.routes, { orgId: COMPANY, developerId: ownerId(w) }, "payments")).waiting).toHaveLength(0);
+    expect((await buildLessonsView(w.lessons.runtime.routes, { orgId: COMPANY, developerId: OWNER }, "payments")).waiting).toHaveLength(0);
     expect((await w.lessons.runtime.store.get(KEY, existing.id))!.status).toBe("active");
   });
 });
@@ -328,7 +287,7 @@ describe("audit: written before anything is stored, never the text", () => {
     await propose(w, { ...GOOD, type: "pitfall" });
     const events = w.h.audit.filter((event) => event.action === "lesson.knowledge_proposed");
     expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ actor: { id: w.h.owner.principal.personId }, details: { by: "tool", lessonType: "pitfall" } });
+    expect(events[0]).toMatchObject({ actor: { id: OWNER }, details: { by: "tool", lessonType: "pitfall" } });
     expect(JSON.stringify(events)).not.toContain("withRetry");
     expect(JSON.stringify(events)).not.toContain("network");
 
@@ -351,7 +310,7 @@ describe("the company switch: one fixed sentence for tools, Rovara's own agents 
     expect(await all(w)).toHaveLength(0);
     expect(w.h.audit.filter((event) => event.action === "lesson.knowledge_proposed")).toHaveLength(0);
     const limits = proposeLimits(w.h.store, () => w.h.clock.now);
-    for (let n = 0; n < KNOWLEDGE_PROPOSALS_PER_PERSON_DAY_MAX; n += 1) expect(await limits.takePersonDay(COMPANY, w.h.owner.principal.personId)).toBe(true);
+    for (let n = 0; n < KNOWLEDGE_PROPOSALS_PER_PERSON_DAY_MAX; n += 1) expect(await limits.takePersonDay(COMPANY, OWNER)).toBe(true);
     // The switch goes off again: the same person proposes.
     const fresh = await world();
     expect((await propose(fresh, GOOD)).body["status"]).toBe("received");
@@ -390,7 +349,7 @@ describe("agents: the task and the project are the broker's, never the event's",
     expect(await all(w, { workspaceId: COMPANY, project: "billing" })).toHaveLength(0);
     expect((await all(w)).map((l) => l.title).sort()).toEqual(["Keep jobs idempotent", "Keep workers idempotent"]);
     // A second task proposing the same advice is a second, independent sighting: it is in front of the people who decide, and still not active.
-    const { task: other } = await w.h.flow.start(w.h.owner, { requestId: randomUUID(), project: "payments", instructions: "Add a /ready endpoint\nreturn 200", workflow: true, workflowPath: "QUICK" });
+    const other = await w.start("Add a /ready endpoint\nreturn 200");
     await w.lessons.onEvents({ workspaceId: other.workspaceId, id: randomUUID() }, [{ type: "progress", payload: { [KNOWLEDGE_PROPOSALS_FIELD]: [{ advice: "Keep jobs idempotent", why: "Retries run twice." }] } }]);
     const merged = (await all(w)).filter((l) => l.title === "Keep jobs idempotent");
     expect(merged).toHaveLength(1);
@@ -428,12 +387,9 @@ describe("company and project scope", () => {
     // Another project of the same company likewise.
     await proposeKnowledge(deps, { companyId: COMPANY, project: "billing", proposer: { kind: "tool", personId: "p3" }, proposal: GOOD });
     expect((await all(w))[0]!.status).toBe("candidate");
-    // A caller of another company is refused by the route.
-    const stranger: Caller = { ...w.h.owner, principal: { ...w.h.owner.principal, companyId: OTHER_COMPANY } };
-    expect((await propose(w, GOOD, "payments", stranger)).status).toBe(403);
     // A script token with the wrong project or without the permission sees "no such project".
-    const wrongProject: Caller = { ...w.h.owner, scriptToken: { tokenId: "stk_a", name: "t", permissions: ["lessons"], projects: ["billing"] } };
-    const noPermission: Caller = { ...w.h.owner, scriptToken: { tokenId: "stk_b", name: "t", permissions: ["read"], projects: ["payments"] } };
+    const wrongProject: ToolCaller = { personId: OWNER, token: { tokenId: "stk_a", permissions: ["lessons"], projects: ["billing"] } };
+    const noPermission: ToolCaller = { personId: OWNER, token: { tokenId: "stk_b", permissions: ["read"], projects: ["payments"] } };
     expect((await propose(w, GOOD, "payments", wrongProject)).status).toBe(404);
     expect((await propose(w, GOOD, "payments", noPermission)).status).toBe(404);
     expect((await propose(w, GOOD, "no-such-project")).status).toBe(404);

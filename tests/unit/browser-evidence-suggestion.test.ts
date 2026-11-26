@@ -4,8 +4,6 @@ import { describe, expect, it } from "vitest";
 import {
   SETUP_ITEM_KINDS, sanitizeSetupProposal, setupItemHandling, setupItemRisk, setupItemsOf, type SetupProposal,
 } from "@agentx/contracts";
-import { renderSetupPage } from "../../packages/broker/src/core/local-pages/setup-page.js";
-import type { SetupPageView } from "../../packages/broker/src/core/local-pages/views.js";
 import { setupProposalFormatLines } from "../../packages/worker/src/setup-draft.js";
 
 const COMMIT = "a".repeat(40);
@@ -91,22 +89,5 @@ describe("a suggestion of pages for browser evidence", () => {
     expect(text).toContain("browserEvidence: ONLY for a web app");
     expect(text).toContain("Never propose a user name, a password or how to sign in");
     expect(text).toContain("nothing is applied by itself");
-  });
-});
-
-describe("the setup page with a suggestion", () => {
-  const context = { base: "/s/t", nonce: "n", formToken: () => "ft" } as never;
-  const view = (kind: string): SetupPageView => ({
-    project: "web", revision: 1, status: "ready", limits: { commands: 10, sameStepTries: 3, wallClockMin: 30, budgetCents: 500, hostAsks: 5 }, verified: true, journal: [], hostAsks: [], check: { status: "unchecked" }, approvedHosts: [],
-    items: [{ id: "browser-recipe", kind, lines: ["{\"startCommand\":\"<b>x</b>\"}"], from: ["web/package.json:8"], verdict: "unchecked", usable: false }],
-  });
-  it("names the item, links to the recipe page to read it and save it there, and gives no way to apply it from here", () => {
-    const html = renderSetupPage(context, view("browser_evidence"));
-    expect(html).toContain("Browser evidence pages");
-    expect(html).toContain('href="/s/t/browser-evidence/web"');
-    expect(html).not.toContain("<b>x</b>");
-    expect(html).not.toContain('type="checkbox"');
-    // A page with no such item has no such link (golden).
-    expect(renderSetupPage(context, view("allowed_domain"))).not.toContain("/browser-evidence/");
   });
 });

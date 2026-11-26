@@ -6,7 +6,6 @@ import { describe, expect, it } from "vitest";
 import { orgScoped, type JsonValue } from "@agentx/contracts";
 import { SETUP_HOST_KIND, SETUP_HOST_OPEN_MAX, approvedHostsOf, hostAskDigest, hostAskSubjectId, hostDecisionRequestId, listHostAsks, readOpenHostAsk, requestHostAsk, type SetupHostAsk } from "../../packages/broker/src/core/setup-agent/host-ask.js";
 import { hostAskKey } from "../../packages/broker/src/core/setup-agent/keys.js";
-import { hostRequestId } from "../../packages/broker/src/local/app/setup-agent.js";
 import { SETUP_HOST_NEEDS_ADMIN, setupHostCardOf } from "../../packages/broker/src/core-host/setup-approval.js";
 import { SETUP_NO_HOST_WAITING } from "../../packages/broker/src/core-host/setup-run-routes.js";
 import { SETUP_HOST_SUBJECT, SETUP_PROPOSAL_SUBJECT, APPROVAL_PROOF_METHOD, createHostedApprovers, issueSetupHostApprovalProof, issueSetupApprovalProof } from "../../packages/broker/src/core-host/hosted-approvers.js";
@@ -167,12 +166,6 @@ describe("L4-SF (d): the host's own checks are unchanged", () => {
     for (const host of ["pastebin.com", "abc.ngrok.io", "db.internal"]) expect(await requestHostAsk(table(world), { orgId: FAKE_COMPANY, project: "payments", host, taskId, projectDomains: [] })).toMatchObject({ outcome: "refused" });
     expect(await listHostAsks(table(world), FAKE_COMPANY, "payments", ["open", "approved", "refused"])).toEqual([]);
     expect(SETUP_HOST_OPEN_MAX).toBe(20);
-  });
-
-  it("uses the laptop's request id for the same ask (one formula)", async () => {
-    const { world } = await setupWorld();
-    const ask = await seedAsk(world, FAKE_COMPANY, "payments");
-    expect(hostDecisionRequestId(ask)).toBe(hostRequestId(ask));
   });
 });
 
