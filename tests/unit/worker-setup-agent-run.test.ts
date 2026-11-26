@@ -119,10 +119,10 @@ describe("F5: a run a person stopped finishes, within a few seconds, and reports
   it("is bounded: when the finish takes longer than the bound it reports the stop with no proposal, and still tears the sandbox and the network down", async () => {
     const t = await world({ script: stopMidRun });
     t.input.stopFinishMs = 30;
-    t.input.ports.checkFiles = async () => { t.w.order.push("checkFiles"); if (t.w.order.includes("sandbox.dispose")) await new Promise((resolve) => setTimeout(resolve, 400)); return { ok: true }; };
+    t.input.ports.checkFiles = async () => { t.w.order.push("checkFiles"); if (t.w.order.includes("sandbox.dispose")) await new Promise((resolve) => setTimeout(resolve, 5_000)); return { ok: true }; };
     const started = Date.now();
     const result = await runSetupAgent(t.input);
-    expect(Date.now() - started).toBeLessThan(350);
+    expect(Date.now() - started).toBeLessThan(2_000);
     expect(result.setupProposal).toBeUndefined();
     expect(result.setupRunSummary).toMatchObject({ partial: true });
     expect(t.w.stopped.network).toBe(true);

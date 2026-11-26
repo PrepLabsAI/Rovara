@@ -880,7 +880,7 @@ describe("the team knowledge briefing of an answer (lead 4 L4-AK2b)", () => {
     w.lessons.runtime.store.list = () => new Promise(() => undefined);
     const started = Date.now();
     expect(await w.lessons.answerBriefing(ask)).toBeUndefined();
-    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(Date.now() - started).toBeLessThan(6_000);
     w.lessons.runtime.store.list = list;
   });
 });

@@ -214,10 +214,13 @@ describe("a big file with many citations (pre-review S5)", () => {
     const many = proposalOf({ setup: Array.from({ length: 30 }, (_, n) => item(`c${n}`, [`make target${n}`], [cite("big.md", `run step number ${n} with make target${n}`)])) });
     const timed = async (proposal: SetupProposal) => { const started = performance.now(); const result = await verifyProposalDetailed(async () => text, proposal, { now: () => 1_000 }); return { ms: performance.now() - started, result }; };
     await timed(one);
-    const single = await timed(one);
+    // The base is the median of three warm runs (one short run is not a stable base). Thirty citations that each rebuilt the text would cost about 30x one;
+    // the work is shared when they cost about 1.2x, so 8x plus 500 ms has headroom for a loaded runner and still fails far below 30x.
+    const singles = [await timed(one), await timed(one), await timed(one)].sort((a, b) => a.ms - b.ms);
+    const single = singles[1]!;
     const all = await timed(many);
     expect(Object.values(all.result.items).every((verdict) => verdict === "verified")).toBe(true);
-    expect(all.ms).toBeLessThan(single.ms * 4 + 300);
+    expect(all.ms).toBeLessThan(single.ms * 8 + 500);
   });
 });
 

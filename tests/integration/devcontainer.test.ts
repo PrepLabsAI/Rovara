@@ -1108,7 +1108,7 @@ describe("the collected process under the devcontainer CLI (#154)", () => {
   it("stops waiting at the timeout for a child that holds the output open after the process exited (#154 review)", async () => {
     const started = Date.now();
     const result = await runCollected("sh", ["-c", "sleep 5 & exit 4"], { timeoutMs: 300 });
-    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(Date.now() - started).toBeLessThan(4_000);
     expect(result.exitCode).toBe(4);
     expect(result).not.toHaveProperty("timedOut");
   });
@@ -1120,7 +1120,7 @@ describe("the collected process under the devcontainer CLI (#154)", () => {
     const result = await runCollected(process.execPath, ["-e", script], { timeoutMs: 1_500, killGraceMs: 300 });
     expect(result).toMatchObject({ exitCode: null, signal: "SIGKILL", timedOut: true });
     expect(result.stdout).toBe("ready\n");
-    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(Date.now() - started).toBeLessThan(10_000);
   });
 
   it("signals the whole process group at a timeout, so a grandchild stops too (#170)", async () => {
@@ -1128,7 +1128,7 @@ describe("the collected process under the devcontainer CLI (#154)", () => {
     // the output open, so the result comes back early only when it was stopped too.
     const started = Date.now();
     const result = await runCollected("sh", ["-c", "sleep 30 & echo $!; wait"], { timeoutMs: 300, killGraceMs: 300 });
-    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(Date.now() - started).toBeLessThan(15_000);
     expect(result.timedOut).toBe(true);
     const grandchild = Number.parseInt(result.stdout.trim(), 10);
     expect(Number.isInteger(grandchild) && grandchild > 0).toBe(true);

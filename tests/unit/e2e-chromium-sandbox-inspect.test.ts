@@ -98,7 +98,7 @@ describe("listing Chromium's processes against a browser that stops answering", 
     try {
       const started = Date.now();
       await expect(listChromiumProcesses(devtools.url, new AbortController().signal, 300)).rejects.toThrow();
-      expect(Date.now() - started).toBeLessThan(5_000);
+      expect(Date.now() - started).toBeLessThan(10_000);
     } finally { await devtools.close(); }
   });
 

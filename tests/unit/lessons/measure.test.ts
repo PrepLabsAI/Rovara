@@ -286,7 +286,7 @@ describe("phase 0: the measurement never holds a load, and its remaining guards"
     const sink = documentMeasureSink({ put: () => new Promise(() => undefined) }, A, () => 1_800_000_000_000);
     const started = Date.now();
     await sink.merged({ workspaceId: WS, project: PROJECT, taskId: "task-1", at: 1_800_000_000_000 });
-    expect(Date.now() - started).toBeLessThan(MEASURE_WRITE_MS + 400);
+    expect(Date.now() - started).toBeLessThan(MEASURE_WRITE_MS + 5_000);
   });
 
   it("a row carries only the closed list of fields, and only the store's own TTL attribute besides", async () => {

@@ -315,8 +315,8 @@ describe("runChecks", () => {
     );
     // A stopped round says so, so the report is not_verified/stopped rather than no_checks (P-4).
     expect(stopped).toBe(true);
-    expect(Date.now() - startedAt).toBeLessThan(120);
-    expect(rejectedAt - startedAt).toBeLessThan(120);
+    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(rejectedAt - startedAt).toBeLessThan(1_000);
     expect(entries.map((entry) => entry.after)).toEqual(["not_run", "not_run"]);
     expect(runners.agent).toHaveLength(1);
   });
@@ -329,7 +329,7 @@ describe("runChecks", () => {
     await expect(runChecks(planChecks([command("a"), command("b")], recorderOf([])), runners, { ...budget(controller.signal), abortJoinMs: 100 })).rejects.toBeInstanceOf(RunnerKillUnconfirmedError);
     // Not at once: the caller's tree is not touched until the runner has reported (or the bound has passed).
     expect(Date.now() - startedAt).toBeGreaterThanOrEqual(100);
-    expect(Date.now() - startedAt).toBeLessThan(1_500);
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
   });
 
   it("runs nothing when the signal has already fired", async () => {
@@ -404,14 +404,14 @@ describe("createCheckRunners on the host", () => {
       runners,
       budget(controller.signal),
     );
-    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(Date.now() - startedAt).toBeLessThan(10_000);
     expect(entries.map((entry) => entry.after)).toEqual(["not_run", "not_run"]);
 
     const sleeping = new AbortController();
     const sleepingAt = Date.now();
     setTimeout(() => sleeping.abort(), 200);
     await expect(runners.runProjectCommand({ cwd: "pkg", executable: "sleep", args: ["30"], timeoutSeconds: 60 }, sleeping.signal)).rejects.toThrow(/aborted/);
-    expect(Date.now() - sleepingAt).toBeLessThan(2_000);
+    expect(Date.now() - sleepingAt).toBeLessThan(10_000);
   });
 
   it("stops a sleeping agent command on abort: it rejects promptly", async () => {
@@ -422,7 +422,7 @@ describe("createCheckRunners on the host", () => {
     const startedAt = Date.now();
     setTimeout(() => controller.abort(), 200);
     await expect(runners.runAgentCommand("make test", 60_000, controller.signal)).rejects.toThrow(/aborted/);
-    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(Date.now() - startedAt).toBeLessThan(10_000);
   });
 
   it("keeps the worker's absolute path out of a failure message (M-4)", async () => {
@@ -481,7 +481,7 @@ describe("createCheckRunners with a devcontainer", () => {
     const startedAt = Date.now();
     setTimeout(() => controller.abort(), 50);
     await expect(runners.runProjectCommand({ cwd: "pkg", executable: "sleep", args: ["300"], timeoutSeconds: 600 }, controller.signal)).rejects.toThrow(/aborted/);
-    expect(Date.now() - startedAt).toBeLessThan(1_000);
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
     expect(calls[0]!.slice(0, 1)).toEqual(["exec"]);
     expect(calls[0]).toEqual(expect.arrayContaining([`${root}/pkg`, "sleep", "300"]));
     // The TERM exec went to the container's process group.

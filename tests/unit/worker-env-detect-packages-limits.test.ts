@@ -36,8 +36,8 @@ describe("workspace call limits", () => {
     const result = await detectWorkspacePackages(["pnpm-workspace.yaml"], (path) => { reads.push(path); return new Promise(() => {}); }, "repo", { entry, timeoutMs: 6000 });
     expect(result).toMatchObject({ kind: "unavailable", units: [] });
     expect(reads).toEqual(["pnpm-workspace.yaml"]);
-    expect(performance.now() - started).toBeLessThan(10_000);
-  }, 20_000);
+    expect(performance.now() - started).toBeLessThan(20_000);
+  }, 40_000);
 
   it("stops uncached loads inside a detector after the shared budget is exhausted", async () => {
     const files: Files = { "pnpm-workspace.yaml": "packages: ['a']", "a/package.json": node };

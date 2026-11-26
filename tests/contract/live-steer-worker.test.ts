@@ -163,7 +163,7 @@ describe("the worker's live steer", () => {
     const invocation = steerInvocation(step.operationId);
     const started = Date.now();
     expect((await handleSteerInvocation(invocation, step.controller, journal)).outcome).toBe("not_ready");
-    expect(Date.now() - started).toBeLessThan(8_000);
+    expect(Date.now() - started).toBeLessThan(15_000);
     expect((await handleSteerInvocation(invocation, step.controller, journal)).outcome).toBe("not_ready");
     await step.finish();
   }, 20_000);

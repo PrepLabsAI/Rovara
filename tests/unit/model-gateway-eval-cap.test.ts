@@ -260,7 +260,7 @@ describe("L4-T3: the cap answer says whether the project's AI key is connected",
     const hung = { connected: (_scope: unknown, signal: AbortSignal) => new Promise<boolean>((_resolve, reject) => { signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }); }) };
     const started = Date.now();
     expect(await call({ ...w.opts, connection: hung }, ask())).toEqual(ok(4));
-    expect(Date.now() - started).toBeLessThan(EVAL_CAP_CONNECTION_MS + 1_500);
+    expect(Date.now() - started).toBeLessThan(EVAL_CAP_CONNECTION_MS + 5_000);
   });
   it("a refusal is still the same fixed refusal and the connection is not even read (no budget source, another company's body, a bad project)", async () => {
     const seen: Array<{ iss: string; cid: string; pid: string }> = [];

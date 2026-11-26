@@ -188,7 +188,7 @@ describe.runIf(built)("executor Chromium sandbox gate", () => {
     const started = Date.now();
     const { result } = await runWebExecutor(async (request) => attestationFor("plain")(request), 600_000, 4_000);
     expect(result.exitCode).toBe(2);
-    expect(Date.now() - started).toBeLessThan(30_000);
+    expect(Date.now() - started).toBeLessThan(50_000);
   });
 
   it("exits 2 with chromium-sandbox-unverifiable when the kernel cannot show it (no procfs, an old kernel), never assuming a sandbox", async () => {

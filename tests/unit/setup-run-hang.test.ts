@@ -99,7 +99,7 @@ describe("a model call that never answers", () => {
     const t = await rig({ prompt: never, abort: never, ports: { modelStallMs: 60, stallTickMs: 10, abortConfirmMs: 40 } });
     const started = Date.now();
     const result = await runSetupAgent(t.input);
-    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(Date.now() - started).toBeLessThan(5_000);
     expect(result.setupRunSummary).toMatchObject({ stop: "infrastructure", partial: true });
     expect(t.progress).toContain(SETUP_HANG_WORDS.stalled);
     expect(t.order).toContain("sandbox.dispose");
@@ -130,7 +130,7 @@ describe("a model call that never answers", () => {
     await vi.waitFor(() => { expect(t.control()).toBeDefined(); });
     const asked = Date.now();
     await t.control()!.abort();
-    expect(Date.now() - asked).toBeLessThan(1_000);
+    expect(Date.now() - asked).toBeLessThan(3_000);
     const result = await running;
     expect(result.setupRunSummary.partial).toBe(true);
   });

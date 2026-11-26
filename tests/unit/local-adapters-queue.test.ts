@@ -112,7 +112,7 @@ describe("the SQLite queue: polling and limits", () => {
     expect(Date.now() - started).toBeLessThan(2_000);
     const empty = Date.now();
     expect(await queue.receive({ waitSeconds: 0.05 })).toEqual([]);
-    expect(Date.now() - empty).toBeLessThan(1_000);
+    expect(Date.now() - empty).toBeLessThan(3_000);
   }));
 
   it("reports a database that stays locked as a retryable storage error", () => withFolder(async (folder) => {

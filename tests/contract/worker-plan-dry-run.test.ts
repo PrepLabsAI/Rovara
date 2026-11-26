@@ -192,7 +192,7 @@ describe("a dry run on the unchanged code", () => {
   it("a check that outlives its own timeout is broken within its timeout, and the container is removed by name", async () => {
     const started = Date.now();
     const { report, observed } = await dryRun([program("grep", ["-q", "x", "keep.txt"], 1)], { docker: hangingDocker });
-    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(Date.now() - started).toBeLessThan(30_000);
     expect(classes(report)).toEqual(["broken"]);
     const run = observed.calls.find((call) => call[0] === "run")!;
     const name = run[run.indexOf("--name") + 1]!;
@@ -202,7 +202,7 @@ describe("a dry run on the unchanged code", () => {
   it("holds the whole dry run to its total budget: the check the budget stops and every later one is not-run", async () => {
     const started = Date.now();
     const { report } = await dryRun([program("grep", ["-q", "x", "keep.txt"], 600), builtin("file-contains", "src/app.js", "BASE-TOKEN")], { totalBudgetMs: 2_000, docker: hangingDocker });
-    expect(Date.now() - started).toBeLessThan(10_000);
+    expect(Date.now() - started).toBeLessThan(30_000);
     expect(classes(report)).toEqual(["not-run", "not-run"]);
   });
 

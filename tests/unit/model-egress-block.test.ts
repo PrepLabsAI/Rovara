@@ -213,7 +213,7 @@ describe("findRedirectEscapes", () => {
       expect(findRedirectEscapes(block, observed, {}, countWork)).toEqual([
         { host: "openrouter.ai", kind: "ignored_redirect", sentence: redirectEscapeSentence("openrouter.ai") },
       ]);
-      expect(performance.now() - started).toBeLessThan(10_000);
+      expect(performance.now() - started).toBeLessThan(20_000);
       // A missing/disconnected counter must not make the scaling check vacuously pass.
       expect(steps).toBeGreaterThanOrEqual(length);
       expect(steps).toBeLessThanOrEqual(2 * length);

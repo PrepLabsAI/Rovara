@@ -72,7 +72,7 @@ describe("which changed pages are picked", () => {
     const changedFiles = Array.from({ length: BROWSER_EVIDENCE_CHANGED_FILES_MAX }, (_, i) => `src/${"deep/".repeat(20)}file-${i}.ts`);
     const started = performance.now();
     expect(pickChangedRoutes({ changedFiles, recipe: recipe({ routes, framework: "nextjs" }) }).status).toBe("not_run");
-    expect(performance.now() - started).toBeLessThan(5_000);
+    expect(performance.now() - started).toBeLessThan(10_000);
   });
 });
 

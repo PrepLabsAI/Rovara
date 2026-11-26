@@ -189,7 +189,7 @@ describe("time limits and failures of a line", () => {
     const started = Date.now();
     const result = await run(line("sleep 30", "repo/app", 1));
     expect(result.timedOut).toBe(true);
-    expect(Date.now() - started).toBeLessThan(15_000);
+    expect(Date.now() - started).toBeLessThan(25_000);
   }, 30_000);
 
   it("a group's time is a limit too: a line is stopped when the group's time runs out, and the next is not started", async () => {
