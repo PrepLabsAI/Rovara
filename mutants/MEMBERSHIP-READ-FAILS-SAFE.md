@@ -95,3 +95,11 @@ Each mutant was applied to the committed file, the named test files run alone, t
 | company-membership.ts lostTheSeatRace (M-1) | Every TransactionCanceledException is a lost race again (the ConditionalCheckFailed reason test removed) | membership-read-signin-paths | killed, 1 failed |
 | sign-in-links.ts adminOver malformed-row catch (S-2, first site) | The `isUnreadableMembershipRow` catch removed (a malformed row becomes the failed-read 503) | sign-in-links | killed, 1 failed |
 | sign-in-links.ts unlink's own membership read (S-2, second site) | The same catch removed | none: equivalent on the wire. The lambda answers every refusal and every marked failure there with the same fixed "unavailable" 503 words, and a missing row already did, so no test can tell them apart. The change keeps the two cases the same as before. | survived (equivalent) |
+
+## After the merge with code/next 35cda32ce (batch A)
+
+| Mutant / production location | Mutation | Test file that kills it | Result |
+|---|---|---|---|
+| broker.ts administratorOfTaskCompany (row 26), now through the share-mode route | The rethrow removed | admin-name-route-guard | killed, 1 failed |
+| developer-tasks.ts listRowDetail core money read | `.catch(orIfNotMembershipFailure(undefined))` back to `.catch(() => undefined)` | aws-engine-boundary | killed, 1 failed |
+| developer-tasks.ts listRowDetail core taskReadable | `.catch(orIfNotMembershipFailure(false))` back to `.catch(() => false)` | aws-engine-boundary | killed, 1 failed |
