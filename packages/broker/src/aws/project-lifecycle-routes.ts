@@ -25,7 +25,7 @@
 import { GetCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import {
-  AGENTX_NAME_PATTERN, OrgIdSchema, ReviewedProjectArchiveBodySchema, ReviewedProjectRestoreBodySchema, agentXError, companyScoped, orgProjectCatalogKey, projectMetaKey,
+  AGENTX_NAME_PATTERN, OrgIdSchema, ReviewedProjectArchiveBodySchema, ReviewedProjectRestoreBodySchema, agentXError, companyLog, companyScoped, orgProjectCatalogKey, projectMetaKey,
   type OrgId, type OrgRole, type ReviewedProjectArchiveOutcome, type ReviewedProjectArchivePreview, type ReviewedProjectRestoreOutcome, type ReviewedProjectRestorePreview,
 } from "@agentx/contracts";
 import { recordInCompany } from "./company-check.js";
@@ -67,6 +67,9 @@ export function lifecycleAccess(role: OrgRole, grant: "developer" | "administrat
   if (grant === "developer") return "view";
   return "none";
 }
+
+/** The refusal row's entity type, written once as a literal so the company inventory scan classifies it. */
+const REFUSAL_ROW = { entityType: "PROJECT_LIFECYCLE_REFUSAL" };
 
 /** The partition of one project's lifecycle receipts and audit rows, under the company's own key. */
 export const lifecyclePartition = (companyId: string, project: string): string => companyScoped(companyId, `PROJECT_LIFECYCLE#${project}`);
@@ -198,12 +201,12 @@ async function recordRefusal(ctx: ProjectLifecycleContext, personId: string, cur
       Key: { pk: lifecyclePartition(current.companyId, current.project), sk: `${lifecycleRefusalPrefix}${personId}#${action}#${current.incarnationRevision ?? "none"}` },
       UpdateExpression: `SET entityType = :entity, companyId = :company, #project = :project, #action = :action, personId = :person, #basis = :basis, #reason = :reason, lastPreviewedIncarnation = :previewed, lastRequestId = :request, lastAt = :at, firstAt = if_not_exists(firstAt, :at)${current.incarnationRevision === undefined ? "" : ", currentIncarnation = :current"} ADD refusals :one`,
       ExpressionAttributeNames: { "#project": "project", "#action": "action", "#basis": "basis", "#reason": "reason" },
-      ExpressionAttributeValues: { ":entity": "PROJECT_LIFECYCLE_REFUSAL", ":company": current.companyId, ":project": current.project, ":action": action, ":person": personId, ":basis": current.basis, ":reason": "project_incarnation_changed",
+      ExpressionAttributeValues: { ":entity": REFUSAL_ROW.entityType, ":company": current.companyId, ":project": current.project, ":action": action, ":person": personId, ":basis": current.basis, ":reason": "project_incarnation_changed",
         ":previewed": body.expectedProjectIncarnation, ":request": body.requestId, ":at": at, ":one": 1, ...(current.incarnationRevision === undefined ? {} : { ":current": current.incarnationRevision }) },
     }));
   } catch (error) {
     // The refusal stands without its row; a failing audit write must not be silent.
-    console.warn(JSON.stringify({ component: "broker", level: "warn", event: "project_lifecycle.refusal_audit_failed", error: (error as { name?: unknown } | undefined)?.name === undefined ? "unknown" : String((error as { name: unknown }).name).slice(0, 80) }));
+    companyLog(current.companyId, (line) => console.warn(JSON.stringify(line)))({ component: "broker", level: "warn", event: "project_lifecycle.refusal_audit_failed", error: (error as { name?: unknown } | undefined)?.name === undefined ? "unknown" : String((error as { name: unknown }).name).slice(0, 80) });
   }
 }
 

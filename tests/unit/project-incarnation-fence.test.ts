@@ -133,7 +133,7 @@ describe("the confirm names the incarnation that was previewed", () => {
     await expect(h.call("archive", h.archive({ expectedProjectIncarnation: 7 }))).rejects.toMatchObject({ code: "CHANGE_STALE", message: `CHANGE_STALE: ${LIFECYCLE_INCARNATION_CHANGED}` });
     expect(h.db.get(h.key.pk, h.key.sk)).toMatchObject({ status: "active" });
     expect(warn).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(warn.mock.calls[0]![0] as string)).toEqual({ component: "broker", level: "warn", event: "project_lifecycle.refusal_audit_failed", error: "ProvisionedThroughputExceededException" });
+    expect(JSON.parse(warn.mock.calls[0]![0] as string)).toEqual({ companyId, component: "broker", level: "warn", event: "project_lifecycle.refusal_audit_failed", error: "ProvisionedThroughputExceededException" });
     warn.mockRestore();
   });
 
