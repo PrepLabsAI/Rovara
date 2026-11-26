@@ -87,3 +87,11 @@ Each mutant was applied to the committed file, the named test files run alone, t
 | dev-routes.ts 1080 (script-token create) | same | core-host-dev-routes | killed, 1 failed |
 | sign-in-links.ts adminOver (row 25) | the rethrow removed | sign-in-links | killed, 1 failed |
 | broker.ts administratorOfTaskCompany (row 26) | the rethrow removed | admin-name-route-guard | killed, 1 failed |
+
+## Opus FAIL round (M-1, S-2, S-3; head c88eae3e2)
+
+| Mutant / production location | Mutation | Test file that kills it | Result |
+|---|---|---|---|
+| company-membership.ts lostTheSeatRace (M-1) | Every TransactionCanceledException is a lost race again (the ConditionalCheckFailed reason test removed) | membership-read-signin-paths | killed, 1 failed |
+| sign-in-links.ts adminOver malformed-row catch (S-2, first site) | The `isUnreadableMembershipRow` catch removed (a malformed row becomes the failed-read 503) | sign-in-links | killed, 1 failed |
+| sign-in-links.ts unlink's own membership read (S-2, second site) | The same catch removed | none: equivalent on the wire. The lambda answers every refusal and every marked failure there with the same fixed "unavailable" 503 words, and a missing row already did, so no test can tell them apart. The change keeps the two cases the same as before. | survived (equivalent) |
