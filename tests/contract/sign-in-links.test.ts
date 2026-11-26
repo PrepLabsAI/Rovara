@@ -733,7 +733,8 @@ describe("adopting an unused company-less record (SLACK-LINK-L2)", () => {
     expect(w.db.find((row) => row.pk === `DEVELOPER#${SLACK()}`)).toHaveLength(1);
     expect(w.linkRows()).toEqual([expect.objectContaining({ personId: P, method: "slack", linkedId: SLACK() })]);
     expect(w.db.get(`DEVELOPER#${P}`, "META")).toMatchObject({ slackUserId: "U0LINKME1", linkedSlackUserId: "U0LINKME1" });
-    expect(w.companyLog("company-signin-link")).toEqual([expect.objectContaining({ companyId: X, personId: P, createdBy: P, method: "slack", adopted: true })]);
+    expect(w.companyLog("company-signin-link")).toEqual([expect.objectContaining({ companyId: X, personId: P, createdBy: P, method: "slack", adopted: true, adoptedId: SLACK() })]);
+    expect(JSON.stringify(w.companyLog("company-signin-link"))).not.toContain("U0LINKME1");
     expect(w.logs).toContainEqual(expect.objectContaining({ event: "signin.linked", developerId: P, method: "slack", adopted: true }));
     // The adopted record's own earlier session ends; no membership was ever written for it; Slack now signs in as P.
     expect((await w.refresh(alone.refresh!)).status).toBe(400);

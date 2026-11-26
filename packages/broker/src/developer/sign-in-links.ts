@@ -19,7 +19,7 @@
 //           merge (`adoptableCompanyLessRecord`, `adoptWrite`); logged as an adoption. Any other existing record keeps the identity taken.
 //
 // Refusals: one fixed answer (`refused`) for every reason a link cannot be made: the identity is already someone's (any existing record but a kept
-// unlinked one of this company, or a membership row), a Slack identity from a workspace that proves nothing for this company (never linked by email: DEC 254h), the company's own
+// unlinked one of this company or an unused company-less one that is adopted, or a membership row), a Slack identity from a workspace that proves nothing for this company (never linked by email: DEC 254h), the company's own
 // sign-in refuses the method, a revoked person or member, the person already has that method, or a used, expired or foreign link. Logs carry
 // fixed reasons and opaque ids only; never a code, a token, an email address or a provider's words.
 import { randomBytes, timingSafeEqual } from "node:crypto";
@@ -163,8 +163,8 @@ function adoptWrite(tableName: string, linkedId: string, personId: string, adopt
 
 /** What stands in the way of an identity being linked: nothing (a new record is written), a kept unlinked record (linked again), an unused company-less record (adopted), or someone else's (taken). */
 type Claim = { kind: "new" } | { kind: "relink"; relink: { unlinkedAt: string; unlinkedFrom: string; unlinkedCompany?: string } } | { kind: "adopt"; adopt: AdoptableRecord } | { kind: "taken" };
-/** The marks the company log row of a link carries for a relink or an adoption. */
-const claimMarks = (claim: Claim) => (claim.kind === "relink" ? { relink: true, previousPersonId: claim.relink.unlinkedFrom } : claim.kind === "adopt" ? { adopted: true } : {});
+/** The marks the company log row of a link carries for a relink (the person it was unlinked from) or an adoption (the adopted record's own opaque id, its owner key: the connected-method row that names it goes on an unlink). */
+const claimMarks = (claim: Claim, linkedId: string) => (claim.kind === "relink" ? { relink: true, previousPersonId: claim.relink.unlinkedFrom } : claim.kind === "adopt" ? { adopted: true, adoptedId: linkedId } : {});
 /** The write of the linked identity's own record for each kind of claim (a new record, the kept one linked again, or the unused one adopted). */
 function identityWrite(tableName: string, claim: Claim, linkedId: string, personId: string, companyId: string, identity: Proved, at: string): Write {
   if (claim.kind === "adopt") return adoptWrite(tableName, linkedId, personId, claim.adopt, identity, at);
@@ -378,7 +378,7 @@ export function createSignInLinks(options: SignInLinkOptions) {
         { Put: { TableName: tableName, ConditionExpression: "attribute_not_exists(pk)", Item: {
           pk: companyScoped(OrgIdSchema.parse(member.companyId), "COMPANY_LOG"), sk: `${at}#${randomBytes(16).toString("hex")}`, entityType: "COMPANY_LOG", event: "company-signin-link",
           companyId: member.companyId, personId: developerId, createdBy: developerId, createdAt: at, method: link.method,
-          ...claimMarks(claim),
+          ...claimMarks(claim, linkedId),
         } } },
       ];
       try { await documentClient.send(new TransactWriteCommand({ TransactItems: writes })); }
