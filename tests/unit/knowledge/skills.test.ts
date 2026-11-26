@@ -8,6 +8,7 @@ import { createLocalOwnerApprovers, createLocalOwnerIdentity, createPriceTableMe
 import { createMemoryModelKeyStore } from "../../../packages/broker/src/ports/model-key-stores.js";
 import { builtinModelProviderBook } from "../../../packages/broker/src/local/model-proxy/index.js";
 import { createLocalLessons, type LocalLessons } from "../../../packages/broker/src/local/app/lessons.js";
+import { hostedDispatcherFlow } from "../../../packages/broker/src/aws/worker-machines/dispatcher-core.js";
 import { setLearnedLessonsGate } from "../../../packages/broker/src/lessons/policy.js";
 import { writeLearningMode } from "../../../packages/broker/src/lessons/document-settings.js";
 import { buildLessonsView } from "../../../packages/broker/src/lessons/view.js";
@@ -505,19 +506,44 @@ describe("delivery to a plan or build step", () => {
     expect((await ask(w, { features: [ROVARA_SKILLS_FEATURE] })).rovaraSkills).toHaveLength(1);
   });
 
-  it("sends none when lessons are switched off or the project's learning is Off, and for a workspace that is not this company's", async () => {
+  it("sends the live skills whatever the install's lessons switch and the project's learning mode say (DEC 254zzz577 a), and none for a workspace that is not this company's", async () => {
     const w = await world();
     await live(w);
-    await writeLearningMode(w.h.store, KEY, "Off", 1);
-    expect((await ask(w)).rovaraSkills).toBeUndefined();
-    await writeLearningMode(w.h.store, KEY, "Suggest", 2);
-    expect((await ask(w)).rovaraSkills).toHaveLength(1);
     expect((await w.lessons.learnedFor({ workspaceId: "no-such-workspace", operationId: randomUUID(), workflowMode: "PLAN", features: [ROVARA_SKILLS_FEATURE] })).rovaraSkills).toBeUndefined();
-    // The install's lessons switch: off means none of the team's memory is sent, skills included.
-    w.setEnabled(false);
-    expect((await ask(w)).rovaraSkills).toBeUndefined();
-    w.setEnabled(true);
-    expect((await ask(w)).rovaraSkills).toHaveLength(1);
+    for (const enabled of [true, false]) {
+      w.setEnabled(enabled);
+      for (const [index, mode] of (["Off", "Collect", "Suggest", "On"] as const).entries()) {
+        await writeLearningMode(w.h.store, KEY, mode, index + 1);
+        const answer = await ask(w);
+        expect(answer.rovaraSkills, `switch ${String(enabled)}, mode ${mode}`).toHaveLength(1);
+        // The lessons stay behind both: with the switch off, or the mode Off or Collect, nothing of the lessons is sent.
+        if (!enabled || mode === "Off" || mode === "Collect") expect(answer.learnedContext, `switch ${String(enabled)}, mode ${mode}`).toBeUndefined();
+      }
+    }
+  });
+
+  it("PARITY with the hosted dispatcher's reader: the same skill rows give the same skills under every combination of the install's switch and the project's learning mode", async () => {
+    const w = await world();
+    await live(w);
+    const ws = w.workspaceId;
+    await w.h.store.put({ item: { pk: `WORKSPACE#${ws}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", companyId: COMPANY, workspaceId: ws } });
+    const send = async (command: { input: { Key: { pk: string; sk: string } } }) => ({ Item: await w.h.store.get(command.input.Key) });
+    const people = { approvers: async () => ({ complete: true, membershipVersion: 1, ownerIds: ["ann"], eligibleIds: ["ann", "bob"], lastEligibleLossAtMs: null }), onProjectRoster: async () => true, linkedAccounts: async () => [], displayName: async () => "Person", isErased: async () => false };
+    for (const switchOn of [true, false]) {
+      const hosted = hostedDispatcherFlow(switchOn ? { ROVARA_CORE_LESSONS: "on" } : {}, { companyId: COMPANY, documentClient: { send } as never, tableName: "state", store: w.h.store, people, now: () => w.h.clock.now });
+      w.setEnabled(switchOn);
+      for (const [index, mode] of (["Off", "Collect", "Suggest", "On"] as const).entries()) {
+        await writeLearningMode(w.h.store, KEY, mode, index + 10);
+        for (const workflowMode of ["PLAN", "IMPLEMENT", "REVIEW"]) {
+          const features = [LEARNED_CONTEXT_FEATURE, ROVARA_SKILLS_FEATURE];
+          const laptop = await w.lessons.learnedFor({ workspaceId: ws, operationId: randomUUID(), workflowMode, features });
+          const onHosted = await hosted!.learned!({ workspaceId: ws, operationId: randomUUID(), workflowMode, features });
+          const label = `switch ${String(switchOn)}, mode ${mode}, ${workflowMode}`;
+          expect(onHosted.rovaraSkills?.map((skill) => skill.name), label).toEqual(laptop.rovaraSkills?.map((skill) => skill.name));
+          expect(onHosted.rovaraSkills === undefined, label).toBe(workflowMode === "REVIEW");
+        }
+      }
+    }
   });
 
   it("a retired skill is not sent to the next step", async () => {
