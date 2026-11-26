@@ -1,3 +1,4 @@
+import { rethrowMembershipReadFailure } from "../core/membership-read.js";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { GetCommand, QueryCommand, TransactWriteCommand, type TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
@@ -286,7 +287,8 @@ async function checked(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, 
   if (admission !== undefined) {
     try { return await checkedFresh(deps, task, developerId, admission); } catch { return unavailable(); }
   }
-  try { return await checkedFresh(deps, task, developerId); } catch { return denied(); }
+  // A membership or grant read that FAILED is the retryable 503 (membership-read.ts), never a denial: the person is not told "no such task" or "you may not" for it.
+  try { return await checkedFresh(deps, task, developerId); } catch (error) { rethrowMembershipReadFailure(error); return denied(); }
 }
 
 function preflight(items: readonly TransactItem[]): void {

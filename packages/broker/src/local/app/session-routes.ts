@@ -31,6 +31,7 @@ import { currentPress } from "../../core/task-flow/current-press.js";
 import { gatewayChargesMember } from "../../core/cost/task-payer.js";
 import type { TaskRecord } from "../../core/task-flow/records.js";
 import type { SecondReview } from "../../core/second-review/index.js";
+import { rethrowMembershipReadFailure } from "../../core/membership-read.js";
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
 const SESSIONS = /^\/v1\/app\/sessions(?:\/([A-Za-z0-9_-]{1,100})(?:\/(stop|retry|messages|answers|revise-plan|follow|unfollow|presence|close|log))?)?$/u;
@@ -116,7 +117,7 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
       const step = await flow.deps.access.checkStep(task);
       // The starter's own rule (a task with no People list) refuses in its own words; a list refuses in the one no-owner sentence; only "could not read" says nothing.
       return !step.allowed && step.message !== OWNER_UNREADABLE_WORDS ? OWNER_LEFT_PROJECT_WORDS : undefined;
-    } catch { return undefined; }
+    } catch (error) { rethrowMembershipReadFailure(error); return undefined; }
   };
 
   /** Who the task's next step is charged to, by the host's own step rule (the task's current owner): undefined for a task that has ended, for a host that names none, and for a read that does not answer. */

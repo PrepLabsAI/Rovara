@@ -124,6 +124,20 @@ function cancellationReasons(error: unknown): CancellationReason[] | undefined {
   return Array.isArray(reasons) ? (reasons as CancellationReason[]) : undefined;
 }
 
+/** What a stored code grants: the grant's own fields only (never the challenge, the redirect or the expiry). */
+function grantOfCode(record: CodeRecord): CodeGrant {
+  return {
+    developerId: record.developerId, amr: record.amr, ...(typeof record.signedInId === "string" ? { signedInId: record.signedInId } : {}),
+    ...(record.slackUserId === undefined ? {} : { slackUserId: record.slackUserId }),
+    ...(record.clientId === undefined ? {} : { clientId: record.clientId }),
+    ...(record.administrator === true ? { administrator: true as const } : {}),
+    ...(record.scopes === undefined ? {} : { scopes: record.scopes }),
+    ...(record.companyId === undefined ? {} : { companyId: record.companyId }),
+    ...(record.installMethod === true ? { installMethod: true as const } : {}),
+    ...(record.joinedByInvite === true ? { joinedByInvite: true as const } : {}),
+  };
+}
+
 export class DeveloperSignInStore {
   constructor(private readonly input: { documentClient: { send(command: unknown): Promise<unknown> }; tableName: string; now: () => number }) {}
 
@@ -407,6 +421,16 @@ export class DeveloperSignInStore {
     return code;
   }
 
+  /**
+   * A code's grant read WITHOUT redeeming it: undefined for an unknown, used or expired code. The token endpoint reads it first to run the membership checks, so a membership read that fails
+   * answers the retryable 503 while the code is still unburned (redeemCode burns it, so a retry afterwards could never work). Nothing is verified or spent here.
+   */
+  async peekCode(code: string): Promise<CodeGrant | undefined> {
+    const record = await this.get<CodeRecord>(`CODE#${sha256Hex(code)}`);
+    if (record === undefined || record.usedAt !== undefined || record.expiresAt <= this.seconds()) return undefined;
+    return grantOfCode(record);
+  }
+
   async redeemCode(input: { code: string; verifier: string; redirectUri: string }): Promise<CodeGrant | undefined> {
     const pk = `CODE#${sha256Hex(input.code)}`;
     try {
@@ -424,16 +448,7 @@ export class DeveloperSignInStore {
     }
     const record = await this.get<CodeRecord>(pk);
     if (record === undefined || record.redirectUri !== input.redirectUri || !pkceChallengeMatches(input.verifier, record.codeChallenge)) return undefined;
-    return {
-      developerId: record.developerId, amr: record.amr, ...(typeof record.signedInId === "string" ? { signedInId: record.signedInId } : {}),
-      ...(record.slackUserId === undefined ? {} : { slackUserId: record.slackUserId }),
-      ...(record.clientId === undefined ? {} : { clientId: record.clientId }),
-      ...(record.administrator === true ? { administrator: true as const } : {}),
-      ...(record.scopes === undefined ? {} : { scopes: record.scopes }),
-      ...(record.companyId === undefined ? {} : { companyId: record.companyId }),
-      ...(record.installMethod === true ? { installMethod: true as const } : {}),
-      ...(record.joinedByInvite === true ? { joinedByInvite: true as const } : {}),
-    };
+    return grantOfCode(record);
   }
 
   /** `endsAt` (epoch seconds) is for a browser review sign-in, which has its own fixed length; every other session lasts DEVELOPER_SESSION_SECONDS. The stored record's clean-up time follows `endsAt`. */

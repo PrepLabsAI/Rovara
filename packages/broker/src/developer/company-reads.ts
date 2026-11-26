@@ -12,6 +12,7 @@ import {
 } from "@agentx/contracts";
 import { readCompanyAudit } from "../core/audit-read/index.js";
 import { readCompanyEvents } from "../core/work-events/read.js";
+import { rethrowMembershipReadFailure } from "../core/membership-read.js";
 
 export interface CompanyReadsConfiguration {
   /** The company's rows. Only `query` is used: nothing here writes. */
@@ -52,7 +53,8 @@ async function companyOfCaller(config: CompanyReadsConfiguration, caller: Compan
   let company: unknown;
   try {
     company = await config.companyOf(caller.developerId);
-  } catch {
+  } catch (error) {
+    rethrowMembershipReadFailure(error);
     throw agentXError("AUTH_REQUIRED", COMPANY_READ_REFUSED);
   }
   if (typeof company !== "string" || !OrgIdSchema.safeParse(company).success) throw agentXError("AUTH_REQUIRED", COMPANY_READ_REFUSED);
@@ -84,7 +86,8 @@ async function readableCompany(config: CompanyReadsConfiguration, caller: Compan
   let membership: { companyId: string; role: OrgRole } | undefined;
   try {
     membership = await config.membershipOf(caller.developerId);
-  } catch {
+  } catch (error) {
+    rethrowMembershipReadFailure(error);
     throw agentXError("AUTH_REQUIRED", COMPANY_READ_REFUSED);
   }
   if (membership === undefined || membership === null || (membership.role !== "owner" && membership.role !== "admin")) throw agentXError("FORBIDDEN", COMPANY_READ_FORBIDDEN);

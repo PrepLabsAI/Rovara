@@ -46,6 +46,7 @@ import {
   HANDOVER_TOO_BIG, HandOverRaced, HandOverTooBig, dropNonAdminGrants, dropStartedRemoval, finishHandOver, finishReceipt, pendingHandOver, pendingHandOvers, planHandOver, readRemoval, sameRemoval, startRemoval,
   type HandOverContext, type MemberRemovalRecord,
 } from "./company-member-handover.js";
+import { readingMembership, rethrowMembershipReadFailure } from "../core/membership-read.js";
 
 export const MEMBER_NOT_FOUND = "member not found";
 export const NOT_FOUND = "not found";
@@ -180,7 +181,7 @@ const isAdmin = (role: OrgRole) => role === "admin" || role === "owner";
 
 /** A person's live membership row, as the sign-in table holds it now; undefined when it is missing or does not read. */
 async function membershipOf(ctx: CompanyMemberRouteContext, personId: string): Promise<z.infer<typeof Membership> | undefined> {
-  const answer = await ctx.documentClient.send(new GetCommand({ TableName: ctx.signInTableName, Key: membershipKey(personId), ConsistentRead: true })) as { Item?: unknown };
+  const answer = await readingMembership(() => ctx.documentClient.send(new GetCommand({ TableName: ctx.signInTableName, Key: membershipKey(personId), ConsistentRead: true }))) as { Item?: unknown };
   const row = Membership.safeParse(answer.Item);
   return row.success && row.data.personId === personId ? row.data : undefined;
 }
@@ -206,7 +207,7 @@ function unwrap(reply: CompanyMemberReply): Extract<CompanyMemberReply, { ok: tr
 export async function routeCompanyMembers(ctx: CompanyMemberRouteContext, input: { caller: DeveloperCaller; companyId: string; webApp?: boolean }, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   const { caller, companyId } = input;
   let me: z.infer<typeof Membership> | undefined;
-  try { me = await membershipOf(ctx, caller.developerId); } catch { me = undefined; }
+  try { me = await membershipOf(ctx, caller.developerId); } catch (error) { rethrowMembershipReadFailure(error); me = undefined; }
   if (me === undefined || me.companyId !== companyId || me.revokedAt !== undefined || !OrgIdSchema.safeParse(companyId).success) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
   if (!isAdmin(me.role)) throw agentXError("NOT_FOUND", NOT_FOUND);
 

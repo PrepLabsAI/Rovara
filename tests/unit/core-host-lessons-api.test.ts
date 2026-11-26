@@ -3,6 +3,7 @@
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentXError, LEARNED_CONTEXT_FEATURE, LessonViewSchema, companyScoped, learningModeLockKey, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type OrgRole, type ProjectDefinition, type ProjectRole } from "@agentx/contracts";
+import { membershipReadFailed } from "../../packages/broker/src/core/membership-read.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { buildCoreRegistry, createCoreRuntime } from "../../packages/broker/src/core-host/index.js";
@@ -104,6 +105,16 @@ async function call(target: ReturnType<typeof createLessonsApi>, personId: strin
     return { ok: false as const, code: error.code, status: error.statusCode, message: error.message.slice(error.code.length + 2) };
   }
 }
+
+describe("MEMBERSHIP-READ-FAILS-SAFE: the membership read of a lessons call", () => {
+  it("a membership read that FAILED is the retryable 503; any other failure of the reader, and a person with none, keep the sign-in refusal", async () => {
+    const w = await setUp();
+    const failed = api(w, { companyOf: async () => { throw membershipReadFailed(); } });
+    expect(await call(failed.api, "a-admin", "GET", "/v1/dev/projects/payments/lessons/weekly")).toMatchObject({ ok: false, code: "RUNTIME_UNAVAILABLE", status: 503 });
+    const other = api(w, { companyOf: async () => { throw new Error("some other failure"); } });
+    expect(await call(other.api, "a-admin", "GET", "/v1/dev/projects/payments/lessons/weekly")).toMatchObject({ ok: false, code: "AUTH_REQUIRED" });
+  });
+});
 
 const P = "/v1/dev/projects/payments";
 describe("lessons weekly route", () => {

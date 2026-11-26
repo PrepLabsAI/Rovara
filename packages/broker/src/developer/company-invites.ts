@@ -1,6 +1,7 @@
 // DEC 254a: operator invite codes, the self-serve switch, and DEC 253z's self-serve company create. Sign-in table only;
 // the sign-in Lambda makes every write here. A code is stored only as its SHA-256 (the CLI makes the code and sends the
 // hash); no row, answer or log line ever holds the code. Every write commits with its audit row in one transaction.
+import { readingMembership } from "../core/membership-read.js";
 import { randomUUID } from "node:crypto";
 import { GetCommand, QueryCommand, TransactWriteCommand, UpdateCommand, type TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
@@ -133,12 +134,11 @@ export class CompanyInviteStore {
    * (DEC 254zzz39: a kept unlinked sign-in linked again). Any doubt: no.
    */
   async companylessEligible(personId: string): Promise<boolean> {
-    try {
-      if (!CompanyPersonId.safeParse(personId).success) return false;
-      if (await this.get(membershipKey(personId)) !== undefined) return false;
-      const developer = await this.get({ pk: `DEVELOPER#${personId}`, sk: "META" }) as Record<string, unknown> | undefined;
-      return developer === undefined || (developer.entityType === "DEVELOPER" && developer.revoked === false && developer.companyless === true && developer.mergedInto === undefined);
-    } catch { return false; }
+    if (!CompanyPersonId.safeParse(personId).success) return false;
+    // Both are reads: one that FAILS is the retryable failure (membership-read.ts), never "not companyless" (which at a refresh would end the person's session as `company_changed`).
+    if (await readingMembership(() => this.get(membershipKey(personId))) !== undefined) return false;
+    const developer = await readingMembership(() => this.get({ pk: `DEVELOPER#${personId}`, sk: "META" })) as Record<string, unknown> | undefined;
+    return developer === undefined || (developer.entityType === "DEVELOPER" && developer.revoked === false && developer.companyless === true && developer.mergedInto === undefined);
   }
 
   /** Counted before any code is read, so guessing is throttled. A conditional increment: the sixth try in an hour fails. */

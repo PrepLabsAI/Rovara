@@ -4,6 +4,7 @@
 // (channel members, channel names for R10, 25d's email lookup and bot token check, and 25e's
 // admin-ended sessions and channel by name).
 // Nothing here logs or echoes a secret, a code, a token or a caught error's message.
+import { isMembershipReadFailure, membershipReadFailed } from "../core/membership-read.js";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import type { CompanyJoin } from "./company-membership.js";
 import type { CompanySignInAuditInput, CompanySignInCause, CompanySignInMethod } from "./company-signin-audit.js";
@@ -332,8 +333,14 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     return [...enabledMethods(deps).filter((method) => method === "slack"), "oidc"];
   };
   /** Recheck live membership at each mint (session-mint.ts holds the check: the canary's session function runs the same code). */
-  function companyMayMint(personId: string, amr: DeveloperSignInMethod, companyId: string | undefined, registered: SignInClientRecord | undefined, legacy = false, installMethod?: true): Promise<boolean> {
-    return mayMint({ company: deps.company, slackCompany, companyless: companylessMayMint }, personId, amr, companyId, registered, legacy, installMethod);
+  async function companyMayMint(personId: string, amr: DeveloperSignInMethod, companyId: string | undefined, registered: SignInClientRecord | undefined, legacy = false, installMethod?: true): Promise<boolean> {
+    try {
+      return await mayMint({ company: deps.company, slackCompany, companyless: companylessMayMint }, personId, amr, companyId, registered, legacy, installMethod);
+    } catch (error) {
+      // Kind only, never the cause: a permanent 503 (a corrupt row, a misconfigured reader) must be visible, and a passing one is the retryable answer (membership-read.ts).
+      if (isMembershipReadFailure(error)) deps.log({ event: "signin.membership_read_failed", amr });
+      throw error;
+    }
   }
   /**
    * DEC 253z: a person with no company may hold a session only from the install's own OIDC sign-in, to the install-level web app with full access,
@@ -839,7 +846,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       ...(identity.slackTeam === undefined ? {} : { slackTeamId: identity.slackTeam.id, ...(identity.slackTeam.name === undefined ? {} : { slackTeamName: identity.slackTeam.name }) }),
     }, companyId, { ...(companyless ? { companyless: true as const } : {}), ...(deps.company === undefined ? {} : { unmerged: true as const }) });
     if (request.browserReturnTo !== undefined) {
-      if (!await companyMayMint(developerId, method, request.companyId ?? companyId, undefined, false, installMethod ? true : undefined)) {
+      // A membership read that FAILED refuses this NEW sign-in (nothing is created); it ends no earlier session.
+      if (!await companyMayMint(developerId, method, request.companyId ?? companyId, undefined, false, installMethod ? true : undefined).catch((error: unknown) => { if (isMembershipReadFailure(error)) return false; throw error; })) {
         return browserReturn(request.browserReturnTo, false);
       }
       // A fixed 30 days from sign-in, with no renewal: the session record ends then, whatever the cookie says.
@@ -877,11 +885,21 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
    */
   async function stillSeated(signedInId: string | undefined, developerId: string): Promise<boolean> {
     if (signedInId === undefined) return true;
-    try { return (await mergeSurvivor((id) => store.getDeveloper(id), signedInId)).survivorId === developerId; } catch { return false; }
+    // The walk REFUSES (a revoked hop, a cycle, an unreadable record shape) is a fact: unseated. A READ of a hop that FAILS is not: it answers the retryable 503 and ends nothing (membership-read.ts).
+    const read = async (id: string) => { try { return await store.getDeveloper(id); } catch { throw membershipReadFailed(); } };
+    try { return (await mergeSurvivor(read, signedInId)).survivorId === developerId; } catch (error) { if (isMembershipReadFailure(error)) throw error; return false; }
   }
 
   async function authorizationCodeGrant(form: URLSearchParams, methods: DeveloperSignInMethod[], client: SignInClientRecord | undefined): Promise<HttpResult> {
-    const redeemed = await store.redeemCode({ code: form.get("code") ?? "", verifier: form.get("code_verifier") ?? "", redirectUri: form.get("redirect_uri") ?? "" });
+    // The membership reads run on the code's grant BEFORE the code is burned: a read that FAILS answers the retryable 503 with the code still usable (a retry works). Only a failure is acted on here;
+    // a refusal is answered after the redemption below, exactly as before, so an unverified caller learns nothing about the person from a refused check.
+    const code = form.get("code") ?? "";
+    const peeked = await store.peekCode(code);
+    if (peeked !== undefined && peeked.clientId === client?.clientId) {
+      await stillSeated(peeked.signedInId, peeked.developerId);
+      await companyMayMint(peeked.developerId, peeked.amr, peeked.companyId, client, false, peeked.installMethod);
+    }
+    const redeemed = await store.redeemCode({ code, verifier: form.get("code_verifier") ?? "", redirectUri: form.get("redirect_uri") ?? "" });
     if (redeemed === undefined) return oauthError(400, ...INVALID_CODE);
     // A code is redeemed only by the client it was issued to (it is burned either way).
     if (redeemed.clientId !== client?.clientId) return oauthError(400, ...INVALID_CODE);
@@ -922,7 +940,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
         companySince = selected.since;
         const person = await store.getDeveloper(session.developerId);
         if (session.amr === "oidc" && person?.issuer !== selected.issuer) { await revoke(session.sessionId, "method_disabled"); return ended; }
-      } catch { return ended; }
+      } catch { throw membershipReadFailed(); /* the company's sign-in settings could not be read: retryable, the session is kept */ }
     }
     if (client !== undefined && Date.parse(session.startedAt) < Date.parse(client.createdAt)) {
       await revoke(session.sessionId, "client_removed");
@@ -974,7 +992,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     if (!caller.ok) return caller.result;
     const methods = enabledMethods(deps);
     const grant = form.get("grant_type");
-    if (grant === "authorization_code") return authorizationCodeGrant(form, methods, caller.client);
+    if (grant === "authorization_code") return retryable("token", () => authorizationCodeGrant(form, methods, caller.client));
     if (grant === "refresh_token") return retryable("token", () => refreshTokenGrant(form, methods, caller.client));
     return oauthError(400, "unsupported_grant_type", "use authorization_code or refresh_token");
   }
@@ -994,7 +1012,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     try {
       return await fn();
     } catch (error) {
-      if (!isRetryableAwsError(error)) throw error;
+      if (!isRetryableAwsError(error) && !isMembershipReadFailure(error)) throw error;
       deps.log({ event: "signin.retry", operation, error: errorName(error) });
       return oauthError(503, "temporarily_unavailable", "Rovara could not finish this just now; your sign-in is kept, try again in a moment");
     }

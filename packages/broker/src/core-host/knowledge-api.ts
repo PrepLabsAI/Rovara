@@ -28,6 +28,7 @@ import type { ScopeKey } from "../lessons/store.js";
 import { knowledgeReadStores } from "../local/app/lessons-routes.js";
 import { switchCovers, type CoreSwitch } from "./flags.js";
 import type { LessonsApiCompany } from "./lessons-api.js";
+import { rethrowMembershipReadFailure } from "../core/membership-read.js";
 
 const SIGN_IN_AGAIN = "Sign in again.";
 const UNAVAILABLE = "Rovara can't read lessons right now. Try again.";
@@ -134,7 +135,7 @@ export function createKnowledgeApi(options: KnowledgeApiOptions): KnowledgeApi {
 
   async function membershipOf(personId: string): Promise<{ companyId: OrgId; role: OrgRole }> {
     let found: unknown;
-    try { found = await options.companyOf({ personId }); } catch { found = undefined; }
+    try { found = await options.companyOf({ personId }); } catch (error) { rethrowMembershipReadFailure(error); found = undefined; }
     const record = found as { companyId?: unknown; role?: unknown } | undefined | null;
     const companyId = OrgIdSchema.safeParse(record?.companyId);
     const role = OrgRoleSchema.safeParse(record?.role);

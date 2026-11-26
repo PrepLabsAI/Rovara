@@ -8,6 +8,7 @@
 //     the person's level, grant or role on every act (DEC 254zzz73: no step-up).
 //   - answers anything the core's handlers throw (a runtime or registry that cannot be built) with fixed words and a log line naming only the error's kind.
 // Where no core is wired the deployment builds no entry at all, so the developer API answers every /v1/app/* path "route not found" and reads nothing.
+import { MEMBERSHIP_READ_FAILED_WORDS } from "../core/membership-read.js";
 import type { DeployedCaller, SlackThreadAnswer, SlackThreadAnswerInput } from "../core-host/dev-routes.js";
 import type { PersonEraseCaller } from "../core-host/person-erase-route.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
@@ -50,7 +51,8 @@ export function coreAppEntryFrom(options: CoreAppEntryOptions): CoreAppEntry {
       const path = request.path.split("?")[0] ?? "";
       if (!path.startsWith(CORE_APP_PREFIX)) return undefined;
       let deployed: DeployedCaller | undefined;
-      try { deployed = await options.deployedCallerOf(caller); } catch { deployed = undefined; }
+      // A membership read that FAILED is the retryable 503 (membership-read.ts); only a read that says "no membership" is the sign-in refusal.
+      try { deployed = await options.deployedCallerOf(caller); } catch { return answer(503, "RUNTIME_UNAVAILABLE", MEMBERSHIP_READ_FAILED_WORDS); }
       if (deployed === undefined || deployed === null) return answer(401, "UNAUTHENTICATED", CORE_APP_SIGN_IN_AGAIN);
       try {
         return PERSON_ERASE.test(path) ? await options.personErase.route(request, deployed) : await options.routes.route(request, deployed);

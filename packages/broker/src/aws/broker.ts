@@ -165,6 +165,7 @@ export { PROJECT_SETUP_CAPTURE_POLICY, NAMED_COMPANY_CANDIDATE_WAITING, type Reg
 export { type SlackStopTaskEvent, type SlackWorkflowStartEvent, type SlackWorkflowDecisionEvent, type SlackWorkflowRetryEvent, type SlackWorkflowSendBackEvent, type SlackWorkflowResolveFindingsEvent, type SlackWorkflowCloseEvent, type SlackWorkflowReviewRetryEvent, type SlackWorkflowFeedbackFindingsDecisionEvent, type SlackWorkflowFeedbackNoteEvent, type SlackTaskAuthorizationEvent, type SlackTaskPeopleConfirmEvent, type SlackTaskPeopleReadEvent, type SlackTaskPeopleChangeEvent, type SlackTaskPeopleTakeOwnershipEvent, isSlackTaskPeopleReadEvent, isSlackTaskPeopleChangeEvent, isSlackTaskPeopleTakeOwnershipEvent, isSlackTaskPeopleConfirmEvent, isSlackTaskAuthorizationEvent, isSlackWorkflowStartEvent, type SlackIntakeRecordEvent, isSlackIntakeRecordEvent, isSlackWorkflowDecisionEvent, isSlackWorkflowRetryEvent, isSlackWorkflowSendBackEvent, isSlackWorkflowResolveFindingsEvent, isSlackWorkflowCloseEvent, isSlackWorkflowReviewRetryEvent, type SlackWorkflowPublishRetryEvent, isSlackWorkflowPublishRetryEvent, type SlackWorkflowKeepPullRequestsEvent, isSlackWorkflowKeepPullRequestsEvent, isSlackWorkflowFeedbackFindingsDecisionEvent, isSlackWorkflowFeedbackNoteEvent, type SlackWorkflowFeedbackReviewRetryEvent, isSlackWorkflowFeedbackReviewRetryEvent, type SlackThreadNoteEvent, isSlackThreadNoteEvent, isSlackStopTaskEvent } from "./slack-broker-events.js";
 export { channelLinkRouteDependencies } from "./broker-primitives.js";
 import { answerSlackCorePress, isSlackCorePressEvent } from "./slack-core-decision.js";
+import { rethrowMembershipReadFailure } from "../core/membership-read.js";
 import { recordRetiredSlackButtonNote } from "./slack-retired-buttons.js";
 import { RETIRED_SLACK_BUTTON_ANSWER } from "./slack-retired-buttons.js";
 export const NAMED_COMPANY_SETUP_APPROVAL_REFUSED = "a company's browser testing is set up on the project's Browser testing page, and the rest of its setup goes through the project's setup flow, not through a setup approval sent with registration";
@@ -7058,7 +7059,7 @@ async function administratorOfTaskCompany(dependencies: AwsBrokerDependencies, i
   const companies = dependencies.developer?.companies ?? dependencies.companies;
   if (companies === undefined) return true;
   let companyId: string | undefined;
-  try { companyId = await companies.companyOf(identity.ownerKey); } catch { return false; }
+  try { companyId = await companies.companyOf(identity.ownerKey); } catch (error) { rethrowMembershipReadFailure(error); return false; }
   return companyId !== undefined && recordInCompany(task, companyId);
 }
 
