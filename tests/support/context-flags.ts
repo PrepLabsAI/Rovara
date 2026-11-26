@@ -22,7 +22,7 @@ export const VALUE_KEYS: readonly string[] = [
   // The model gateway's app mode (#1478): -c rovaraModelGateway=<env> makes only the gateway's two stacks, never an environment's, and the rest set
   // up those stacks. Every role there carries Cloud's boundary, which the RequireCloudBoundary aspect enforces at synth (infra/lib/model-gateway-boundary.ts).
   "rovaraModelGateway", "rovaraModelGatewayProductAi", "rovaraModelGatewayRovaraAi", "rovaraModelGatewayRovaraAiExempt", "rovaraModelGatewayRovaraAiDisabled",
-  "rovaraModelGatewayOfferedPrices", "rovaraModelGatewayProviderSecretNames", "rovaraAiSourceKinds", "rovaraCloudSha",
+  "rovaraModelGatewayOfferedPrices", "rovaraModelGatewayProviderSecretNames", "rovaraAiSourceKinds", "rovaraCodeSha",
 ];
 /** Flags for stacks that exist only in the deployment that predates environments (no boundary applies there). */
 export const LEGACY_ONLY_FLAGS: readonly string[] = ["agentxBetaAccess", "agentxBetaDomain"];

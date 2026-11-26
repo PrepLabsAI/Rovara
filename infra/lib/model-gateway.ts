@@ -24,7 +24,7 @@ import {
 import type { Construct } from "constructs";
 import { METRICS_NAMESPACE_ROOT, PRODUCTION_SOURCE_KINDS_NAMED_REFUSAL, PRODUCTION_SOURCE_KINDS_REFUSAL, RESOURCE_PREFIX, environmentSettingsPrefix, parseSourceKindsSwitch, productionSourceKindsAllowed } from "./model-gateway-contracts.js";
 import { applyCloudBoundary, byoCustomerAssumeConditions } from "./model-gateway-boundary.js";
-import { GATEWAY_SERVICE_ARN_OUTPUT, addDeployedCloudSha } from "./model-gateway-deployed-sha.js";
+import { GATEWAY_SERVICE_ARN_OUTPUT, addDeployedCodeSha } from "./model-gateway-deployed-sha.js";
 
 /**
  * The Cloud model gateway's infrastructure (migration plan v3.2, 7.4; packages/model-gateway). Every model call of every task
@@ -762,7 +762,7 @@ export class ModelGatewayStack extends Stack {
     }
     if (bedrockByo !== undefined) new CfnOutput(this, "BedrockBrokerRoleArn", { value: bedrockByo.broker.roleArn, description: "Customers' RovaraBedrockInvoke roles trust this role (with their external id): never delete or rename it" });
     // The release pipeline's own outputs, only when it names the commit (model-gateway-deployed-sha.ts): the deployed sha and the service its settled gate reads.
-    if (addDeployedCloudSha(this)) new CfnOutput(this, GATEWAY_SERVICE_ARN_OUTPUT, { value: service.serviceArn, description: "The gateway's Fargate service (read by the release pipeline's settled gate)" });
+    if (addDeployedCodeSha(this)) new CfnOutput(this, GATEWAY_SERVICE_ARN_OUTPUT, { value: service.serviceArn, description: "The gateway's Fargate service (read by the release pipeline's settled gate)" });
     // Last, so the template keeps its section order; the aspect puts it on every role at synth (model-gateway-boundary.ts).
     applyCloudBoundary(this, env, "gateway");
   }

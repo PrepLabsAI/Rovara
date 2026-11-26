@@ -26,6 +26,7 @@ import {
   projectUseRefusal,
   type ProjectDefinition,
   PREPARE_EGRESS_S3_FEATURE,
+  browserRunnerMissingWords,
   projectAllowedS3Hosts,
   workflowPublicationContext,
   workflowPublicationContextDigest,
@@ -343,7 +344,8 @@ async function handleWorkerDispatch(deps: TaskFlowDeps, queue: Queue, message: R
     const checkpoints = deps.moneyStop !== undefined && operation.dispatch.kind === "task";
     const missing = [...(operation.dispatch.requires ?? []), ...(routed ? ["model.route"] : []), ...(checkpoints ? [USAGE_CHECKPOINTS_FEATURE] : [])].filter((feature) => !health.features.includes(feature));
     // DEC 254zm: a worker that lacks only test-services features could not start them here (its boot stage or pulls failed): the fixed "not available here" words, not "too old".
-    if (missing.length > 0) return endAndAck("FAILED", testServicesMissingWords(missing) ?? "this worker is too old to run this step; upgrade it");
+    // BROWSER-SKIP-HONESTY: a worker that knows the application checks but lists none withholds them (no executor image ready on its host): it is not old, and the step says the browser checks were not run.
+    if (missing.length > 0) return endAndAck("FAILED", testServicesMissingWords(missing) ?? browserRunnerMissingWords(missing, health.features) ?? "this worker is too old to run this step; upgrade it");
     // A block is never dropped: a worker that cannot place it is refused the step (the rules were read above, before any machine was asked for).
     if (standing !== undefined && !health.features.includes(STANDING_INSTRUCTIONS_FEATURE)) return endAndAck("FAILED", "this worker is too old to run this step; upgrade it");
     if (await deps.deliveryAccess?.(deps, operation, workspace) === "PARKED") {
