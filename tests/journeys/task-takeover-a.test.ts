@@ -26,13 +26,14 @@ const roleOf = (list: PeopleList, person: WebPerson): string | undefined => list
 /** The task page as a company person's browser sees it (a review session of the person's own company sign-in). */
 const pageOf = (w: JourneyWorld, taskId: string, person: WebPerson) => pageReader(w, taskId, writeReviewSession(w, person.who, { company: w.harness.runtime.flow.deps.companyId }));
 
-/** A People change as a person makes it on the task page: the propose step, then the confirm step. */
-async function confirmed(page: ReturnType<typeof pageOf>, endpoint: "people/add" | "people/take-ownership", body: Record<string, unknown>): Promise<void> {
-  // The page's own state call hands out the CSRF cookie its writes need.
-  expect((await page.read("state")).status).toBe(200);
+/** A People change as a person makes it after D1: the propose step on the developer API (the task page's own propose calls are deleted), then the confirm step on the one page that stays, the People confirmation page. */
+async function confirmed(w: JourneyWorld, taskId: string, person: WebPerson, endpoint: "people/add" | "people/take-ownership", body: Record<string, unknown>): Promise<void> {
   const requestId = randomUUID();
-  const proposed = await page.post(endpoint, { requestId, ...body });
-  expect(proposed.status, proposed.text).toBe(202);
+  const proposed = await person.ask("POST", `/v1/dev/tasks/${taskId}/${endpoint}`, { requestId, ...body });
+  expect(proposed.status, JSON.stringify(proposed.body)).toBe(200);
+  const page = pageOf(w, taskId, person);
+  // Opening the confirmation page hands out the CSRF cookie its confirm call needs.
+  expect((await page.open(`/people/confirm/${requestId}`)).status).toBe(200);
   const done = await page.post(`people/requests/${requestId}/confirm`, { requestId });
   expect(done.status, done.text).toBe(200);
   expect(done.json()).toMatchObject({ status: "COMMITTED" });
@@ -45,7 +46,7 @@ async function inFlight(piaRole: "commenter" | "owner" = "commenter"): Promise<{
   const pia = w.addWebPerson({ name: "Pia Lund", subject: "pia", role: "admin", grant: "developer" });
   const taskId = await startTask(w, { as: wren.ask });
   expect(listOf(w, taskId), "the web starter's task has its People list from the start").toMatchObject({ revision: 1, orphaned: false, people: [{ developerId: wren.who.developerId, role: "owner" }] });
-  await confirmed(pageOf(w, taskId, wren), "people/add", { expectedPeopleRevision: 1, developerId: pia.who.developerId, role: piaRole });
+  await confirmed(w, taskId, wren, "people/add", { expectedPeopleRevision: 1, developerId: pia.who.developerId, role: piaRole });
   expect(roleOf(listOf(w, taskId), pia)).toBe(piaRole);
   await planUntilCard(w, taskId);
   await w.approvePlan(taskId, wren.ask);
@@ -81,7 +82,7 @@ describe("a task changes owner while a step is due", () => {
     expect(view.status, JSON.stringify(view.body)).toBe(200);
     const shown = view.body.view as { revision: number; orphaned: boolean; canTakeOwnership: boolean };
     expect([shown.orphaned, shown.canTakeOwnership]).toEqual([true, true]);
-    await confirmed(pageOf(w, taskId, pia), "people/take-ownership", { expectedPeopleRevision: shown.revision });
+    await confirmed(w, taskId, pia, "people/take-ownership", { expectedPeopleRevision: shown.revision });
     const list = listOf(w, taskId);
     expect([roleOf(list, pia), roleOf(list, wren), list.orphaned]).toEqual(["owner", "denied", false]);
     await buildRuns(w, pia);
