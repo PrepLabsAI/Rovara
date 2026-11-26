@@ -538,6 +538,55 @@ async function sessionCompanyId(deps: DeveloperRouteDependencies, session: Sessi
   return resolvedCompany ?? await (deps.serverReadBudget === undefined ? scope.read(() => resolveCompany(deps.companies, session.developerId)) : resolveCompany(deps.companies, session.developerId));
 }
 
+const CompanySessionRecordSchema = z.object({
+  sessionId: z.string().uuid(), developerId: z.string().regex(/^[a-f0-9]{64}$/), amr: z.enum(["oidc", "slack", "github"]),
+  companyId: OrgIdSchema, startedAt: z.iso.datetime(), endsAt: z.number().finite(),
+  reviewExpiresAt: z.number().finite().optional(), installMethod: z.literal(true).optional(),
+});
+
+async function parseCompanySessionRecord(
+  deps: DeveloperRouteDependencies,
+  scope: ReturnType<typeof boundedCompanyReads>,
+  session: SessionRecord,
+): Promise<z.infer<typeof CompanySessionRecordSchema>> {
+  const candidate = deps.serverReadBudget === undefined ? await scope.read(async () => session) : session;
+  const parsed = CompanySessionRecordSchema.safeParse(candidate);
+  if (!parsed.success) throw new Error("session record");
+  return parsed.data;
+}
+
+function isCompanyIssuerPolicyActive(issuer: z.infer<typeof CompanyIssuerRecord>, startedAt: string): boolean {
+  if (!issuer.enabled) return false;
+  if (issuer.requiredValues.length > 0 && issuer.requiredClaim === undefined) return false;
+  return !startedBeforeMethodOn(startedAt, Math.max(issuer.enabledSince, issuer.since ?? 0));
+}
+
+async function verifyCompanyIssuerSession(
+  deps: DeveloperRouteDependencies,
+  scope: ReturnType<typeof boundedCompanyReads>,
+  companyId: string,
+  session: SessionRecord,
+  parsed: z.infer<typeof CompanySessionRecordSchema>,
+): Promise<DeveloperRecord | undefined> {
+  const key = companyIssuerKey(companyId);
+  const response = await readingMembership(() => scope.client.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: key, ConsistentRead: true }))) as { Item?: unknown };
+  // DEC 254b (a): a company with no issuer row signs in only through the install's own OIDC (the shared method), and only a session the sign-in
+  // server marked so; the install's switch and since time then hold, as for the built-in company. A company with any issuer row never takes it.
+  if (response.Item === undefined) {
+    if (parsed.installMethod !== true || deps.developer.methods[parsed.amr] !== true) throw new Error("shared method");
+    scope.check();
+    return undefined;
+  }
+  if (parsed.installMethod !== undefined) throw new Error("shared method");
+  const issuer = CompanyIssuerRecord.extend({ pk: z.literal(key.pk), sk: z.literal("OIDC") }).safeParse(response.Item);
+  if (!issuer.success || !isCompanyIssuerPolicyActive(issuer.data, session.startedAt)) throw new Error("issuer policy");
+  const developer = await readingMembership(() => getSignIn<DeveloperRecord>({ ...deps, documentClient: scope.client }, `DEVELOPER#${session.developerId}`));
+  if (developer === undefined || developer.provider !== "oidc"
+    || developer.issuer !== issuer.data.issuer.replace(/\/+$/, "") || developer.revoked !== false) throw new Error("issuer identity");
+  scope.check();
+  return developer;
+}
+
 /** Company policy is selected only from live membership and the stored session (OIDC, and since DEC 254e Slack too).
  * Fixed-size reads share one budget and the host's existing SDK timeout; no cache or token company.
  * Undefined: the session is held to the install's own method (the built-in company, a shared-method session of a company with no issuer, or a
@@ -555,30 +604,8 @@ async function companyOidcSession(deps: DeveloperRouteDependencies, session: Ses
       if (session.installMethod !== undefined) throw new Error("session method");
       return undefined;
     }
-    const parsed = z.object({
-      sessionId: z.string().uuid(), developerId: z.string().regex(/^[a-f0-9]{64}$/), amr: z.enum(["oidc", "slack", "github"]),
-      companyId: OrgIdSchema, startedAt: z.iso.datetime(), endsAt: z.number().finite(),
-      reviewExpiresAt: z.number().finite().optional(), installMethod: z.literal(true).optional(),
-    }).safeParse(deps.serverReadBudget === undefined ? await scope.read(async () => session) : session);
-    if (!parsed.success) throw new Error("session record");
-    const key = companyIssuerKey(companyId);
-    const response = await readingMembership(() => scope.client.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: key, ConsistentRead: true }))) as { Item?: unknown };
-    // DEC 254b (a): a company with no issuer row signs in only through the install's own OIDC (the shared method), and only a session the sign-in
-    // server marked so; the install's switch and since time then hold, as for the built-in company. A company with any issuer row never takes it.
-    if (response.Item === undefined) {
-      if (parsed.data.installMethod !== true || deps.developer.methods[parsed.data.amr] !== true) throw new Error("shared method");
-      scope.check();
-      return undefined;
-    }
-    if (parsed.data.installMethod !== undefined) throw new Error("shared method");
-    const issuer = CompanyIssuerRecord.extend({ pk: z.literal(key.pk), sk: z.literal("OIDC") }).safeParse(response.Item);
-    if (!issuer.success || !issuer.data.enabled || (issuer.data.requiredValues.length > 0 && issuer.data.requiredClaim === undefined)
-      || startedBeforeMethodOn(session.startedAt, Math.max(issuer.data.enabledSince, issuer.data.since ?? 0))) throw new Error("issuer policy");
-    const developer = await readingMembership(() => getSignIn<DeveloperRecord>({ ...deps, documentClient: scope.client }, `DEVELOPER#${session.developerId}`));
-    if (developer === undefined || developer.provider !== "oidc"
-      || developer.issuer !== issuer.data.issuer.replace(/\/+$/, "") || developer.revoked !== false) throw new Error("issuer identity");
-    scope.check();
-    return developer;
+    const parsed = await parseCompanySessionRecord(deps, scope, session);
+    return await verifyCompanyIssuerSession(deps, scope, companyId, session, parsed);
   } catch (error) {
     // The session company's membership, the company's sign-in settings and the identity row are reads: one that FAILED is the retryable 503 (membership-read.ts), never "your sign-in has ended".
     rethrowMembershipReadFailure(error);
@@ -599,26 +626,43 @@ export async function authenticateDeveloper(deps: DeveloperRouteDependencies, cl
   }
 }
 
-async function authenticateSession(deps: DeveloperRouteDependencies, token: { developerId: string; sessionId: string; amr: DeveloperSignInMethod }, storedSession?: SessionRecord, checkInstallEnabled = false): Promise<DeveloperCaller> {
-  deps = withSignInReads(deps);
-  const session = storedSession ?? await getSignIn<SessionRecord>(deps, `SESSION#${token.sessionId}`);
-  if (session === undefined || session.developerId !== token.developerId || session.revokedAt !== undefined || session.endsAt <= Math.floor(deps.now() / 1000)) {
+function assertLiveDeveloperSession(
+  session: SessionRecord | undefined,
+  token: { developerId: string; amr: DeveloperSignInMethod },
+  nowSeconds: number,
+): asserts session is SessionRecord {
+  if (session === undefined || session.developerId !== token.developerId || session.revokedAt !== undefined || session.endsAt <= nowSeconds) {
     throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
   }
   // Spec 063 FR-003: a registered client's session never acts on Rovara, whatever token names it.
-  if (session.clientId !== undefined) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
-  if (session.amr !== token.amr) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
-  // Only the server-side signed-in identity may keep the person this session was issued to.
-  await requireSessionSurvivor(deps, session, () => agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN));
-  const companyDeveloper = await companyOidcSession(deps, session);
-  if (checkInstallEnabled && deps.companies !== undefined && token.amr === "oidc" && companyDeveloper === undefined && !deps.developer.methods.oidc) {
+  if (session.clientId !== undefined || session.amr !== token.amr) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+}
+
+function assertInstallMethodStillActive(
+  deps: DeveloperRouteDependencies,
+  amr: DeveloperSignInMethod,
+  startedAt: string,
+  checkInstallEnabled: boolean,
+): void {
+  if (checkInstallEnabled && deps.companies !== undefined && amr === "oidc" && !deps.developer.methods.oidc) {
     throw agentXError("AUTH_REQUIRED", "Company sign-in is turned off in this environment; sign in another way with agentx login <url>");
   }
   // The broker may only read the sign-in table (R13), so it refuses; the token endpoint revokes the
   // session at its next refresh.
-  if (companyDeveloper === undefined && startedBeforeMethodOn(session.startedAt, deps.developer.since?.[token.amr])) {
-    throw agentXError("AUTH_REQUIRED", `your sign-in ended when ${token.amr === "slack" ? "Slack" : token.amr === "github" ? "GitHub" : "company sign-in"} was turned off; sign in again with agentx login <url>`);
+  if (startedBeforeMethodOn(startedAt, deps.developer.since?.[amr])) {
+    const label = amr === "slack" ? "Slack" : amr === "github" ? "GitHub" : "company sign-in";
+    throw agentXError("AUTH_REQUIRED", `your sign-in ended when ${label} was turned off; sign in again with agentx login <url>`);
   }
+}
+
+async function authenticateSession(deps: DeveloperRouteDependencies, token: { developerId: string; sessionId: string; amr: DeveloperSignInMethod }, storedSession?: SessionRecord, checkInstallEnabled = false): Promise<DeveloperCaller> {
+  deps = withSignInReads(deps);
+  const session = storedSession ?? await getSignIn<SessionRecord>(deps, `SESSION#${token.sessionId}`);
+  assertLiveDeveloperSession(session, token, Math.floor(deps.now() / 1000));
+  // Only the server-side signed-in identity may keep the person this session was issued to.
+  await requireSessionSurvivor(deps, session, () => agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN));
+  const companyDeveloper = await companyOidcSession(deps, session);
+  if (companyDeveloper === undefined) assertInstallMethodStillActive(deps, token.amr, session.startedAt, checkInstallEnabled);
   const developer = companyDeveloper ?? await getSignIn<Pick<DeveloperRecord, "displayName" | "provider" | "subject" | "slackUserId" | "email" | "revoked" | "sessionsEndedAt">>(deps, `DEVELOPER#${token.developerId}`);
   if (developer === undefined || developer.revoked) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
   if (endedByAdmin(session.startedAt, developer.sessionsEndedAt)) {
@@ -766,13 +810,40 @@ function safeChannelMembers(deps: DeveloperRouteDependencies): (request: Channel
   };
 }
 
+async function assertChannelInfoWorkspaceAllowed(deps: DeveloperRouteDependencies, workspace?: SlackWorkspaceScope): Promise<void> {
+  if (!companySlackMode(deps)) return;
+  if (workspace === undefined || deps.workspaces === undefined || await deps.workspaces.requireCompany(workspace.teamId) !== workspace.companyId) {
+    throw new SlackWorkspaceRefused();
+  }
+}
+
+async function fetchChannelInfoBatch(
+  channelInfo: NonNullable<DeveloperApiConfiguration["channelInfo"]>,
+  channelIds: string[],
+  workspace: SlackWorkspaceScope | undefined,
+  expired: Promise<"deadline">,
+): Promise<Extract<ChannelInfoResponse, { ok: true }> | undefined> {
+  let answer: ChannelInfoResponse | "deadline";
+  try {
+    answer = await Promise.race([channelInfo({ kind: "channel-info", channelIds, ...(workspace === undefined ? {} : { workspace }) }), expired]);
+  } catch (error) {
+    logDeveloperEvent({ event: "developer.channel_info_failed", reason: "threw", error: errorName(error) });
+    return undefined;
+  }
+  if (answer === "deadline") {
+    logDeveloperEvent({ event: "developer.channel_info_failed", reason: "deadline" });
+    return undefined;
+  }
+  return answer.ok ? answer : undefined;
+}
+
 /**
  * Channel names and privacy, best effort: without them the channels are listed by ID (R10).
  * Privacy comes from DeveloperIdentity's 10-minute cache. The whole lookup has one deadline.
  */
 async function channelNames(deps: DeveloperRouteDependencies, channelIds: readonly string[], workspace?: SlackWorkspaceScope): Promise<Map<string, { name: string; isPrivate: boolean }>> {
   const names = new Map<string, { name: string; isPrivate: boolean }>();
-  if (companySlackMode(deps) && (workspace === undefined || deps.workspaces === undefined || await deps.workspaces.requireCompany(workspace.teamId) !== workspace.companyId)) throw new SlackWorkspaceRefused();
+  await assertChannelInfoWorkspaceAllowed(deps, workspace);
   const channelInfo = deps.developer.channelInfo;
   if (channelInfo === undefined || channelIds.length === 0) return names;
   const unique = [...new Set(channelIds)].sort();
@@ -780,20 +851,11 @@ async function channelNames(deps: DeveloperRouteDependencies, channelIds: readon
   const expired = new Promise<"deadline">((resolve) => {
     timer = setTimeout(() => resolve("deadline"), deps.developer.channelInfoDeadlineMs ?? CHANNEL_NAMES_DEADLINE_MS);
   });
+  const onFailure = () => (workspace === undefined ? names : new Map<string, { name: string; isPrivate: boolean }>());
   try {
     for (let start = 0; start < unique.length; start += CHANNEL_MEMBERS_MAX_CHANNELS) {
-      let answer: ChannelInfoResponse | "deadline";
-      try {
-        answer = await Promise.race([channelInfo({ kind: "channel-info", channelIds: unique.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS), ...(workspace === undefined ? {} : { workspace }) }), expired]);
-      } catch (error) {
-        logDeveloperEvent({ event: "developer.channel_info_failed", reason: "threw", error: errorName(error) });
-        return workspace === undefined ? names : new Map();
-      }
-      if (answer === "deadline") {
-        logDeveloperEvent({ event: "developer.channel_info_failed", reason: "deadline" });
-        return workspace === undefined ? names : new Map();
-      }
-      if (!answer.ok) return workspace === undefined ? names : new Map();
+      const answer = await fetchChannelInfoBatch(channelInfo, unique.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS), workspace, expired);
+      if (answer === undefined) return onFailure();
       for (const channel of answer.channels) names.set(channel.channelId, { name: channel.name, isPrivate: channel.isPrivate });
     }
     return names;
@@ -847,33 +909,54 @@ async function liveNamedCompany(deps: DeveloperRouteDependencies, personId: stri
   return reader === undefined ? undefined : namedCompany(await resolveCompany(reader, personId));
 }
 
+async function legacyBindingsOf(deps: DeveloperRouteDependencies, workspace?: SlackWorkspaceScope, companyId?: string): Promise<SlackChannelBinding[]> {
+  const legacyTeam = deps.developer.slackTeamId;
+  const legacyApplies = legacyTeam !== undefined && (!companySlackMode(deps) || (workspace === undefined && companyId === IMPLICIT_COMPANY_ID));
+  return legacyApplies ? queryAll<SlackChannelBinding>(deps, channelBindingPartition(SLACK_CHANNEL, legacyTeam), channelBindingSortPrefix(SLACK_CHANNEL)) : [];
+}
+
+async function resolveBindingScopes(
+  deps: DeveloperRouteDependencies,
+  budget: ReturnType<typeof boundedCompanyReads>,
+  workspace: SlackWorkspaceScope | undefined,
+  companyId: string | undefined,
+): Promise<SlackWorkspaceScope[]> {
+  if (workspace !== undefined) return [workspace];
+  const scopes = await listSlackWorkspaceScopes({ client: budget.client, tableName: deps.tableName }, companyId!);
+  const legacyTeam = deps.developer.slackTeamId;
+  if (companyId === IMPLICIT_COMPANY_ID && legacyTeam !== undefined && !scopes.some((scope) => scope.teamId === legacyTeam)) {
+    const legacyCompany = await deps.workspaces!.requireCompany(legacyTeam).catch(() => undefined);
+    if (legacyCompany === IMPLICIT_COMPANY_ID) scopes.push({ companyId: IMPLICIT_COMPANY_ID, teamId: legacyTeam });
+  }
+  return scopes;
+}
+
+async function readScopedChannelBindings(
+  deps: DeveloperRouteDependencies,
+  budget: ReturnType<typeof boundedCompanyReads>,
+  scope: SlackWorkspaceScope,
+): Promise<SlackChannelBinding[]> {
+  if (!SlackWorkspaceScopeSchema.safeParse(scope).success || await deps.workspaces!.requireCompany(scope.teamId) !== scope.companyId) {
+    throw new SlackWorkspaceRefused();
+  }
+  // DEC 254zzz98 (review M1): a NAMED company's channel bindings live only in its own partition (`ORG#<company>#SLACK_BINDING#<team>`, slackChannelBindingPkFor), as the Slack
+  // ingress, the dispatcher and the channel-link writer read and write them; a legacy row on its team is never this company's. A row there naming another company is dropped.
+  // The built-in company keeps the legacy partition, byte for byte.
+  const named = namedCompany(scope.companyId);
+  const rows = await queryAll<SlackChannelBinding>({ ...deps, documentClient: budget.client }, slackChannelBindingPkFor(scope.companyId, scope.teamId), channelBindingSortPrefix(SLACK_CHANNEL));
+  if (rows.some((row) => row.teamId !== scope.teamId)) throw new SlackWorkspaceRefused();
+  return named === undefined ? rows : rows.filter((row) => ownPartitionRow(row as unknown as Record<string, unknown>, named));
+}
+
 async function bindingsOf(deps: DeveloperRouteDependencies, workspace?: SlackWorkspaceScope, companyId?: string): Promise<SlackChannelBinding[]> {
   // The install's own Slack team (the deployment's SlackTeamId) belongs to the implicit company until the workspace backfill binds it: the implicit company keeps
   // seeing its channel projects exactly as before company mode (the company-check goldens), and no other company ever does.
-  const legacyTeam = deps.developer.slackTeamId;
-  if (deps.workspaces === undefined) {
-    const legacyApplies = legacyTeam !== undefined && (!companySlackMode(deps) || (workspace === undefined && companyId === IMPLICIT_COMPANY_ID));
-    return legacyApplies ? queryAll<SlackChannelBinding>(deps, channelBindingPartition(SLACK_CHANNEL, legacyTeam), channelBindingSortPrefix(SLACK_CHANNEL)) : [];
-  }
+  if (deps.workspaces === undefined) return legacyBindingsOf(deps, workspace, companyId);
   if (workspace === undefined && companyId === undefined) throw new SlackWorkspaceRefused();
   const budget = boundedCompanyReads(deps.documentClient, deps.now);
-  const scopes = workspace === undefined ? await listSlackWorkspaceScopes({ client: budget.client, tableName: deps.tableName }, companyId!) : [workspace];
-  if (workspace === undefined && companyId === IMPLICIT_COMPANY_ID && legacyTeam !== undefined && !scopes.some((scope) => scope.teamId === legacyTeam)) {
-    let legacyCompany: string | undefined;
-    try { legacyCompany = await deps.workspaces.requireCompany(legacyTeam); } catch { legacyCompany = undefined; }
-    if (legacyCompany === IMPLICIT_COMPANY_ID) scopes.push({ companyId: IMPLICIT_COMPANY_ID, teamId: legacyTeam });
-  }
+  const scopes = await resolveBindingScopes(deps, budget, workspace, companyId);
   const bindings: SlackChannelBinding[] = [];
-  for (const scope of scopes) {
-    if (!SlackWorkspaceScopeSchema.safeParse(scope).success || await deps.workspaces.requireCompany(scope.teamId) !== scope.companyId) throw new SlackWorkspaceRefused();
-    // DEC 254zzz98 (review M1): a NAMED company's channel bindings live only in its own partition (`ORG#<company>#SLACK_BINDING#<team>`, slackChannelBindingPkFor), as the Slack
-    // ingress, the dispatcher and the channel-link writer read and write them; a legacy row on its team is never this company's. A row there naming another company is dropped.
-    // The built-in company keeps the legacy partition, byte for byte.
-    const named = namedCompany(scope.companyId);
-    const rows = await queryAll<SlackChannelBinding>({ ...deps, documentClient: budget.client }, slackChannelBindingPkFor(scope.companyId, scope.teamId), channelBindingSortPrefix(SLACK_CHANNEL));
-    if (rows.some((row) => row.teamId !== scope.teamId)) throw new SlackWorkspaceRefused();
-    bindings.push(...(named === undefined ? rows : rows.filter((row) => ownPartitionRow(row as unknown as Record<string, unknown>, named))));
-  }
+  for (const scope of scopes) bindings.push(...await readScopedChannelBindings(deps, budget, scope));
   return bindings;
 }
 
@@ -941,6 +1024,99 @@ function clientSecretMatches(secret: string, secretHash: string | undefined): bo
   return kept.length === given.length && timingSafeEqual(given, kept);
 }
 
+interface AccessCheckSubject {
+  developerId: string;
+  administrator: boolean;
+  clientId: string;
+  companyId: string | undefined;
+  sessionFacts: AccessCheckContext["session"];
+  signedInId: string | undefined;
+  companyless: boolean;
+  joinedByInvite: boolean;
+  via: "token" | "client_secret";
+}
+
+async function authenticateAccessCheckSubject(
+  deps: DeveloperRouteDependencies,
+  authorization: string | undefined,
+  requestedDeveloperId: string | undefined,
+  nowSeconds: number,
+  refused: () => Error,
+): Promise<AccessCheckSubject> {
+  const basic = basicClientCredentials(authorization);
+  if (basic !== undefined) {
+    const client = await signInClientOf(deps, basic.clientId);
+    if (client === undefined || !clientSecretMatches(basic.secret, client.secretHash) || requestedDeveloperId === undefined) throw refused();
+    const companyId = await clientCompany(deps, client, requestedDeveloperId);
+    return {
+      developerId: requestedDeveloperId, administrator: false, clientId: client.clientId, companyId,
+      sessionFacts: undefined, signedInId: undefined, companyless: false, joinedByInvite: false, via: "client_secret",
+    };
+  }
+  if (requestedDeveloperId !== undefined) throw refused();
+  // DEC 253z: the person's own token is the one form that may answer for a person with no company yet (the web app's "create your company").
+  const authenticated = await authenticateClientToken(deps, authorization, nowSeconds, { companyless: true });
+  return {
+    developerId: authenticated.developerId,
+    administrator: authenticated.administrator,
+    clientId: authenticated.client.clientId,
+    companyId: authenticated.companyId,
+    sessionFacts: { sessionId: authenticated.sessionId, amr: authenticated.amr, startedAt: authenticated.startedAt, administrator: authenticated.administrator },
+    signedInId: authenticated.signedInId,
+    companyless: authenticated.companyless === true,
+    joinedByInvite: authenticated.joinedByInvite === true,
+    via: "token",
+  };
+}
+
+type AccessCheckCompanyFields = Pick<AccessCheckResponse, "companyId" | "companyRole" | "companyName" | "joinedByInvite">;
+type AccessCheckPersonAccess = Awaited<ReturnType<typeof projectsAPersonUses>>;
+
+async function installLayerAccessOf(
+  deps: DeveloperRouteDependencies,
+  developerId: string,
+  refused: () => Error,
+): Promise<{ access: AccessCheckPersonAccess; company: AccessCheckCompanyFields }> {
+  // DEC 254: with Code's company layer off, the install's own company records (and a merged sign-in's survivor) decide; none: exactly the legacy read.
+  const install = await installCompanyAccess(deps, developerId);
+  if (install === "refused") throw refused();
+  const access = install === undefined ? await projectsAPersonUses(deps, developerId) : install.access;
+  return { access, company: install?.company ?? {} };
+}
+
+async function companylessAccessOf(
+  deps: DeveloperRouteDependencies,
+  client: DeveloperRouteDependencies["documentClient"],
+  developerId: string,
+): Promise<AccessCheckPersonAccess> {
+  // DEC 253z: no company yet: who they are, no company fields, no projects. Nothing company-scoped is read.
+  const person = await getSignIn<Pick<DeveloperRecord, "displayName" | "displayNameChosen" | "revoked">>({ ...deps, documentClient: client }, `DEVELOPER#${developerId}`);
+  if (person === undefined || person.revoked !== false || typeof person.displayName !== "string") return undefined;
+  return { displayName: person.displayName, nameChosen: person.displayNameChosen === true, projects: [], notices: [] };
+}
+
+async function resolveAccessCheckProjectsAndCompany(
+  deps: DeveloperRouteDependencies,
+  subject: AccessCheckSubject,
+  refused: () => Error,
+): Promise<{ access: AccessCheckPersonAccess; company: AccessCheckCompanyFields }> {
+  if (deps.companies === undefined) return installLayerAccessOf(deps, subject.developerId, refused);
+  const scope = boundedCompanyReads(deps.documentClient);
+  if (subject.companyless) {
+    const access = await companylessAccessOf(deps, scope.client, subject.developerId);
+    scope.check();
+    return { access, company: {} };
+  }
+  const access = await projectsAPersonUses({ ...deps, documentClient: scope.client }, subject.developerId, subject.companyId);
+  // DEC 253z: the company, its role and its name, from live membership read on this call.
+  if (subject.companyId === undefined) throw refused();
+  let company: AccessCheckCompanyFields = await codeCompanyOf(deps, scope.client, subject.developerId, subject.companyId);
+  // DEC 254b (f): only the person's own token, only Code's company layer, only for the company this answer names.
+  if (subject.joinedByInvite && company.companyId === subject.companyId) company = { ...company, joinedByInvite: true };
+  scope.check();
+  return { access, company };
+}
+
 /**
  * Spec 063 FR-004: who a registered service's signed-in person is, and what they can use now. Asked with the person's
  * own token for that service (Bearer), or by developer ID with a confidential service's credentials (HTTP Basic). It
@@ -953,62 +1129,13 @@ export async function checkSignInAccess(deps: DeveloperRouteDependencies, reques
   if (!parsed.success) throw agentXError("CONFIG_INVALID", "the access check takes an optional developerId (64 hex characters) and nothing else");
   // Authentication and the Slack hint share this request's live identity reads.
   deps = withSignInReads(deps);
-  const authorization = request.headers.authorization;
-  const basic = basicClientCredentials(authorization);
-  const nowSeconds = Math.floor(deps.now() / 1000);
-  let developerId: string;
-  let administrator = false;
-  let clientId: string;
-  let companyId: string | undefined;
-  let sessionFacts: AccessCheckContext["session"];
-  let signedInId: string | undefined;
-  let companyless = false;
-  let joinedByInvite = false;
-  if (basic !== undefined) {
-    const client = await signInClientOf(deps, basic.clientId);
-    if (client === undefined || !clientSecretMatches(basic.secret, client.secretHash) || parsed.data.developerId === undefined) throw refused();
-    developerId = parsed.data.developerId;
-    clientId = client.clientId;
-    companyId = await clientCompany(deps, client, developerId);
-  } else {
-    if (parsed.data.developerId !== undefined) throw refused();
-    // DEC 253z: the person's own token is the one form that may answer for a person with no company yet (the web app's "create your company").
-    const authenticated = await authenticateClientToken(deps, authorization, nowSeconds, { companyless: true });
-    ({ developerId, administrator, signedInId } = authenticated);
-    clientId = authenticated.client.clientId;
-    companyId = authenticated.companyId;
-    companyless = authenticated.companyless === true;
-    joinedByInvite = authenticated.joinedByInvite === true;
-    sessionFacts = { sessionId: authenticated.sessionId, amr: authenticated.amr, startedAt: authenticated.startedAt, administrator };
-  }
-  const scope = deps.companies === undefined ? undefined : boundedCompanyReads(deps.documentClient);
-  let access: Awaited<ReturnType<typeof projectsAPersonUses>>;
-  let company: Pick<AccessCheckResponse, "companyId" | "companyRole" | "companyName" | "joinedByInvite"> = {};
-  if (deps.companies === undefined) {
-    // DEC 254: with Code's company layer off, the install's own company records (and a merged sign-in's survivor) decide; none: exactly the legacy read.
-    const install = await installCompanyAccess(deps, developerId);
-    if (install === "refused") throw refused();
-    access = install === undefined ? await projectsAPersonUses(deps, developerId) : install.access;
-    if (install?.company !== undefined) company = install.company;
-  } else if (companyless) {
-    // DEC 253z: no company yet: who they are, no company fields, no projects. Nothing company-scoped is read.
-    const person = await getSignIn<Pick<DeveloperRecord, "displayName" | "displayNameChosen" | "revoked">>({ ...deps, documentClient: scope!.client }, `DEVELOPER#${developerId}`);
-    access = person === undefined || person.revoked !== false || typeof person.displayName !== "string" ? undefined
-      : { displayName: person.displayName, nameChosen: person.displayNameChosen === true, projects: [], notices: [] };
-  } else {
-    access = await projectsAPersonUses({ ...deps, documentClient: scope!.client }, developerId, companyId);
-    // DEC 253z: the company, its role and its name, from live membership read on this call.
-    if (companyId === undefined) throw refused();
-    company = await codeCompanyOf(deps, scope!.client, developerId, companyId);
-    // DEC 254b (f): only the person's own token, only Code's company layer, only for the company this answer names.
-    if (joinedByInvite && company.companyId === companyId) company = { ...company, joinedByInvite: true };
-  }
-  scope?.check();
+  const subject = await authenticateAccessCheckSubject(deps, request.headers.authorization, parsed.data.developerId, Math.floor(deps.now() / 1000), refused);
+  const { access, company } = await resolveAccessCheckProjectsAndCompany(deps, subject, refused);
   if (access === undefined) throw refused();
   // L4-SIGNIN: a Slack session of the person's own token also names its workspace (a convenience for the browser; best effort: unreadable is left out).
-  const slackTeamId = basic === undefined && sessionFacts?.amr === "slack" ? await slackWorkspaceOf(deps, developerId, signedInId) : undefined;
-  const answer: AccessCheckResponse = { developerId, displayName: access.displayName, nameChosen: access.nameChosen, administrator, projects: access.projects, notices: access.notices, ...company, ...(slackTeamId === undefined ? {} : { slackTeamId }) };
-  const context: AccessCheckContext = { clientId, via: basic === undefined ? "token" : "client_secret", developerId, ...(sessionFacts === undefined ? {} : { session: sessionFacts }), now: deps.now() };
+  const slackTeamId = subject.via === "token" && subject.sessionFacts?.amr === "slack" ? await slackWorkspaceOf(deps, subject.developerId, subject.signedInId) : undefined;
+  const answer: AccessCheckResponse = { developerId: subject.developerId, displayName: access.displayName, nameChosen: access.nameChosen, administrator: subject.administrator, projects: access.projects, notices: access.notices, ...company, ...(slackTeamId === undefined ? {} : { slackTeamId }) };
+  const context: AccessCheckContext = { clientId: subject.clientId, via: subject.via, developerId: subject.developerId, ...(subject.sessionFacts === undefined ? {} : { session: subject.sessionFacts }), now: deps.now() };
   const ruled = await applyAccessRules(deps.developer.accessRules, context, answer);
   if (ruled === undefined) throw refused();
   // What leaves is exactly the answer's shape, whatever a rule did.
@@ -1048,54 +1175,73 @@ async function codeCompanyOf(deps: DeveloperRouteDependencies, client: { send(co
   return { companyId, companyRole: membership.role, companyName: record.data.name };
 }
 
+type InstallCompanyAccessResult = undefined | "refused" | { access: Awaited<ReturnType<typeof projectsAPersonUses>>; company?: Pick<AccessCheckResponse, "companyId" | "companyRole" | "companyName"> };
+
+async function legacyInstallCompanyFallback(
+  deps: DeveloperRouteDependencies,
+  scoped: DeveloperRouteDependencies,
+  budget: ReturnType<typeof boundedCompanyReads>,
+  developerId: string,
+  survivorId: string,
+): Promise<InstallCompanyAccessResult> {
+  // A company-layout install: no pointer means removed or never joined, never "read the legacy keys".
+  if (await installUsesCompanyLayout(budget.client, deps.tableName, deps.developer.slackTeamId)) return "refused";
+  if (survivorId === developerId) return undefined;
+  // A merged sign-in on a legacy install: the survivor's legacy grants.
+  const access = await projectsAPersonUses(scoped, survivorId);
+  budget.check();
+  return access === undefined ? "refused" : { access };
+}
+
+async function resolveInstallCompanyProjects(
+  deps: DeveloperRouteDependencies,
+  budget: ReturnType<typeof boundedCompanyReads>,
+  walk: Awaited<ReturnType<typeof mergeSurvivor>>,
+  company: NonNullable<Awaited<ReturnType<typeof installCompanyOf>>>,
+): Promise<InstallCompanyAccessResult> {
+  if (typeof walk.survivor.displayName !== "string") return "refused";
+  const { companyId, role } = company;
+  const grants = await installCompanyGrants(budget.client, deps.tableName, companyId, walk.survivorId, mayUseProject);
+  const catalog = role === "owner" || role === "admin" ? await installCompanyCatalog(budget.client, deps.tableName, companyId) : [];
+  const teamId = deps.developer.slackTeamId;
+  const bindings = teamId === undefined ? [] : await installCompanyBindings(budget.client, deps.tableName, companyId, teamId);
+  const names = [...new Set([...grants, ...catalog, ...bindings.map((binding) => binding.projectName)])].sort();
+  if (names.length > INSTALL_COMPANY_PROJECTS_MAX) return "refused";
+  const definitions = await mapLimit(names, REVISION_READS_AT_ONCE, (name) => installCompanyLatestDefinition(budget.client, deps.tableName, companyId, name));
+  const policies = new Map<string, DeveloperTaskPolicy>();
+  names.forEach((name, index) => { const definition = definitions[index]; if (definition !== undefined) policies.set(name, developerTaskPolicy(definition)); });
+  const slackUserId = walk.survivor.slackUserId ?? walk.signedIn.slackUserId;
+  const resolved = await resolveDeveloperAccess({
+    grants: [...grants, ...catalog].filter((name) => policies.has(name)),
+    bindings: bindings.filter((binding) => policies.has(binding.projectName)),
+    ...(slackUserId === undefined ? {} : { slackUserId }),
+    channelMembersMayUse: (project) => policies.get(project)?.channelMembersMayUse === true,
+    channelMembers: safeChannelMembers(deps),
+  });
+  budget.check();
+  return {
+    access: {
+      displayName: walk.survivor.displayName, nameChosen: walk.survivor.displayNameChosen === true,
+      projects: [...resolved.projects].filter(([name]) => policies.has(name)).map(([name, entry]) => ({ name, access: entry.access })),
+      notices: resolved.slackUnavailable ? ["slack_unavailable"] : [],
+    },
+    company: { companyId, companyRole: role, ...(company.name === undefined ? {} : { companyName: company.name }) },
+  };
+}
+
 /**
  * DEC 254: the access answer from the install's company-scoped records (install-company.ts), for a Code whose own company layer is off. The signed-in id is
  * followed through account merges to its survivor first. Undefined: the person has no company there and was never merged, so the caller reads exactly the
  * legacy keys as before. "refused": the one fixed refusal (a merge loop, a removed or banned member, an unreadable record, a read limit).
  */
-async function installCompanyAccess(deps: DeveloperRouteDependencies, developerId: string): Promise<undefined | "refused" | { access: Awaited<ReturnType<typeof projectsAPersonUses>>; company?: Pick<AccessCheckResponse, "companyId" | "companyRole" | "companyName"> }> {
+async function installCompanyAccess(deps: DeveloperRouteDependencies, developerId: string): Promise<InstallCompanyAccessResult> {
   const budget = boundedCompanyReads(deps.documentClient, deps.now);
   const scoped: DeveloperRouteDependencies = { ...deps, documentClient: budget.client };
   try {
     const walk = await mergeSurvivor((id) => getSignIn(scoped, `DEVELOPER#${id}`), developerId);
     const company = await installCompanyOf(budget.client, deps.tableName, walk.survivorId);
-    if (company === undefined) {
-      // A company-layout install: no pointer means removed or never joined, never "read the legacy keys".
-      if (await installUsesCompanyLayout(budget.client, deps.tableName, deps.developer.slackTeamId)) return "refused";
-      if (walk.survivorId === developerId) return undefined;
-      // A merged sign-in on a legacy install: the survivor's legacy grants.
-      const access = await projectsAPersonUses(scoped, walk.survivorId);
-      budget.check();
-      return access === undefined ? "refused" : { access };
-    }
-    if (typeof walk.survivor.displayName !== "string") return "refused";
-    const { companyId, role } = company;
-    const grants = await installCompanyGrants(budget.client, deps.tableName, companyId, walk.survivorId, mayUseProject);
-    const catalog = role === "owner" || role === "admin" ? await installCompanyCatalog(budget.client, deps.tableName, companyId) : [];
-    const teamId = deps.developer.slackTeamId;
-    const bindings = teamId === undefined ? [] : await installCompanyBindings(budget.client, deps.tableName, companyId, teamId);
-    const names = [...new Set([...grants, ...catalog, ...bindings.map((binding) => binding.projectName)])].sort();
-    if (names.length > INSTALL_COMPANY_PROJECTS_MAX) return "refused";
-    const definitions = await mapLimit(names, REVISION_READS_AT_ONCE, (name) => installCompanyLatestDefinition(budget.client, deps.tableName, companyId, name));
-    const policies = new Map<string, DeveloperTaskPolicy>();
-    names.forEach((name, index) => { const definition = definitions[index]; if (definition !== undefined) policies.set(name, developerTaskPolicy(definition)); });
-    const slackUserId = walk.survivor.slackUserId ?? walk.signedIn.slackUserId;
-    const resolved = await resolveDeveloperAccess({
-      grants: [...grants, ...catalog].filter((name) => policies.has(name)),
-      bindings: bindings.filter((binding) => policies.has(binding.projectName)),
-      ...(slackUserId === undefined ? {} : { slackUserId }),
-      channelMembersMayUse: (project) => policies.get(project)?.channelMembersMayUse === true,
-      channelMembers: safeChannelMembers(deps),
-    });
-    budget.check();
-    return {
-      access: {
-        displayName: walk.survivor.displayName, nameChosen: walk.survivor.displayNameChosen === true,
-        projects: [...resolved.projects].filter(([name]) => policies.has(name)).map(([name, entry]) => ({ name, access: entry.access })),
-        notices: resolved.slackUnavailable ? ["slack_unavailable"] : [],
-      },
-      company: { companyId, companyRole: role, ...(company.name === undefined ? {} : { companyName: company.name }) },
-    };
+    if (company === undefined) return await legacyInstallCompanyFallback(deps, scoped, budget, developerId, walk.survivorId);
+    return await resolveInstallCompanyProjects(deps, budget, walk, company);
   } catch (error) {
     if (error instanceof InstallCompanyRefused || error instanceof AgentXError || error instanceof z.ZodError) return "refused";
     throw error;
@@ -1186,30 +1332,28 @@ function clientTokenScopes(client: SignInClientRecord, scope: unknown): ClientSc
   return client.fullAccess === true ? [...CLIENT_SCOPES] : scopesOf(scope).filter((entry) => client.scopes?.includes(entry) === true);
 }
 
-async function verifyClientSessionAndCompany(
+async function resolveClientSessionCompany(
   deps: DeveloperRouteDependencies,
   client: SignInClientRecord,
+  session: SessionRecord,
+  options: { companyless?: true },
+): Promise<{ companyId: string | undefined; companyless: boolean }> {
+  try {
+    return { companyId: await clientCompany(deps, client, session.developerId), companyless: false };
+  } catch (error) {
+    if (options.companyless !== true || !await companylessSession(deps, client, session)) throw error;
+    return { companyId: undefined, companyless: true };
+  }
+}
+
+function buildAuthenticatedClientToken(
+  client: SignInClientRecord,
+  session: SessionRecord,
   claims: Record<string, unknown>,
   amr: "slack" | "oidc" | "github",
-  nowSeconds: number,
-  options: { companyless?: true },
-  refused: () => Error,
+  companyId: string | undefined,
+  companyless: boolean,
 ) {
-  const session = await getSignIn<SessionRecord>(deps, `SESSION#${claims.sid as string}`);
-  if (session === undefined || session.clientId !== client.clientId || session.developerId !== claims.sub || session.amr !== amr
-    || session.revokedAt !== undefined || session.endsAt <= nowSeconds || Date.parse(session.startedAt) < Date.parse(client.createdAt)) throw refused();
-  await requireSessionSurvivor(deps, session, refused);
-  let companyId: string | undefined;
-  let companyless = false;
-  try { companyId = await clientCompany(deps, client, session.developerId); }
-  catch (error) {
-    if (options.companyless !== true || !await companylessSession(deps, client, session)) throw error;
-    companyless = true;
-  }
-  const companyDeveloper = companyless ? undefined : await companyOidcSession(deps, session, companyId);
-  if (companyDeveloper === undefined && (deps.developer.methods[amr] !== true || startedBeforeMethodOn(session.startedAt, deps.developer.since?.[amr]))) throw refused();
-  const developer = companyDeveloper ?? await getSignIn<Pick<DeveloperRecord, "sessionsEndedAt">>(deps, `DEVELOPER#${session.developerId}`);
-  if (endedByAdmin(session.startedAt, developer?.sessionsEndedAt)) throw refused();
   const joinedByInvite = session.joinedByInvite === true && !companyless && companyId !== undefined && (session.companyId ?? IMPLICIT_COMPANY_ID) === companyId;
   return {
     client,
@@ -1226,17 +1370,41 @@ async function verifyClientSessionAndCompany(
   };
 }
 
-/**
- * Spec 063 FR-004, spec 065 FR-003: a registered sign-in client's token, for a live session of its own. The unverified azp
- * only picks which client's audience the token must then verify against. Every refusal is the same 401.
- */
-async function authenticateClientToken(deps: DeveloperRouteDependencies, authorization: string | undefined, nowSeconds: number, options: { companyless?: true } = {}): Promise<{ signedInId?: string; client: SignInClientRecord; companyId?: string; companyless?: true; developerId: string; administrator: boolean; scopes: ClientScope[]; sessionId: string; amr: DeveloperSignInMethod; startedAt: string; joinedByInvite?: true }> {
-  deps = withSignInReads(deps);
-  const refused = () => agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
-  let azp: unknown;
-  try { azp = decodeJwt(/^Bearer (\S+)$/.exec(authorization ?? "")?.[1] ?? "").azp; } catch { throw refused(); }
-  const client = await signInClientOf(deps, azp);
-  if (client === undefined) throw refused();
+async function verifyClientSessionAndCompany(
+  deps: DeveloperRouteDependencies,
+  client: SignInClientRecord,
+  claims: Record<string, unknown>,
+  amr: "slack" | "oidc" | "github",
+  nowSeconds: number,
+  options: { companyless?: true },
+  refused: () => Error,
+) {
+  const session = await getSignIn<SessionRecord>(deps, `SESSION#${claims.sid as string}`);
+  if (session === undefined || session.clientId !== client.clientId || session.developerId !== claims.sub || session.amr !== amr
+    || session.revokedAt !== undefined || session.endsAt <= nowSeconds || Date.parse(session.startedAt) < Date.parse(client.createdAt)) throw refused();
+  await requireSessionSurvivor(deps, session, refused);
+  const { companyId, companyless } = await resolveClientSessionCompany(deps, client, session, options);
+  const companyDeveloper = companyless ? undefined : await companyOidcSession(deps, session, companyId);
+  if (companyDeveloper === undefined && (deps.developer.methods[amr] !== true || startedBeforeMethodOn(session.startedAt, deps.developer.since?.[amr]))) throw refused();
+  const developer = companyDeveloper ?? await getSignIn<Pick<DeveloperRecord, "sessionsEndedAt">>(deps, `DEVELOPER#${session.developerId}`);
+  if (endedByAdmin(session.startedAt, developer?.sessionsEndedAt)) throw refused();
+  return buildAuthenticatedClientToken(client, session, claims, amr, companyId, companyless);
+}
+
+function unverifiedBearerAzp(authorization: string | undefined): unknown {
+  try {
+    return decodeJwt(/^Bearer (\S+)$/.exec(authorization ?? "")?.[1] ?? "").azp;
+  } catch {
+    return undefined;
+  }
+}
+
+async function verifyClientAccessClaims(
+  deps: DeveloperRouteDependencies,
+  authorization: string | undefined,
+  client: SignInClientRecord,
+  refused: () => Error,
+): Promise<{ claims: Record<string, unknown>; amr: "slack" | "oidc" | "github" }> {
   let claims: Record<string, unknown>;
   try { claims = await deps.developer.verifyAccessToken(authorization, client.audience); }
   catch (error) {
@@ -1245,7 +1413,21 @@ async function authenticateClientToken(deps: DeveloperRouteDependencies, authori
   }
   if (claims.azp !== client.clientId || claims.env !== deps.developer.env || typeof claims.sub !== "string" || typeof claims.sid !== "string") throw refused();
   const amr = claims.amr;
-  if ((amr !== "slack" && amr !== "oidc" && amr !== "github") || (deps.developer.methods[amr] !== true && !(deps.companies !== undefined && amr === "oidc"))) throw refused();
+  if (amr !== "slack" && amr !== "oidc" && amr !== "github") throw refused();
+  if (deps.developer.methods[amr] !== true && !(deps.companies !== undefined && amr === "oidc")) throw refused();
+  return { claims, amr };
+}
+
+/**
+ * Spec 063 FR-004, spec 065 FR-003: a registered sign-in client's token, for a live session of its own. The unverified azp
+ * only picks which client's audience the token must then verify against. Every refusal is the same 401.
+ */
+async function authenticateClientToken(deps: DeveloperRouteDependencies, authorization: string | undefined, nowSeconds: number, options: { companyless?: true } = {}): Promise<{ signedInId?: string; client: SignInClientRecord; companyId?: string; companyless?: true; developerId: string; administrator: boolean; scopes: ClientScope[]; sessionId: string; amr: DeveloperSignInMethod; startedAt: string; joinedByInvite?: true }> {
+  deps = withSignInReads(deps);
+  const refused = () => agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
+  const client = await signInClientOf(deps, unverifiedBearerAzp(authorization));
+  if (client === undefined) throw refused();
+  const { claims, amr } = await verifyClientAccessClaims(deps, authorization, client, refused);
   try {
     return await verifyClientSessionAndCompany(deps, client, claims, amr, nowSeconds, options, refused);
   } catch (error) {
@@ -1277,14 +1459,21 @@ function requireRouteScope(route: DevRoute, caller: { client: SignInClientRecord
  * picks the path; each then verifies the token in full. The client's registration is read at every request, so
  * removing a scope or full access takes effect at once.
  */
+function buildClientDeveloperCaller(
+  person: Awaited<ReturnType<typeof authenticateClientToken>>,
+  developer: Pick<DeveloperRecord, "displayName" | "provider" | "subject" | "slackUserId" | "email">,
+): DeveloperCaller {
+  return {
+    developerId: person.developerId, sessionId: person.sessionId, amr: person.amr, name: profileDisplayName(developer) ?? developer.displayName, clientId: person.client.clientId,
+    ...(developer.slackUserId === undefined ? {} : { slackUserId: developer.slackUserId }),
+    ...(developer.email === undefined ? {} : { email: developer.email }),
+    ...(person.client.fullAccess === true && person.client.webApp === true ? { webApp: true as const } : {}),
+  };
+}
+
 /** The caller of a developer route: the Rovara CLI's token, or a sign-in client's with the route's scope (or full access). Exported for its tests. */
 export async function authenticateCaller(deps: DeveloperRouteDependencies, authorization: string | undefined, route: DevRoute, options: { companyless?: true } = {}): Promise<DeveloperCaller> {
-  let azp: unknown;
-  try {
-    azp = decodeJwt(/^Bearer (\S+)$/.exec(authorization ?? "")?.[1] ?? "").azp;
-  } catch {
-    azp = undefined;
-  }
+  const azp = unverifiedBearerAzp(authorization);
   // A client with neither a scope nor full access is refused as before: its tokens are never Rovara's (401).
   const client = typeof azp !== "string" || azp === AGENTX_CLI_CLIENT_ID ? undefined : await signInClientOf(deps, azp);
   if (client === undefined || (client.fullAccess !== true && (client.scopes ?? []).length === 0)) {
@@ -1294,13 +1483,7 @@ export async function authenticateCaller(deps: DeveloperRouteDependencies, autho
   const developer = await getSignIn<Pick<DeveloperRecord, "displayName" | "provider" | "subject" | "slackUserId" | "email" | "revoked">>(deps, `DEVELOPER#${person.developerId}`);
   if (developer === undefined || developer.revoked) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
   requireRouteScope(route, person);
-  const caller: DeveloperCaller = {
-    developerId: person.developerId, sessionId: person.sessionId, amr: person.amr, name: profileDisplayName(developer) ?? developer.displayName, clientId: person.client.clientId,
-    ...(developer.slackUserId === undefined ? {} : { slackUserId: developer.slackUserId }),
-    ...(developer.email === undefined ? {} : { email: developer.email }),
-    ...(person.client.fullAccess === true && person.client.webApp === true ? { webApp: true as const } : {}),
-  };
-  return caller;
+  return buildClientDeveloperCaller(person, developer);
 }
 
 /** What the project member reads and changes (spec 065) need. */
@@ -1351,6 +1534,28 @@ const CLIENT_PROJECTS_BULK = "/v1/dev/client/projects/bulk";
 const CLIENT_REPOSITORY_CHOICES = "/v1/dev/client/repositories/available";
 const CLIENT_CODE_SETTINGS = /^\/v1\/dev\/client\/projects\/([^/]+)\/code-settings$/;
 
+async function requireActiveClientProfile(deps: DeveloperRouteDependencies, developerId: string): Promise<void> {
+  const profile = await getSignIn<Pick<DeveloperRecord, "revoked">>(deps, `DEVELOPER#${developerId}`);
+  if (profile === undefined || profile.revoked === true) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
+}
+
+function decodeClientProjectName(rawProject: string): string {
+  let project: string;
+  try { project = decodeURIComponent(rawProject); } catch { throw agentXError("NOT_FOUND", "project not found"); }
+  if (!AgentXNameSchema.safeParse(project).success) throw agentXError("NOT_FOUND", "project not found");
+  return project;
+}
+
+async function isClientCompanyAdmin(
+  deps: DeveloperRouteDependencies,
+  person: { developerId: string; administrator: boolean },
+  companyId: string | undefined,
+): Promise<boolean> {
+  if (companyId === undefined) return person.administrator;
+  const membership = await deps.companies?.membershipOf?.(person.developerId);
+  return membership?.companyId === companyId && (membership.role === "admin" || membership.role === "owner");
+}
+
 /**
  * Lane W: `GET|PUT /v1/dev/client/projects/{project}/code-settings`. Read by a person who may use the project (in their company, from membership); changed by its administrator or a
  * company administrator (or, with no company layer, a Rovara administrator). Another company's project, one they may not use and a missing one all answer "project not found".
@@ -1358,11 +1563,8 @@ const CLIENT_CODE_SETTINGS = /^\/v1\/dev\/client\/projects\/([^/]+)\/code-settin
 async function routeClientCodeSettings(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, rawProject: string, route: DevRoute): Promise<unknown> {
   const person = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
   requireRouteScope(route, person);
-  const profile = await getSignIn<Pick<DeveloperRecord, "revoked">>(deps, `DEVELOPER#${person.developerId}`);
-  if (profile === undefined || profile.revoked === true) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
-  let project: string;
-  try { project = decodeURIComponent(rawProject); } catch { throw agentXError("NOT_FOUND", "project not found"); }
-  if (!AgentXNameSchema.safeParse(project).success) throw agentXError("NOT_FOUND", "project not found");
+  await requireActiveClientProfile(deps, person.developerId);
+  const project = decodeClientProjectName(rawProject);
   // As readClientProject: one bounded read budget for the company-checked listing.
   const scope = deps.companies === undefined ? undefined : boundedCompanyReads(deps.documentClient);
   const companyId = await resolveCompany(deps.companies, person.developerId);
@@ -1373,8 +1575,7 @@ async function routeClientCodeSettings(deps: DeveloperRouteDependencies, request
   const store = { documentClient: deps.documentClient, tableName: deps.tableName };
   if (request.method === "GET") return { settings: await readCodeSettings(store, companyId ?? IMPLICIT_COMPANY_ID, project) };
   const own = await projectGrant(memberActions(deps), project, person.developerId, namedCompany(companyId));
-  const membership = companyId === undefined ? undefined : await deps.companies?.membershipOf?.(person.developerId);
-  const companyAdmin = companyId === undefined ? person.administrator : membership?.companyId === companyId && (membership.role === "admin" || membership.role === "owner");
+  const companyAdmin = await isClientCompanyAdmin(deps, person, companyId);
   return putCodeSettings({ ...store, now: deps.now, // The file's one company-less logger (already in the log-site inventory), with the company added when there is one.
     log: (entry) => logDeveloperEvent({ ...entry, ...(companyId === undefined ? {} : { companyId }) }) }, {
     companyId, project, personId: person.developerId, clientId: person.client.clientId, mayChange: own?.role === "administrator" || companyAdmin, webApp: person.client.fullAccess === true && person.client.webApp === true, body: jsonBody(request),
@@ -1428,37 +1629,66 @@ async function loadClientSetupStatusProject(
   return { project, revision: definition.revision, definition: { revision: definition.revision, repositories: definition.repositories, readiness: definition.readiness }, noAutomatedTests: row?.noAutomatedTests };
 }
 
+async function resolveSetupStatusPermissions(
+  deps: DeveloperRouteDependencies,
+  scopeClient: DeveloperRouteDependencies["documentClient"],
+  person: { developerId: string; administrator: boolean },
+  project: string,
+  companyId: string | undefined,
+): Promise<{ role: OrgRole | undefined; projectAdmin: boolean; mayChange: boolean }> {
+  const membership = companyId === undefined ? undefined : await deps.companies?.membershipOf?.(person.developerId);
+  const role = membership !== undefined && membership.companyId === companyId ? membership.role : undefined;
+  const own = await projectGrant({ ...memberActions(deps), documentClient: scopeClient }, project, person.developerId, namedCompany(companyId));
+  const projectAdmin = own?.role === "administrator";
+  const mayChange = projectAdmin || (companyId === undefined ? person.administrator : role === "admin" || role === "owner");
+  return { role, projectAdmin, mayChange };
+}
+
+async function applyClientSetupEvalNone(
+  deps: DeveloperRouteDependencies,
+  scope: ReturnType<typeof boundedCompanyReads>,
+  person: Awaited<ReturnType<typeof authenticateClientToken>>,
+  loaded: Awaited<ReturnType<typeof loadClientSetupStatusProject>>,
+  companyId: string | undefined,
+  mayChange: boolean,
+  request: AdaptedHttpRequest,
+): Promise<unknown> {
+  if (request.method !== "PUT") throw agentXError("NOT_FOUND", "route not found");
+  const changed = await putEvalNone({ documentClient: scope.client, tableName: deps.tableName, now: deps.now, companyId: companyId ?? IMPLICIT_COMPANY_ID, project: loaded.project, revision: loaded.revision, personId: person.developerId, mayChange, body: () => jsonBody(request) });
+  scope.check();
+  logDeveloperEvent({ event: "client.project_setup_eval_none_changed", clientId: person.client.clientId, by: person.developerId, project: loaded.project, noEvals: changed.noEvals ? "true" : "false", ...(companyId === undefined ? {} : { companyId }) });
+  return changed;
+}
+
+async function applyClientSetupSkip(
+  deps: DeveloperRouteDependencies,
+  scope: ReturnType<typeof boundedCompanyReads>,
+  person: Awaited<ReturnType<typeof authenticateClientToken>>,
+  loaded: Awaited<ReturnType<typeof loadClientSetupStatusProject>>,
+  companyId: string | undefined,
+  mayChange: boolean,
+  request: AdaptedHttpRequest,
+): Promise<unknown> {
+  if (request.method !== "PUT") throw agentXError("NOT_FOUND", "route not found");
+  const changed = await putSkip({ documentClient: scope.client, tableName: deps.tableName, now: deps.now, companyId: companyId ?? IMPLICIT_COMPANY_ID, project: loaded.project, personId: person.developerId, mayChange, body: () => jsonBody(request) });
+  scope.check();
+  logDeveloperEvent({ event: "client.project_setup_skip_changed", clientId: person.client.clientId, by: person.developerId, project: loaded.project, row: changed.row, skipped: changed.skipped ? "true" : "false", ...(companyId === undefined ? {} : { companyId }) });
+  return changed;
+}
+
 async function routeClientSetupStatus(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, rawProject: string, change: "/skips" | "/eval-none" | undefined, route: DevRoute): Promise<unknown> {
   const person = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
   requireRouteScope(route, person);
-  const profile = await getSignIn<Pick<DeveloperRecord, "revoked">>(deps, `DEVELOPER#${person.developerId}`);
-  if (profile === undefined || profile.revoked === true) throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
+  await requireActiveClientProfile(deps, person.developerId);
   const scope = boundedCompanyReads(deps.documentClient, deps.now);
   const companyId = await resolveCompany(deps.companies, person.developerId);
   const loaded = await loadClientSetupStatusProject(deps, scope.client, person.developerId, rawProject, companyId);
-  const membership = companyId === undefined ? undefined : await deps.companies?.membershipOf?.(person.developerId);
-  const role = membership !== undefined && membership.companyId === companyId ? membership.role : undefined;
-  const own = await projectGrant({ ...memberActions(deps), documentClient: scope.client }, loaded.project, person.developerId, namedCompany(companyId));
-  const projectAdmin = own?.role === "administrator";
-  const mayChange = projectAdmin || (companyId === undefined ? person.administrator : role === "admin" || role === "owner");
-  const effectiveCompany = companyId ?? IMPLICIT_COMPANY_ID;
-  if (change === "/eval-none") {
-    if (request.method !== "PUT") throw agentXError("NOT_FOUND", "route not found");
-    const changed = await putEvalNone({ documentClient: scope.client, tableName: deps.tableName, now: deps.now, companyId: effectiveCompany, project: loaded.project, revision: loaded.revision, personId: person.developerId, mayChange, body: () => jsonBody(request) });
-    scope.check();
-    logDeveloperEvent({ event: "client.project_setup_eval_none_changed", clientId: person.client.clientId, by: person.developerId, project: loaded.project, noEvals: changed.noEvals ? "true" : "false", ...(companyId === undefined ? {} : { companyId }) });
-    return changed;
-  }
-  if (change === "/skips") {
-    if (request.method !== "PUT") throw agentXError("NOT_FOUND", "route not found");
-    const changed = await putSkip({ documentClient: scope.client, tableName: deps.tableName, now: deps.now, companyId: effectiveCompany, project: loaded.project, personId: person.developerId, mayChange, body: () => jsonBody(request) });
-    scope.check();
-    logDeveloperEvent({ event: "client.project_setup_skip_changed", clientId: person.client.clientId, by: person.developerId, project: loaded.project, row: changed.row, skipped: changed.skipped ? "true" : "false", ...(companyId === undefined ? {} : { companyId }) });
-    return changed;
-  }
+  const { role, projectAdmin, mayChange } = await resolveSetupStatusPermissions(deps, scope.client, person, loaded.project, companyId);
+  if (change === "/eval-none") return applyClientSetupEvalNone(deps, scope, person, loaded, companyId, mayChange, request);
+  if (change === "/skips") return applyClientSetupSkip(deps, scope, person, loaded, companyId, mayChange, request);
   if (request.method !== "GET") throw agentXError("NOT_FOUND", "route not found");
   const status = await readProjectSetupStatus({
-    documentClient: scope.client, tableName: deps.tableName, now: deps.now, companyId: effectiveCompany, project: loaded.project, definition: loaded.definition, noAutomatedTests: loaded.noAutomatedTests,
+    documentClient: scope.client, tableName: deps.tableName, now: deps.now, companyId: companyId ?? IMPLICIT_COMPANY_ID, project: loaded.project, definition: loaded.definition, noAutomatedTests: loaded.noAutomatedTests,
     viewer: { companyRole: role ?? null, projectAdmin },
     readers: { channels: () => projectChannelLinks({ ...deps, documentClient: scope.client }, loaded.project, companyId), ...linearTeamReader(deps, companyId, loaded.project) },
   });
@@ -1569,6 +1799,37 @@ async function routeClientCompanyAudit(
   return routeCompanyReads({ ...deps.companyReads, personName }, { developerId: reader.developerId, administrator: reader.administrator, companyId: reader.companyId }, url, deps.now());
 }
 
+async function routeClientRepositoryChoices(
+  deps: DeveloperRouteDependencies,
+  url: URL,
+  creator: Awaited<ReturnType<typeof authenticateClientToken>>,
+): Promise<ClientRepositoryChoicesResponse> {
+  if (deps.clientRepositoryChoices === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
+  const query = RepositoryChoicesQuerySchema.safeParse(Object.fromEntries(url.searchParams));
+  if (!query.success || new Set(url.searchParams.keys()).size !== [...url.searchParams.keys()].length) {
+    throw agentXError("CONFIG_INVALID", "invalid repository search: use q, limit (1 to 100) and after, once each");
+  }
+  return await deps.clientRepositoryChoices(creator.developerId, query.data);
+}
+
+async function routeClientProjectsBulk(
+  deps: DeveloperRouteDependencies,
+  request: AdaptedHttpRequest,
+  creator: Awaited<ReturnType<typeof authenticateClientToken>>,
+  naming: [] | [ClientProjectNaming],
+): Promise<BulkCreateClientProjectsResponse> {
+  if (deps.createClientProjectsBulk === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
+  const parsed = BulkCreateClientProjectsRequestSchema.safeParse(jsonBody(request));
+  if (!parsed.success) throw agentXError("CONFIG_INVALID", `invalid projects: ${parsed.error.issues[0]?.path.join(".") || "request"}: ${parsed.error.issues[0]?.message ?? "invalid"}`);
+  const answer = await deps.createClientProjectsBulk(creator.developerId, parsed.data, ...naming);
+  logDeveloperEvent({
+    event: "client.projects_bulk_created", clientId: creator.client.clientId, by: creator.developerId,
+    ...(creator.companyId === undefined ? {} : { companyId: creator.companyId }), asked: parsed.data.repositories.length,
+    created: answer.results.filter((row) => row.outcome === "created").length,
+  });
+  return answer;
+}
+
 async function routeClientProjectCreation(
   deps: DeveloperRouteDependencies,
   request: AdaptedHttpRequest,
@@ -1579,31 +1840,28 @@ async function routeClientProjectCreation(
   requireRouteScope(route, creator);
   if (!creator.administrator && !await companyMayCreateProjects(deps, creator)) throw agentXError("FORBIDDEN", "only a Rovara administrator can create a project");
   const naming: [] | [ClientProjectNaming] = creator.administrator ? [] : [{ perCompany: true }];
-  if (url.pathname === CLIENT_REPOSITORY_CHOICES && request.method === "GET") {
-    if (deps.clientRepositoryChoices === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
-    const query = RepositoryChoicesQuerySchema.safeParse(Object.fromEntries(url.searchParams));
-    if (!query.success || new Set(url.searchParams.keys()).size !== [...url.searchParams.keys()].length) {
-      throw agentXError("CONFIG_INVALID", "invalid repository search: use q, limit (1 to 100) and after, once each");
-    }
-    return await deps.clientRepositoryChoices(creator.developerId, query.data) satisfies ClientRepositoryChoicesResponse;
-  }
-  if (url.pathname === CLIENT_PROJECTS_BULK && request.method === "POST") {
-    if (deps.createClientProjectsBulk === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
-    const parsed = BulkCreateClientProjectsRequestSchema.safeParse(jsonBody(request));
-    if (!parsed.success) throw agentXError("CONFIG_INVALID", `invalid projects: ${parsed.error.issues[0]?.path.join(".") || "request"}: ${parsed.error.issues[0]?.message ?? "invalid"}`);
-    const answer = await deps.createClientProjectsBulk(creator.developerId, parsed.data, ...naming);
-    logDeveloperEvent({
-      event: "client.projects_bulk_created", clientId: creator.client.clientId, by: creator.developerId,
-      ...(creator.companyId === undefined ? {} : { companyId: creator.companyId }), asked: parsed.data.repositories.length,
-      created: answer.results.filter((row) => row.outcome === "created").length,
-    });
-    return answer satisfies BulkCreateClientProjectsResponse;
-  }
-  if (!(url.pathname === "/v1/dev/client/projects" && request.method === "POST")) {
-    if (deps.clientRepositories === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
-    return { installations: await deps.clientRepositories(creator.developerId) } satisfies ClientRepositoriesResponse;
-  }
-  return routeClientCreateProjectBody(deps, request, creator, naming);
+  if (url.pathname === CLIENT_REPOSITORY_CHOICES && request.method === "GET") return routeClientRepositoryChoices(deps, url, creator);
+  if (url.pathname === CLIENT_PROJECTS_BULK && request.method === "POST") return routeClientProjectsBulk(deps, request, creator, naming);
+  if (url.pathname === "/v1/dev/client/projects" && request.method === "POST") return routeClientCreateProjectBody(deps, request, creator, naming);
+  if (deps.clientRepositories === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
+  return { installations: await deps.clientRepositories(creator.developerId) } satisfies ClientRepositoriesResponse;
+}
+
+async function createClientMultiRepoProject(
+  deps: DeveloperRouteDependencies,
+  body: unknown,
+  creator: Awaited<ReturnType<typeof authenticateClientToken>>,
+  naming: [] | [ClientProjectNaming],
+): Promise<unknown> {
+  if (deps.createClientProjects === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
+  const many = CreateClientProjectsRequestSchema.safeParse(body);
+  if (!many.success) throw agentXError("CONFIG_INVALID", `invalid project: ${many.error.issues[0]?.path.join(".") || "request"}: ${many.error.issues[0]?.message ?? "invalid"}`);
+  const created = await deps.createClientProjects(creator.developerId, many.data, ...naming);
+  logDeveloperEvent({
+    event: "client.project_created", clientId: creator.client.clientId, by: creator.developerId, project: created.name, repositories: many.data.repositories.length,
+    ...(creator.companyId === undefined ? {} : { companyId: creator.companyId }),
+  });
+  return readClientProject(deps, creator.developerId, created.name, namedCompany(created.companyId) ?? creator.companyId);
 }
 
 async function routeClientCreateProjectBody(
@@ -1614,15 +1872,7 @@ async function routeClientCreateProjectBody(
 ): Promise<unknown> {
   const body = jsonBody(request);
   if (body !== null && typeof body === "object" && Object.prototype.hasOwnProperty.call(body, "repositories")) {
-    if (deps.createClientProjects === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
-    const many = CreateClientProjectsRequestSchema.safeParse(body);
-    if (!many.success) throw agentXError("CONFIG_INVALID", `invalid project: ${many.error.issues[0]?.path.join(".") || "request"}: ${many.error.issues[0]?.message ?? "invalid"}`);
-    const created = await deps.createClientProjects(creator.developerId, many.data, ...naming);
-    logDeveloperEvent({
-      event: "client.project_created", clientId: creator.client.clientId, by: creator.developerId, project: created.name, repositories: many.data.repositories.length,
-      ...(creator.companyId === undefined ? {} : { companyId: creator.companyId }),
-    });
-    return readClientProject(deps, creator.developerId, created.name, namedCompany(created.companyId) ?? creator.companyId);
+    return createClientMultiRepoProject(deps, body, creator, naming);
   }
   if (deps.createClientProject === undefined) throw agentXError("NOT_FOUND", "creating projects is not set up in this deployment");
   const parsed = CreateClientProjectRequestSchema.safeParse(body);
@@ -1691,6 +1941,45 @@ async function executeClientProjectMembersChange(
   return { project, developerId: target.developerId, outcome: revoked.revoked ? "revoked" : "not_member" } satisfies ClientProjectMemberChangeResponse;
 }
 
+function isClientProjectCreationRequest(method: string, pathname: string): boolean {
+  if (method === "POST") return pathname === "/v1/dev/client/projects" || pathname === CLIENT_PROJECTS_BULK;
+  if (method === "GET") return pathname === CLIENT_REPOSITORY_CHOICES || pathname === "/v1/dev/client/repositories";
+  return false;
+}
+
+async function routeClientReadProject(
+  deps: DeveloperRouteDependencies,
+  request: AdaptedHttpRequest,
+  rawProject: string,
+  route: DevRoute,
+): Promise<ClientProjectResponse> {
+  const reader = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
+  requireRouteScope(route, reader);
+  const project = decodeURIComponent(rawProject);
+  if (!AgentXNameSchema.safeParse(project).success) throw agentXError("NOT_FOUND", "project not found");
+  return readClientProject(deps, reader.developerId, project, reader.companyId);
+}
+
+async function routeClientProjectSubroute(
+  deps: DeveloperRouteDependencies,
+  request: AdaptedHttpRequest,
+  url: URL,
+  route: DevRoute,
+): Promise<unknown> {
+  const lifecycle = CLIENT_LIFECYCLE.exec(url.pathname);
+  if (lifecycle !== null) return routeClientLifecycle(deps, request, lifecycle[1]!, lifecycle[2] as LifecycleAction, route);
+  const isReadOrWrite = request.method === "GET" || request.method === "PUT";
+  const settings = CLIENT_CODE_SETTINGS.exec(url.pathname);
+  if (settings !== null && isReadOrWrite) return routeClientCodeSettings(deps, request, settings[1]!, route);
+  const setupStatus = CLIENT_SETUP_STATUS.exec(url.pathname);
+  if (setupStatus !== null && isReadOrWrite) return routeClientSetupStatus(deps, request, setupStatus[1]!, setupStatus[2] as "/skips" | "/eval-none" | undefined, route);
+  const read = CLIENT_PROJECT.exec(url.pathname);
+  if (read !== null && request.method === "GET") return routeClientReadProject(deps, request, read[1]!, route);
+  const members = CLIENT_MEMBERS.exec(url.pathname);
+  if (members === null) throw agentXError("NOT_FOUND", "route not found");
+  return routeClientProjectMembers(deps, request, members[1]!, members[2], route);
+}
+
 /**
  * Spec 065: a sign-in client acting as the signed-in person, within its scopes and the person's own rights. 065a: a
  * project's members, which only the project's administrators or a Rovara administrator may see and change.
@@ -1699,28 +1988,44 @@ export async function routeClientRequest(deps: DeveloperRouteDependencies, reque
   const route = devRouteOf(request.method, url.pathname);
   if (route === undefined) throw agentXError("NOT_FOUND", "route not found");
   if (url.pathname === COMPANY_AUDIT_RECORDS_PATH || url.pathname === COMPANY_EVENTS_PATH) return routeClientCompanyAudit(deps, request, url, route);
-  const isProjectCreation = (url.pathname === "/v1/dev/client/projects" && request.method === "POST")
-    || (url.pathname === CLIENT_PROJECTS_BULK && request.method === "POST")
-    || (url.pathname === CLIENT_REPOSITORY_CHOICES && request.method === "GET")
-    || (url.pathname === "/v1/dev/client/repositories" && request.method === "GET");
-  if (isProjectCreation) return routeClientProjectCreation(deps, request, url, route);
-  const lifecycle = CLIENT_LIFECYCLE.exec(url.pathname);
-  if (lifecycle !== null) return routeClientLifecycle(deps, request, lifecycle[1]!, lifecycle[2] as LifecycleAction, route);
-  const settings = CLIENT_CODE_SETTINGS.exec(url.pathname);
-  if (settings !== null && (request.method === "GET" || request.method === "PUT")) return routeClientCodeSettings(deps, request, settings[1]!, route);
-  const setupStatus = CLIENT_SETUP_STATUS.exec(url.pathname);
-  if (setupStatus !== null && (request.method === "GET" || request.method === "PUT")) return routeClientSetupStatus(deps, request, setupStatus[1]!, setupStatus[2] as "/skips" | "/eval-none" | undefined, route);
-  const read = CLIENT_PROJECT.exec(url.pathname);
-  if (read !== null && request.method === "GET") {
-    const reader = await authenticateClientToken(deps, request.headers.authorization, Math.floor(deps.now() / 1000));
-    requireRouteScope(route, reader);
-    const project = decodeURIComponent(read[1]!);
-    if (!AgentXNameSchema.safeParse(project).success) throw agentXError("NOT_FOUND", "project not found");
-    return readClientProject(deps, reader.developerId, project, reader.companyId);
+  if (isClientProjectCreationRequest(request.method, url.pathname)) return routeClientProjectCreation(deps, request, url, route);
+  return routeClientProjectSubroute(deps, request, url, route);
+}
+
+async function listedProjectChannelNames(
+  deps: DeveloperRouteDependencies,
+  project: string,
+  channels: readonly string[],
+  bindings: readonly SlackChannelBinding[],
+  slackUserId: string | undefined,
+  companyId: string | undefined,
+  fallbackNames: Map<string, { name: string; isPrivate: boolean }>,
+): Promise<Map<string, { name: string; isPrivate: boolean }>> {
+  if (deps.workspaces === undefined || slackUserId === undefined) return fallbackNames;
+  const teams = [...new Set(bindings.filter((row) => row.projectName === project).map((row) => row.teamId))];
+  if (teams.length !== 1 || companyId === undefined) return new Map();
+  return channelNames(deps, channels, { companyId, teamId: teams[0]! });
+}
+
+async function buildListedProjects(
+  deps: DeveloperRouteDependencies,
+  listed: ReadonlyArray<[string, { access: "granted" | "channel"; channels: string[] }]>,
+  policies: Map<string, { revision: number; policy: DeveloperTaskPolicy }>,
+  bindings: readonly SlackChannelBinding[],
+  slackUserId: string | undefined,
+  companyId: string | undefined,
+): Promise<DeveloperProjectsResponse["projects"]> {
+  // Like checkProjectAccess: a caller with no Slack link is never shown channel names.
+  const names = slackUserId === undefined || companySlackMode(deps)
+    ? new Map<string, { name: string; isPrivate: boolean }>()
+    : await channelNames(deps, listed.flatMap(([, entry]) => entry.channels));
+  const projects: DeveloperProjectsResponse["projects"] = [];
+  for (const [name, entry] of listed) {
+    const known = policies.get(name)!;
+    const projectNames = await listedProjectChannelNames(deps, name, entry.channels, bindings, slackUserId, companyId, names);
+    projects.push({ name, latestRevision: known.revision, access: entry.access, channels: entry.channels.map((channelId) => describeChannel(channelId, projectNames)), tasks: known.policy });
   }
-  const members = CLIENT_MEMBERS.exec(url.pathname);
-  if (members === null) throw agentXError("NOT_FOUND", "route not found");
-  return routeClientProjectMembers(deps, request, members[1]!, members[2], route);
+  return projects;
 }
 
 async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperCaller, companyId?: string): Promise<DeveloperProjectsResponse> {
@@ -1739,18 +2044,7 @@ async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperC
     channelMembers: safeChannelMembers(deps),
   });
   const listed = [...access.projects].filter(([name]) => policies.has(name));
-  // Like checkProjectAccess: a caller with no Slack link is never shown channel names.
-  const names = caller.slackUserId === undefined || companySlackMode(deps) ? new Map<string, { name: string; isPrivate: boolean }>() : await channelNames(deps, listed.flatMap(([, entry]) => entry.channels));
-  const projects: DeveloperProjectsResponse["projects"] = [];
-  for (const [name, entry] of listed) {
-    const known = policies.get(name)!;
-    if (deps.workspaces !== undefined && caller.slackUserId !== undefined) {
-      names.clear();
-      const teams = [...new Set(bindings.filter((row) => row.projectName === name).map((row) => row.teamId))];
-      if (teams.length === 1 && companyId !== undefined) for (const [id, label] of await channelNames(deps, entry.channels, { companyId, teamId: teams[0]! })) names.set(id, label);
-    }
-    projects.push({ name, latestRevision: known.revision, access: entry.access, channels: entry.channels.map((channelId) => describeChannel(channelId, names)), tasks: known.policy });
-  }
+  const projects = await buildListedProjects(deps, listed, policies, bindings, caller.slackUserId, companyId);
   return {
     developer: {
       id: caller.developerId, name: caller.name, provider: caller.amr,
@@ -1760,6 +2054,53 @@ async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperC
     projects,
     notices: access.slackUnavailable ? ["slack_unavailable"] : [],
   };
+}
+
+async function resolveProjectAccessWorkspaceAndBindings(
+  deps: DeveloperRouteDependencies,
+  caller: ProjectAccessSubject,
+  project: string,
+  companyId: string | undefined,
+): Promise<{ bindings: SlackChannelBinding[]; workspace: SlackWorkspaceScope | undefined }> {
+  const requestedWorkspace = deps.workspace === undefined ? undefined : await callerWorkspace(deps, caller, { companyId: deps.workspace.companyId }, deps.workspace.teamId);
+  const bindings = (await bindingsOf(deps, requestedWorkspace, companyId)).filter((binding) => binding.projectName === project);
+  const teams = [...new Set(bindings.map((binding) => binding.teamId))];
+  if (deps.workspaces !== undefined && teams.length > 1) throw new SlackWorkspaceRefused();
+  const workspace = deps.workspaces === undefined || teams.length === 0 ? undefined : await callerWorkspace(deps, caller, { companyId }, teams[0]);
+  return { bindings, workspace };
+}
+
+async function fetchFreshChannelMembership(
+  deps: DeveloperRouteDependencies,
+  slackUserId: string,
+  channelIds: readonly string[],
+  workspace: SlackWorkspaceScope | undefined,
+): Promise<string[]> {
+  const memberOf = new Set<string>();
+  for (let start = 0; start < channelIds.length; start += CHANNEL_MEMBERS_MAX_CHANNELS) {
+    const response = await safeChannelMembers(deps)({
+      kind: "channel-members", slackUserId, channelIds: channelIds.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS), ...(workspace === undefined ? {} : { workspace }),
+    });
+    if (!response.ok) throw agentXError("SLACK_UNAVAILABLE", "Slack could not be reached to check your channel membership; try again, or ask an admin for access");
+    for (const channelId of response.memberOf) memberOf.add(channelId);
+  }
+  return [...memberOf];
+}
+
+async function throwProjectAccessDenied(
+  deps: DeveloperRouteDependencies,
+  caller: ProjectAccessSubject,
+  project: string,
+  channelMembersMayUse: boolean,
+  result: { reason: string; visibleChannelIds: readonly string[] },
+  workspace: SlackWorkspaceScope | undefined,
+): Promise<never> {
+  if (result.reason === "tasks-disabled") throw agentXError("PROJECT_TASKS_DISABLED", `tasks from AI tools are turned off for \`${project}\`; use the project's Slack channel, or ask an admin`);
+  // Only a channel that would give access is worth naming, and only a public one (R10).
+  const visible = caller.slackUserId === undefined || !channelMembersMayUse
+    ? []
+    : [...(await channelNames(deps, result.visibleChannelIds, workspace)).values()].filter((channel) => !channel.isPrivate).map((channel) => channel.name).sort();
+  throw agentXError("PROJECT_ACCESS_DENIED", accessDeniedMessage(project, visible));
 }
 
 /**
@@ -1781,11 +2122,7 @@ export async function checkProjectAccess(
   const known = (await projectsWithPolicy(deps, [project], companyId)).get(project);
   if (known === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist in this AgentX`);
   const grants = (await grantsOf(deps, caller, companyId)).filter((name) => name === project);
-  const requestedWorkspace = deps.workspace === undefined ? undefined : await callerWorkspace(deps, caller, { companyId: deps.workspace.companyId }, deps.workspace.teamId);
-  const bindings = (await bindingsOf(deps, requestedWorkspace, companyId)).filter((binding) => binding.projectName === project);
-  const teams = [...new Set(bindings.map((binding) => binding.teamId))];
-  if (deps.workspaces !== undefined && teams.length > 1) throw new SlackWorkspaceRefused();
-  const workspace = deps.workspaces === undefined || teams.length === 0 ? undefined : await callerWorkspace(deps, caller, { companyId }, teams[0]);
+  const { bindings, workspace } = await resolveProjectAccessWorkspaceAndBindings(deps, caller, project, companyId);
   const projectMemberships = grants.map((projectName) => ({ projectName, role: "developer" }));
   const evaluate = (freshMemberOf?: readonly string[]) => evaluateProjectAuthority({
     project,
@@ -1797,27 +2134,11 @@ export async function checkProjectAccess(
   });
   let result = evaluate(membership?.freshMemberOf);
   if (result.kind === "needs-membership") {
-    const memberOf = new Set<string>();
-    for (let start = 0; start < result.channelIds.length; start += CHANNEL_MEMBERS_MAX_CHANNELS) {
-      const response = await safeChannelMembers(deps)({
-        kind: "channel-members", slackUserId: caller.slackUserId!, channelIds: result.channelIds.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS), ...(workspace === undefined ? {} : { workspace }),
-      });
-      if (!response.ok) throw agentXError("SLACK_UNAVAILABLE", "Slack could not be reached to check your channel membership; try again, or ask an admin for access");
-      for (const channelId of response.memberOf) memberOf.add(channelId);
-    }
-    result = evaluate([...memberOf]);
+    result = evaluate(await fetchFreshChannelMembership(deps, caller.slackUserId!, result.channelIds, workspace));
   }
-  if (result.kind === "unavailable") throw agentXError("SLACK_UNAVAILABLE", "Slack could not be reached to check your channel membership; try again, or ask an admin for access");
+  if (result.kind === "unavailable" || result.kind === "needs-membership") throw agentXError("SLACK_UNAVAILABLE", "Slack could not be reached to check your channel membership; try again, or ask an admin for access");
   if (result.kind === "not-found") throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist in this AgentX`);
-  if (result.kind === "needs-membership") throw agentXError("SLACK_UNAVAILABLE", "Slack could not be reached to check your channel membership; try again, or ask an admin for access");
-  if (result.kind === "denied") {
-    if (result.reason === "tasks-disabled") throw agentXError("PROJECT_TASKS_DISABLED", `tasks from AI tools are turned off for \`${project}\`; use the project's Slack channel, or ask an admin`);
-    // Only a channel that would give access is worth naming, and only a public one (R10).
-    const visible = caller.slackUserId === undefined || !known.policy.channelMembersMayUse
-      ? []
-      : [...(await channelNames(deps, result.visibleChannelIds, workspace)).values()].filter((channel) => !channel.isPrivate).map((channel) => channel.name).sort();
-    throw agentXError("PROJECT_ACCESS_DENIED", accessDeniedMessage(project, visible));
-  }
+  if (result.kind === "denied") return await throwProjectAccessDenied(deps, caller, project, known.policy.channelMembersMayUse, result, workspace);
   // DEC 254zzz98 (re-review H): the caller's company as resolved here, so the start can check the project row it actually loads (developer-tasks.ts startTask).
   return { revision: result.revision, policy: result.policy, access: result.access, channelIds: result.channelIds, ...(companyId === undefined ? {} : { companyId }) };
 }
@@ -1908,6 +2229,70 @@ export async function taskPersonStoredName(deps: DeveloperRouteDependencies, tas
   if (person === undefined || person["personId"] !== personId || typeof person["developerId"] !== "string" || typeof person["name"] !== "string") return undefined;
   const subject = (await read(`PERSON_SUBJECT#${person["developerId"]}`)).Item;
   return subject !== undefined && subject["personId"] === personId && subject["developerId"] === person["developerId"] ? person["name"] : undefined;
+}
+
+function optionalWorkflowTaskDependencies(deps: DeveloperRouteDependencies) {
+  return {
+    ...(deps.workflowE2EPresentation === undefined ? {} : { workflowE2EPresentation: deps.workflowE2EPresentation }),
+    ...(deps.workflowE2EPublicationChecks === undefined ? {} : { workflowE2EPublicationChecks: deps.workflowE2EPublicationChecks }),
+    ...(deps.workflowE2EScenarioResults === undefined ? {} : { workflowE2EScenarioResults: deps.workflowE2EScenarioResults }),
+    ...(deps.workflowE2EArtifact === undefined ? {} : { workflowE2EArtifact: deps.workflowE2EArtifact }),
+    ...(deps.startWorkflowE2EBaseline === undefined ? {} : { startWorkflowE2EBaseline: deps.startWorkflowE2EBaseline }),
+    ...(deps.validateWorkflowE2EApplicationPlan === undefined ? {} : { validateWorkflowE2EApplicationPlan: deps.validateWorkflowE2EApplicationPlan }),
+    ...(deps.registeredRepositoryIdentity === undefined ? {} : { registeredRepositoryIdentity: deps.registeredRepositoryIdentity }),
+    ...(deps.refreshTaskFeedback === undefined ? {} : { refreshTaskFeedback: deps.refreshTaskFeedback.bind(deps) }),
+  };
+}
+
+function optionalTaskConfigDependencies(deps: DeveloperRouteDependencies) {
+  return {
+    ...(deps.developer.slackTeamId === undefined ? {} : { slackTeamId: deps.developer.slackTeamId }),
+    ...(deps.developer.coreTasks === undefined ? {} : { coreTasks: deps.developer.coreTasks }),
+    ...(deps.developer.taskPeopleConfiguration === undefined ? {} : { taskPeopleConfiguration: deps.developer.taskPeopleConfiguration }),
+    ...(deps.developer.workflowDependenciesEnabled === undefined ? {} : { workflowDependenciesEnabled: deps.developer.workflowDependenciesEnabled }),
+    ...(deps.developer.inviteTaskPerson === undefined ? {} : { inviteTaskPerson: deps.developer.inviteTaskPerson }),
+    ...(deps.developer.slackRequestQueue === undefined ? {} : { slackRequestQueue: deps.developer.slackRequestQueue }),
+  };
+}
+
+function optionalTaskDisplayDependencies(
+  deps: DeveloperRouteDependencies,
+  identityDependencies: (task: DeveloperTaskRecord, admission?: TaskPeopleDisplayAdmission) => Promise<TaskPersonIdentityDependencies>,
+  projectChannelIds: (project: string, workspace?: SlackWorkspaceScope) => Promise<string[]>,
+) {
+  return {
+    ...(deps.developer.taskPeopleDisplayRead === undefined ? {} : {
+      createTaskPeopleDisplayAdmission: () => taskPeopleDisplayAdmission({ now: deps.now, read: deps.developer.taskPeopleDisplayRead! }),
+      listTaskPeople: async (task: DeveloperTaskRecord, admission: TaskPeopleDisplayAdmission) => {
+        const identity = await identityDependencies(task, admission);
+        const workspace = identity.workspace;
+        const channels = [...new Set([...(await projectChannelIds(task.project, workspace)), ...(task.share === undefined ? [] : [task.share.channelId])])].sort();
+        admission.assertOpen();
+        const answer = await admission.directory({ kind: "task-channel-people", channelIds: channels, ...(workspace === undefined ? {} : { workspace }) });
+        if (!answer.ok) throw agentXError("SLACK_UNAVAILABLE", "the complete task People directory is unavailable");
+        admission.assertOpen();
+        const identities = await registerTaskChannelPeople(identity, task, answer.users, () => admission.assertOpen());
+        admission.assertOpen();
+        const bySlack = new Map(answer.users.map((user) => [user.id, user]));
+        return identities.map((identity) => {
+          const slackUserId = identity.slackUserId;
+          const user = slackUserId === undefined ? undefined : bySlack.get(slackUserId);
+          if (slackUserId === undefined || user === undefined) throw agentXError("SLACK_UNAVAILABLE", "the complete task People directory is unavailable");
+          return { subject: { developerId: identity.developerId, slackUserId }, identity, eligible: true,
+            channelMember: task.share === undefined || user.memberOf.includes(task.share.channelId) };
+        });
+      },
+    }),
+    ...(deps.developer.channelInfo === undefined ? {} : {
+      boundChannels: async (channelIds: readonly string[], workspace?: SlackWorkspaceScope) => {
+        const known = await channelNames(deps, channelIds, workspace);
+        return channelIds.map((channelId) => {
+          const channel = known.get(channelId);
+          return channel === undefined ? { channelId } : { channelId, name: channel.name, isPrivate: channel.isPrivate };
+        });
+      },
+    }),
+  };
 }
 
 export function developerTaskRouteDependencies(
@@ -2055,19 +2440,11 @@ export function developerTaskRouteDependencies(
       return membership.companyId === taskCompanyId(task)
         && (own || membership.role === "owner" || membership.role === "admin");
     },
-    ...(deps.developer.slackTeamId === undefined ? {} : { slackTeamId: deps.developer.slackTeamId }),
     issuer: deps.developer.issuer,
-    ...(deps.developer.coreTasks === undefined ? {} : { coreTasks: deps.developer.coreTasks }),
     actions: deps.tasks!,
-    ...(deps.workflowE2EPresentation === undefined ? {} : { workflowE2EPresentation: deps.workflowE2EPresentation }),
-    ...(deps.workflowE2EPublicationChecks === undefined ? {} : { workflowE2EPublicationChecks: deps.workflowE2EPublicationChecks }),
-    ...(deps.workflowE2EScenarioResults === undefined ? {} : { workflowE2EScenarioResults: deps.workflowE2EScenarioResults }),
-    ...(deps.workflowE2EArtifact === undefined ? {} : { workflowE2EArtifact: deps.workflowE2EArtifact }),
-    ...(deps.startWorkflowE2EBaseline === undefined ? {} : { startWorkflowE2EBaseline: deps.startWorkflowE2EBaseline }),
-    ...(deps.validateWorkflowE2EApplicationPlan === undefined ? {} : { validateWorkflowE2EApplicationPlan: deps.validateWorkflowE2EApplicationPlan }),
-    ...(deps.registeredRepositoryIdentity === undefined ? {} : { registeredRepositoryIdentity: deps.registeredRepositoryIdentity }),
-    ...(deps.developer.taskPeopleConfiguration === undefined ? {} : { taskPeopleConfiguration: deps.developer.taskPeopleConfiguration }),
-    ...(deps.developer.workflowDependenciesEnabled === undefined ? {} : { workflowDependenciesEnabled: deps.developer.workflowDependenciesEnabled }),
+    ...optionalTaskConfigDependencies(deps),
+    ...optionalWorkflowTaskDependencies(deps),
+    ...optionalTaskDisplayDependencies(deps, identityDependencies, projectChannelIds),
     taskPeopleStart: async task => prepareTaskPeopleStart(await identityDependenciesOrWebOnly(task), task),
     checkTaskPerson: async (task, developerId, admission) => checkTaskPersonIdentity(await identityDependenciesOrWebOnly(task, admission), task, developerId),
     // C4 (plan 4.2 "Add a person from the web"): the web proof's own reads, which need no Slack.
@@ -2094,30 +2471,6 @@ export function developerTaskRouteDependencies(
       }
       return { teamId: share.teamId, channelId: share.channelId, threadTs: share.threadTs };
     },
-    ...(deps.developer.inviteTaskPerson === undefined ? {} : { inviteTaskPerson: deps.developer.inviteTaskPerson }),
-    ...(deps.developer.taskPeopleDisplayRead === undefined ? {} : {
-      createTaskPeopleDisplayAdmission: () => taskPeopleDisplayAdmission({ now: deps.now, read: deps.developer.taskPeopleDisplayRead! }),
-      listTaskPeople: async (task: DeveloperTaskRecord, admission: TaskPeopleDisplayAdmission) => {
-      const identity = await identityDependencies(task, admission);
-      const workspace = identity.workspace;
-      const channels = [...new Set([...(await projectChannelIds(task.project, workspace)), ...(task.share === undefined ? [] : [task.share.channelId])])].sort();
-      admission.assertOpen();
-      const answer = await admission.directory({ kind: "task-channel-people", channelIds: channels, ...(workspace === undefined ? {} : { workspace }) });
-      if (!answer.ok) throw agentXError("SLACK_UNAVAILABLE", "the complete task People directory is unavailable");
-      admission.assertOpen();
-      const identities = await registerTaskChannelPeople(identity, task, answer.users, () => admission.assertOpen());
-      admission.assertOpen();
-      const bySlack = new Map(answer.users.map((user) => [user.id, user]));
-      return identities.map((identity) => {
-        const slackUserId = identity.slackUserId;
-        const user = slackUserId === undefined ? undefined : bySlack.get(slackUserId);
-        if (slackUserId === undefined || user === undefined) throw agentXError("SLACK_UNAVAILABLE", "the complete task People directory is unavailable");
-        return { subject: { developerId: identity.developerId, slackUserId }, identity, eligible: true,
-          channelMember: task.share === undefined || user.memberOf.includes(task.share.channelId) };
-      });
-      },
-    }),
-    ...(deps.refreshTaskFeedback === undefined ? {} : { refreshTaskFeedback: deps.refreshTaskFeedback.bind(deps) }),
     ...(initialSlackThread === undefined ? {} : { initialSlackThread }),
     checkAccess: async (project) => {
       try {
@@ -2138,38 +2491,31 @@ export function developerTaskRouteDependencies(
       return answer.memberOf.includes(channelId);
     },
     projectChannelIds,
-    ...(deps.developer.slackRequestQueue === undefined ? {} : { slackRequestQueue: deps.developer.slackRequestQueue }),
-    ...(deps.developer.channelInfo === undefined ? {} : {
-      boundChannels: async (channelIds: readonly string[], workspace?: SlackWorkspaceScope) => {
-        const known = await channelNames(deps, channelIds, workspace);
-        return channelIds.map((channelId) => {
-          const channel = known.get(channelId);
-          return channel === undefined ? { channelId } : { channelId, name: channel.name, isPrivate: channel.isPrivate };
-        });
-      },
-    }),
     now: deps.now,
   };
 }
 
 const CompanyInviteInput = z.object({ email: z.string().trim().min(3).max(320).email(), role: z.literal("member"), expiresInHours: z.number().int().min(1).max(720) }).strict();
-/**
- * DEC 254h / 254zzz184: `POST` makes a single-use link; `POST .../{inviteId}/resend` atomically replaces it for a live pending invite. `DELETE`
- * withdraws the pre-approval. The secret is answered once and only its SHA-256 travels to the sign-in Lambda and is stored.
- */
-async function companyPreapprovalRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<CompanyPreapprovalCreated | { ok: true }> {
-  const notFound = () => agentXError("NOT_FOUND", "not found");
-  if (deps.companies === undefined) throw agentXError("NOT_FOUND", "route not found");
-  const isPost = request.method === "POST" && url.pathname === "/v1/dev/company/preapprovals";
-  const hash = /^\/v1\/dev\/company\/preapprovals\/([a-f0-9]{64})$/.exec(url.pathname)?.[1];
-  const resendHash = /^\/v1\/dev\/company\/preapprovals\/([a-f0-9]{64})\/resend$/.exec(url.pathname)?.[1];
-  const isResend = request.method === "POST" && resendHash !== undefined;
-  if (!isPost && !isResend && !(request.method === "DELETE" && hash !== undefined)) throw notFound();
-  const route = devRouteOf(request.method, url.pathname);
-  if (route === undefined) throw notFound();
-  // Named scopes never authorize invitations; full access is checked before the live membership role.
-  const caller = await authenticateCaller(deps, request.headers.authorization, route);
-  const companyId = await resolveCompany(deps.companies, caller.developerId);
+type CompanyPreapprovalAction =
+  | { kind: "create" }
+  | { kind: "resend"; emailHash: string }
+  | { kind: "withdraw"; emailHash: string };
+
+function parseCompanyPreapprovalAction(method: string, pathname: string): CompanyPreapprovalAction | undefined {
+  if (method === "POST" && pathname === "/v1/dev/company/preapprovals") return { kind: "create" };
+  const resendHash = /^\/v1\/dev\/company\/preapprovals\/([a-f0-9]{64})\/resend$/.exec(pathname)?.[1];
+  if (method === "POST" && resendHash !== undefined) return { kind: "resend", emailHash: resendHash };
+  const hash = /^\/v1\/dev\/company\/preapprovals\/([a-f0-9]{64})$/.exec(pathname)?.[1];
+  if (method === "DELETE" && hash !== undefined) return { kind: "withdraw", emailHash: hash };
+  return undefined;
+}
+
+async function requireCompanyAdminMember(
+  deps: DeveloperRouteDependencies,
+  caller: DeveloperCaller,
+  companyId: string | undefined,
+  notFound: () => Error,
+): Promise<z.infer<typeof Membership>> {
   let member: z.infer<typeof Membership>;
   try {
     const response = await readingMembership(() => deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: membershipKey(caller.developerId), ConsistentRead: true }))) as { Item?: unknown };
@@ -2177,20 +2523,47 @@ async function companyPreapprovalRoute(deps: DeveloperRouteDependencies, request
     if (member.personId !== caller.developerId || member.companyId !== companyId || member.revokedAt !== undefined) throw new Error("membership unavailable");
   } catch (error) { rethrowMembershipReadFailure(error); throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN); }
   if (member.role !== "admin" && member.role !== "owner") throw notFound();
-  if (isResend && caller.webApp !== true) throw agentXError("FORBIDDEN", "resending an invite is done in the Rovara web app");
-  let forwarded: CompanyPreapprovalRequest;
-  let link: { secret: string; secretHash: string } | undefined;
-  if (isPost) {
+  return member;
+}
+
+function buildCompanyPreapprovalForward(
+  action: CompanyPreapprovalAction,
+  request: AdaptedHttpRequest,
+  companyId: string,
+  developerId: string,
+): { forwarded: CompanyPreapprovalRequest; link?: { secret: string; secretHash: string } } {
+  if (action.kind === "create") {
     const parsed = CompanyInviteInput.safeParse(jsonBody(request));
     if (!parsed.success) throw agentXError("CONFIG_INVALID", "a member invitation needs an email and an expiry from 1 to 720 hours");
-    link = newCompanyInviteLink();
-    forwarded = { kind: "company-preapprove", companyId: member.companyId, ...parsed.data, createdBy: caller.developerId, inviteHash: link.secretHash };
-  } else if (isResend) {
+    const link = newCompanyInviteLink();
+    return { link, forwarded: { kind: "company-preapprove", companyId, ...parsed.data, createdBy: developerId, inviteHash: link.secretHash } };
+  }
+  if (action.kind === "resend") {
     const parsed = z.object({ expiresInHours: z.number().int().min(1).max(720) }).strict().safeParse(jsonBody(request));
     if (!parsed.success) throw agentXError("CONFIG_INVALID", "an invite resend needs an expiry from 1 to 720 hours");
-    link = newCompanyInviteLink();
-    forwarded = { kind: "company-preapproval-resend", companyId: member.companyId, emailHash: resendHash, ...parsed.data, createdBy: caller.developerId, inviteHash: link.secretHash };
-  } else forwarded = { kind: "company-preapproval-withdraw", companyId: member.companyId, emailHash: hash!, createdBy: caller.developerId };
+    const link = newCompanyInviteLink();
+    return { link, forwarded: { kind: "company-preapproval-resend", companyId, emailHash: action.emailHash, ...parsed.data, createdBy: developerId, inviteHash: link.secretHash } };
+  }
+  return { forwarded: { kind: "company-preapproval-withdraw", companyId, emailHash: action.emailHash, createdBy: developerId } };
+}
+
+/**
+ * DEC 254h / 254zzz184: `POST` makes a single-use link; `POST .../{inviteId}/resend` atomically replaces it for a live pending invite. `DELETE`
+ * withdraws the pre-approval. The secret is answered once and only its SHA-256 travels to the sign-in Lambda and is stored.
+ */
+async function companyPreapprovalRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<CompanyPreapprovalCreated | { ok: true }> {
+  const notFound = () => agentXError("NOT_FOUND", "not found");
+  if (deps.companies === undefined) throw agentXError("NOT_FOUND", "route not found");
+  const action = parseCompanyPreapprovalAction(request.method, url.pathname);
+  if (action === undefined) throw notFound();
+  const route = devRouteOf(request.method, url.pathname);
+  if (route === undefined) throw notFound();
+  // Named scopes never authorize invitations; full access is checked before the live membership role.
+  const caller = await authenticateCaller(deps, request.headers.authorization, route);
+  const companyId = await resolveCompany(deps.companies, caller.developerId);
+  const member = await requireCompanyAdminMember(deps, caller, companyId, notFound);
+  if (action.kind === "resend" && caller.webApp !== true) throw agentXError("FORBIDDEN", "resending an invite is done in the Rovara web app");
+  const { forwarded, link } = buildCompanyPreapprovalForward(action, request, member.companyId, caller.developerId);
   let answer: false | { expiresAt?: number } | undefined;
   try { answer = await deps.developer.companyPreapprovals?.(forwarded); }
   catch { throw notFound(); }
@@ -2379,34 +2752,52 @@ export function requireMachineSizeRole(companyAdmin: boolean, projectAdmin: bool
   if (!companyAdmin && !projectAdmin) throw agentXError("FORBIDDEN", MACHINE_SIZE_ROLE_REQUIRED);
 }
 
+async function applyMachineSizeChoice(
+  deps: DeveloperRouteDependencies,
+  testEnvDeps: { store: DynamoDocumentStore; now: () => number },
+  caller: DeveloperCaller,
+  orgId: string,
+  companyId: string | undefined,
+  project: string,
+  request: AdaptedHttpRequest,
+): Promise<void> {
+  const membership = await deps.companies?.membershipOf?.(caller.developerId);
+  const companyAdmin = membership !== undefined && membership.companyId === companyId && (membership.role === "owner" || membership.role === "admin");
+  const own = await projectGrant(memberActions(deps), project, caller.developerId, companyId);
+  requireMachineSizeRole(companyAdmin, own?.role === "administrator");
+  const body = jsonBody(request);
+  const rowId = body !== null && typeof body === "object" ? (body as Record<string, unknown>)["rowId"] : undefined;
+  if (typeof rowId !== "string" || !MACHINE_SIZE_ROWS.some((row) => row.id === rowId)) throw agentXError("CONFIG_INVALID", "Choose one of the listed machine sizes");
+  await setMachineChoice(testEnvDeps, { orgId, project, rowId });
+  logDeveloperEvent({ event: "project.machine_size_chosen", companyId: orgId, by: caller.developerId, project, rowId });
+}
+
+function formatMachineSizeResponse(card: Awaited<ReturnType<typeof machineCard>>) {
+  return {
+    measuredPeakMemoryMiB: card?.measuredPeakMemoryMiB ?? null,
+    testTimeMs: card?.testTimeMs ?? null,
+    suggestedSize: card?.suggestedRowId ?? null,
+    currentSize: card?.chosenRowId ?? null,
+    storedOnlyLine: MACHINE_STORED_ONLY_LINE,
+    choices: card?.choices ?? [],
+  };
+}
+
 /** Hosted TE-C5 read and page-only stored choice. A selection is a project setting; it never changes a worker launch or task estimate. */
 async function checkedMachineSize(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, rawProject: string): Promise<unknown> {
   if (!machineSizeEnabled()) throw agentXError("NOT_AVAILABLE_HERE", "Machine size suggestions are not set up here.");
   const companyId = await resolveCompany(deps.companies, caller.developerId);
   if (request.method === "POST") requireMachineSizePage(caller);
-  let project: string;
-  try { project = decodeURIComponent(rawProject); } catch { throw agentXError("NOT_FOUND", "project not found"); }
-  if (!AgentXNameSchema.safeParse(project).success) throw agentXError("NOT_FOUND", "project not found");
+  const project = decodeClientProjectName(rawProject);
   const projects = await listProjects(deps, caller, companyId);
   if (!projects.projects.some((entry) => entry.name === project)) throw agentXError("NOT_FOUND", "project not found");
   const orgId = companyId ?? IMPLICIT_COMPANY_ID;
   const store = new DynamoDocumentStore({ client: deps.documentClient, tableName: deps.tableName });
   const testEnvDeps = { store, now: deps.now };
-  if (request.method === "POST") {
-    const membership = await deps.companies?.membershipOf?.(caller.developerId);
-    const companyAdmin = membership !== undefined && membership.companyId === companyId && (membership.role === "owner" || membership.role === "admin");
-    const own = await projectGrant(memberActions(deps), project, caller.developerId, companyId);
-    requireMachineSizeRole(companyAdmin, own?.role === "administrator");
-    const body = jsonBody(request);
-    const rowId = body !== null && typeof body === "object" ? (body as Record<string, unknown>)["rowId"] : undefined;
-    if (typeof rowId !== "string" || !MACHINE_SIZE_ROWS.some((row) => row.id === rowId)) throw agentXError("CONFIG_INVALID", "Choose one of the listed machine sizes");
-    await setMachineChoice(testEnvDeps, { orgId, project, rowId });
-    logDeveloperEvent({ event: "project.machine_size_chosen", companyId: orgId, by: caller.developerId, project, rowId });
-  }
+  if (request.method === "POST") await applyMachineSizeChoice(deps, testEnvDeps, caller, orgId, companyId, project, request);
   const view = await testEnvironmentView(testEnvDeps, orgId, project);
   const card = await machineCard(testEnvDeps, orgId, project, view.proposal?.digest ?? view.approved?.digest);
-  return { measuredPeakMemoryMiB: card?.measuredPeakMemoryMiB ?? null, testTimeMs: card?.testTimeMs ?? null,
-    suggestedSize: card?.suggestedRowId ?? null, currentSize: card?.chosenRowId ?? null, storedOnlyLine: MACHINE_STORED_ONLY_LINE, choices: card?.choices ?? [] };
+  return formatMachineSizeResponse(card);
 }
 
 /** No SDK or parser causes leave the hosted route. */
@@ -2515,25 +2906,37 @@ async function routeDeveloperProjectsList(deps: DeveloperRouteDependencies, call
   return result;
 }
 
+function optionalRequestBody(request: AdaptedHttpRequest) {
+  return request.body === undefined ? {} : { body: request.body };
+}
+
+function answerLessonsApi(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  if (deps.lessons === undefined) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
+  return deps.lessons.answer({ method: request.method, path: url.pathname, query: url.searchParams, ...optionalRequestBody(request) }, { personId: caller.developerId });
+}
+
+function answerKnowledgeSwitch(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  // Where the core does not serve (no switch API), the routes are there but not served: a fixed answer that is not "route not found" (named-scopes: a route row is never an unknown route).
+  if (deps.knowledgeSwitch === undefined) throw agentXError("NOT_FOUND", "These settings are not available on this install.");
+  return deps.knowledgeSwitch.answer({ method: request.method, path: url.pathname, ...optionalRequestBody(request) }, { personId: caller.developerId, webApp: caller.webApp === true });
+}
+
+function answerLessonsSlackSwitch(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  if (deps.lessonsSlackSwitch === undefined) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
+  return deps.lessonsSlackSwitch.answer({ method: request.method, path: url.pathname, ...optionalRequestBody(request) }, { personId: caller.developerId });
+}
+
+function answerLessonRepeats(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  if (deps.lessonRepeats === undefined) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
+  return deps.lessonRepeats.answer({ method: request.method, path: url.pathname, query: url.searchParams }, { personId: caller.developerId });
+}
+
 function routeDeveloperLessonsRequest(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> | undefined {
   // Lane LM8: the lessons API answers as the signed-in person; the company comes from their membership, inside it.
-  if (LESSONS_API_ROUTES.test(url.pathname) || LESSONS_GRADUATION_ROUTES.test(url.pathname)) {
-    if (deps.lessons === undefined) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
-    return deps.lessons.answer({ method: request.method, path: url.pathname, query: url.searchParams, ...(request.body === undefined ? {} : { body: request.body }) }, { personId: caller.developerId });
-  }
-  if (url.pathname === "/v1/dev/company/lessons/local-tools" || /^\/v1\/dev\/projects\/[^/]+\/lessons\/local-tools$/u.test(url.pathname)) { // L4-JA7 (core-host/knowledge-switch-api.ts parses the same paths; a test holds the two equal)
-    // Where the core does not serve (no switch API), the routes are there but not served: a fixed answer that is not "route not found" (named-scopes: a route row is never an unknown route).
-    if (deps.knowledgeSwitch === undefined) throw agentXError("NOT_FOUND", "These settings are not available on this install.");
-    return deps.knowledgeSwitch.answer({ method: request.method, path: url.pathname, ...(request.body === undefined ? {} : { body: request.body }) }, { personId: caller.developerId, webApp: caller.webApp === true });
-  }
-  if (url.pathname === "/v1/dev/me/lessons-slack") { // L4-SRC-SL (core-host/lessons-slack-switch-api.ts parses the same path; a test holds the two equal)
-    if (deps.lessonsSlackSwitch === undefined) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
-    return deps.lessonsSlackSwitch.answer({ method: request.method, path: url.pathname, ...(request.body === undefined ? {} : { body: request.body }) }, { personId: caller.developerId });
-  }
-  if (LESSONS_REPEATS_ROUTES.test(url.pathname)) {
-    if (deps.lessonRepeats === undefined) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
-    return deps.lessonRepeats.answer({ method: request.method, path: url.pathname, query: url.searchParams }, { personId: caller.developerId });
-  }
+  if (LESSONS_API_ROUTES.test(url.pathname) || LESSONS_GRADUATION_ROUTES.test(url.pathname)) return answerLessonsApi(deps, caller, request, url);
+  if (url.pathname === "/v1/dev/company/lessons/local-tools" || /^\/v1\/dev\/projects\/[^/]+\/lessons\/local-tools$/u.test(url.pathname)) return answerKnowledgeSwitch(deps, caller, request, url); // L4-JA7 (core-host/knowledge-switch-api.ts parses the same paths; a test holds the two equal)
+  if (url.pathname === "/v1/dev/me/lessons-slack") return answerLessonsSlackSwitch(deps, caller, request, url); // L4-SRC-SL (core-host/lessons-slack-switch-api.ts parses the same path; a test holds the two equal)
+  if (LESSONS_REPEATS_ROUTES.test(url.pathname)) return answerLessonRepeats(deps, caller, request, url);
   return undefined;
 }
 
@@ -2579,7 +2982,7 @@ async function routeDeveloperTasksRequest(deps: DeveloperRouteDependencies, call
   return result;
 }
 
-function routeAuthenticatedDeveloperRequest(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+function routeDeveloperProjectAndWorkspaceRequest(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> | undefined {
   // The preview is read-only; the core resolves live company membership and project access.
   if (/^\/v1\/dev\/projects\/([^/]+)\/start-estimates$/u.test(url.pathname)) return routeStartEstimates(deps, caller, request);
   const machineSize = /^\/v1\/dev\/projects\/([^/]+)\/machine-size$/u.exec(url.pathname);
@@ -2589,6 +2992,12 @@ function routeAuthenticatedDeveloperRequest(deps: DeveloperRouteDependencies, ca
   if (url.pathname === "/v1/dev/company/settings-compliance") return projectSettingsComplianceRoute(deps, caller, url);
   if (request.method === "GET" && url.pathname === "/v1/dev/projects") return routeDeveloperProjectsList(deps, caller);
   if (request.method === "GET" && url.pathname === "/v1/dev/workspaces") return listWorkspaces(deps, caller);
+  return undefined;
+}
+
+function routeAuthenticatedDeveloperRequest(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  const projectResponse = routeDeveloperProjectAndWorkspaceRequest(deps, caller, request, url);
+  if (projectResponse !== undefined) return projectResponse;
   if (request.method === "PUT" && url.pathname === "/v1/dev/me/name") return setMyName(deps, caller, request);
   if (/^\/v1\/dev\/(?:me\/sign-ins(?:\/link|\/link\/finish|\/[^/]+)?|company\/members\/[^/]+\/sign-ins(?:\/[^/]+)?)$/.test(url.pathname)) return routeSignInLinks(deps.developer.signInLinks, caller, request, url); // DEC 254w: connected sign-ins (sign-in-link-routes.ts).
   const lessonsResponse = routeDeveloperLessonsRequest(deps, caller, request, url);
@@ -2643,6 +3052,14 @@ export async function routeAppRequest(deps: DeveloperRouteDependencies, request:
   return { ...answer, headers: { ...answer.headers, "cache-control": "no-store" } };
 }
 
+function linkingRouteKind(method: string, pathname: string): "projects" | "workspaces" | "links" | "name" | undefined {
+  if (method === "GET" && pathname === "/v1/dev/projects") return "projects";
+  if (method === "GET" && pathname === "/v1/dev/workspaces") return "workspaces";
+  if (pathname === "/v1/dev/channel-links" || pathname.startsWith("/v1/dev/channel-links/")) return "links";
+  if (method === "PUT" && pathname === "/v1/dev/me/name") return "name";
+  return undefined;
+}
+
 /**
  * Spec 064: the legacy deployment's developer API: the link page, a registered service's access check, a person's own
  * links, and (spec 066) their projects and workspaces. Tasks and ChatGPT sign-in are not there: the legacy deployment
@@ -2655,21 +3072,12 @@ export async function routeLinkingRequest(deps: DeveloperRouteDependencies, requ
   if (route === undefined) throw agentXError("NOT_FOUND", "route not found");
   if (request.method === "POST" && url.pathname === "/v1/dev/access") return checkSignInAccess(deps, request);
   if (url.pathname.startsWith("/v1/dev/client/")) return routeClientRequest(deps, request, url);
-  const projects = request.method === "GET" && url.pathname === "/v1/dev/projects";
-  const workspaces = request.method === "GET" && url.pathname === "/v1/dev/workspaces";
-  const links = url.pathname === "/v1/dev/channel-links" || url.pathname.startsWith("/v1/dev/channel-links/");
-  const name = request.method === "PUT" && url.pathname === "/v1/dev/me/name";
-  if (!projects && !workspaces && !links && !name) throw agentXError("NOT_FOUND", "route not found");
+  const kind = linkingRouteKind(request.method, url.pathname);
+  if (kind === undefined) throw agentXError("NOT_FOUND", "route not found");
   const caller = await authenticateCaller(deps, request.headers.authorization, route);
-  if (projects) {
-    const scope = deps.companies === undefined ? undefined : boundedCompanyReads(deps.documentClient);
-    const companyId = await resolveCompany(deps.companies, caller.developerId);
-    const result = await listProjects(scope === undefined ? deps : { ...deps, documentClient: scope.client }, caller, companyId);
-    scope?.check();
-    return result;
-  }
-  if (name) return setMyName(deps, caller, request);
-  if (workspaces) return listWorkspaces(deps, caller);
+  if (kind === "projects") return routeDeveloperProjectsList(deps, caller);
+  if (kind === "name") return setMyName(deps, caller, request);
+  if (kind === "workspaces") return listWorkspaces(deps, caller);
   return routeOwnChannelLinks(deps, caller, request, url);
 }
 
