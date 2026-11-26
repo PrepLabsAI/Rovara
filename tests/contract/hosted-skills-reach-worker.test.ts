@@ -376,4 +376,65 @@ describe("the skills' read has a share of its own (time, reads, bytes) and can n
     expect(run.at).toBeGreaterThanOrEqual(700);
     expect(run.at).toBeLessThan(900);
   });
+
+  it("S3 (time): three skills reads of 200 ms fit the 700 ms; three of 300 ms do not (no skills, the lessons stand)", async () => {
+    const fits = await world();
+    slow(fits, (key) => (isSkillKey(key) ? 200 : 0));
+    const ok = await timed(fits);
+    expect(namesOf(ok.value ?? {})).toEqual([SKILL_NAME]);
+    expect(lessonIds(ok.value)).toEqual(["les_aaaa1111"]);
+    const late = await world();
+    slow(late, (key) => (isSkillKey(key) ? 300 : 0));
+    const cut = await timed(late);
+    expect(cut.refused).toBeUndefined();
+    expect(cut.value?.rovaraSkills).toBeUndefined();
+    expect(lessonIds(cut.value)).toEqual(["les_aaaa1111"]);
+    expect(cut.at).toBeLessThan(900);
+  });
+
+  it("S3 (reads): a project with more members than the selector reads (80) costs exactly 129 skills reads (the set row, then a head and a version for each of 64), and the cap does not cut that", async () => {
+    const w = await world({ skill: false });
+    for (let index = 0; index < 80; index += 1) await seedSkill(w.store, { company: A, project: PROJECT, name: `skill-${String(index).padStart(2, "0")}`, text: skillText(`skill-${String(index).padStart(2, "0")}`) });
+    const asked = vi.spyOn(w.store, "get");
+    const answer = await ask(w, "PLAN");
+    expect(asked.mock.calls.filter(([key]) => isSkillKey(key))).toHaveLength(129);
+    expect(namesOf(answer)).toEqual(Array.from({ length: 8 }, (_, index) => `skill-${String(index).padStart(2, "0")}`));
+  });
+
+  it("S3 (bytes): skill rows that add up past the byte share (64 x 32 KB + 256 KB) end the read: no skills at all (not even the good one), and the lessons stand", async () => {
+    const build = async (junk: number) => {
+      const w = await world({ skill: false });
+      await seedSkill(w.store, { company: A, project: PROJECT, name: "aaa-good", text: skillText("aaa-good") });
+      // Rows of 100 KB (a skill is at most 32 KB: these are never delivered, but they are read and counted).
+      for (let index = 0; index < junk; index += 1) await seedSkill(w.store, { company: A, project: PROJECT, name: `junk-${String(index).padStart(2, "0")}`, text: "x".repeat(100_000) });
+      return w;
+    };
+    // Control: 10 such rows (1 MB) are under the share, so the good skill is delivered.
+    const under = await build(10);
+    expect(namesOf(await ask(under, "PLAN"))).toEqual(["aaa-good"]);
+    // 30 rows (3 MB) pass the share of 2.3 MB.
+    const over = await build(30);
+    const answer = await over.learned({ workspaceId: WS, operationId: randomUUID(), workflowMode: "PLAN", features: WORKER_FEATURES });
+    expect(answer.rovaraSkills).toBeUndefined();
+    expect(lessonIds(answer)).toEqual(["les_aaaa1111"]);
+  });
+
+  it("S3 (fault): a store whose skills reads throw (or reject) gives no skills, and the lessons are delivered, nothing refused", async () => {
+    for (const fail of [() => { throw new Error("skills store down"); }, async () => { throw new Error("skills store down"); }]) {
+      const w = await world();
+      const original = w.store.get.bind(w.store);
+      vi.spyOn(w.store, "get").mockImplementation(async (key) => { if (isSkillKey(key)) return fail() as never; return original(key); });
+      const answer = await w.learned({ workspaceId: WS, operationId: randomUUID(), workflowMode: "IMPLEMENT", features: WORKER_FEATURES });
+      expect(answer.rovaraSkills).toBeUndefined();
+      expect(lessonIds(answer)).toEqual(["les_aaaa1111"]);
+    }
+  });
+
+  it("S3 (lessons counters): the skills' reads are not counted in the lessons' read budget (a project with 64 skills still gets its lessons)", async () => {
+    const w = await world({ skill: false });
+    for (let index = 0; index < 64; index += 1) await seedSkill(w.store, { company: A, project: PROJECT, name: `skill-${String(index).padStart(2, "0")}`, text: skillText(`skill-${String(index).padStart(2, "0")}`) });
+    const answer = await w.learned({ workspaceId: WS, operationId: randomUUID(), workflowMode: "PLAN", features: WORKER_FEATURES });
+    expect(lessonIds(answer)).toEqual(["les_aaaa1111"]);
+    expect(namesOf(answer)).toHaveLength(8);
+  });
 });
