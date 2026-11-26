@@ -3,7 +3,7 @@
 Each mutant was applied to ONE source line on top of the lane head (9cd9e005a + the two survivor tests), run against these 8 files with `--maxWorkers=1`, and reverted with `git checkout -- <file>` (tree clean after each):
 `tests/unit/task-read-rule.test.ts`, `tests/contract/rd-2-0-read-rule-golden.test.ts`, `tests/contract/core-plan-comments.test.ts`, `tests/contract/task-reader-person.test.ts`, `tests/contract/read-rule-share-b-slack.test.ts`, `tests/contract/task-access.test.ts`, `tests/contract/core-task-rule-routes.test.ts`, `tests/unit/rd2a-spec-read.test.ts`.
 
-Result: 19 of 19 killed (two survived the first run and each drove a new test, noted below).
+Result: 25 of 25 killed (19 first; 6 added after the Sonnet pre-review, run on a717be03d against the same 8 files plus tests/contract/read-rule-share-b-prereview.test.ts) (two survived the first run and each drove a new test, noted below).
 
 | id | what the mutant does | result | evidence |
 |---|---|---|---|
@@ -26,6 +26,12 @@ Result: 19 of 19 killed (two survived the first run and each drove a new test, n
 | R3-g | rule 3: a stored share cannot comment (the comment access never asks the rule) | KILLED | 3 failed, 191 passed (194) |
 | R3-h | rule 3: the comment access lets a non-share decision through (Opus M1 mutant: mode shared -> any) | KILLED | 1 failed, 195 passed (196) (first run SURVIVED (equivalent for every reachable person once a People viewer can comment: every mode the People rule refuses is also refused by the rule); fixed by a test that hands the comment route decisions of mode page, reader and owner for a person the People rule refuses) |
 | S4-a | Opus S4: work-item text keeps its paths for a reader without source code | KILLED | 1 failed, 193 passed (194) |
+| R3-i | S5 (pre-review NIT-2): the cancellation index of the share check is off by one | KILLED | 1 failed, 197 passed (198) |
+| R3-j | S5 (pre-review NIT-2): the share check asks only that the row exists, not its role | KILLED | 1 failed, 197 passed (198) (the test changes the row's role between the decision and the write) |
+| R2-c | pre-review S1: the share's write does not refuse a person the People list denies | KILLED | 1 failed, 197 passed (198) (the test denies inside `authorize`) |
+| R3-k | pre-review S2: the plan comment write goes back to the Slack `comment` cell (a viewer cannot write) | KILLED | 1 failed, 197 passed (198) |
+| R3-l | pre-review S2: the Slack continue cell admits a viewer again | KILLED | 2 failed, 196 passed (198) |
+| R1-i | pre-review S3: with no company layer a registered person is a company member (fail open) | KILLED | 3 failed, 195 passed (198) |
 
 Rule / cell coverage:
 - Rule 1 (same company, no project access): R1-a..R1-f (stored share, host read, writer, company-first), R1-g and R1-h (Slack Connect or foreign workspace).
