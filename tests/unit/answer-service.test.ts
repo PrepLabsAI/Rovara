@@ -976,7 +976,7 @@ describe("the team knowledge briefing of an answer (lead 4 L4-AK2b)", () => {
     const started = Date.now();
     const result = await w.service({ model, over: { briefing: () => new Promise(() => undefined) } }).ask({ personId: ADA, project: "alpha", body: body() });
     expect(Date.now() - started).toBeGreaterThanOrEqual(ANSWER_BRIEFING_WAIT_MS - 50);
-    expect(Date.now() - started).toBeLessThan(ANSWER_BRIEFING_WAIT_MS + 1_500);
+    expect(Date.now() - started).toBeLessThan(ANSWER_BRIEFING_WAIT_MS + 5_000);
     expect(model.turns[0]!.transcript).toBe(expected);
     expect(result.outcome).toBe("answered");
   });

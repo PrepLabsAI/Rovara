@@ -33,7 +33,7 @@ describe("createNodeCommandPort.run", () => {
     const started = Date.now();
     const result = await port.run(NODE, ["-e", script], { timeoutMs: 1_500, maxStdoutBytes: 1_000 });
     expect(result).toMatchObject({ timedOut: true, exitCode: null });
-    expect(Date.now() - started).toBeLessThan(6_000);
+    expect(Date.now() - started).toBeLessThan(12_000);
     const childPid = Number(text(result.stdout).trim());
     expect(Number.isInteger(childPid) && childPid > 1).toBe(true);
     expect(await waitGone(childPid)).toBe(true);

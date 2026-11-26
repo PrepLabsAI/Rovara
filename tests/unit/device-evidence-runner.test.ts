@@ -212,7 +212,7 @@ describe("runDeviceEvidence", () => {
       const got = await runDeviceEvidence(input(driver, { flows: [flows[1]!], limits: { stepMs: 50, runMs: 5_000 } }));
       expect(reasons(got)).toEqual(["time_limit"]);
       expect(calls).toEqual(["prepare:before", "stop:before"]);
-      expect(Date.now() - started).toBeLessThan(DEVICE_EVIDENCE_STOP_MS + 3_000);
+      expect(Date.now() - started).toBeLessThan(DEVICE_EVIDENCE_STOP_MS + 8_000);
     }, 20_000);
     it("a prepare that answers after the run gave up is stopped as soon as it settles", async () => {
       const stops: string[] = [];

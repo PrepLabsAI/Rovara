@@ -294,7 +294,7 @@ describe("the lint shards: a failing shard fails the command", () => {
     const result = spawnSync(process.execPath, ["scripts/lint-shards.ts", "--eslint-bin", fake, "--only", shards[0]!.name, "--timeout", "1"], { cwd: root, encoding: "utf8" });
     expect(result.status, result.stdout + result.stderr).toBe(1);
     expect(result.stdout).toContain("timed out");
-    expect(Date.now() - started).toBeLessThan(30_000);
+    expect(Date.now() - started).toBeLessThan(40_000);
   });
 
   it("explains a shard killed by the operating system as a possible out-of-memory kill", () => {

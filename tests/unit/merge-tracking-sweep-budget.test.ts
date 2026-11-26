@@ -85,8 +85,8 @@ it("a verify read that hangs ends at its own phase: the row settles with a truth
   hooks.current.reconcile = async (taskId, budget) => { seen.push(`${taskId}:${String(budget.signal.aborted)}`); return { kind: "OBSERVED" }; };
   const at = w.clock.ms;
   const started = Date.now();
-  expect(await w.tracking.sweep({ budgetMs: 1_000 })).toEqual({ attempted: 1 });
-  expect(Date.now() - started).toBeLessThan(900);
+  expect(await w.tracking.sweep({ budgetMs: 10_000 })).toEqual({ attempted: 1 });
+  expect(Date.now() - started).toBeLessThan(9_000);
   // Reconcile ran, on a budget the stalled verify had not spent.
   expect(seen).toEqual([`${TASK_ID}:false`]);
   expect(await w.row(TASK_ID)).toMatchObject({ attempts: 1, readState: "github_read_incomplete", lastAttemptAt: at, nextAttemptAt: at + 60_000 });

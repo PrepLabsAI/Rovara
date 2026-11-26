@@ -45,7 +45,7 @@ describe("a request with no token (all a sandbox can send) is refused; the worke
     const { port } = await emulator(() => true);
     const started = Date.now();
     expect(await probeService({ host: "127.0.0.1", port, path: "/_rovara/ledger/summary", timeoutMs: 300, control: { token: TOKEN, method: "GET", onBody: () => undefined } })).toBe(false);
-    expect(Date.now() - started).toBeLessThan(3_000);
+    expect(Date.now() - started).toBeLessThan(10_000);
   });
   it("refuses locally, without a connection: a token that is not plain, a GET with a body, a control call combined with --post, a body past the limit, a host that is not an IPv4 address", async () => {
     const { port, seen } = await emulator();

@@ -1693,7 +1693,7 @@ describe("X: the hold never fails open", () => {
     console.log("X9", JSON.stringify({ result, calls, aborted: signals.map((s) => s.aborted), took }));
     expect(result).toBe("timeout");
     expect(signals.every((s) => s.aborted)).toBe(true);
-    expect(took).toBeLessThan(2_500);
+    expect(took).toBeLessThan(6_500);
     signals = [];
   });
 

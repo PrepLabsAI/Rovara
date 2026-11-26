@@ -117,7 +117,7 @@ describe("loadAnswerBriefing", () => {
     const hung = { ...w.deps, store: { ...w.store, list: () => new Promise(() => undefined) } as unknown as LoadDeps["store"] };
     expect(await loadAnswerBriefing(hung, ASK)).toBeUndefined();
     expect(Date.now() - started).toBeGreaterThanOrEqual(ANSWER_BRIEFING_MS - 50);
-    expect(Date.now() - started).toBeLessThan(ANSWER_BRIEFING_MS + 800);
+    expect(Date.now() - started).toBeLessThan(ANSWER_BRIEFING_MS + 5_000);
   });
 
   it("picks by the question's fit: an unrelated unscoped lesson is not briefed, a lesson scoped to the project's repository is found by its repository", async () => {

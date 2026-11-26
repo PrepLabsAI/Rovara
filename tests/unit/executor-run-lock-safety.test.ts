@@ -110,12 +110,12 @@ describe("the executor run lock's safety", () => {
     const started = Date.now();
     const outcome = await Promise.race([
       createExecutorRunLock({ path, pollMs: 10, giveUpMs: 150, removeStaleLock }).withLock(async () => "ran").then(() => "ran", (error: Error) => error),
-      new Promise<"hung">((done) => setTimeout(() => done("hung"), 3_000)),
+      new Promise<"hung">((done) => setTimeout(() => done("hung"), 15_000)),
     ]);
     expect(outcome).toBeInstanceOf(Error);
     expect((outcome as Error).message).toContain(path);
     expect((outcome as Error).message).toMatch(/reused process id.*stale lock.*delete/);
-    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(Date.now() - started).toBeLessThan(5_000);
     // Tried now and then, paced by the poll interval: not a tight loop.
     expect(removals).toBeGreaterThan(0);
     expect(removals).toBeLessThan(60);

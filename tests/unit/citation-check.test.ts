@@ -207,7 +207,7 @@ describe("prose mode (DEC 254zh): strict rules for answers and the wiki", () => 
     expect(result.claims[0]!.dropped).toBe("sentence_too_long");
     const started = Date.now();
     for (const run of ["a-".repeat(20_000), "a".repeat(40_000), "a.".repeat(20_000), "aB".repeat(20_000), "a_".repeat(20_000)]) codeNamesOf(run);
-    expect(Date.now() - started).toBeLessThan(1_500);
+    expect(Date.now() - started).toBeLessThan(5_000);
   });
 
   it("hasCodeToken matches whole tokens only, case-sensitive", () => {

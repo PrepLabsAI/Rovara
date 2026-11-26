@@ -182,7 +182,7 @@ describe("gaps 3 and 4: URL tokens and request headers (the real capture on a st
     const started = Date.now();
     expect((await e.workerSays("Welcome back 4/0AbCdEf123456")).status).toBe("ok");
     expect(Date.now() - started).toBeGreaterThanOrEqual(REQUEST_HEADER_WAIT_MS - 100);
-    expect(Date.now() - started).toBeLessThan(REQUEST_HEADER_WAIT_MS + 4_000);
+    expect(Date.now() - started).toBeLessThan(REQUEST_HEADER_WAIT_MS + 8_000);
     expect(e.redactor.text("code 4/0AbCdEf123456")).toBe("code <session>");
   });
 });

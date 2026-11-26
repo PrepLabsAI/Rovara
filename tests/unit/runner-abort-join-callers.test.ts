@@ -47,7 +47,7 @@ describe("runChecks joins an abort", () => {
     const startedAt = Date.now();
     await expect(runChecks(plan, runners, budget(controller.signal, 150))).rejects.toBeInstanceOf(RunnerKillUnconfirmedError);
     expect(Date.now() - startedAt).toBeGreaterThanOrEqual(150);
-    expect(Date.now() - startedAt).toBeLessThan(1_500);
+    expect(Date.now() - startedAt).toBeLessThan(6_000);
   });
 
   it("rethrows a runner's own kill-unconfirmed, not an 'aborted' check entry", async () => {

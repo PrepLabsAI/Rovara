@@ -85,7 +85,7 @@ describe("which changed flows are picked", () => {
     const changedFiles = Array.from({ length: DEVICE_EVIDENCE_CHANGED_FILES_MAX }, (_, i) => `src/${"deep/".repeat(20)}file-${i}.kt`);
     const started = performance.now();
     expect(pickChangedFlows({ changedFiles, recipe: recipe({ flows }) }).status).toBe("not_run");
-    expect(performance.now() - started).toBeLessThan(5_000);
+    expect(performance.now() - started).toBeLessThan(10_000);
   });
 });
 

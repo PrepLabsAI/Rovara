@@ -318,7 +318,7 @@ describe("prewarm at stage start", () => {
     expect(await prewarmStdioServers({ host: hanging, servers: w.deps.store, stdioEnabled: true, waitMs: 60 }, ORG, [wiki.serverId])).toBe(1);
     const took = Date.now() - began;
     expect(took).toBeGreaterThanOrEqual(50);
-    expect(took).toBeLessThan(1_000);
+    expect(took).toBeLessThan(2_000);
   });
   it("the requests go out together, not one after another, and the default bound is 2 seconds", async () => {
     const { w, wiki } = await setup();

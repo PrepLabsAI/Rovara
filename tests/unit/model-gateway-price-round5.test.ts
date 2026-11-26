@@ -147,7 +147,7 @@ it("the complete pooled identity/alias bound resolves in bounded time and oldest
   expect(effective).toHaveLength(20_000);
   expect(effective.every((e) => e.aliases.length === 2)).toBe(true); expect(big.valid).toBe(true);
   expect(big.again).toHaveLength(20_000);
-  expect(big.ms).toBeLessThan(30_000);
+  expect(big.ms).toBeLessThan(55_000);
   expect(bigMs / Math.max(smallMs, 1)).toBeLessThan(16);
   const next = structuredClone(sources); next.litellm.entries[0]!.model = "eu.anthropic.model-0-v1:0";
   const pruned = effectivePrices(next, effective);

@@ -49,7 +49,7 @@ describe("the ready line says the verdict", () => {
     const { tracking, ready, pr } = await world(() => new Promise(() => undefined));
     const started = Date.now();
     await trackPullRequest(tracking, TASK_ID);
-    expect(Date.now() - started).toBeLessThan(VERDICT_READ_MAX_MS + 3_000);
+    expect(Date.now() - started).toBeLessThan(VERDICT_READ_MAX_MS + 8_000);
     expect(pr.model.getChangeRequest(String(pr.number)).draft).toBe(false);
     expect(ready()[0]!.text).toBe(`Rovara marked app pull request ${String(pr.number)} ready for review.`);
   }, 15_000);

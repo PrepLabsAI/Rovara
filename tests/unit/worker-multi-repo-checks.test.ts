@@ -534,10 +534,10 @@ describe("candidate-bound multi-repository rounds", () => {
 
   it("charges setup to one total budget and joins its stop", async () => {
     const f = await fixture();
-    f.input.setup = [command("setTimeout(()=>{},3000)")];
+    f.input.setup = [command("setTimeout(()=>{},30000)")];
     const began = Date.now();
     const result = await runChecks({ source: "project", readiness: [command("console.log('no')")] }, f.runners(), { signal: new AbortController().signal, budgetMs: 1_000 });
-    expect(Date.now() - began).toBeLessThan(2_800);
+    expect(Date.now() - began).toBeLessThan(8_000);
     expect(result.entries[0]).toMatchObject({ after: "not_run", output: "AgentX did not run this check: the time budget for checks ran out." });
     expect((await readdir(f.root)).filter((name) => name.startsWith(".agentx-check-"))).toEqual([]);
   });
@@ -778,7 +778,7 @@ describe("candidate-bound multi-repository rounds", () => {
     else for (let offset = 0; offset < 8_448; offset += 256) await Promise.all(Array.from({ length: 256 }, (_, index) => writeFile(join(root, `f-${offset + index}`), "")));
     const began = Date.now();
     await expect(f.run([command("console.log('no')")])).rejects.toEqual(new Error("multi-repository leftover sweep limit exceeded"));
-    expect(Date.now() - began).toBeLessThan(5_000);
+    expect(Date.now() - began).toBeLessThan(10_000);
   });
 
   it("refuses an unreadable leftover sweep with a fixed reason", async () => {

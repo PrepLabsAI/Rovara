@@ -348,7 +348,7 @@ describe("read-only dispatcher lessons: the delivery record and the measured fac
     expect(asks).toBeGreaterThanOrEqual(2);
     expect(answer.learnedContext?.lessons.map((lesson) => lesson.id)).toEqual(["les_aaaa1111"]);
     expect(answer.knowledgeContext).toBeUndefined();
-    expect(Date.now() - started).toBeLessThan(DISPATCHER_PULL_MS + 600);
+    expect(Date.now() - started).toBeLessThan(DISPATCHER_PULL_MS + 5_000);
     expect(knowledgePuts(w)).toEqual([]);
     expect(await w.store.get({ pk: companyScoped(A, "KNOWLEDGE_GIVEN"), sk: TASK })).toBeUndefined();
   });

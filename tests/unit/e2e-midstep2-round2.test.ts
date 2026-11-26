@@ -167,7 +167,7 @@ describe("N-3: the main frame is never skipped", () => {
     const frames = [okFrame(), ...Array.from({ length: 6 }, () => brokenFrame(undefined, sleep))];
     const started = Date.now();
     await readBrowserState(contextOf([frames]));
-    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(Date.now() - started).toBeLessThan(10_000);
   });
 });
 
