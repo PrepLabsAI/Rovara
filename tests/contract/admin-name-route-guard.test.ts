@@ -142,7 +142,7 @@ describe("D2 (2): the admin reads are given the company reader production sets",
 
 // MEMBERSHIP-READ-FAILS-SAFE (re-check SHOULD, mutant row 26): the task-company check of the admin task routes (broker.ts administratorOfTaskCompany).
 describe("an administrator's task route reads their company: a failed read is the retryable 503, never the 'not an administrator' 403", () => {
-  const TASK = "11111111-2222-4333-8444-555555555555";
+  const TASK = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
   const replay = (broker: Awaited<ReturnType<typeof world>>) => call(broker.handler, { method: "POST", path: `/v1/admin/tasks/${TASK}/e2e-replay`, user: ADMIN, body: { requestId: randomUUID(), roundId: "round-1" } });
   const seeded = async (held: Held) => {
     // The company reader answers while the world is set up, and gives `held` (an answer, no company, or a failure) when the route asks.
