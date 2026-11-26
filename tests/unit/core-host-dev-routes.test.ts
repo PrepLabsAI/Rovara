@@ -1,6 +1,7 @@
 import { CORE_CONTEXT_WORKER_ROUTES, coreContextWorkerRouteOf, appRouteOf as contextAppRouteOf, devRouteOf as contextDevRouteOf } from "../../packages/broker/src/aws/dev-route-scopes.js";
 // Engine host (lane E2): the core's own handlers mounted on the deployed developer API behind the switch. Off is byte-identical (nothing read, nothing answered); the company comes from
 // membership only and fails closed; another company's task reads exactly like a missing one; unwired parts say so in fixed words; a script token is never made through this API.
+import { MEMBERSHIP_READ_FAILED_WORDS, membershipReadFailed } from "../../packages/broker/src/core/membership-read.js";
 import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ROUTES, ROUTE_NOT_SERVED_MESSAGE, routeIdOf } from "@preplabsai/rovara-code-api";
@@ -470,6 +471,19 @@ describe("making a script token and acting on a decision card need no step-up", 
     expect(errorOf(member)).toEqual({ code: "FORBIDDEN", message: "Only an owner or an admin of the company can create script tokens." });
   });
 
+
+  it("a grant read that FAILS (marked, as the deployed seam marks it) is the retryable 503 on a script-token create, never the 404 of a missing project; nothing is created", async () => {
+    const { routesFor, remember } = await setup();
+    const caller: DeployedCaller = remember(FAKE_COMPANY);
+    const failing = routesFor({ canReadProject: async () => { throw membershipReadFailed(); } });
+    const answer = await failing.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller);
+    expect(answer?.statusCode).toBe(503);
+    expect(errorOf(answer)).toEqual({ code: "RUNTIME_UNAVAILABLE", message: MEMBERSHIP_READ_FAILED_WORDS });
+    expect(JSON.parse((await routesFor({}).route(get("/v1/app/script-tokens"), caller))!.body), "nothing was created").toMatchObject({ tokens: [] });
+    // An unmarked throw (not a membership read) keeps the old answer, and a clean "no" is still the missing-project 404.
+    const other = await routesFor({ canReadProject: async () => { throw new Error("not a membership read"); } }).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller);
+    expect(other?.statusCode).toBe(404);
+  });
 
   it("makes a token only for projects the person may read now; one they may not read answers like a missing one", async () => {
     const { routes, remember } = await setup();

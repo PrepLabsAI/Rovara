@@ -2,6 +2,7 @@
 // the risk-based approvers (DEC 254z b) read LIVE. Parts: (1) the approvers point's proof for this subject and its separation from the task and setup subjects; (2) the route
 // `POST /v1/app/projects/{project}/test-environment/approve` end to end over the real approvers, gate and subject (roles by risk, no step-up (DEC 254zzz73), binding, live role re-read, two companies,
 // two projects); (3) Code's workers advertise the feature the task flow relies on.
+import { MEMBERSHIP_READ_FAILED_WORDS, membershipReadFailed } from "../../packages/broker/src/core/membership-read.js";
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
@@ -135,7 +136,8 @@ async function world(options: { approval?: boolean } = {}) {
   const depsOf = (): TestEnvDeps => ({ store, now: () => clock.now, env: { ROVARA_TEST_ENVIRONMENT: "1", ROVARA_TEST_SERVICES: "1" }, audit: sink });
   const approvalOf = (companyId: OrgId) => createHostedTestEnvironmentApproval({ companyId, deps: depsOf(), store, approvers, audit: sink, identity, people: { membershipOf, projectGrantRole }, proofKey: KEY, now });
   // The deployment's own reading rule (core-engine-root.ts `canReadProject: projectGrant`): a grant on the project, whatever the company role.
-  const canRead = async (personId: string, project: string) => people.get(personId)?.grants[project] !== undefined;
+  const canReadFails = { value: false };
+  const canRead = async (personId: string, project: string) => { if (canReadFails.value) throw membershipReadFailed(); return people.get(personId)?.grants[project] !== undefined; };
   const approvals = new Map<string, ReturnType<typeof approvalOf>>([[A, approvalOf(A)], [OTHER, approvalOf(OTHER)]]);
   const wiring = (runtime: { companyId: string }): CoreDevWiring => ({
     origin: () => "https://api.example", canReadProject: canRead,
@@ -164,7 +166,7 @@ async function world(options: { approval?: boolean } = {}) {
   };
   const approved = (companyId: OrgId, project: string) => readApprovedTestEnvironment(depsOf(), companyId, project);
   const bodyFor = (seen: { digest: string; revision: number }, over: Record<string, unknown> = {}) => ({ requestId: `req_${randomUUID().slice(0, 12)}`, revision: seen.revision, artifactDigest: seen.digest, ...over });
-  return { fake, store, clock, person, call, routes, audit, memberReadsLeft, grantReadsLeft, seed, approved, bodyFor, approvers, approvals, depsOf, sink, identity, people };
+  return { fake, store, clock, person, call, routes, audit, memberReadsLeft, grantReadsLeft, canReadFails, seed, approved, bodyFor, approvers, approvals, depsOf, sink, identity, people };
 }
 
 describe("approving a test environment on the deployed API: who, by risk (DEC 254z b)", () => {
@@ -195,6 +197,18 @@ describe("approving a test environment on the deployed API: no step-up, binding 
     // The proposal no longer waits once it is the newest revision: a second approval finds nothing to approve, and no second revision is made.
     expect((await w.call("payments", owner, w.bodyFor(seen))).status).toBe(404);
     expect((await w.approved(A, "payments"))?.revision).toBe(1);
+  });
+
+  it("a grant read that FAILS at the route's own reading check is the retryable 503, never the 404 of a missing project; nothing is approved", async () => {
+    const w = await world();
+    const seen = await w.seed(A, "payments");
+    const dev = w.person("dev", A, "member", { payments: "developer" });
+    w.canReadFails.value = true;
+    const reply = await w.call("payments", dev, w.bodyFor(seen));
+    expect(reply, reply.raw).toMatchObject({ status: 503, body: { error: { code: "RUNTIME_UNAVAILABLE", message: MEMBERSHIP_READ_FAILED_WORDS } } });
+    expect(await w.approved(A, "payments")).toBeUndefined();
+    w.canReadFails.value = false;
+    expect((await w.call("payments", dev, w.bodyFor(seen))).status, "control: the read answering 'a grant' reaches the decision, which refuses a developer").toBe(403);
   });
 
   it("re-reads the company role inside the decision: an admin demoted after the route's own check approves nothing", async () => {
