@@ -172,7 +172,7 @@ export function withMultiRepoChecks(input: MultiRepoChecks, base: CheckRunners, 
               if (fallBack && wiringFailed) return;
               try { await base.endRound?.(); } catch { unconfirmed = true; }
             },
-            runProjectCommand: (command, stop) => base.runProjectCommand(mapped(command), stop),
+            runProjectCommand: (command, stop, session) => base.runProjectCommand(mapped(command), stop, session),
             async runAgentCommand(replay, timeoutMs, stop) {
               if (matchTestCommand(replay) !== replay) throw new CheckNotRunError("AgentX replays only a simple test command, and this is not one.");
               const cd = /^cd (\S+) && (.+)$/s.exec(replay);

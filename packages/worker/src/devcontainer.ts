@@ -8,6 +8,8 @@ import { promisify } from "node:util";
 import {
   DEFAULT_DEVCONTAINER_CONFIG_PATH,
   agentXError,
+  formatCommandLine,
+  shellLineOf,
   type ProjectCommand,
   type StoredProjectDefinition,
 } from "@agentx/contracts";
@@ -36,6 +38,7 @@ import type { CommandResult } from "./readiness.js";
 import { createDockerCli, type DockerCli } from "./docker-cli.js";
 import { hiddenWorkspaceDirectories, isMaskVolumeName } from "./workspace-state.js";
 import { assertNoInstallSecrets } from "./install-secrets.js";
+import { SHELL_SESSION_SCRIPT, remainingMs, type ShellSession } from "./shell-session.js";
 
 const execFile = promisify(execFileCallback);
 const UP_TIMEOUT_MS = 20 * 60_000;
@@ -566,8 +569,10 @@ export async function runDevcontainerCommand(
   target: DevcontainerTarget,
   command: ProjectCommand,
   signal?: AbortSignal,
+  /** The group of lines this command belongs to (see shell-session.ts): its shell lines share one session. */
+  session?: ShellSession,
 ): Promise<CommandResult> {
-  return runContainerCommand(devcontainerExec(cli, target), target.rootPath, command, signal);
+  return runContainerCommand(devcontainerExec(cli, target), target.rootPath, command, signal, session === undefined ? {} : { session });
 }
 
 /**
@@ -583,29 +588,66 @@ export async function runContainerCommand(
 ): Promise<CommandResult> {
   const cwd = contained(rootPath, command.cwd);
   const pathPrefix = options.pathPrefixFor === undefined ? [] : await options.pathPrefixFor(cwd).catch(() => []);
+  const session = options.session;
+  // The group's time (shell-session.ts): a line is not started once it has run out, and no line runs past it.
+  const left = remainingMs(session);
+  if (left !== undefined && left <= 0) return groupLimitResult(session);
+  const lineTimeoutMs = command.timeoutSeconds * 1_000;
+  const timeoutMs = left === undefined ? lineTimeoutMs : Math.min(lineTimeoutMs, left);
+  const plan = shellPlan(command, session);
   const run = await runInContainerGroup(exec, {
     groupFilePrefix: "agentx-command",
-    // The executable and its arguments stay positional parameters: no shell reads them again.
-    body: 'exec "$@"',
+    body: plan.body,
     cwd,
-    args: [command.executable, ...command.args],
-    timeoutMs: command.timeoutSeconds * 1_000,
-    // The command's own variables (#54) reach the command only, never the TERM and KILL execs.
-    ...(command.env !== undefined || options.defaultEnvironment !== undefined ? { env: { ...options.defaultEnvironment, ...command.env } } : {}),
-    ...(options.unsetEnvironment === undefined ? {} : { unsetEnvironment: options.unsetEnvironment }),
-    ...(options.pathSuffix === undefined ? {} : { pathSuffix: options.pathSuffix }),
-    ...(pathPrefix.length === 0 ? {} : { pathPrefix }),
+    args: plan.args,
+    timeoutMs,
+    ...commandEnvironmentOptions(command, options, pathPrefix),
     ...(signal !== undefined ? { signal } : {}),
   });
+  // A shell line has run (or tried to): from now on every line of the session runs in its shell, and the state file is the session's to remove.
+  if (plan.line !== undefined && session !== undefined) { session.stateful = true; session.exec = exec; }
   const { result } = run;
   // An abort whose stop could not be confirmed: the command may still be running in the container, which mounts the workspace.
   if (run.killUnconfirmed) throw new RunnerKillUnconfirmedError({ kind: options.target ?? "devcontainer" });
+  const timedOut = run.timedOut || result.timedOut === true;
   return {
     exitCode: result.exitCode ?? -1,
     stdout: result.stdout,
     stderr: withStopFailures(result.stderr, run.stopFailures),
     ...(result.signal !== undefined ? { signal: result.signal } : {}),
-    ...(run.timedOut || result.timedOut === true ? { timedOut: true } : {}),
+    ...(timedOut ? { timedOut: true } : {}),
+    ...(timedOut && timeoutMs < lineTimeoutMs ? { stoppedBy: "group_limit" as const } : {}),
+  };
+}
+
+/** What a command starts with: its own variables (#54, which reach the command only, never the TERM and KILL execs), the container's defaults, what is unset, and the PATH folders. */
+function commandEnvironmentOptions(command: ProjectCommand, options: ContainerCommandOptions, pathPrefix: readonly string[]): Partial<ContainerGroupCommand> {
+  return {
+    ...(command.env !== undefined || options.defaultEnvironment !== undefined ? { env: { ...options.defaultEnvironment, ...command.env } } : {}),
+    ...(options.unsetEnvironment === undefined ? {} : { unsetEnvironment: options.unsetEnvironment }),
+    ...(options.pathSuffix === undefined ? {} : { pathSuffix: options.pathSuffix }),
+    ...(pathPrefix.length === 0 ? {} : { pathPrefix }),
+  };
+}
+
+/**
+ * SETUP-L9-SHELL: how a command is started. A SHELL line (`bash -c <line>`, contracts/project-commands.ts) is run by the session's shell. So is every other command once a shell line has run in the session, so it sees what the
+ * shell lines left (the activated virtual environment, the directory, the variables). A group of programs alone runs exactly as it always did: `exec` of the program and its arguments, no shell reads them again.
+ */
+function shellPlan(command: ProjectCommand, session: ShellSession | undefined): { line: string | undefined; body: string; args: string[] } {
+  const line = shellLineOf(command);
+  if (line === undefined && session?.stateful !== true) return { line, body: 'exec "$@"', args: [command.executable, ...command.args] };
+  return { line, body: 'eval "$1"', args: [SHELL_SESSION_SCRIPT, session?.stateFile ?? "", line ?? formatCommandLine(command)] };
+}
+
+/** What a line that was never started returns when its group's time had already run out. */
+function groupLimitResult(session: ShellSession | undefined): CommandResult {
+  return {
+    exitCode: -1,
+    stdout: "",
+    stderr: `AgentX did not start this line: the time for its group of commands (${String(session?.limitSeconds ?? 0)} s) had run out.`,
+    timedOut: true,
+    stoppedBy: "group_limit",
   };
 }
 
@@ -614,6 +656,8 @@ export async function runContainerCommand(
  * image, whose ENV is the project's; the task sandbox is the worker's image, whose ENV is the worker's (Bug F).
  */
 export interface ContainerCommandOptions {
+  /** The group of lines this command belongs to (shell-session.ts): its shell lines share one session, and the group has a time limit. Absent: the command stands alone. */
+  session?: ShellSession;
   /**
    * What the container is. "sandbox": the task sandbox, which the worker can remove, so a stop it could not confirm is
    * quarantined by removing it (TaskSandbox.quarantine). "sealed": a sealed check round's sandbox, removed by the round's own teardown. Absent: a devcontainer, which persists and the worker cannot remove: the workspace is marked unsafe until it is reset.

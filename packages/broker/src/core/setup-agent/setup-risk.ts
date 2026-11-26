@@ -9,7 +9,7 @@
 //
 // Who approves (DEC 254z b): low and medium, anyone who maintains the project (a company owner or admin, or the project's administrator); high, a company owner or admin. A rejection
 // applies nothing (the candidate is removed), so anyone who maintains the project may reject at any risk.
-import { canonicalJson } from "@agentx/contracts";
+import { canonicalJson, inlineEnvEntries, shellLineOf } from "@agentx/contracts";
 
 export type SetupRisk = "low" | "medium" | "high";
 export type SetupChangeArea = "setup_commands" | "test_commands" | "test_mocks" | "prompt_locations" | "websites" | "registries" | "integrations" | "dev_container" | "other";
@@ -44,9 +44,11 @@ function envOf(command: unknown): string[] | undefined {
   if (!isRecord(command) || typeof command["cwd"] !== "string" || typeof command["executable"] !== "string" || !Array.isArray(command["args"]) || !command["args"].every((arg) => typeof arg === "string")
     || typeof command["timeoutSeconds"] !== "number") return undefined;
   const env = command["env"];
-  if (env === undefined) return [];
+  // SETUP-L9-SHELL: a shell line's inline `NAME=value` (`FOO=1 make`, `export FOO=1 && make`) is an environment entry too.
+  const inline = inlineEnvEntries(shellLineOf({ executable: command["executable"], args: command["args"] }) ?? "").map((entry) => `inline:${entry}`);
+  if (env === undefined) return inline;
   if (!isRecord(env) || !Object.values(env).every((value) => typeof value === "string")) return undefined;
-  return Object.entries(env).map(([name, value]) => `${name}=${String(value)}`);
+  return [...inline, ...Object.entries(env).map(([name, value]) => `${name}=${String(value)}`)];
 }
 
 /** A changed command list: low, unless a command cannot be read or gains an environment entry the approved commands did not have (high). */
