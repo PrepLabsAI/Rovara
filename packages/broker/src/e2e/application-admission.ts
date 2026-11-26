@@ -177,7 +177,7 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
   const rows = input.registeredRuntimes.filter((row) => (row.capabilities.kind === "web" || row.capabilities.kind === "api") && roundKinds.includes(row.capabilities.kind));
 
   const evaluation = evaluateApplicationPlanApproval({ intent, taskId: input.taskId, artifact: input.artifact, snapshot: input.snapshot, setupProposal: input.setupProposal,
-    setupApproval: input.setupApproval, policy: baselinePolicy, registeredRuntimes: rows, runtimeCatalogId: input.runtimeCatalogId, runtimeBinding: input.runtimeBinding, now: input.now,
+    setupApproval: input.setupApproval, policy: baselinePolicy, registeredRuntimes: rows, registeredRuntimeCount: input.registeredRuntimes.length, runtimeCatalogId: input.runtimeCatalogId, runtimeBinding: input.runtimeBinding, now: input.now,
     planDigest: input.planDigest, accounts: { entries: input.accountEntries, mode: "current", pinned: input.recordedSelection.accountRefs } });
   if (!evaluation.ok) {
     throw evaluation.scope === "runtime" ? applicationRuntimeRefusal(evaluation.reason) : evaluation.scope === "plan" ? new ApplicationPlanDefect(evaluation.reason)

@@ -1,3 +1,4 @@
+import { localBrowserEvidenceDeps } from "./browser-evidence-skip.js";
 import { recordClosedRunUsage } from "../../core/cost/run-usage.js";
 import { OPERATION_SK_PREFIX } from "../../core/task-flow/keys.js";
 import { workspaceKeys } from "../../core/task-flow/workspace-location.js";
@@ -453,6 +454,8 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     signIn: createBrowserEvidenceSignIn({ secrets: createLocalConnectionSecrets({ directory: join(options.stateDirectory, "connection-secrets"), secrets: createRegistrySecretStore(registry), companyId, env: LOCAL_SECRET_ENV, now: () => clock().getTime() }), env: LOCAL_SECRET_ENV }),
     canRun: options.browserEvidenceCanRun, suggestion: (project) => browserSuggestion.current?.(project) ?? Promise.resolve(undefined), audit: registry.require("audit-sink"),
   });
+  // TE-H1: the recipe is the owner's (config); the pull request's lines are text only and say "on the task page, behind sign-in" (the laptop's own address is http, so no link is written). A recipe that cannot run here says so (BROWSER-SKIP-HONESTY).
+  const browserEvidenceDeps = localBrowserEvidenceDeps({ page: browserEvidence, canRun: options.browserEvidenceCanRun, fromConfig: options.browserEvidenceFromConfig, linesOf: (task, digest) => evidence.browserEvidenceLinesOf(task, digest, {}) });
   const flow = createTaskFlowFromRegistry(registry, {
     companyId,
     testEnvironment: testEnvironment.taskEnvironment,
@@ -501,12 +504,7 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
     keepEvidence: (input) => evidence.keepAfterChecks(input),
     // TE-C6: a failed check whose every failing test passed on the worker's one rerun may be recorded as passed (the draft is then held for it); off unless ROVARA_FLAKY_RERUN=1.
     flakyChecks: createLocalFlakyChecks({ flow: { store, companyId }, blobs, testEnv: testEnvironment.deps, env: options.environment ?? process.env }),
-    // TE-H1: the recipe is the owner's (config); the pull request's lines are text only and say "on the task page, behind sign-in" (the laptop's own address is http, so no link is written).
-    ...(browserEvidence === undefined || options.browserEvidenceCanRun === undefined ? {} : { browserEvidence: {
-      // The recipe is asked for only when the worker can take it: a worker without the executor image would be refused the step.
-      recipe: async (task: TaskRecord) => ((await options.browserEvidenceCanRun!().catch(() => false)) ? browserEvidence.recipeFor(task.project) : undefined),
-      linesOf: (task: TaskRecord, digest: string) => evidence.browserEvidenceLinesOf(task, digest, {}),
-    } }),
+    ...(browserEvidenceDeps === undefined ? {} : { browserEvidence: browserEvidenceDeps }),
     // Lane L10: the approved plan is read back for the coding step and the reviewers; Rovara's own fixing reads what the task has cost (nothing priced counts as nothing spent).
     artifacts: blobs, feedbackArtifacts: blobs,
     taskSpendUsd: async (taskId) => costUsdOf(await ledger.taskCost(companyId, taskId)),
