@@ -324,3 +324,56 @@ describe("skills are not behind the learning mode or the CoreLessons switch (les
     await expect(w.learned({ workspaceId: "33333333-3333-4333-8333-333333333333", operationId: randomUUID(), workflowMode: "PLAN", features: WORKER_FEATURES })).rejects.toThrow();
   });
 });
+
+// SKILLS-TO-WORKERS pre-review S2 and S3: the skills' read has its own time, reads and bytes (`DISPATCHER_SKILLS_LIMITS`: 129 reads, 64 x 32 KB + 256 KB, 700 ms), runs beside the lessons, and can never take
+// anything from them; a slow, oversized, over-long or throwing skills read is "no skills", and the lessons are delivered as they would be.
+describe("the skills' read has a share of its own (time, reads, bytes) and can never cost the lessons anything", () => {
+  type World = Awaited<ReturnType<typeof world>>;
+  const isSkillKey = (key: { pk: string }): boolean => key.pk.includes("SKILL#");
+  /** Delays every store read by `delay(key)` ms (the lessons' reads, the workspace and task reads and the skills' reads all go through `store.get`), on the test's fake clock. */
+  const slow = (w: World, delay: (key: { pk: string; sk: string }) => number): void => {
+    const original = w.store.get.bind(w.store);
+    vi.spyOn(w.store, "get").mockImplementation(async (key) => { const ms = delay(key); if (ms > 0) await new Promise((resolve) => setTimeout(resolve, ms)); return original(key); });
+  };
+  /** One reader call on the fake clock: what it answered (or that it refused) and how many ms it took. */
+  async function timed(w: World, workflowMode = "PLAN") {
+    vi.useFakeTimers();
+    const started = Date.now();
+    let settled: { value?: Awaited<ReturnType<typeof ask>> & { learnedContext?: { lessons: Array<{ id: string }> } }; refused?: unknown; at: number } | undefined;
+    w.learned({ workspaceId: WS, operationId: randomUUID(), workflowMode, features: WORKER_FEATURES }).then((value) => { settled = { value, at: Date.now() - started }; }, (refused: unknown) => { settled = { refused, at: Date.now() - started }; });
+    for (let step = 0; settled === undefined && step < 1_000; step += 1) await vi.advanceTimersByTimeAsync(10);
+    vi.useRealTimers();
+    if (settled === undefined) throw new Error("the reader never answered");
+    return settled;
+  }
+  const lessonIds = (answer: { learnedContext?: { lessons: Array<{ id: string }> } } | undefined): string[] => answer?.learnedContext?.lessons.map((lesson) => lesson.id) ?? [];
+
+  it("S2: a skills read that runs out its whole clock leaves the lessons their own time (they need ~2 s here; the run clock is 2.5 s)", async () => {
+    // Control: every non-skill read takes 250 ms (8 serial reads, about 2 s), skills reads are instant.
+    const control = await world();
+    slow(control, (key) => (isSkillKey(key) ? 0 : 250));
+    const baseline = await timed(control);
+    expect(lessonIds(baseline.value), "control: lessons delivered").toEqual(["les_aaaa1111"]);
+    expect(namesOf(baseline.value ?? {}), "control: skills delivered").toEqual([SKILL_NAME]);
+    expect(baseline.at).toBeGreaterThan(1_800);
+    expect(baseline.at).toBeLessThan(2_500);
+    // Each skills read takes 400 ms: the third read passes the skills' own 700 ms, so there are no skills. The lessons still take their 2 s and are delivered: the skills' 700 ms was not taken from them.
+    const w = await world();
+    slow(w, (key) => (isSkillKey(key) ? 400 : 250));
+    const run = await timed(w);
+    expect(run.refused, "the lessons are not refused for lack of time").toBeUndefined();
+    expect(lessonIds(run.value)).toEqual(["les_aaaa1111"]);
+    expect(run.value?.rovaraSkills, "no skills: their read was cut at its own clock").toBeUndefined();
+    expect(run.at, "the answer is no later than the lessons need").toBeLessThan(2_500);
+  });
+
+  it("S2: a skills-only answer (no lesson set) waits for a slow skills read no longer than the skills' own clock", async () => {
+    const w = await world({ lessons: false });
+    slow(w, (key) => (isSkillKey(key) ? 5_000 : 0));
+    const run = await timed(w);
+    expect(run.refused).toBeUndefined();
+    expect(run.value).toEqual({});
+    expect(run.at).toBeGreaterThanOrEqual(700);
+    expect(run.at).toBeLessThan(900);
+  });
+});
