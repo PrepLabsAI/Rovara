@@ -16,6 +16,7 @@ import { lstat, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { REGISTRY_TOKEN_MIN_LENGTH, agentXError, scrubRegistrySecrets, type PrepareRegistry, type ProjectCommand, type RegistryCredential } from "@agentx/contracts";
 import type { CommandResult } from "./readiness.js";
+import type { ShellSession } from "./shell-session.js";
 import type { RegistryCredentialProvider } from "./registry-credentials.js";
 import { GIT_CHANGED_MESSAGE, RegistryTokenLeakError, gitStates, gitStatesDiffer, readIssuedTokens, recordIssuedTokens, removeTree, workspaceHoldsToken } from "./registry-guard.js";
 
@@ -74,7 +75,7 @@ export interface RegistrySession {
   /** The tokens, for scrubbing. */
   readonly secrets: readonly string[];
   /** A command runner whose commands carry the environment, and whose results and errors are scrubbed. */
-  wrap<Run extends (command: ProjectCommand, index: number, rootPath: string) => Promise<CommandResult>>(run: Run): Run;
+  wrap<Run extends (command: ProjectCommand, index: number, rootPath: string, session?: ShellSession) => Promise<CommandResult>>(run: Run): Run;
   scrub(text: string): string;
   /** The leak a command's scan found, if one did. Later commands do not run once it is set; the caller rethrows it (a runner's errors become step results, which would hide it). */
   readonly leak: () => RegistryTokenLeakError | undefined;
@@ -158,7 +159,7 @@ export async function openRegistrySession(input: {
     secrets,
     scrub,
     wrap(run) {
-      const wrapped = async (command: ProjectCommand, index: number, rootPath: string): Promise<CommandResult> => {
+      const wrapped = async (command: ProjectCommand, index: number, rootPath: string, session?: ShellSession): Promise<CommandResult> => {
         // The project's own `env` wins, as it does over every default of the sandbox.
         // Once a leak is found, no later command runs: it could read the copy.
         if (leaked !== undefined) throw leaked;
@@ -167,7 +168,7 @@ export async function openRegistrySession(input: {
         const withEnvironment: ProjectCommand = { ...command, env: { ...environment, ...command.env } };
         let outcome: { result: CommandResult } | { error: unknown };
         try {
-          outcome = { result: await run(withEnvironment, index, rootPath) };
+          outcome = { result: await run(withEnvironment, index, rootPath, session) };
         } catch (error) {
           outcome = { error };
         }

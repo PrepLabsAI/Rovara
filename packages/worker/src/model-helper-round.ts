@@ -235,13 +235,13 @@ export function withModelHelperRound(plan: ModelHelperRoundPlan | undefined, run
       if (currentId === undefined) unknown = true;
       runners.beginCheck?.(checkId);
     },
-    async runProjectCommand(command, signal) {
+    async runProjectCommand(command, signal, session) {
       const started = await ensure(signal);
-      if (started === undefined) return runners.runProjectCommand(command, signal);
+      if (started === undefined) return runners.runProjectCommand(command, signal, session);
       // The helper's variables win; preserve only a GOOGLE_APPLICATION_CREDENTIALS explicitly set by the project (decision 174).
       const unset = Object.fromEntries(started.unsetEnvironment.filter((name) => name !== "GOOGLE_APPLICATION_CREDENTIALS" || !Object.hasOwn(command.env ?? {}, name)).map((name) => [name, undefined])) as unknown as Record<string, string>;
       try {
-        return await runners.runProjectCommand({ ...command, env: { ...(command.env ?? {}), ...started.commandEnvironment, ...unset } }, signal);
+        return await runners.runProjectCommand({ ...command, env: { ...(command.env ?? {}), ...started.commandEnvironment, ...unset } }, signal, session);
       } finally { await afterCommand(started, signal); }
     },
     async runAgentCommand(replay, timeoutMs, signal) {

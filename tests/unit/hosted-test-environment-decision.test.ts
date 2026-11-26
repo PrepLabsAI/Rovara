@@ -67,7 +67,8 @@ describe("approving a project's test environment on AWS", () => {
     const s = await setup(sandbox(), people({ role: "admin" }));
     const failing: DeployedPeople = { membershipOf: async () => { throw new Error("read failed"); }, projectGrantRole: async () => "administrator" };
     const f = await setup(sandbox(), failing);
-    expect(await f.decider.approve({ personId: "p1", project: f.b.project, approval: f.approval })).toMatchObject({ ok: false, reason: "not_found" });
+    // A read that FAILED is the retryable failure (membership-read.ts), not "not found"; nothing is issued either way.
+    await expect(f.decider.approve({ personId: "p1", project: f.b.project, approval: f.approval })).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
     // A malformed person id or an unknown role is nobody (the deployed decisions' own membership reader).
     expect(await s.decider.approve({ personId: "p#1", project: s.b.project, approval: s.approval })).toMatchObject({ ok: false, reason: "not_found" });
     const oddRole = await setup(sandbox(), people({ role: "superuser" as OrgRole }, "administrator"));

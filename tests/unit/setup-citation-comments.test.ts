@@ -101,10 +101,17 @@ describe("the comment scan of a file is one pass (Opus delta M1: lines just unde
   const wholeFile = Array.from({ length: 1_280 }, () => line);
   const timed = (work: () => void): number => { const started = performance.now(); work(); return performance.now() - started; };
 
-  it.each(["a.ts", "a.tf", "a.vue", "notes.xyz", "a.sql", "a.php", "a.ps1", "README.md"])("a 20 MB file of those lines in %s is scanned in under 1.5 s", (path) => {
+  // The bound is relative, not an absolute cap: a loaded CI runner took 1.6 s for the 20 MB scan (an absolute 1.5 s cap flaked), and a
+  // second runner scanned 20 MB at about 24x its 2 MB time (a single 2 MB run is too short to be a stable base: warm-up, GC).
+  // So the 2 MB time is the median of three warm runs, and the bound is 50x plus 500 ms: linear scanning is about 10x for 10x the input,
+  // noise has been seen up to about 24x, and a quadratic scan is about 100x, which stays well above 50x + 500 ms once 2 MB takes over 10 ms.
+  const small = wholeFile.slice(0, 128); // about 2 MB of the same lines
+  const medianMs = (work: () => void): number => { work(); const runs = [timed(work), timed(work), timed(work)].sort((a, b) => a - b); return runs[1]!; };
+  it.each(["a.ts", "a.tf", "a.vue", "notes.xyz", "a.sql", "a.php", "a.ps1", "README.md"])("a 20 MB file of those lines in %s is scanned in under 50 times the time of a 2 MB file of them", (path) => {
     expect(line.length).toBeLessThan(MAX_LINE_CHARS);
-    const ms = timed(() => { const code = codeLinesOf(wholeFile, path); expect(code).toHaveLength(wholeFile.length); });
-    expect(ms, `${path} ${ms.toFixed(0)} ms`).toBeLessThan(1_500);
+    const smallMs = medianMs(() => { codeLinesOf(small, path); });
+    const bigMs = timed(() => { const code = codeLinesOf(wholeFile, path); expect(code).toHaveLength(wholeFile.length); });
+    expect(bigMs, `${path} 20 MB ${bigMs.toFixed(0)} ms, 2 MB ${smallMs.toFixed(0)} ms`).toBeLessThan(50 * smallMs + 500);
   });
 
   it("the characters the scanner goes over stay within twice the file's size, for every kind of comment and whatever the line holds", () => {

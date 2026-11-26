@@ -180,7 +180,8 @@ describe("the broker's core root", () => {
   it("refuses a start, rather than falling back, when membership cannot be read", async () => {
     const root = createBrokerCoreRoot(rootInputs({}, { send: async () => { throw new Error("dynamo down"); } }));
     const answer = await root.coreTasks!.route({ method: "POST", path: "/v1/dev/tasks", headers: {}, body: "{}" }, { developerId: "dev-a", sessionId: "s", name: "Ada" });
-    expect(answer?.statusCode).toBe(401);
+    // A membership read that FAILED is the retryable 503, never the sign-in refusal and never a fallback (membership-read.ts).
+    expect(answer?.statusCode).toBe(503);
     expect(answer?.body).not.toContain("dynamo");
   });
 });

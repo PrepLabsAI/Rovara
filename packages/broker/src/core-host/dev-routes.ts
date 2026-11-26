@@ -1,3 +1,4 @@
+import { MEMBERSHIP_READ_FAILED_WORDS, orIfNotMembershipFailure, rethrowMembershipReadFailure } from "../core/membership-read.js";
 import { feedbackOwner } from "../core/pr-feedback/decide.js";
 import { isPrFeedbackPath, type createPrFeedbackRoutes } from "./pr-feedback-routes.js";
 import { committedResponse } from "../core/task-flow/committed-response.js";
@@ -695,7 +696,8 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
         const spent = cap.spentUsd;
         const money = await moneyOf(target, record, cap);
         return { money, runLimitUsd: cap.limitUsd, ...(typeof spent === "number" && Number.isFinite(spent) && spent >= 0 ? { costUsd: spent } : {}) };
-      } catch {
+      } catch (error) {
+        rethrowMembershipReadFailure(error);
         return undefined;
       }
     },
@@ -708,7 +710,8 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
         // The one read rule's "readable" read (the company, then the company's read access): the same refusal as a missing task for anyone it does not show the task to.
         await decideRead(target, caller, membership.role, { read: "readable", taskId });
         return true;
-      } catch {
+      } catch (error) {
+        rethrowMembershipReadFailure(error);
         return false;
       }
     },
@@ -728,6 +731,8 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
       if (starting && !unreadable && (membership === undefined || membership === null)) return undefined;
       // The involved list says "nothing" only when it is sure: a membership that could not be read is a fixed outage answer, never an empty list.
       if (unreadable && path === TASK_START && request.method === "GET") return errorAnswer(agentXError("RUNTIME_UNAVAILABLE", INVOLVED_UNAVAILABLE));
+      // A membership read that FAILED (any route, not only the involved list) is the retryable 503 (membership-read.ts), never the sign-in refusal or a missing task.
+      if (unreadable) return errorAnswer(agentXError("RUNTIME_UNAVAILABLE", MEMBERSHIP_READ_FAILED_WORDS));
       // Fail closed: no member company, a malformed one or an unknown role is a sign-in refusal, never the install's company.
       if (membership === undefined || membership === null || typeof membership !== "object" || typeof membership.companyId !== "string" || !ORG_ID.test(membership.companyId) || !OrgRoleSchema.safeParse(membership.role).success) return unauthenticated();
       const companyId = membership.companyId;
@@ -1022,7 +1027,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           const project = approveEnvironment[1]!;
           // A live company owner or admin (the risk rule's top approvers, who need no grant on the project), or a person the company lets read the project; anyone else gets the words of a missing project
           // and nothing is decided for them. A project that does not exist is the decision's own "not found" for an owner or admin.
-          if (membership.role !== "owner" && membership.role !== "admin" && !(await target.wiring.canReadProject(caller.principal.personId, project).catch(() => false))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
+          if (membership.role !== "owner" && membership.role !== "admin" && !(await target.wiring.canReadProject(caller.principal.personId, project).catch(orIfNotMembershipFailure(false)))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
           const parsedBody = ApproveTestEnvironmentBodySchema.safeParse(jsonBodyOf(request));
           if (!parsedBody.success) throw agentXError("CONFIG_INVALID", `${parsedBody.error.issues[0]?.path.join(".") || "body"}: invalid`);
           const result = await approval.approve({ personId: caller.principal.personId, project, approval: parsedBody.data });
@@ -1046,7 +1051,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
           if (wired === undefined || target.wiring.canReadProject === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
           const project = savedEnvImage[1]!;
           // A project the person may not read, and one that does not exist, answer the same words; nothing is read for it.
-          if (!(await target.wiring.canReadProject(caller.principal.personId, project).catch(() => false))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
+          if (!(await target.wiring.canReadProject(caller.principal.personId, project).catch(orIfNotMembershipFailure(false)))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
           // The company is the membership's (the runtime's), never the request's. Role "viewer": a reader never gets Reset or the setting control, whatever their grant (the writes are not on the core here).
           const deps = { store: documentSavedEnvStore({ store: target.runtime.flow.deps.store, audit: target.runtime.flow.deps.audit }), session: { config: { enabled: wired.enabled === true } }, now: () => nowOf(target) };
           const panel = await savedEnvPanel(deps, { orgId: target.runtime.companyId, projectId: project }, { projectRole: "viewer" });
@@ -1073,7 +1078,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
             // A token is made only for projects this person may read now; one they may not read answers exactly like a missing one.
             // The record keeps how the maker signed in (the verified token's amr, when known), and the token never outlives the install's session cap.
             const made = await createScriptToken(deps, scriptCaller, bodyOf(request), async (project) => {
-              if (!(await canRead(caller.principal.personId, project).catch(() => false))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
+              if (!(await canRead(caller.principal.personId, project).catch(orIfNotMembershipFailure(false)))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
             }, { ...(cap === undefined ? {} : { lifetimeCapSeconds: cap }), ...(caller.amr === undefined ? {} : { signIn: { amr: caller.amr } }) });
             return json(201, made);
           }

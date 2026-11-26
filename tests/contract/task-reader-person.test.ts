@@ -5,6 +5,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { AgentXError } from "@agentx/contracts";
+import { MEMBERSHIP_READ_FAILED_WORDS, membershipReadFailed } from "../../packages/broker/src/core/membership-read.js";
 import { taskReaderPerson, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import { grantTaskReader, readerShare, type TaskReaderDependencies, type TaskReaderPerson } from "../../packages/broker/src/aws/task-readers.js";
 import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
@@ -30,7 +31,7 @@ function layer(companyOf: Record<string, string>, options: { companies?: boolean
   db.set({ pk: `MEMBER#${GRANTED}`, sk: "PROJECT#payments", entityType: "MEMBERSHIP", ownerKey: GRANTED, projectName: "payments", role: "developer" });
   const deps = {
     documentClient: { send: (command: unknown) => db.send(command as never) }, tableName: "state", now: () => 0, developer: { signInTableName: "signin" },
-    ...(options.companies === false ? {} : { companies: { companyOf: async (id: string) => { const company = companyOf[id]; if (company === "throws") throw new Error("directory down"); return company; } } }),
+    ...(options.companies === false ? {} : { companies: { companyOf: async (id: string) => { const company = companyOf[id]; if (company === "throws") throw new Error("directory down"); if (company === "read-failed") throw membershipReadFailed(); return company; } } }),
   } as unknown as DeveloperRouteDependencies;
   return { db, deps, person: (id: string) => taskReaderPerson(deps, id, "payments", TASK_COMPANY) };
 }
@@ -44,8 +45,9 @@ describe("taskReaderPerson: the stored share's person now (rule 1)", () => {
     const moved = layer({ [PERSON]: OTHER_COMPANY, [GRANTED]: OTHER_COMPANY });
     expect(await moved.person(PERSON)).toEqual({ name: "Person b", projectMember: false, companyMember: false });
     expect(await moved.person(GRANTED)).toEqual({ name: "Person c", projectMember: false, companyMember: false });
-    // A directory that fails is "not a member" (fail closed); a person who is registered nowhere or whose sign-in was revoked is no one.
-    expect(await layer({ [PERSON]: "throws" }).person(PERSON)).toEqual({ name: "Person b", projectMember: false, companyMember: false });
+    // A person who is registered nowhere or whose sign-in was revoked is no one.
+    // (a failing directory is a FAILED membership read: since MEMBERSHIP-READ-FAILS-SAFE it is the retryable 503, never "not a member": see the last describe)
+    await expect(layer({ [PERSON]: "throws" }).person(PERSON)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
     expect(await layer({}).person("d".repeat(64))).toBeUndefined();
     const revoked = layer({ [PERSON]: TASK_COMPANY });
     revoked.db.set({ ...revoked.db.get(`DEVELOPER#${PERSON}`, "META")!, revoked: true });
@@ -120,5 +122,23 @@ describe("grantTaskReader: the owner shares with a company member, a project gra
       expect([refused.code, refused.message], target.slice(0, 1)).toEqual(["CONFIG_INVALID", "CONFIG_INVALID: that person isn't a member of your company; add them to the company first"]);
     }
     expect(JSON.stringify(w.db.find(() => true)), "nothing written for a refusal").toBe(before);
+  });
+});
+
+// READ-RULE-SHARE-B on top of MEMBERSHIP-READ-FAILS-SAFE: a membership read that FAILED (the store threw) is not "not a member". It goes up as the retryable 503, so a share lookup is "no share" with the failure logged (never a leaked 404, never a share granted),
+// and a share write is the retryable answer with nothing written. (Any throw of the company reader is a failed membership read: `resolveCompany` marks it.)
+describe("a failed membership read gives no share and writes none (MEMBERSHIP-READ-FAILS-SAFE)", () => {
+  it("taskReaderPerson rethrows the retryable failure; readerShare lets it go up (the rule logs it and answers no share); grantTaskReader answers the retryable 503 and writes nothing", async () => {
+    const w = layer({ [PERSON]: "read-failed", [OWNER]: TASK_COMPANY });
+    const refused = await w.person(PERSON).catch((error: unknown) => error as AgentXError);
+    expect([refused.code, refused.message]).toEqual(["RUNTIME_UNAVAILABLE", `RUNTIME_UNAVAILABLE: ${MEMBERSHIP_READ_FAILED_WORDS}`]);
+    // The share's own functions over the same real reader.
+    const db = w.db;
+    db.set({ pk: `DEVTASK#${TASK_ID}`, sk: `READER#${PERSON}`, schemaVersion: 1, developerId: PERSON, role: "viewer", grantedBy: OWNER, grantedAt: "2026-11-25T00:00:00.000Z" });
+    const deps: TaskReaderDependencies = { documentClient: { send: (command: unknown) => db.send(command as never) }, tableName: "state", now: () => 0, taskReaderPerson: async (id, project, company, options) => taskReaderPerson(w.deps, id, project, company, options) };
+    await expect(readerShare(deps, task, PERSON)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    const before = JSON.stringify(db.find(() => true));
+    await expect(grantTaskReader(deps, task as never, OWNER, PERSON, { requestId: randomUUID(), role: "viewer" })).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    expect(JSON.stringify(db.find(() => true)), "nothing written").toBe(before);
   });
 });

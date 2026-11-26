@@ -51,9 +51,9 @@ type Write = NonNullable<TransactWriteCommandInput["TransactItems"]>[number];
  * then holds it), and the successor, who must be a live member of the same company (any role) at the moment the removal commits.
  */
 export interface RemovalFence { expectedRole?: Member["role"]; successorId?: string }
-export type CompanyJoin = { ok: true; membership: Member; viaPreapproval?: true } | { ok: false; reason: "not_invited" | "member_elsewhere" | "member_revoked" | "invite_email_mismatch" | "invite_email_unverified"; attributedCompanyId?: string };
+export type CompanyJoin = { ok: true; membership: Member; viaPreapproval?: true } | { ok: false; reason: "not_invited" | "member_elsewhere" | "member_revoked" | "invite_email_mismatch" | "invite_email_unverified"; attributedCompanyId?: string; /** A read or write the join needed FAILED (membership-read.ts): the refusal is not a fact about the person. */ readFailed?: true };
 const refused = (): CompanyJoin => ({ ok: false, reason: "not_invited" });
-const unavailable = () => new Error("company sign-in unavailable");
+const unavailable = () => new Error(UNAVAILABLE_WORDS);
 const conditional = (error: unknown) => error instanceof Error && (error.name === "ConditionalCheckFailedException" || error.name === "TransactionCanceledException");
 
 /** Arch ruling: a restored person comes back as a plain member, never with the role they had (a rejoin gets no old grant back). An administrator grants the role again through setRole, audited like any other. */
@@ -134,12 +134,12 @@ export class CompanySignInStore {
       } });
       try { await this.input.documentClient.send(new TransactWriteCommand({ TransactItems: writes })); }
       catch (error) {
-        if (!conditional(error)) return refused();
+        if (!lostTheSeatRace(error)) throw error;
         const won = await this.membership(input.personId);
         return won === undefined ? refused() : this.memberResult(won, input.companyId);
       }
       return { ok: true, membership: member, ...(legacy ? {} : { viaPreapproval: true as const }) };
-    } catch { return refused(); }
+    } catch (error) { return isUnreadableMembershipRow(error) ? refused() : { ok: false, reason: "not_invited", readFailed: true }; }
   }
   /**
    * DEC 254h / DEC 254zzz218: join by an invite link's secret only when this sign-in's provider-verified email matches its binding. Every current or future sign-in method must pass its current provider-verified email through this guard before redeeming an invite. Missing verified email refuses a new membership; request fields and saved profile emails are not proof. The secret must be live,
@@ -454,3 +454,10 @@ export class CompanySignInStore {
     await this.operatorWrite(companyId, "company-issuer-set", [{ Put: { TableName: this.input.tableName, Item: { ...companyIssuerKey(companyId), ...record } } }]);
   }
 }
+
+/** The store's own words for a membership row that reads and is MALFORMED (a fact about the row: a refusal), as opposed to a read or write that FAILED (membership-read.ts). */
+const UNAVAILABLE_WORDS = "company sign-in unavailable";
+export const isUnreadableMembershipRow = (error: unknown): boolean => error instanceof Error && error.message === UNAVAILABLE_WORDS;
+
+/** A seat write lost a RACE only when a condition failed (a ConditionalCheckFailed reason); a cancelled transaction for any other reason (throttled, conflicting) is a failed write: a retryable failure, never "no" (membership-read.ts). */
+const lostTheSeatRace = (error: unknown): boolean => error instanceof Error && (error.name === "ConditionalCheckFailedException" || (error.name === "TransactionCanceledException" && ((error as { CancellationReasons?: Array<{ Code?: string }> }).CancellationReasons ?? []).some((reason) => reason.Code === "ConditionalCheckFailed")));

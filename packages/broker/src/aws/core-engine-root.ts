@@ -1,3 +1,4 @@
+import { readingMembership } from "../core/membership-read.js";
 import { hostedAutofixDayBudgetHasRoom } from "../core-host/autofix-day-budget.js";
 import type { E2ESourceSnapshot } from "@agentx/contracts";
 import { hostedAuthorityStore } from "./core-e2e-authority-store.js";
@@ -397,7 +398,8 @@ export function coreEvalPlanSources(registry: Pick<AdapterRegistry, "names" | "g
 export function membershipWithRoleFromDynamo(client: DynamoSender, tableName: string): (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined> {
   return async (personId) => {
     if (typeof personId !== "string" || personId.length === 0 || personId.length > 256 || /[#\s]/u.test(personId)) return undefined;
-    const response = await client.send(new GetCommand({ TableName: tableName, Key: membershipKey(personId), ConsistentRead: true })) as { Item?: unknown };
+    // A read that throws is "the read failed" (a retryable 503, membership-read.ts), never "no membership".
+    const response = await readingMembership(() => client.send(new GetCommand({ TableName: tableName, Key: membershipKey(personId), ConsistentRead: true }))) as { Item?: unknown };
     const parsed = Membership.safeParse(response?.Item);
     if (!parsed.success || parsed.data.personId !== personId || parsed.data.revokedAt !== undefined || !OrgRoleSchema.safeParse(parsed.data.role).success) return undefined;
     return { companyId: parsed.data.companyId, role: parsed.data.role };
@@ -413,7 +415,8 @@ export function projectGrantRoleFromDynamo(client: DynamoSender, tableName: stri
   return async (personId, project, companyId) => {
     if (typeof personId !== "string" || personId === "" || /[#\s]/u.test(personId) || typeof project !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u.test(project)) return undefined;
     const key = grantKeyFor(companyId, personId, project);
-    const response = await client.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> };
+    // A grant read that throws is "the read failed" (a retryable 503, membership-read.ts), never "no grant".
+    const response = await readingMembership(() => client.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true }))) as { Item?: Record<string, unknown> };
     const row = response?.Item;
     if (row === undefined || row["pk"] !== key.pk || row["sk"] !== key.sk || row["projectName"] !== project) return undefined;
     const company = namedCompany(companyId);

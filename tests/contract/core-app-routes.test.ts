@@ -363,11 +363,18 @@ describe("the core app entry", () => {
     const log: Array<Record<string, unknown>> = [];
     const throwing = { route: async (): Promise<BrokerResponse | undefined> => { throw Object.assign(new Error("secret-detail-1"), { name: "RegistryRefused" }); } };
     const ok = { route: async (): Promise<BrokerResponse | undefined> => ({ statusCode: 200, headers: {}, body: "{}" }) };
-    for (const deployedCallerOf of [async () => undefined, async () => { throw new Error("secret-detail-2"); }]) {
-      const entry = coreAppEntryFrom({ routes: throwing, personErase: throwing, deployedCallerOf, log: (line) => log.push(line) });
+    {
+      const entry = coreAppEntryFrom({ routes: throwing, personErase: throwing, deployedCallerOf: async () => undefined, log: (line) => log.push(line) });
       const answer = await entry.route(request, caller);
       expect(answer?.statusCode).toBe(401);
       expect(JSON.parse(answer!.body)).toEqual({ error: { code: "UNAUTHENTICATED", message: CORE_APP_SIGN_IN_AGAIN } });
+    }
+    {
+      // A caller mapping that THROWS (the membership read failed) is not "no member": the retryable 503, with the existing words and none of the read's own.
+      const entry = coreAppEntryFrom({ routes: throwing, personErase: throwing, deployedCallerOf: async () => { throw new Error("secret-detail-2"); }, log: (line) => log.push(line) });
+      const answer = await entry.route(request, caller);
+      expect(answer?.statusCode).toBe(503);
+      expect(JSON.parse(answer!.body)).toEqual({ error: { code: "RUNTIME_UNAVAILABLE", message: "AgentX could not reach AWS just now; try again in a moment" } });
     }
     const principal = { companyId: FAKE_COMPANY, personId: ADA, displayName: "Ada", roles: ["admin"], provider: "developer" } as never;
     const entry = coreAppEntryFrom({ routes: throwing, personErase: ok, deployedCallerOf: async () => ({ principal }), log: (line) => log.push(line) });

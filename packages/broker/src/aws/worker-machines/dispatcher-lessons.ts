@@ -1,6 +1,6 @@
 // L10: a read-only learned input for ONE company's dispatcher runtime. L6 composes this
 // with hostedDispatcherFlow. The workspace record, never the job payload, vouches for scope.
-import { AgentXNameSchema, KNOWLEDGE_CONTEXT_FEATURE, KNOWLEDGE_PULL_MAX_UNITS, KNOWLEDGE_STAGE_PARTS, LEARNED_CONTEXT_FEATURE, OrgIdSchema, agentXError, codeRepositoriesOf, companyScoped, lessonSetKey, type DocumentStore, type OrgId, type StoredDocument } from "@agentx/contracts";
+import { AgentXNameSchema, KNOWLEDGE_CONTEXT_FEATURE, KNOWLEDGE_PULL_MAX_UNITS, KNOWLEDGE_STAGE_PARTS, LEARNED_CONTEXT_FEATURE, ROVARA_SKILLS_FEATURE, OrgIdSchema, agentXError, codeRepositoriesOf, companyScoped, lessonSetKey, type DocumentStore, type OrgId, type RovaraSkillFile, type StoredDocument } from "@agentx/contracts";
 import { z } from "zod";
 import type { GetCommand } from "@aws-sdk/lib-dynamodb";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
@@ -13,6 +13,7 @@ import { documentLearningSettings } from "../../lessons/document-settings.js";
 import { documentLessonVectors } from "../../lessons/document-vectors.js";
 import { createHostedLessonParts, type HostedLessonPeople } from "../../lessons/hosted-people.js";
 import { LESSON_LOAD_DEADLINE_MS } from "../../lessons/host-glue.js";
+import { readHostedLiveSkills } from "./dispatcher-skills.js";
 import { recordLessonLoad } from "../../lessons/load-record.js";
 import { hasStaleCitation, LOAD_MAX_BYTES, LOAD_MAX_LESSONS, selectLessons } from "../../lessons/load.js";
 import { buildKnowledgeContext, deliveryRecordOf, pullable } from "../../lessons/knowledge-brief.js";
@@ -48,6 +49,18 @@ class SignalsSpent extends Error {}
 /** Projects whose signals one dispatcher keeps at once (the oldest is dropped past it). */
 const SIGNALS_KEPT_MAX = 200;
 type Learned = NonNullable<TaskFlowDeps["learned"]>;
+/**
+ * What a step may be given. Lessons: only while the install's lessons switch covers the company (`lessonsOn`), a step of the five lesson modes, for a worker that lists the feature (the plan check's lessons are part of the
+ * knowledge briefing: an older worker is sent exactly what it always was).
+ * Rovara skills (SKILLS-TO-WORKERS, DEC 254zzz577 a): plan and build steps only (as `lessons/host-glue.ts` `skillsFor`), for a worker that lists the feature, whether or not the project has any lesson, WHATEVER the install's lessons
+ * switch and the project's learning mode say: a published skill is a two-person decision of its own.
+ */
+function partsOfStep(data: { workflowMode?: string | undefined; features: readonly string[] }, lessonsOn: boolean): { lessons: boolean; skills: boolean } {
+  const mode = data.workflowMode ?? "";
+  const lessons = lessonsOn && ["UNDERSTAND", "PLAN", "PLAN_CRITIQUE", "IMPLEMENT", "REVIEW"].includes(mode) && data.features.includes(LEARNED_CONTEXT_FEATURE) && (mode !== "PLAN_CRITIQUE" || data.features.includes(KNOWLEDGE_CONTEXT_FEATURE));
+  return { lessons, skills: (mode === "PLAN" || mode === "IMPLEMENT") && data.features.includes(ROVARA_SKILLS_FEATURE) };
+}
+const withSkills = <T extends object>(answer: T, skills: readonly RovaraSkillFile[]): T & { rovaraSkills?: RovaraSkillFile[] } => skills.length === 0 ? answer : { ...answer, rovaraSkills: [...skills] };
 function refuse(): never { throw agentXError("RUNTIME_UNAVAILABLE", DISPATCHER_LESSONS_UNAVAILABLE); }
 const Request = z.object({ workspaceId: z.uuid(), operationId: z.uuid(), workflowMode: z.enum(["UNDERSTAND", "PLAN", "PLAN_CRITIQUE", "IMPLEMENT", "REVIEW", "CHECKS", "FEEDBACK_REVIEW", "SETUP_DRAFT", "SETUP_AGENT", "WIKI_BUILD", "SPEC_WRITE"]).optional(), features: z.array(z.string().max(100)).max(64) });
 const Task = z.object({ taskId: z.uuid(), workspaceId: z.uuid(), companyId: OrgIdSchema, project: AgentXNameSchema, developerId: z.string().min(1).max(100), title: z.string().max(20_000), requestText: z.string().max(100_000).optional(), startingRevision: z.number().int().positive(), workflow: z.object({ revision: z.number().int().nonnegative() }) });
@@ -69,9 +82,14 @@ export interface DispatcherLessonsOptions {
 export function createDispatcherLearned(options: DispatcherLessonsOptions): Learned {
   const signalsKept = new Map<string, ProjectSignals>();
   return async (input) => {
-    if (!switchCovers(options.lessonsSwitch, options.companyId)) return {};
+    const lessonsOn = switchCovers(options.lessonsSwitch, options.companyId);
+    // Neither the lessons (switch off for this company) nor a worker that lists the skills feature: nothing to read, nothing asked of the store.
+    if (!lessonsOn && !(Array.isArray(input?.features) && input.features.includes(ROVARA_SKILLS_FEATURE))) return {};
     let stopped = false;
     let failed = false;
+    // The skills' own read (started once the task is known) and the end of the whole call: the skills depend on neither the lessons' failures nor their clock, only on this call still being open.
+    let skillsRun: Promise<RovaraSkillFile[]> | undefined;
+    let ended = false;
     let reads = 0;
     let items = 0;
     let bytes = 0;
@@ -105,9 +123,8 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
       if (!Array.isArray(input?.features) || input.features.length > 64) refuse();
       const request = Request.safeParse(input);
       if (!request.success || !OrgIdSchema.safeParse(options.companyId).success) refuse();
-      if (request.data.workflowMode === undefined || !["UNDERSTAND", "PLAN", "PLAN_CRITIQUE", "IMPLEMENT", "REVIEW"].includes(request.data.workflowMode) || !request.data.features.includes(LEARNED_CONTEXT_FEATURE)) return {};
-      // The plan check's lessons are part of the knowledge briefing: an older worker is sent exactly what it always was.
-      if (request.data.workflowMode === "PLAN_CRITIQUE" && !request.data.features.includes(KNOWLEDGE_CONTEXT_FEATURE)) return {};
+      const { lessons: wantsLessons, skills: wantsSkills } = partsOfStep(request.data, lessonsOn);
+      if (!wantsLessons && !wantsSkills) return {};
       const memo = new Map<string, Promise<StoredDocument | undefined>>();
       const client = { send: async (command: GetCommand) => {
         const answer = await read(() => options.documentClient.send(command));
@@ -156,16 +173,23 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
       };
       const parts = createHostedLessonParts({ companyId: company, people, readTask: ownTask });
       const settings = documentLearningSettings(store);
+      // The project's live skills, from the SAME selector the laptop path uses, for THIS task's own company and project (read from the workspace record and the task above, never from the request). Never throws. They are read
+      // BESIDE the lessons, on a clock and a share of reads of their own (`DISPATCHER_SKILLS_LIMITS`, through `options.store` directly): the lessons' reads, counters and 2.5 s run clock never see them, and the answer waits
+      // for them at most as long as their own clock (it starts here, so by the time the lessons are done it is usually over). Whatever the learning mode and the lessons switch say, they are given.
+      const started: Promise<RovaraSkillFile[]> = wantsSkills ? readHostedLiveSkills({ store: options.store, company, project: task.project, alive: () => !ended }) : Promise.resolve([]);
+      skillsRun = started;
+      const finish = async (answer: object) => { const skills = await started; check(); return withSkills(answer, skills); };
+      if (!wantsLessons) return finish({});
       const resolved = await resolveLearning(settings, company, task.project);
       check();
       // This read-only input has already checked its own company switch. It does not
       // depend on the broker process having installed the learning-model global gate.
       if (!modeAllows(resolved.chosenMode, "load")) {
         if (resolved.chosenMode === "Off" && await whyLearningOff(settings, company, task.project) === "unreadable") refuse();
-        return {};
+        return finish({});
       }
       const rawSet = await store.get(lessonSetKey(company, task.project));
-      if (rawSet === undefined) return {};
+      if (rawSet === undefined) return finish({});
       if (rawSet["members"] === null || typeof rawSet["members"] !== "object" || Object.keys(rawSet["members"]).length > DISPATCHER_LESSONS_LIMITS.lessons) refuse();
       const set = SetRecord.safeParse(rawSet);
       if (!set.success) refuse();
@@ -268,17 +292,22 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
           } catch { /* no record: the report of this step is dropped, as it was before */ } finally { if (recordTimer !== undefined) clearTimeout(recordTimer); }
         }
       }
-      return selected.chosen.length === 0 && knowledgeContext === undefined ? {} : {
+      return finish(selected.chosen.length === 0 && knowledgeContext === undefined ? {} : {
         ...(selected.chosen.length === 0 ? {} : { learnedContext: { v: 1, setVersion: set.data.setVersion, stage, lessons: selected.chosen } }),
         ...(knowledgeContext === undefined ? {} : { knowledgeContext }),
-      };
+      });
     };
     try {
       return await Promise.race([run(), new Promise<never>((_resolve, reject) => {
         timer = setTimeout(() => { stopped = true; reject(agentXError("RUNTIME_UNAVAILABLE", DISPATCHER_LESSONS_UNAVAILABLE)); }, LESSON_LOAD_DEADLINE_MS);
         timer.unref?.();
       })]);
-    } catch { return refuse(); }
-    finally { stopped = true; if (timer !== undefined) clearTimeout(timer); }
+    } catch {
+      // ANY failure of the lessons part (unreadable settings, a failed or over-budget read, a refused set, the 2.5 s clock) is no lessons, never no skills: the skills read began once the company and the task were proved, on its
+      // own scope and share, and its own failure is already "no skills". A failure before that point (no company, no task, a foreign workspace) gives nothing at all.
+      const skills = skillsRun === undefined ? [] : await skillsRun;
+      return skills.length === 0 ? refuse() : withSkills({}, skills);
+    }
+    finally { ended = true; stopped = true; if (timer !== undefined) clearTimeout(timer); }
   };
 }

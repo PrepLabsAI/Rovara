@@ -479,7 +479,7 @@ describe("the worker says it has the install step only when the step is wired", 
     const prepare = await source("prepare.ts");
     const step = prepare.indexOf("await runPrivateInstallStep(");
     expect(step).toBeGreaterThan(0);
-    for (const later of ["await ensureDevcontainer(", "await startPrepareTestServices(", "await run(command, index, canonicalRoot)", "await evaluateReadiness("]) {
+    for (const later of ["await ensureDevcontainer(", "await startPrepareTestServices(", "await run(command, index, canonicalRoot, setupSession)", "await evaluateReadiness("]) {
       expect(prepare.indexOf(later), later).toBeGreaterThan(step);
     }
     // The company's registries never reach N9's project-command path.

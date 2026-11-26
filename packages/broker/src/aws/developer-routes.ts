@@ -1,3 +1,4 @@
+import { readingMembership, rethrowMembershipReadFailure } from "../core/membership-read.js";
 import { prepareTaskPeopleStart } from "../developer/task-people-start.js";
 import { companyMembershipFromDynamo } from "./company-check.js";
 import type { TaskPeopleDependencies } from "../developer/task-people.js";
@@ -506,9 +507,10 @@ async function getSignIn<T>(deps: DeveloperRouteDependencies, pk: string): Promi
 async function requireSessionSurvivor(deps: DeveloperRouteDependencies, session: SessionRecord, refused: () => Error): Promise<void> {
   if (session.signedInId === undefined) return;
   try {
-    const walk = await mergeSurvivor((id) => getSignIn(deps, `DEVELOPER#${id}`), session.signedInId);
+    // A hop whose read FAILS is not a revoked hop: it answers the retryable 503 and ends nothing (membership-read.ts); a walk that refuses (a revoked hop, a cycle, another survivor) is the refusal.
+    const walk = await mergeSurvivor((id) => readingMembership(() => getSignIn(deps, `DEVELOPER#${id}`)), session.signedInId);
     if (walk.survivorId !== session.developerId) throw refused();
-  } catch { throw refused(); }
+  } catch (error) { rethrowMembershipReadFailure(error); throw refused(); }
 }
 
 /** Reuse consistent sign-in identity reads within one verifier/request, never across requests. */
@@ -560,7 +562,7 @@ async function companyOidcSession(deps: DeveloperRouteDependencies, session: Ses
     }).safeParse(deps.serverReadBudget === undefined ? await scope.read(async () => session) : session);
     if (!parsed.success) throw new Error("session record");
     const key = companyIssuerKey(companyId);
-    const response = await scope.client.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: key, ConsistentRead: true })) as { Item?: unknown };
+    const response = await readingMembership(() => scope.client.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: key, ConsistentRead: true }))) as { Item?: unknown };
     // DEC 254b (a): a company with no issuer row signs in only through the install's own OIDC (the shared method), and only a session the sign-in
     // server marked so; the install's switch and since time then hold, as for the built-in company. A company with any issuer row never takes it.
     if (response.Item === undefined) {
@@ -572,12 +574,16 @@ async function companyOidcSession(deps: DeveloperRouteDependencies, session: Ses
     const issuer = CompanyIssuerRecord.extend({ pk: z.literal(key.pk), sk: z.literal("OIDC") }).safeParse(response.Item);
     if (!issuer.success || !issuer.data.enabled || (issuer.data.requiredValues.length > 0 && issuer.data.requiredClaim === undefined)
       || startedBeforeMethodOn(session.startedAt, Math.max(issuer.data.enabledSince, issuer.data.since ?? 0))) throw new Error("issuer policy");
-    const developer = await getSignIn<DeveloperRecord>({ ...deps, documentClient: scope.client }, `DEVELOPER#${session.developerId}`);
+    const developer = await readingMembership(() => getSignIn<DeveloperRecord>({ ...deps, documentClient: scope.client }, `DEVELOPER#${session.developerId}`));
     if (developer === undefined || developer.provider !== "oidc"
       || developer.issuer !== issuer.data.issuer.replace(/\/+$/, "") || developer.revoked !== false) throw new Error("issuer identity");
     scope.check();
     return developer;
-  } catch { throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN); }
+  } catch (error) {
+    // The session company's membership, the company's sign-in settings and the identity row are reads: one that FAILED is the retryable 503 (membership-read.ts), never "your sign-in has ended".
+    rethrowMembershipReadFailure(error);
+    throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  }
 }
 
 export async function authenticateDeveloper(deps: DeveloperRouteDependencies, claims: Record<string, unknown> | undefined): Promise<DeveloperCaller> {
@@ -815,6 +821,14 @@ async function grantsOf(deps: DeveloperRouteDependencies, caller: ProjectAccessS
 }
 
 /**
+ * The same dependencies with every read marked: a store read that throws is the one retryable failure (membership-read.ts). Only the SEND is marked, so a refusal the code itself decides (a person
+ * with more grant rows than the web proof reads) stays a refusal and is never mistaken for a failed read.
+ */
+function markedReads(deps: DeveloperRouteDependencies): DeveloperRouteDependencies {
+  return { ...deps, documentClient: { send: (command: unknown) => readingMembership(() => deps.documentClient.send(command)) } };
+}
+
+/**
  * DEC 254zzz80: a person's grant rows for the company named by their LIVE membership. A named company's are read from its own partition only (`ORG#<company>#MEMBER#<person>`,
  * company-layout.ts), and a row there whose keys disagree with its project name, or that names another company, is never this company's grant. The built-in company and no
  * company read the legacy rows exactly as before.
@@ -902,7 +916,7 @@ async function clientCompany(deps: DeveloperRouteDependencies, client: SignInCli
     const companyId = await resolveCompany(deps.companies, personId);
     if (client.installLevel !== true && (client.companyId ?? IMPLICIT_COMPANY_ID) !== companyId) throw new Error("client unavailable");
     return companyId;
-  } catch { throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED); }
+  } catch (error) { rethrowMembershipReadFailure(error); throw agentXError("AUTH_REQUIRED", ACCESS_REFUSED); }
 }
 
 /** RFC 6749 2.3.1 HTTP Basic client credentials, or undefined. */
@@ -1022,7 +1036,7 @@ async function slackWorkspaceOf(deps: DeveloperRouteDependencies, developerId: s
 async function codeCompanyOf(deps: DeveloperRouteDependencies, client: { send(command: unknown): Promise<unknown> }, developerId: string, companyId: string): Promise<Pick<AccessCheckResponse, "companyId" | "companyRole" | "companyName">> {
   const refused = () => agentXError("AUTH_REQUIRED", ACCESS_REFUSED);
   let membership: { companyId: string; role: OrgRole } | undefined;
-  try { membership = await deps.companies?.membershipOf?.(developerId); } catch { throw refused(); }
+  try { membership = await deps.companies?.membershipOf?.(developerId); } catch (error) { rethrowMembershipReadFailure(error); throw refused(); }
   if (membership === undefined || membership.companyId !== companyId || !OrgRoleSchema.safeParse(membership.role).success) throw refused();
   const key = companyKey(companyId);
   const stored = (await client.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> }).Item;
@@ -1156,11 +1170,15 @@ async function readClientProject(deps: DeveloperRouteDependencies, developerId: 
 async function companylessSession(deps: DeveloperRouteDependencies, client: SignInClientRecord, session: SessionRecord): Promise<boolean> {
   if (deps.companies === undefined || client.installLevel !== true || client.fullAccess !== true || client.webApp !== true || (session.amr !== "oidc" && session.amr !== "slack" && session.amr !== "github") || session.companyId !== undefined) return false;
   try {
-    const membership = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: membershipKey(session.developerId), ConsistentRead: true })) as { Item?: unknown };
-    if (membership.Item !== undefined) return false;
-    const developer = await getSignIn<{ revoked?: unknown; companyless?: unknown; mergedInto?: unknown }>(deps, `DEVELOPER#${session.developerId}`);
-    return developer?.revoked === false && developer.companyless === true && developer.mergedInto === undefined; // SLACK-LINK-L2: a record that points at a person is never one with no company
-  } catch { return false; }
+    // Reads only: a read that FAILS is the retryable 503, never "not companyless" (membership-read.ts); any other doubt is no.
+    return await readingMembership(async () => {
+      const membership = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: membershipKey(session.developerId), ConsistentRead: true })) as { Item?: unknown };
+      if (membership.Item !== undefined) return false;
+      const developer = await getSignIn<{ revoked?: unknown; companyless?: unknown; mergedInto?: unknown }>(deps, `DEVELOPER#${session.developerId}`);
+      // SLACK-LINK-L2: a record that points at a person is never one with no company.
+      return developer?.revoked === false && developer.companyless === true && developer.mergedInto === undefined;
+    });
+  } catch (error) { rethrowMembershipReadFailure(error); return false; }
 }
 
 /** Only the token scopes still allowed by the registration, or all scopes for a full-access client. */
@@ -1231,6 +1249,8 @@ async function authenticateClientToken(deps: DeveloperRouteDependencies, authori
   try {
     return await verifyClientSessionAndCompany(deps, client, claims, amr, nowSeconds, options, refused);
   } catch (error) {
+    // A failed membership read is not a refusal: it answers the retryable 503 and ends nothing.
+    rethrowMembershipReadFailure(error);
     if (deps.companies !== undefined && amr === "oidc") throw refused();
     throw error;
   }
@@ -1296,7 +1316,7 @@ function memberActions(deps: DeveloperRouteDependencies) {
 /**
  * Spec 067: a registered, not removed person, with their name and whether they hold a grant on `project`. With `ownTask` (the task's own person asking whether they still hold their task) it also
  * answers `mayStart`: the SAME live test the task start meets, `checkProjectAccess`: the grant, or fresh bound-channel membership while the project lets channel members use it and the person is
- * Slack-linked, for an OLD-engine task only (no engine stamp; a core task's own person needs the grant). Read now, nothing kept; a read that fails (Slack unreachable, a refusal, the stamp) is "no", as at the start. A reader never gets it (a reader needs the grant itself).
+ * Slack-linked, for an OLD-engine task only (no engine stamp; a core task's own person needs the grant). Read now, nothing kept; a read that fails (Slack unreachable, a refusal, the stamp) is "no", as at the start; a MEMBERSHIP read that fails is the retryable 503 instead (membership-read.ts). A reader never gets it (a reader needs the grant itself).
  */
 export async function taskReaderPerson(deps: DeveloperRouteDependencies, developerId: string, project: string, taskCompany?: string, options?: { ownTask?: true; taskId?: string }): Promise<{ name: string; projectMember: boolean; companyMember: boolean; mayStart?: boolean } | undefined> {
   const person = await getSignIn<Pick<DeveloperRecord, "revoked" | "displayName" | "slackUserId">>(deps, `DEVELOPER#${developerId}`);
@@ -1309,10 +1329,10 @@ export async function taskReaderPerson(deps: DeveloperRouteDependencies, develop
     try {
       // Channel access holds an OLD-engine task only: the one the engine stamp (`TASK_ENGINE#<id>`, written by the core's own start) is missing for. A core task's own person needs the grant, as its start
       // and every step do (core-engine-root.ts); no task id, a stamp that is there, or a stamp that cannot be read: grant only.
-      if (options.taskId === undefined || await isCoreTaskThatExists(deps, options.taskId)) return { name, projectMember: held, companyMember: true, mayStart: false };
+      if (options.taskId === undefined || await isCoreTaskThatExists(deps, options.taskId)) return { name, projectMember: held, companyMember, mayStart: false };
       await checkProjectAccess(deps, { developerId, ...(person.slackUserId === undefined ? {} : { slackUserId: person.slackUserId }) }, project);
-      return { name, projectMember: held, companyMember: true, mayStart: true };
-    } catch { return { name, projectMember: held, companyMember: true, mayStart: false }; }
+      return { name, projectMember: held, companyMember, mayStart: true };
+    } catch (error) { rethrowMembershipReadFailure(error); return { name, projectMember: held, companyMember, mayStart: false }; }
   };
   // DEC 254zzz80 / 254zzz98 (review L2): a reader of a task must be a LIVE member of the TASK's company, and their grant is read where that company keeps it (beside its
   // revision): never in the reader's own other company, so a share never says whether a person of another company holds a grant there. No live company: no grant.
@@ -1321,7 +1341,8 @@ export async function taskReaderPerson(deps: DeveloperRouteDependencies, develop
   // A core task can still run on such an install (the core reads company membership from the sign-in table itself), and its sign-ins may belong to more than one company, so "registered" is never enough.
   if ((deps.companies ?? deps.developer.companies) === undefined) { const held = await projectGrant(memberActions(deps), project, developerId, undefined) !== undefined; return answer(held, held); }
   let company: string | undefined;
-  try { company = await liveNamedCompany(deps, developerId); } catch { return { name, projectMember: false, companyMember: false }; }
+  // A membership read that FAILED is not "not a member": it goes up as the retryable 503 (membership-read.ts), so the task's own person is never told "no such task" for it (and a share lookup is "no share" with the failure logged, a share write the retryable 503).
+  try { company = await liveNamedCompany(deps, developerId); } catch (error) { rethrowMembershipReadFailure(error); return { name, projectMember: false, companyMember: false }; }
   const owning = taskCompany === undefined ? company : namedCompany(taskCompany);
   if (owning !== company) return { name, projectMember: false, companyMember: false };
   return answer(await projectGrant(memberActions(deps), project, developerId, owning) !== undefined);
@@ -1921,7 +1942,7 @@ export function developerTaskRouteDependencies(
   // C2 (plan 4.1, decisions D1, D3): the web proof's reads, none of them Slack's. The developer record and the membership are the sign-in table's
   // own rows (the reviewed reader every sign-in uses); the grant is the project's in the TASK'S company, by grant only (no channel list, no Slack id).
   const developerRecord = async (targetDeveloperId: string): Promise<DeveloperRecord | undefined> => {
-    const response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: { pk: `DEVELOPER#${targetDeveloperId}`, sk: META }, ConsistentRead: true })) as { Item?: DeveloperRecord };
+    const response = await readingMembership(() => deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: { pk: `DEVELOPER#${targetDeveloperId}`, sk: META }, ConsistentRead: true }))) as { Item?: DeveloperRecord };
     return developerRecordKeyedBy(response.Item, targetDeveloperId); // the id lives only in the row's key (real rows have no `developerId` attribute); a disagreeing attribute refuses
   };
   const definitionReads = new Map<string, ReturnType<typeof latestDefinition>>();
@@ -1929,10 +1950,10 @@ export function developerTaskRouteDependencies(
     // C4: one bounded page of the project's side of its grants (admin-actions.ts projectMemberKey rows); each id is proved live before use.
     // DEC 254zzz80: in the TASK'S company's own partition for a named company (company-layout.ts); the legacy rows otherwise.
     projectMemberIds: async (project, limit, companyId) => {
-      const response = await deps.documentClient.send(new QueryCommand({
+      const response = await readingMembership(() => deps.documentClient.send(new QueryCommand({
         TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :developer)",
         ExpressionAttributeValues: { ":pk": projectMemberKey(project, "", companyId).pk, ":developer": "DEVELOPER#" }, ConsistentRead: true, Limit: limit,
-      })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
+      }))) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
       const ids = (response.Items ?? []).map((item) => typeof item.sk === "string" && item.sk.startsWith("DEVELOPER#") ? item.sk.slice("DEVELOPER#".length) : "");
       return { ids, complete: response.LastEvaluatedKey === undefined };
     },
@@ -1940,7 +1961,7 @@ export function developerTaskRouteDependencies(
       // Only an install with the company layer has live memberships; without it there is no web proof (unavailable, a refusal).
       if ((deps.companies ?? deps.developer.companies) === undefined) throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
       const key = membershipKey(targetDeveloperId);
-      const response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> };
+      const response = await readingMembership(() => deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: key, ConsistentRead: true }))) as { Item?: Record<string, unknown> };
       if (response.Item !== undefined && (response.Item.pk !== key.pk || response.Item.sk !== key.sk)) throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
       return strictLiveMembership(response.Item, targetDeveloperId);
     },
@@ -1956,7 +1977,7 @@ export function developerTaskRouteDependencies(
       }
       const revision = await pending;
       if (revision === undefined) throw agentXError("PROJECT_NOT_FOUND", "task person project was not found");
-      const memberships = await grantRowsOf<{ pk?: string; sk?: string; projectName: string; role?: string }>(deps, targetDeveloperId, companyId, WEB_PROOF_GRANT_ROWS_MAX);
+      const memberships = await grantRowsOf<{ pk?: string; sk?: string; projectName: string; role?: string }>(markedReads(deps), targetDeveloperId, companyId, WEB_PROOF_GRANT_ROWS_MAX);
       const result = evaluateProjectAuthority({ project, revision: { revision: revision.revision, definition: { developerTasks: revision.developerTasks } }, memberships, bindings: [] });
       if (result.kind === "allowed") return result.access === "granted";
       if (result.kind === "denied" && result.reason === "project-access") return false;
@@ -2000,7 +2021,7 @@ export function developerTaskRouteDependencies(
         const revision = await latestDefinition(deps, project, workspace?.companyId);
         if (revision === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist in this AgentX`);
         const [memberships, allBindings] = await Promise.all([
-          grantRowsOf<{ projectName: string; role?: string }>(deps, subject.developerId, workspace?.companyId),
+          grantRowsOf<{ projectName: string; role?: string }>(markedReads(deps), subject.developerId, workspace?.companyId),
           bindingsOf(deps, workspace),
         ]);
         const result = evaluateProjectAuthority({
@@ -2154,10 +2175,10 @@ async function companyPreapprovalRoute(deps: DeveloperRouteDependencies, request
   const companyId = await resolveCompany(deps.companies, caller.developerId);
   let member: z.infer<typeof Membership>;
   try {
-    const response = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: membershipKey(caller.developerId), ConsistentRead: true })) as { Item?: unknown };
+    const response = await readingMembership(() => deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: membershipKey(caller.developerId), ConsistentRead: true }))) as { Item?: unknown };
     member = Membership.parse(response.Item);
     if (member.personId !== caller.developerId || member.companyId !== companyId || member.revokedAt !== undefined) throw new Error("membership unavailable");
-  } catch { throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN); }
+  } catch (error) { rethrowMembershipReadFailure(error); throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN); }
   if (member.role !== "admin" && member.role !== "owner") throw notFound();
   if (isResend && caller.webApp !== true) throw agentXError("FORBIDDEN", "resending an invite is done in the Rovara web app");
   let forwarded: CompanyPreapprovalRequest;

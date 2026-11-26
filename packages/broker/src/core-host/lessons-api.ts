@@ -66,6 +66,7 @@ import type { CoreLessons } from "./lessons.js";
 import { LESSONS_GRADUATION_API, answerGraduation } from "./lessons-graduation.js";
 import type { SkillGraduation } from "../lessons/graduate.js";
 import { digestPilotOf, switchCovers, type CoreSwitch } from "./flags.js";
+import { rethrowMembershipReadFailure } from "../core/membership-read.js";
 
 /** The paths this API serves (one regex, so the route-table tests read every path from it). */
 const LESSONS_API = /^\/v1\/dev\/projects\/([^/]+)\/(?:lessons(?:\/(mode|mode\/trial-offer|weekly|weekly-summary|retire-requests|decisions|measure|tuning|replay|areas|learning-sources)|\/([^/]+)\/(approve|reject|retire|retire-request|skill|keep))?|tasks\/([^/]+)\/lessons(?:\/([^/]+)\/(not-helpful))?|lessons\/learning-sources\/([a-z0-9_]{1,40})|skills(?:\/([a-z0-9][a-z0-9-]{0,63})(?:\/(approve|retire))?)?)$/u;
@@ -255,7 +256,7 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
   /** The caller's company and role from membership, checked. */
   async function membershipOf(caller: LessonsApiCaller): Promise<{ companyId: OrgId; role: OrgRole }> {
     let found: unknown;
-    try { found = await options.companyOf(caller); } catch { found = undefined; }
+    try { found = await options.companyOf(caller); } catch (error) { rethrowMembershipReadFailure(error); found = undefined; }
     const record = found as { companyId?: unknown; role?: unknown } | undefined | null;
     const companyId = OrgIdSchema.safeParse(record?.companyId);
     const role = OrgRoleSchema.safeParse(record?.role);
@@ -318,7 +319,7 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
     /** Who may inspect replay or change the project's lessons settings: company owner/admin or project maintainer. */
     const mayChange = async (): Promise<boolean> => {
       if (role === "owner" || role === "admin") return true;
-      try { return (await options.projectRole(companyId, project, personId)) === "maintainer"; } catch { return false; }
+      try { return (await options.projectRole(companyId, project, personId)) === "maintainer"; } catch (error) { rethrowMembershipReadFailure(error); return false; }
     };
 
     if (route === "task" || route === "not-helpful") {

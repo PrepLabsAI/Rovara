@@ -16,6 +16,7 @@ import {
   StoredProjectDefinitionSchema,
   agentXError,
   redactText,
+  shellLineOf,
   type PrepareMeta,
   type PrepareRegistry,
   type ProjectCommand,
@@ -33,6 +34,7 @@ import {
 import { assertWorkspaceReset } from "./workspace-quarantine.js";
 import { RunnerKillUnconfirmedError, runCollected, type CollectedProcess } from "./collected-process.js";
 import { describeCommandFailure } from "./command-failure.js";
+import { closeShellSession, groupLimitSeconds, newShellSession, type ShellSession } from "./shell-session.js";
 import { DOCKER_DATA_DIRECTORY, RUNTIME_BACKING_DIRECTORY } from "./devcontainer-policy.js";
 import { evaluateReadiness, type CommandResult } from "./readiness.js";
 import { startPrepareTestServices, type PrepareServices, type PrepareTestServices } from "./test-services-run.js";
@@ -130,6 +132,8 @@ export type PreparationCommandRunner = (
   command: ProjectCommand,
   index: number,
   rootPath: string,
+  /** SETUP-L9-SHELL: the group of lines (the setup commands, or the test commands) the command belongs to; its shell lines share one shell session. A runner that has no shell (the host's, a test's) ignores it. */
+  session?: ShellSession,
 ) => Promise<CommandResult>;
 
 export interface PrepareWorkspaceOptions {
@@ -320,9 +324,9 @@ async function prepareWorkspaceOnce(options: PrepareWorkspaceOptions): Promise<P
     : taskSandboxFor(options.taskShell ?? taskShellSelection(), { rootPath: canonicalRoot, taskId: options.creationIdentity ?? randomUUID() });
   const commandRunner = options.commandRunner
     ?? (target !== undefined && devcontainerCli !== undefined
-      ? (command: ProjectCommand) => runDevcontainerCommand(devcontainerCli, target, command)
+      ? (command: ProjectCommand, _index: number, _root: string, session?: ShellSession) => runDevcontainerCommand(devcontainerCli, target, command, undefined, session)
       : sandbox !== undefined
-        ? (command: ProjectCommand) => executionFor(SANDBOX_TARGET, { sandbox }).runCommand(command)
+        ? (command: ProjectCommand, _index: number, _root: string, session?: ShellSession) => executionFor(SANDBOX_TARGET, { sandbox }).runCommand(command, undefined, session)
         : (command: ProjectCommand, index: number, root: string) => runProjectCommand(command, index, root, undefined, true));
   // A crashed preparation may have left a registry config (and a token) behind: removed before anything else runs.
   await removeLeftoverRegistryConfigs(canonicalRoot);
@@ -456,30 +460,48 @@ async function prepareWorkspaceOnce(options: PrepareWorkspaceOptions): Promise<P
     }
 
     services = await startPrepareTestServices({ options: options.testServices, sandbox, devcontainer: target !== undefined, operationId: options.creationIdentity ?? "agentx-worker", rootPath: canonicalRoot, repositoryPaths: project.repositories.map((repository) => resolve(canonicalRoot, repository.path)) });
-    for (const [index, command] of project.setup.entries()) {
-      if (manifest.completedSetupSteps.includes(index)) continue;
-      let result: CommandResult;
-      try {
-        result = await run(command, index, canonicalRoot);
-      } catch (error) {
-        // A leaked registry token is not a step result: it stops the preparation and taints the workspace.
-        if (error instanceof RegistryTokenLeakError) throw error;
-        // For example, the step's directory does not exist: still say which step (#154).
-        result = { exitCode: -1, stdout: "", stderr: error instanceof Error ? error.message : "setup command could not run" };
-      }
-      // A step that its timeout stopped failed, even when it exited 0 on SIGTERM (#170).
-      if (result.exitCode !== 0 || result.timedOut === true) {
-        throw new Error(describeCommandFailure("setup step", index, command, result));
-      }
-      await assertContainedSymlinks(canonicalRoot, canonicalRoot, options.trustedRuntimeBackingOwner, options.venvLinkPolicy);
-      manifest.completedSetupSteps.push(index);
+    // SETUP-L9-SHELL: the setup commands are one GROUP, and their shell lines share one shell session (shell-session.ts). A resumed preparation cannot skip the steps it had finished when a line is a shell line: what they
+    // left in the shell (an activated virtual environment, a directory) is gone with the container, so the group starts again from its first line.
+    const setupSession = newShellSession({ limitSeconds: groupLimitSeconds(project.setup) });
+    if (project.setup.some((command) => shellLineOf(command) !== undefined) && manifest.completedSetupSteps.length > 0) {
+      manifest.completedSetupSteps = [];
       manifest = await writeManifest(canonicalRoot, withoutFailure(manifest));
     }
-
-    const readiness = await evaluateReadiness(
-      { rootPath: canonicalRoot, commands: project.readiness },
-      services?.sealedReadiness(run) ?? run,
-    );
+    try {
+      for (const [index, command] of project.setup.entries()) {
+        if (manifest.completedSetupSteps.includes(index)) continue;
+        let result: CommandResult;
+        try {
+          result = await run(command, index, canonicalRoot, setupSession);
+        } catch (error) {
+          // A leaked registry token is not a step result: it stops the preparation and taints the workspace.
+          if (error instanceof RegistryTokenLeakError) throw error;
+          // For example, the step's directory does not exist: still say which step (#154).
+          result = { exitCode: -1, stdout: "", stderr: error instanceof Error ? error.message : "setup command could not run" };
+        }
+        // A step that its timeout stopped failed, even when it exited 0 on SIGTERM (#170).
+        if (result.exitCode !== 0 || result.timedOut === true) {
+          throw new Error(describeCommandFailure("setup step", index, command, result));
+        }
+        await assertContainedSymlinks(canonicalRoot, canonicalRoot, options.trustedRuntimeBackingOwner, options.venvLinkPolicy);
+        manifest.completedSetupSteps.push(index);
+        manifest = await writeManifest(canonicalRoot, withoutFailure(manifest));
+      }
+    } finally {
+      await closeShellSession(setupSession);
+    }
+    // The test commands are the second group: their own shell session, started clean (a test line that needs the virtual environment activates it itself, or on an earlier test line).
+    const readinessSession = newShellSession({ limitSeconds: groupLimitSeconds(project.readiness) });
+    let readiness: Awaited<ReturnType<typeof evaluateReadiness>>;
+    try {
+      readiness = await evaluateReadiness(
+        { rootPath: canonicalRoot, commands: project.readiness },
+        // A sealed check runs in a sandbox of its own (one per test check), so there is no shell state to carry between those checks: a test line there is self-contained (`source .venv/bin/activate && pytest`).
+        services?.sealedReadiness((command, index, root) => run(command, index, root, readinessSession)) ?? ((command, index, root) => run(command, index, root, readinessSession)),
+      );
+    } finally {
+      await closeShellSession(readinessSession);
+    }
     // The readiness runner turns an error into a result; a leak found by a check's scan is thrown here instead.
     const leak = registrySession?.leak();
     if (leak !== undefined) throw leak;

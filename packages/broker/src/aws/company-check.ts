@@ -1,5 +1,6 @@
 // R4: membership is an internal, replaceable person -> company read. T3 writes the
 // sign-in-table membership. A token's company is never membership.
+import { membershipReadFailed, isMembershipReadFailure, readingMembership } from "../core/membership-read.js";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import type { DeveloperTaskActions } from "./developer-task-actions.js";
@@ -21,10 +22,10 @@ function membershipReader(read: (personId: string) => Promise<unknown>): Company
   // Lane W: `membershipOf` adds the live role (for "a company administrator may change it"); `companyOf` answers exactly as before.
   const membershipOf = async (personId: string) => {
     if (typeof personId !== "string" || personId.length === 0 || personId.length > 256 || /[#\s]/.test(personId)) return undefined;
-    try {
-      const parsed = Membership.safeParse(await read(personId));
-      return parsed.success && parsed.data.personId === personId && parsed.data.revokedAt === undefined ? { companyId: parsed.data.companyId, role: parsed.data.role } : undefined;
-    } catch { throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN); }
+    // A failed read is the retryable 503 (membership-read.ts), never "no membership"; a row that reads and says none, revoked or malformed stays undefined.
+    const row = await readingMembership(() => read(personId));
+    const parsed = Membership.safeParse(row);
+    return parsed.success && parsed.data.personId === personId && parsed.data.revokedAt === undefined ? { companyId: parsed.data.companyId, role: parsed.data.role } : undefined;
   };
   return { membershipOf, async companyOf(personId) { return (await membershipOf(personId))?.companyId; } };
 }
@@ -46,7 +47,7 @@ export async function resolveCompany(reader: CompanyMembershipReader | undefined
   try {
     const company = OrgIdSchema.safeParse(await reader.companyOf(personId));
     if (company.success) return company.data;
-  } catch { /* No reader cause belongs in a caller's response. */ }
+  } catch (error) { throw isMembershipReadFailure(error) ? error : membershipReadFailed(); /* A reader that threw FAILED: no cause of its own belongs in a caller's response, and absence is never inferred from it. */ }
   throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
 }
 
@@ -61,7 +62,7 @@ export const ADMIN_NOT_IN_A_COMPANY = "this admin sign-in is not a member of a c
 export async function resolveAdminCompany(reader: CompanyMembershipReader | undefined, personId: string, refusal: () => AgentXError = () => agentXError("FORBIDDEN", ADMIN_NOT_IN_A_COMPANY)): Promise<string | undefined> {
   if (reader === undefined) return undefined;
   let value: unknown;
-  try { value = await reader.companyOf(personId); } catch { throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN); }
+  try { value = await reader.companyOf(personId); } catch (error) { throw isMembershipReadFailure(error) ? error : membershipReadFailed(); }
   const company = OrgIdSchema.safeParse(value);
   if (company.success) return company.data;
   throw refusal();

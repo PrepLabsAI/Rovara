@@ -1,5 +1,6 @@
 // Spec 061 slice 2: who may do what on a task page. Every check goes through resolveTaskAccess and the one role-to-action
 // table below, so roles (slice 3) change only these two places; callers never decide roles themselves.
+import { rethrowMembershipReadFailure } from "../core/membership-read.js";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { agentXError } from "@agentx/contracts";
 import type { DeveloperCaller } from "../aws/developer-routes.js";
@@ -116,7 +117,9 @@ async function taskAccessOfRecord(deps: AccessDependencies, caller: DeveloperCal
       }
       return { task, role: people.role, peopleRevision: people.peopleRevision, ownerActorIds: people.ownerActorIds, ...channelShareOf(people) };
     }
-  } catch {
+  } catch (error) {
+    // A membership or grant read that FAILED is the retryable 503 (membership-read.ts), never "no such task".
+    rethrowMembershipReadFailure(error);
     throw notFound();
   }
   const legacyOwners = [taskOwnerKey(task.developerId, task.taskId)];
@@ -135,6 +138,7 @@ async function taskAccessOfRecord(deps: AccessDependencies, caller: DeveloperCal
     await deps.checkAccess(task.project);
     usesProject = true;
   } catch (error) {
+    rethrowMembershipReadFailure(error);
     log(deps, { event: "developer.task_page_project_access_refused", taskId, errorName: error instanceof Error ? error.name : "unknown" });
   }
   const share = task.share;

@@ -205,10 +205,11 @@ describe("the deployed session levels (the company's own records)", () => {
       expect(await members.projectGrant(who, "payments")).toBeUndefined();
     }
     const failing = deployedSessionMembers(ORG, people({ membershipOf: async () => { throw new Error("dynamo down"); } }));
-    expect(await failing.companyRole(person("dev-o"))).toBeUndefined();
-    expect(await failing.projectGrant(person("dev-o"), "payments")).toBeUndefined();
+    // A read that FAILED is not "no membership" / "no grant": it throws the retryable failure (membership-read.ts), so no session answers "no such session" for it.
+    await expect(failing.companyRole(person("dev-o"))).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    await expect(failing.projectGrant(person("dev-o"), "payments")).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
     const grantFails = deployedSessionMembers(ORG, people({ projectGrantRole: async () => { throw new Error("dynamo down"); } }));
-    expect(await grantFails.projectGrant(person("dev-o"), "payments")).toBeUndefined();
+    await expect(grantFails.projectGrant(person("dev-o"), "payments")).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
     // A revoked or unknown role is no membership.
     const odd = deployedSessionMembers(ORG, people({ membershipOf: async () => ({ companyId: ORG, role: "superuser" as never }) }));
     expect(await odd.companyRole(person("dev-o"))).toBeUndefined();

@@ -12,6 +12,8 @@ export interface CommandResult {
   signal?: string;
   /** True when the command's own timeoutSeconds ended it (#154). */
   timedOut?: boolean;
+  /** SETUP-L9-SHELL: the command was stopped, or not started, because its GROUP's time ran out (shell-session.ts), not its own limit. */
+  stoppedBy?: "group_limit";
 }
 
 export type ReadinessCommandRunner = (

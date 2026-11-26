@@ -514,6 +514,33 @@ describe("unlinking (DEC 254w)", () => {
   });
 });
 
+describe("a failed read of the person's membership under an owner's sign-in-link action (MEMBERSHIP-READ-FAILS-SAFE)", () => {
+  it("answers the retryable 503, never the 'forbidden' of a missing member, and removes nothing; the retry works", async () => {
+    const w = world();
+    const p = await w.githubMember();
+    expect((await w.link(p, "slack", { slack: "U0LINKME1", team: TEAM })).status).toBe(200);
+    const owner = (await w.signIn("owner")).access!;
+    w.db.injectFault({ command: "GetCommand", match: (input) => (input.Key as { pk: string }).pk === `COMPANY_MEMBER#${P}`, error: { name: "ProvisionedThroughputExceededException", message: "throttled" }, times: 1 });
+    const failed = await w.api("DELETE", `/v1/dev/company/members/${P}/sign-ins/slack`, owner);
+    expect(failed, JSON.stringify(failed.body)).toMatchObject({ status: 503, body: { error: { code: "RUNTIME_UNAVAILABLE" } } });
+    expect(w.linkRows(), "nothing was removed").toHaveLength(1);
+    expect((await w.api("DELETE", `/v1/dev/company/members/${P}/sign-ins/slack`, owner)).status, "the retry is served").toBe(200);
+  });
+
+  it("a MALFORMED membership row is a refusal (a fact about the row), never the failed-read 503", async () => {
+    const w = world();
+    const p = await w.githubMember();
+    expect((await w.link(p, "slack", { slack: "U0LINKME1", team: TEAM })).status).toBe(200);
+    const owner = (await w.signIn("owner")).access!;
+    const key = membershipKey(P);
+    const row = w.db.get(key.pk, key.sk)!;
+    w.db.set({ ...row, role: "not-a-role" });
+    const refused = await w.api("DELETE", `/v1/dev/company/members/${P}/sign-ins/slack`, owner);
+    expect(refused, JSON.stringify(refused.body)).toMatchObject({ status: 403, body: { error: { code: "FORBIDDEN", message: SIGN_IN_LINK_TEXT.forbidden } } });
+    expect(w.linkRows(), "nothing was removed").toHaveLength(1);
+  });
+});
+
 // DEC 254zzz39 (4): an unlinked identity's kept record (DEC 254zzz33) can be linked again: to the same person, or (with the normal finish proof) to another person of the
 // company it was unlinked from; never into another company, never one an admin turned off or one that has a membership of its own.
 describe("re-linking an unlinked sign-in (DEC 254zzz39)", () => {

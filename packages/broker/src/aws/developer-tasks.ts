@@ -49,6 +49,7 @@ import type { TaskPeopleDisplayAdmission } from "../developer/task-people-displa
 
 import { EngineStampUnreadableError, involvedOnCore, isCoreTask, isCoreTaskThatExists, serveCoreTaskRoute, startOnCore, taskEntryOperation, type CoreTaskEntry } from "./engine-boundary.js";
 import { missingTaskWords } from "../core-host/task-route-answer.js";
+import { orIfNotMembershipFailure } from "../core/membership-read.js";
 import { type WorkflowSnapshot } from "@agentx/contracts";
 import { workflowDocumentName } from "../developer/workflow-messages.js";
 import { workflowPullRequestUpdateDue } from "@agentx/contracts";
@@ -378,7 +379,7 @@ export async function taskView(
     try { e2ePresentation = await deps.workflowE2EPresentation({ task, operations, actor: options.actor ?? "owner" }); }
     catch (error) { log(deps, { event: "developer.task_e2e_view_unavailable", taskId: task.taskId, errorName: error instanceof Error ? error.name : "unknown" }); }
   }
-  const revealMoney = deps.taskMoneyVisible === undefined ? options.actor !== "viewer" : await deps.taskMoneyVisible(task).catch(() => false);
+  const revealMoney = deps.taskMoneyVisible === undefined ? options.actor !== "viewer" : await deps.taskMoneyVisible(task).catch(orIfNotMembershipFailure(false));
   const spent = revealMoney ? taskSpent(task) : undefined;
   const owner = taskOwnerView(task);
   return {
@@ -463,12 +464,12 @@ async function listStartupView(deps: DeveloperTaskRouteDependencies, caller: Dev
 async function listRowDetail(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, task: DeveloperTaskRecord, listedStatus: DeveloperTaskStatus): Promise<DeveloperTaskListDetail> {
   const workflow = task.workflow;
   const pulls = (task.workflow?.pullRequests ?? []).slice(0, 32).map((pull) => ({ repository: pull.repositoryId, number: pull.number, url: pull.url, state: pull.state }));
-  // A core task's cost and limit are the core's (its owner round's money read), asked as this caller.
-  const money = await deps.coreTasks?.taskMoney?.(caller, task.taskId).catch(() => undefined);
+  // A core task's cost and limit are the core's (its owner round's money read), asked as this caller. A money read that FAILED is the retryable 503 (membership-read.ts): money is never hidden as "not allowed" nor shown.
+  const money = await deps.coreTasks?.taskMoney?.(caller, task.taskId).catch(orIfNotMembershipFailure(undefined));
   const spent = money?.costUsd;
   // Understand's round is built from the workflow the list already has, and shown only when the core's own task read would show this caller the task.
   const asked = understandRoundOf(workflow);
-  const round = asked !== undefined && (await deps.coreTasks?.taskReadable?.(caller, task.taskId).catch(() => false)) === true ? asked : undefined;
+  const round = asked !== undefined && (await deps.coreTasks?.taskReadable?.(caller, task.taskId).catch(orIfNotMembershipFailure(false))) === true ? asked : undefined;
   const detail: DeveloperTaskListDetail = {
     ...await listStartupView(deps, caller, task, listedStatus).catch(() => ({})),
     ...(workflow === undefined ? {} : { workflow: { stage: workflow.stage, state: workflow.state, revision: workflow.revision, path: workflow.path, ...(workflow.blockReason === undefined ? {} : { blockReason: redactBlockReason(workflow.blockReason, 500) }) } }),

@@ -247,19 +247,18 @@ export function createLessonsHost(input: LessonsHostInput): LessonsHost {
   }
 
   /**
-   * The project's live Rovara skills for a plan or build step (L4-AK3), for a worker that lists the feature: read with `get` only from the step's OWN task's company and project, behind the same switches as lessons (the install's
-   * lessons switch and the project's learning mode). A slow or failed read is none: a step never waits on a skill. Skills left out for their limits are counted in the log, never named.
+   * The project's live Rovara skills for a plan or build step (L4-AK3), for a worker that lists the feature: read with `get` only from the step's OWN task's company and project. DEC 254zzz577 (a): NOT behind the install's lessons
+   * switch or the project's learning mode (an approved skill is a two-person decision of its own, and the hosted dispatcher gives it the same way: `aws/worker-machines/dispatcher-lessons.ts`); lessons keep both gates. A slow or
+   * failed read is none: a step never waits on a skill. Skills left out for their limits are counted in the log, never named.
    */
   async function skillsFor(request: Parameters<LessonsHost["learnedFor"]>[0]): Promise<RovaraSkillFile[]> {
-    if ((request.workflowMode !== "PLAN" && request.workflowMode !== "IMPLEMENT") || !enabled() || !request.features.includes(ROVARA_SKILLS_FEATURE)) return [];
+    if ((request.workflowMode !== "PLAN" && request.workflowMode !== "IMPLEMENT") || !request.features.includes(ROVARA_SKILLS_FEATURE)) return [];
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const pointer = fromDocument<TaskPointerRecord>(await flow.store.get((await workspaceKeys(flow, request.workspaceId)).taskPointerKey()));
       const task = pointer === undefined ? undefined : await ownTask(pointer.taskId);
       if (task === undefined) return [];
       const run = (async () => {
-        const resolved = await resolveLearning(runtime.settings, companyId, task.project);
-        if (!modeAllows(resolved.chosenMode, "load")) return [];
         const live = await liveSkillsForStep(flow.store, { workspaceId: companyId, project: task.project });
         if (live.left > 0) log("skills_left_out", { left: live.left });
         return live.skills;

@@ -14,27 +14,108 @@ export function agentxRepositoryName(githubName: string): string {
   return /^[a-z]/.test(cleaned) ? cleaned : `repo-${cleaned}`.slice(0, 63);
 }
 
-export function parseCommandLine(line: string, cwd: string, timeoutSeconds: number): ProjectCommand {
+/**
+ * The program a saved SHELL line is stored under: `bash -c <line>` (SETUP-L9-SHELL, DEC 254zzz562). A line that only names a program and its words ("npm ci") is stored as that program and its arguments, as it always was.
+ * A line that needs a shell to mean what it says (`source .venv/bin/activate && pip install -r requirements.txt`, `cd sub && npm ci`, `FOO=1 make`, `pytest tests/*.py`) is stored as this one program with the line as its
+ * single argument, so the stored shape, its schema, its digests and every older reader are unchanged. `shellLineOf` reads it back and `formatCommandLine` shows the bare line. The worker's one command runner (`runContainerCommand`)
+ * runs EVERY saved command, shell or not, in a bash session (see worker/src/shell-session.ts).
+ */
+export const SHELL_PROGRAM = "bash";
+/**
+ * The arguments before the line: `-e -o pipefail -c`. A shell line is stored with the options it runs under (a CI step's `bash -e -o pipefail`), so a command stored BEFORE shell lines existed, a hand-stored `bash -c "<line>"`, stays
+ * what it was byte for byte and is run as the program it is: only a line this parser wrote gets them.
+ */
+export const SHELL_ARGS_PREFIX: readonly string[] = ["-e", "-o", "pipefail", "-c"];
+
+/** Characters that mean something to a shell when they are not quoted: operators, redirections, groups, expansions, globs, escapes, comments. */
+const SHELL_SPECIAL = new Set(["&", "|", ";", "<", ">", "(", ")", "{", "}", "$", "`", "\\", "*", "?", "[", "]", "!"]);
+/** Words that are not programs: a shell builtin or keyword, which only a shell can run (and which only change the session when the session runs them). */
+const SHELL_FIRST_WORDS: ReadonlySet<string> = new Set([
+  "cd", "source", ".", "export", "unset", "set", "alias", "unalias", "eval", "exec", "ulimit", "umask", "hash", "declare", "local", "typeset", "readonly", "shift", "trap", "wait", "read", "return", "exit", "pushd", "popd",
+  "dirs", "shopt", "builtin", "command", "type", "if", "for", "while", "until", "case", "function", "select", "[[", "!", "{", "}",
+]);
+/**
+ * A character a person cannot see as what it is: a control or format character (a line break, an escape, a bidirectional override, a zero-width character), the line and paragraph separators (U+2028, U+2029), a space that is not the
+ * ASCII one (U+00A0, U+1680, U+2000-U+200A, U+202F, U+205F, U+3000), and a Hangul filler (U+115F, U+1160, U+3164, U+FFA0), which look like a space and are part of a word to a shell.
+ */
+export const HIDDEN_COMMAND_CHARACTER = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000\u115F\u1160\u3164\uFFA0]/u;
+const HIDDEN_CHARACTER = HIDDEN_COMMAND_CHARACTER;
+const ASSIGNMENT_WORD = /^[A-Za-z_][A-Za-z0-9_]*=/u;
+
+interface LineReading { words: string[]; shell: boolean; unclosedQuote: boolean }
+
+/** What an unquoted character does to a line: a shell operator or expansion, or (at the start of a word) a comment or `~`. */
+const specialOutsideQuotes = (character: string, atWordStart: boolean): boolean => SHELL_SPECIAL.has(character) || (atWordStart && (character === "#" || character === "~"));
+/** Inside double quotes a shell still expands `$`, a back tick and a backslash; inside single quotes nothing. */
+const specialInDoubleQuotes = (character: string): boolean => character === "$" || character === "`" || character === "\\";
+
+/** Reads a line the way a POSIX shell splits it into words (quotes removed) and says whether it needs a shell to mean what it says. */
+function readLine(line: string): LineReading {
   const words: string[] = [];
   let current = "";
   let quote: string | undefined;
   let started = false;
+  let shell = false;
+  let wordStart = true;
   for (const character of line.trim()) {
+    if (quote !== undefined && character === quote) { quote = undefined; continue; }
     if (quote !== undefined) {
-      if (character === quote) quote = undefined; else current += character;
+      current += character;
+      shell ||= quote === '"' && specialInDoubleQuotes(character);
     } else if (character === '"' || character === "'") {
-      quote = character; started = true;
+      [quote, started, wordStart] = [character, true, false];
     } else if (/\s/.test(character)) {
       if (started) { words.push(current); current = ""; started = false; }
+      wordStart = true;
     } else {
-      current += character; started = true;
+      shell ||= specialOutsideQuotes(character, wordStart);
+      current += character; started = true; wordStart = false;
     }
   }
-  if (quote !== undefined) throw agentXError("CONFIG_INVALID", "the command has an unclosed quote");
   if (started) words.push(current);
+  const first = words[0];
+  shell ||= first !== undefined && (SHELL_FIRST_WORDS.has(first) || ASSIGNMENT_WORD.test(first));
+  return { words, shell, unclosedQuote: quote !== undefined };
+}
+
+/** Whether a line needs a shell to mean what it says (an operator, a redirection, an expansion, a glob, a builtin such as `cd` or `source`, a `NAME=value` prefix). Pure; the same reading as `parseCommandLine`. */
+export function needsShell(line: string): boolean {
+  return readLine(line).shell;
+}
+
+/**
+ * The `NAME=value` words a shell line puts in a command's environment inline: `FOO=1 make`, `export FOO=1 && make`, `env FOO=1 make`, `a; BAR=2 b`. Read statement by statement (split at `&&`, `||`, `;`, `|`, `&`, `(`; a split inside a quote only
+ * reads more, never less), conservative on purpose: setup risk treats such an entry like a command's `env` (a secret, a cloud account or a credential can ride on it).
+ */
+export function inlineEnvEntries(line: string): string[] {
+  const found: string[] = [];
+  for (const statement of line.split(/&&|\|\||[;&|(]/u)) {
+    const words = statement.trim().replace(/^(?:export|env|declare\s+-x)\s+/u, "").split(/\s+/u);
+    for (const word of words) {
+      if (!ASSIGNMENT_WORD.test(word)) break;
+      found.push(word);
+    }
+  }
+  return found;
+}
+
+/** The line a command runs as a SHELL line (stored as `bash -c <line>`), or undefined for a command that is one program and its arguments. */
+export function shellLineOf(command: Pick<ProjectCommand, "executable" | "args">): string | undefined {
+  const line = command.args[SHELL_ARGS_PREFIX.length];
+  return command.executable === SHELL_PROGRAM && command.args.length === SHELL_ARGS_PREFIX.length + 1 && SHELL_ARGS_PREFIX.every((arg, at) => command.args[at] === arg)
+    && line !== undefined && line === line.trim() && needsShell(line) ? line : undefined;
+}
+
+export function parseCommandLine(line: string, cwd: string, timeoutSeconds: number): ProjectCommand {
+  const text = line.trim();
+  const { words, shell, unclosedQuote } = readLine(text);
+  // A shell line may carry an escaped quote (`echo it\'s`), which only the shell can read; without a backslash an open quote is a mistake whatever the shell.
+  if (unclosedQuote && !(shell && text.includes("\\"))) throw agentXError("CONFIG_INVALID", "the command has an unclosed quote");
   if (words.length === 0) throw agentXError("CONFIG_INVALID", "the command is empty");
-  if (words.some((word) => ["&&", "||", "|", ";"].includes(word))) {
-    throw agentXError("CONFIG_INVALID", "a command runs one program; put && , | and ; steps in a script or Makefile target and call that");
+  if (shell) {
+    // One line of text the person who approves it can read whole: no line break, no control or format character (an escape, a bidirectional override, a zero-width character) that would show a line other than the one that runs.
+    if (HIDDEN_CHARACTER.test(text)) throw agentXError("CONFIG_INVALID", "a command is one line of plain text");
+    return { cwd, executable: SHELL_PROGRAM, args: [...SHELL_ARGS_PREFIX, text], timeoutSeconds };
   }
   const [executable, ...args] = words as [string, ...string[]];
   return { cwd, executable, args, timeoutSeconds };
@@ -52,6 +133,9 @@ function quoteWord(word: string): string {
  * arguments (it joins adjacent quoted pieces into one word, as a POSIX shell does).
  */
 export function formatCommandLine(command: ProjectCommand): string {
+  // A shell line is shown, compared and checked as the line it is.
+  const shell = shellLineOf(command);
+  if (shell !== undefined) return shell;
   return [command.executable, ...command.args].map(quoteWord).join(" ");
 }
 

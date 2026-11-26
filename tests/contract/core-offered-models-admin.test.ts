@@ -250,10 +250,11 @@ describe(`GET ${CORE_OFFERED_MODELS_ADMIN_PATH} for an operator in no company (P
     expect(w.asked).toEqual([]);
   });
 
-  it("a membership read that fails keeps the fixed sign-in refusal (fail closed)", async () => {
+  it("a membership read that fails is the retryable 503, never the refusal and never the store's words; nothing is read (MEMBERSHIP-READ-FAILS-SAFE)", async () => {
     const { handler } = await createAdminBroker({ linking: { companies: { companyOf: async () => { throw new Error("secret-table"); } }, signInTableName: SIGN_IN_TABLE } as never, coreOfferedModels: async () => { throw new Error("must not be read"); } });
     const answer = await adminCall(handler, { method: "GET", path: CORE_OFFERED_MODELS_ADMIN_PATH });
-    expect(answer.status).toBe(401);
+    expect(answer.status).toBe(503);
+    expect(JSON.stringify(answer.body)).toContain("RUNTIME_UNAVAILABLE");
     expect(JSON.stringify(answer.body)).not.toContain("secret");
   });
 

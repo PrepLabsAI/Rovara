@@ -1,6 +1,7 @@
 import { CORE_CONTEXT_WORKER_ROUTES, coreContextWorkerRouteOf, appRouteOf as contextAppRouteOf, devRouteOf as contextDevRouteOf } from "../../packages/broker/src/aws/dev-route-scopes.js";
 // Engine host (lane E2): the core's own handlers mounted on the deployed developer API behind the switch. Off is byte-identical (nothing read, nothing answered); the company comes from
 // membership only and fails closed; another company's task reads exactly like a missing one; unwired parts say so in fixed words; a script token is never made through this API.
+import { MEMBERSHIP_READ_FAILED_WORDS, membershipReadFailed } from "../../packages/broker/src/core/membership-read.js";
 import { randomUUID } from "node:crypto";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ROUTES, ROUTE_NOT_SERVED_MESSAGE, routeIdOf } from "@preplabsai/rovara-code-api";
@@ -86,10 +87,11 @@ describe("the core's handlers on the deployed API", () => {
       async () => { throw new Error("down"); }, async () => undefined, async () => ({ companyId: "not-an-org", role: "owner" }), async () => ({ companyId: "", role: "owner" }),
       async () => ({ companyId: FAKE_COMPANY, role: "superuser" as never }), async () => ({ companyId: FAKE_COMPANY }) as never, async () => null as never,
     ];
-    for (const companyOf of readers) {
+    for (const [index, companyOf] of readers.entries()) {
       const answer = await createCoreDevRoutes({ app, companyOf, wiring: () => WIRED }).route({ ...get(`/v1/app/script-tokens?org=${FAKE_COMPANY}`, { "x-company": FAKE_COMPANY }), body: JSON.stringify({ companyId: FAKE_COMPANY }) }, caller);
-      expect(answer?.statusCode).toBe(401);
-      expect(JSON.parse(answer!.body)).toEqual({ error: { code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN } });
+      // The first reader THROWS: a failed membership read is the retryable 503 (membership-read.ts); every reader that answers (nothing, malformed) is the sign-in refusal.
+      expect(answer?.statusCode).toBe(index === 0 ? 503 : 401);
+      expect(JSON.parse(answer!.body)).toEqual(index === 0 ? { error: { code: "RUNTIME_UNAVAILABLE", message: "AgentX could not reach AWS just now; try again in a moment" } } : { error: { code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN } });
       expect(answer!.body).not.toContain("org_");
     }
     // A principal of one company with membership in another is refused too.
@@ -484,6 +486,19 @@ describe("making a script token and acting on a decision card need no step-up", 
   });
 
 
+  it("a grant read that FAILS (marked, as the deployed seam marks it) is the retryable 503 on a script-token create, never the 404 of a missing project; nothing is created", async () => {
+    const { routesFor, remember } = await setup();
+    const caller: DeployedCaller = remember(FAKE_COMPANY);
+    const failing = routesFor({ canReadProject: async () => { throw membershipReadFailed(); } });
+    const answer = await failing.route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller);
+    expect(answer?.statusCode).toBe(503);
+    expect(errorOf(answer)).toEqual({ code: "RUNTIME_UNAVAILABLE", message: MEMBERSHIP_READ_FAILED_WORDS });
+    expect(JSON.parse((await routesFor({}).route(get("/v1/app/script-tokens"), caller))!.body), "nothing was created").toMatchObject({ tokens: [] });
+    // An unmarked throw (not a membership read) keeps the old answer, and a clean "no" is still the missing-project 404.
+    const other = await routesFor({ canReadProject: async () => { throw new Error("not a membership read"); } }).route(post("/v1/app/script-tokens", { ...BODY, requestId: randomUUID() }), caller);
+    expect(other?.statusCode).toBe(404);
+  });
+
   it("makes a token only for projects the person may read now; one they may not read answers like a missing one", async () => {
     const { routes, remember } = await setup();
     const caller: DeployedCaller = remember(FAKE_COMPANY);
@@ -829,7 +844,8 @@ describe("a task's start on the deployed API (lane E2 step 6)", () => {
     const { app, remember } = await world2();
     const failing = createCoreDevRoutes({ app, companyOf: async () => { throw new Error("membership store down"); }, wiring: () => WIRED });
     const refused = await failing.route(post("/v1/dev/tasks", startBody()), remember(FAKE_COMPANY));
-    expect(refused?.statusCode).toBe(401);
+    // A membership read that FAILED is the retryable 503, never a fallback and never the sign-in refusal; another company's membership is still the 401 below.
+    expect(refused?.statusCode).toBe(503);
     expect(refused!.body).not.toContain("down");
     const elsewhere = createCoreDevRoutes({ app, companyOf: async () => ({ companyId: OTHER, role: "owner" }), wiring: () => WIRED });
     expect((await elsewhere.route(post("/v1/dev/tasks", startBody()), callerOf(FAKE_COMPANY)))?.statusCode).toBe(401);
