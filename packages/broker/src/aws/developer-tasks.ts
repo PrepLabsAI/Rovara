@@ -54,7 +54,7 @@ import { workflowDocumentName } from "../developer/workflow-messages.js";
 import { workflowPullRequestUpdateDue } from "@agentx/contracts";
 import { isE2EPlanCorrectionBlockReason } from "../developer/task-records.js";
 import { workflowKeepPullRequestsOffered } from "@agentx/contracts";
-import { WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX } from "@agentx/contracts";
+import { WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, browserRunnerSentenceOf, isBrowserRunnerBlock } from "@agentx/contracts";
 import { isRuntimeRenewedBlock } from "../e2e/requalify-hold.js";
 import { WORKFLOW_APPLICATION_ACCOUNTS_CHANGED_PREFIX } from "@agentx/contracts";
 import { WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX } from "@agentx/contracts";
@@ -1254,6 +1254,10 @@ export function taskPageStage(workflow: WorkflowSnapshot | undefined, closed: bo
     case "VERIFY/READY": case "VERIFY/RUNNING": return { status: "Running the checks", nextStep: "The code and security reviews start when the checks pass." };
     case "VERIFY/BLOCKED": {
       // A block of a browser and API round names its own way on: new code does not fix a runtime that needs qualifying or a selection that needs approving again.
+      if (workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX) === true && isBrowserRunnerBlock(workflow.blockReason)) {
+        // BROWSER-SKIP-HONESTY: the status says the browser checks were not run, in the plain words.
+        return { status: browserRunnerSentenceOf(workflow.blockReason)!.replace(/\.$/u, ""), nextStep: `Set up a browser runner for this install; then retry the checks, or close the task ${inSlack}.` };
+      }
       if (workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX) === true) {
         return { status: "The browser and API checks can't run on the runtime as it is now", nextStep: `An administrator must qualify the runtime again; then retry the checks, or close the task ${inSlack}.` };
       }

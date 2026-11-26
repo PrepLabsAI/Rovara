@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { BROWSER_RUNNER_WORDS } from "./browser-runner-words.js";
 import { E2E_DISPLAY_ASSERTION_KINDS } from "./e2e-view-node.js";
 import { PLAN_ONE_SCREEN_MAX_CHARS, planTooBigSentence } from "./plan-one-screen.js";
 
@@ -55,7 +56,7 @@ export const PLAN_QUALITY_LINTS = [
 export type PlanQualityLint = (typeof PLAN_QUALITY_LINTS)[number];
 
 /** Why a target cannot run application scenarios, as the planning context names it (anything else reads as `runtime-unavailable`). */
-export const PLAN_QUALITY_TARGET_REASONS = ["runtime-unavailable", "no-launch-recipe", "needs-project-contract", "runtime-not-ready", "no-source-identity", "no-account-definition", "not-offered"] as const;
+export const PLAN_QUALITY_TARGET_REASONS = ["runtime-unavailable", "no-launch-recipe", "needs-project-contract", "runtime-not-ready", "no-source-identity", "no-account-definition", "not-offered", "no-browser-runner"] as const;
 export type PlanQualityTargetReason = (typeof PLAN_QUALITY_TARGET_REASONS)[number];
 
 /** Findings the planner can fix by writing the plan again; the others need a person (or a new project revision). */
@@ -178,11 +179,18 @@ const TARGET_REASON_SENTENCES: Record<PlanQualityTargetReason, string> = {
   "no-source-identity": "its application has no package or project file that names it. Add one, then close and restart the task.",
   "no-account-definition": "no usable test account is registered for it. Run project setup-approve, then close and restart the task.",
   "not-offered": "this project revision does not offer it. Run project setup-approve, then close and restart the task.",
+  // BROWSER-SKIP-HONESTY: the whole sentence is the fixed words (one table: browser-runner-words.ts), so it is said the same way on every surface.
+  "no-browser-runner": BROWSER_RUNNER_WORDS.planWillNotRun,
 };
 
 /** The reason string the planning context gives, as one this module has a sentence for. */
 export function planQualityTargetReason(reason: string | undefined): PlanQualityTargetReason {
   return (PLAN_QUALITY_TARGET_REASONS as readonly string[]).includes(reason ?? "") ? (reason as PlanQualityTargetReason) : "runtime-unavailable";
+}
+
+/** The owner's sentence for targets that cannot run: the fixed "no browser runner" words stand alone (BROWSER-SKIP-HONESTY), every other cause is a clause after the targets. */
+function targetUnavailableOwner(targetReason: PlanQualityTargetReason | undefined, targets: string, reason: string): string {
+  return targetReason === "no-browser-runner" ? `${reason} The checks planned for ${targets} will not run.` : `The browser or API checks cannot run on ${targets}: ${reason}`;
 }
 
 function sentences(input: PlanQualityFindingInput): { owner: string; planner: string } {
@@ -234,7 +242,7 @@ function sentences(input: PlanQualityFindingInput): { owner: string; planner: st
     case "e2e-target-unavailable": {
       const reason = TARGET_REASON_SENTENCES[input.targetReason ?? "runtime-unavailable"];
       return {
-        owner: `The browser or API checks cannot run on ${idList(input.targetIds)}: ${reason}`,
+        owner: targetUnavailableOwner(input.targetReason, idList(input.targetIds), reason),
         planner: `e2e-target-unavailable: ${idList(input.targetIds)} cannot run application scenarios now; do not rely on it.`,
       };
     }
