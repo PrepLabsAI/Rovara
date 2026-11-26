@@ -95,6 +95,7 @@ __rv_funcs() {
   done
 }
 __rv_save() {
+  { set +x +v; } 2>/dev/null
   [ -z "\${__rv_saved-}" ] || return 0
   __rv_saved=1
   [ -n "$__rv_state" ] || return 0
@@ -139,10 +140,11 @@ if [ -n "$__rv_state" ]; then
   __rv_base_vars="$__rv_nl$(__rv_vars)$__rv_nl"
   __rv_base_names="$(__rv_names)"
   __rv_base_funcs="$__rv_nl$(__rv_funcs)$__rv_nl"
-  trap '__rv_save' EXIT
+  trap '{ set +x +v; } 2>/dev/null; __rv_save' EXIT
 fi
 set -e -o pipefail
 eval "$__rv_line"
+{ set +x +v; } 2>/dev/null
 set +e +o pipefail
 __rv_save
 `.replaceAll("\\${", "${");
