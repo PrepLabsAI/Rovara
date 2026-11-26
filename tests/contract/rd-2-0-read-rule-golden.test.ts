@@ -19,13 +19,28 @@ for (const persona of ["co-owner", "commenter", "viewer"]) CHANGED[`${persona} |
 for (const persona of ["project member", "unknown role", "left the project", "company admin", "stranger", "other company"]) {
   for (const read of NEW_READS) CHANGED[`${persona} | ${read}`] = { now: { status: 404, code: "TASK_NOT_FOUND", message: "no such task" }, why: "narrowing: the new reads refuse a non-reader as a missing task" };
 }
-// NEW REFUSAL (ship B, Q1 pending): a share shows the task's summary; the plan, the checks and the code changes answer TASK_PART_NOT_SHOWN with words from the one table (never the missing task's 404).
-const PART_WORDS: Record<string, string> = { spec: "The plan is not shown.", checks: "The checks are not shown.", changes: "The code changes are not shown." };
-// NARROWING (the answers read, pre-review S1): the answers frame carries none of the plan, design or requirements text for a share (option B), so the scripted answer that cites the plan cannot be verified: "not found".
-for (const persona of ["shared reader", "admin and shared"]) CHANGED[`${persona} | answers`] = { now: { status: 200, shape: "outcome:not_found" }, why: "narrowing: a share's answer frame has no plan text (option B)" };
+// OWNER DECISION 254zzz558 (option A, Q1 answered): a person the task is SHARED with (the stored share, "Can view") reads the whole task page, the code changes included, and can comment. Each cell below was a refusal (the
+// diff, the plan, the proof and the comments: the missing task's; the new reads: ROUTE_NOT_SERVED) and is now the answer the task's own person gets on that read in this world (the diff and the plan have nothing to show yet:
+// the same 404 as for the owner). A person with no share is not touched. The Slack channel share is not in this golden (it has no persona of the base); its cells are in tests/unit/task-read-rule.test.ts.
+const SHARE_NOW: Record<string, Answer> = {
+  diff: { status: 404, code: "NOT_FOUND", message: "no such pull request on this task" },
+  plan: { status: 404, code: "NOT_FOUND", message: "this task has no plan document yet" },
+  evidence: { status: 200, shape: "items,taskId" },
+  comments: { status: 200, shape: "comments" },
+  spec: { status: 200, shape: "spec" },
+  checks: { status: 200, shape: "checks" },
+  changes: { status: 200, shape: "changes" },
+};
 for (const persona of ["shared reader", "admin and shared"]) {
-  for (const read of ["spec", "checks", "changes"]) CHANGED[`${persona} | ${read}`] = { now: { status: 403, code: "TASK_PART_NOT_SHOWN", message: `The owner shared this task's summary with you. ${PART_WORDS[read]!}` }, why: "new refusal: a share is not shown this part (ship B, Q1)" };
+  for (const [read, now] of Object.entries(SHARE_NOW)) CHANGED[`${persona} | ${read}`] = { now, why: "widening (owner decision 254zzz558, option A): a share reads the whole task page, the code changes included" };
 }
+// FILLED READS (not a read-rule change): a lane that fills a stub moves every cell the rule ADMITS from the placeholder's ROUTE_NOT_SERVED to the served answer.
+// RD-2a (spec):
+for (const persona of ["owner", "co-owner", "commenter", "viewer"]) CHANGED[`${persona} | spec`] = { now: { status: 200, shape: "spec" }, why: "RD-2a fills the spec read: a person the rule admits is served" };
+// RD-2b2 (changes):
+for (const persona of ["owner", "co-owner", "commenter", "viewer"]) CHANGED[`${persona} | changes`] = { now: { status: 200, shape: "changes" }, why: "RD-2b2 fills the changes read: a person the rule admits is served" };
+// RD-2b1 (checks):
+for (const persona of ["owner", "co-owner", "commenter", "viewer"]) CHANGED[`${persona} | checks`] = { now: { status: 200, shape: "checks" }, why: "RD-2b1 fills the checks read: a person the rule admits is served" };
 
 describe("RD-2.0-READ-RULE: every read answers every kind of person as it did on the base (but the named cells)", () => {
   it("matches the recorded answers", async () => {

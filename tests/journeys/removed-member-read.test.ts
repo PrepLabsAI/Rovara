@@ -71,6 +71,7 @@ async function observe(w: JourneyWorld, taskId: string, removed = true, project 
       out.push({ surface, route: r.route, status: answer.status, ...errorOf(answer.text), shows });
     }
   }
+  // D1-2 (pre-review S3): Code's task page is deleted and answers 404 to everyone, the owner included, so the "task page" rows below prove nothing; the rows that still prove the rule are the web client and CLI ones above.
   // Code's task page, with the person's review session (a plain sign-in, 30 days).
   const page = pageReader(w, taskId, writeReviewSession(w, MAYA));
   for (const [route, reply] of [["page: open", await page.open()], ["page: api state", await page.read("state")], ["page: api comments", await page.read("comments")]] as const) {

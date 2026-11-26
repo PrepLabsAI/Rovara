@@ -24,7 +24,7 @@ export const TaskChangesReadSchema = loose({
     checkedAgainstCodeHost: z.boolean().nullish(),
     pullRequests: z.array(loose({ repository: z.string().nullish(), number: z.number().nullish(), url: z.string().nullish() })).nullish(),
     files: z.array(ChangedFileWireSchema).nullish(),
-    /** How many files are left out of `files` (a cap), when any are. */
+    /** How many files are left out of `files` (a cap, a page that could not be read, a time limit), when any are. It is a LOWER BOUND when Code stopped reading pages early: show "and more", not an exact number. */
     filesNotListed: z.number().nullish(),
   }).nullish(),
 });

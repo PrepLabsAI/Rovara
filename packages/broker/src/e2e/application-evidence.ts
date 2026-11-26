@@ -40,7 +40,7 @@ export type ApplicationEvidenceInput = Readonly<{
   purpose?: "candidate" | "baseline" | "replay" | "grounding";
   /**
    * T7b: what a `grounding` verification holds the admission to. A grounding round signs no member, so it is told apart from a candidate's by the plan digest it was admitted under
-   * (`groundingPlanDigest`, recomputed by the caller from the grounding record) and by running the base commit with no model. Required for the purpose `grounding`, ignored otherwise.
+   * (recomputed by the caller) and by running the base commit with no model. Required for the purpose `grounding`, ignored otherwise.
    */
   grounding?: Readonly<{ planDigest: string; baseCommitSha: string }>;
   /**

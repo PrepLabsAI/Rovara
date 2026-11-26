@@ -1,11 +1,7 @@
 import { readWorkspaceMeta } from "./worker-machines/workspace-company.js";
-import { GetCommand, TransactWriteCommand, UpdateCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { WORKFLOW_BLOCK_REASONS, WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED, WorkflowSnapshotSchema, blockWorkflow, blockWorkflowPullRequestUpdate } from "@agentx/contracts";
+import { GetCommand, TransactWriteCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { releaseFailedPreparation } from "./failed-preparation.js";
 import type { DurableOutboxRecord } from "./lambda.js";
-import { taskKey, taskPointerKey } from "../developer/task-records.js";
-import { markWorkflowE2EGroundingUnavailable } from "./workflow-e2e-grounding.js";
-import { endedRunRows } from "./workflow-autofix-dispatch-exhaust.js";
 
 /**
  * Fails an outbox record's operation for good: the operation becomes FAILED, the workspace is
@@ -75,100 +71,6 @@ export async function failOutboxOperation(
     ],
   }));
   if (record.invocation.kind === "prepare") await releaseFailedPreparation(documentClient, tableName, record.workspaceId);
-  if (record.invocation.kind === "maintain") await blockFailedPullRequestUpdate(documentClient, tableName, record.workspaceId, record.operationId, error);
-  if (record.invocation.kind === "task") await blockFailedWorkflowRun(documentClient, tableName, record.workspaceId, record.operationId, error);
-}
-
-/** Why a workflow step stopped when its run ended FAILED or INTERRUPTED: the reason a failed result records too. */
-export function workflowRunEndedReason(workflowMode: "PLAN" | "IMPLEMENT" | "CHECKS" | "REVIEW", status: string): string {
-  const step = workflowMode === "PLAN" ? "planning" : workflowMode === "CHECKS" ? "verification retry" : workflowMode === "REVIEW" ? "independent review" : "implementation";
-  return `${step} operation ended ${status.toLowerCase()}`;
-}
-
-/**
- * A workflow task's step whose run ended without reaching the worker's result (the dispatcher gave up delivering it, or
- * the worker's compute was lost): the task stops with its retry, as a failed result would leave it, instead of showing
- * the step running for ever. Only a task still running that step is blocked; a failed write is logged, since the
- * operation itself is already failed.
- */
-async function blockFailedWorkflowRun(documentClient: Pick<DynamoDBDocumentClient, "send">, tableName: string, workspaceId: string, operationId: string, failureText?: string, cancelRequested = false): Promise<void> {
-  try {
-    const read = async (key: { pk: string; sk: string }) => (await documentClient.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true }))).Item;
-    const operation = await read({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}` }) as {
-      workflowMode?: string; workflowFeedbackReview?: { taskId?: string; workflowRevision?: number; candidateDigest?: string }; workflowE2EAdmission?: { purpose?: string; taskId?: string; planArtifactSha256?: string; attempt?: number };
-    } | undefined;
-    const mode = operation?.workflowMode;
-    if (mode === undefined) return;
-    // M1.3 Task 3.7b: a baseline round (the unchanged code, for information only) that is lost never blocks the workflow; its record says it could not be checked.
-    if (operation?.workflowE2EAdmission?.purpose === "baseline") return;
-    // M1.4 Task 4.6b: nor does a lost audit replay; its record says it could not be run.
-    if (operation?.workflowE2EAdmission?.purpose === "replay") return;
-    // T7b: nor does a lost grounding round (the proposed plan's must-not-change checks on the unchanged code, before the owner is asked): it runs in the PLAN step of a task that is
-    // waiting for it, so blocking that step as a failed verification would stop the plan for a check that gates nothing. Its record is marked as one that could not be run; whoever holds
-    // the plan's card back reads that record and posts the card.
-    if (operation?.workflowE2EAdmission?.purpose === "grounding") { await markLostGroundingRound(documentClient, tableName, workspaceId, operationId, operation.workflowE2EAdmission, failureText); return; }
-    const pointer = await read(taskPointerKey(workspaceId)) as { taskId?: string } | undefined;
-    if (typeof pointer?.taskId !== "string") return;
-    const task = await read(taskKey(pointer.taskId)) as { closedAt?: string; workflow?: unknown } | undefined;
-    const parsed = WorkflowSnapshotSchema.safeParse(task?.workflow);
-    if (task === undefined || task.closedAt !== undefined || !parsed.success || parsed.data.state !== "RUNNING") return;
-    const workflow = parsed.data;
-    let reason: string;
-    if (mode === "FEEDBACK_REVIEW") {
-      const binding = operation?.workflowFeedbackReview;
-      if (binding === undefined || workflow.stage !== "WAIT_FOR_MERGE" || workflow.revision !== binding.workflowRevision || workflow.taskId !== binding.taskId
-        || workflow.candidate?.digest !== binding.candidateDigest || workflow.feedbackReview?.status !== "COLLECTING") return;
-      reason = WORKFLOW_BLOCK_REASONS.feedbackReviewFailed;
-    } else if (mode === "IMPLEMENT" || mode === "CHECKS" || mode === "REVIEW" || (mode === "PLAN" && workflow.stage === "PLAN")) {
-      reason = workflowRunEndedReason(mode, "FAILED");
-    } else {
-      return;
-    }
-    const now = new Date().toISOString();
-    // DISPATCHEXHAUST: a lost run in VERIFY or REVIEW commits its AUTOFIX row (cause run-lost) with the block, so the policy decides it: one automatic retry after a delay, then an ask.
-    await documentClient.send(new TransactWriteCommand({ TransactItems: [{ Update: {
-      TableName: tableName, Key: taskKey(pointer.taskId),
-      UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
-      ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :running AND attribute_not_exists(closedAt)",
-      ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
-      ExpressionAttributeValues: { ":workflow": blockWorkflow(workflow, reason, now), ":now": now, ":revision": workflow.revision, ":stage": workflow.stage, ":running": "RUNNING" },
-    } }, ...endedRunRows(tableName, workflow, cancelRequested ? "owner-stopped" : "run-lost", now)] }));
-  } catch (failure) {
-    console.log(JSON.stringify({ component: "broker", event: "workflow.lost_run_block_failed", operationId, error: failure instanceof Error ? failure.name : "unknown" }));
-  }
-}
-
-/**
- * A workflow task's push of its reviewed fix that ended without reaching the worker's result (the worker refused it, or
- * could not be reached, or its compute was lost): the task waits for the merge, blocked, naming the pull request, as a
- * failed result would leave it. Only the push the task still waits on is blocked; a failed write is logged, since the
- * operation itself is already failed.
- */
-async function blockFailedPullRequestUpdate(documentClient: Pick<DynamoDBDocumentClient, "send">, tableName: string, workspaceId: string, operationId: string, error: string): Promise<void> {
-  try {
-    const read = async (key: { pk: string; sk: string }) => (await documentClient.send(new GetCommand({ TableName: tableName, Key: key }))).Item;
-    const operation = await read({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}` }) as { maintenance?: { repository?: string; pullRequestNumber?: number; workflowCandidate?: { candidateDigest?: string } } } | undefined;
-    const binding = operation?.maintenance?.workflowCandidate;
-    if (binding === undefined) return;
-    const pointer = await read(taskPointerKey(workspaceId)) as { taskId?: string } | undefined;
-    if (typeof pointer?.taskId !== "string") return;
-    const task = await read(taskKey(pointer.taskId)) as { closedAt?: string; workflow?: unknown } | undefined;
-    const workflow = WorkflowSnapshotSchema.safeParse(task?.workflow);
-    if (task === undefined || task.closedAt !== undefined || !workflow.success || workflow.data.stage !== "PULL_REQUEST" || workflow.data.state !== "RUNNING"
-      || workflow.data.candidate?.digest !== binding.candidateDigest || typeof operation?.maintenance?.pullRequestNumber !== "number") return;
-    const now = new Date().toISOString();
-    const next = blockWorkflowPullRequestUpdate(workflow.data, { numbers: [operation.maintenance.pullRequestNumber],
-      ...(error.includes(WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED) ? { cause: "WORKER_OUTDATED" as const } : {}), now });
-    await documentClient.send(new UpdateCommand({
-      TableName: tableName, Key: taskKey(pointer.taskId),
-      UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
-      ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :running AND attribute_not_exists(closedAt)",
-      ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
-      ExpressionAttributeValues: { ":workflow": next, ":now": now, ":revision": workflow.data.revision, ":stage": "PULL_REQUEST", ":running": "RUNNING" },
-    }));
-  } catch (failure) {
-    console.log(JSON.stringify({ component: "broker", event: "workflow.pull_request_update_block_failed", operationId, error: failure instanceof Error ? failure.name : "unknown" }));
-  }
 }
 
 /**
@@ -220,30 +122,10 @@ export async function failActiveOperation(
       } },
     ] }));
     if (resolved.key.pk === `WORKSPACE#${workspaceId}` && released === "PREPARATION_FAILED") await releaseFailedPreparation(documentClient, tableName, workspaceId);
-    if (resolved.key.pk === `WORKSPACE#${workspaceId}` && operation.kind === "maintain") await blockFailedPullRequestUpdate(documentClient, tableName, workspaceId, operationId, error);
-    // A run the owner already asked to stop is the owner's stop, not a lost run (DISPATCHEXHAUST): it is explained and never started again.
-    if (resolved.key.pk === `WORKSPACE#${workspaceId}` && operation.kind === "task") await blockFailedWorkflowRun(documentClient, tableName, workspaceId, operationId, error, operation.status === "CANCEL_REQUESTED");
     return operationId;
   } catch (failure) {
     if (failure instanceof Error && failure.name === "TransactionCanceledException") return undefined;
     throw failure;
-  }
-}
-
-/**
- * A grounding round that was lost (the dispatcher gave up delivering it, or its compute was lost): its record, if it is still this operation's and still REQUESTED or STARTED, is marked
- * `run-failed` (a fixed reason). Nothing else changes; a failed write is logged with a fixed event, since the operation itself is already failed.
- */
-async function markLostGroundingRound(documentClient: Pick<DynamoDBDocumentClient, "send">, tableName: string, workspaceId: string, operationId: string,
-  reference: { taskId?: string; planArtifactSha256?: string; attempt?: number }, failureText?: string): Promise<void> {
-  try {
-    if (typeof reference.taskId !== "string" || typeof reference.planArtifactSha256 !== "string" || typeof reference.attempt !== "number") return;
-    await markWorkflowE2EGroundingUnavailable({ documentClient, tableName }, { taskId: reference.taskId, planArtifactSha256: reference.planArtifactSha256, attempt: reference.attempt },
-      // A delivery refused because the worker does not list the grounding feature is an old runner (the refusal text names the feature); anything else is a run that failed.
-      failureText !== undefined && failureText.includes("task.workflowE2EGroundingChecks.v1") ? "worker-too-old" : "run-failed",
-      { from: ["REQUESTED", "STARTED"], operationId });
-  } catch {
-    console.log(JSON.stringify({ component: "broker", event: "workflow.lost_grounding_mark_failed", operationId, workspaceId }));
   }
 }
 

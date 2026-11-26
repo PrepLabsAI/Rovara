@@ -192,10 +192,11 @@ describe("the knowledge routes at the developer router", () => {
 // removed one back after DELETE /v1/dev/company/members/{personId}/sign-ins/{method} gives the previous pin 94b5a951d82e3018901238dc6fdb2967296519a1554f994e650414e97b4ccbe0.
 // L4-JA7 (rule D): re-pinned for the 4 new knowledge-switch rows (GET and PUT company/lessons/local-tools, GET and PUT projects/{project}/lessons/local-tools; all full, added, none changed, order of every earlier row kept):
 // removing exactly those 4 rows gives back the pin below.
-const OTHER_ROWS_DIGEST_BEFORE_JA7 = "3e93a0c13585f735aa5bc8b18f3b5225dfc770ba135fed28e56cb4e5964fea57";
+const OTHER_ROWS_DIGEST_BEFORE_JA7 = "560c46a5ae4e5d6c4216c0f23ba868e020e1f9785d169ab3a5d5747b0203839b";
 // Batch b20 (rule D): with #1095 (the 4 local-tools rows) and #1104 (GET /v1/dev/projects/{project}/lessons/weekly, full) both added: removing the 4 rows gives the BEFORE_JA7 pin, and removing the weekly row too gives def66b83.
 // Batch b20 (rule D): plus #1108's 2 hand-over rows; removing exactly those gives 5d5d7ca6 (the pin before #1108).
-const OTHER_ROWS_DIGEST = "775a500554b18c68847dac9013d6c88dfe51f52860fb162d76ade0265dc64a3d";
+// D1-2 (DEC 254zzz519, owner): re-pinned for the deletion of the one row `POST /v1/dev/tasks/{id}/merge` (declared change; every other row is as before).
+const OTHER_ROWS_DIGEST = "0a56075402c90ec8c337bcd2a79ade86f6fc538dea181dfad36b818bea17dfe4";
 // (#1108) DEC 254zzz101 (rule D): #1100 stacks on #1086, whose own table (step-up removed) gives ff498627c2c192b3cb3ea56aa4fb04369cb6b6f2957598952f4b96d7ea4c128a here (the earlier pin was
 // 94b5a951d82e3018901238dc6fdb2967296519a1554f994e650414e97b4ccbe0); #1100 adds two rows (GET company/members/handovers, POST company/members/{personId}/handover), none changed: removing
 // exactly those 2 rows gives back ff498627....

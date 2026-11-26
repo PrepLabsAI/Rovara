@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type ProjectDefinition } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../../packages/broker/src/core/task-flow/access.js";
 import { localOwnerPrincipal } from "../../../packages/broker/src/ports/policy-defaults.js";
-import { CORE_ENGINE_ON, buildCoreRegistry, createCoreRuntime } from "../../../packages/broker/src/core-host/index.js";
+import { buildCoreRegistry, createCoreRuntime } from "../../../packages/broker/src/core-host/index.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, CORE_LESSONS_VARIABLE } from "../../../packages/broker/src/core-host/lessons.js";
 import type { HostedLessonPeople } from "../../../packages/broker/src/lessons/hosted-people.js";
 import { setLearnedLessonsGate } from "../../../packages/broker/src/lessons/policy.js";
@@ -228,7 +228,7 @@ describe("wired for a company's lessons (the weekly extras the digest route read
     await fake.store.put({ item: { ...projectRevisionKey(FAKE, DEFINITION.name, 1), entityType: "PROJECT", definition: JSON.parse(JSON.stringify(DEFINITION)) as JsonValue } });
     await fake.store.put({ item: { ...orgProjectCatalogKey(FAKE, DEFINITION.name), entityType: "PROJECT_CATALOG", latestRevision: 1 } });
     const runtime = createCoreRuntime({
-      registry, companyId: FAKE, flags: CORE_ENGINE_ON, callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
+      registry, companyId: FAKE, callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
       repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(fake.clock.now), log: () => undefined,
     });
     const lessons = createCoreLessons({ flow: runtime.flow, registry, companyId: FAKE, lessonsSwitch: readCoreLessonsSwitch(env).value, people, hostFor: async () => undefined, now: () => fake.clock.now })!;

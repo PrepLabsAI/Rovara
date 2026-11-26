@@ -256,8 +256,8 @@ it("mounted Answers and history use task-page read authority and recheck it", as
   expect(model.turns.at(-1)!.transcript).not.toContain("PRIVATE-TASK-REQUEST");
   expect(JSON.parse((await get())!.body)).toEqual({ entries: [], more: false });
   readable.shared = true;
-  // A share is admitted to the task but is shown its summary only: the frame carries none of the plan text (and so the answer that cites it is not found).
-  expect((JSON.parse((await post())!.body) as Record<string, unknown>)["outcome"]).toBe("not_found");
+  // A share is shown the whole task page (owner decision 254zzz558), the plan included: its frame is the owner's, and the answer is given.
+  expect((JSON.parse((await post())!.body) as Record<string, unknown>)["outcome"]).toBe("answered");
   readable.failed = true;
   expect((JSON.parse((await post())!.body) as Record<string, unknown>)["outcome"]).toBe("not_found");
   expect(model.turns.at(-1)!.transcript).not.toContain("PRIVATE-TASK-REQUEST");

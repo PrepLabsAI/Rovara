@@ -4,7 +4,7 @@
 //   PUT /v1/dev/client/projects/{project}/code-settings   the project's administrator or a company administrator; revision-checked
 //
 // The shape is Code's own `CodeSettings` (allowSelfApproval, mergeMethod, codeReviewers, revision; `CodeSettingsBodySchema` for a change): the one the web app's reader parses and the
-// merge core enforces (`CodeSettingsReader`, read by `prepareMerge`/`pressMerge` through `codeSettingsReader` below). Contract v0's proposed shape (requireSecondReviewer, mergeRule,
+// merge core enforces (`CodeSettingsReader`, read by `prepareMerge`/`pressMergeAsPerson` through `codeSettingsReader` below). Contract v0's proposed shape (requireSecondReviewer, mergeRule,
 // protectedPaths) names rules no merge code enforces, so it is not served; the contract is corrected to this shape (see the PR).
 //
 // Rules:

@@ -19,8 +19,6 @@ export const WORKFLOW_ACTION_IDS: ReadonlySet<string> = new Set([
   WORKFLOW_STOP_ACTION,
 ]);
 
-/** Decision 134: Stop pressed once the task's pull request is being opened (publication cannot be cancelled), or is open. */
-export const STOP_WHILE_PUBLISHING_REFUSAL = "the pull request is already being opened, so this task can't be stopped now";
 /** What the presser hears for it. */
 export const STOP_WHILE_PUBLISHING_TEXT = "The pull request is already being opened, so it can't be stopped now. You can close it on GitHub.";
 
@@ -45,17 +43,3 @@ export const WORKFLOW_BREAKDOWN_REFUSALS = Object.freeze({
   onePinnedRepository: "ordered work is available only when this task is pinned to one registered repository",
 });
 
-/**
- * Refusals of an approval or a retry that name what the presser does next, by their exact text. The task page and the API say them as they are, and so does Slack
- * (instead of "out of date", which fits only a press that no longer matches the task). The text lives here so the refusing code and Slack's wording cannot drift apart.
- */
-export const WORKFLOW_ACTIONABLE_REFUSALS = Object.freeze({
-  correctionStale: "the candidate changed after this plan's source reference was rejected; refresh the plan before approval",
-  correctionUnchanged: "this plan was returned because its E2E source reference failed protected-candidate validation; request changes and submit a corrected plan before approval",
-  correctionLostIntent: "the corrected plan must retain the required feature E2E intent before approval",
-  pinnedProjectUnavailable: "the pinned project revision is unavailable; refresh the plan before approving it",
-  baselineIntentMissing: "the approved plan must include the canonical E2E intent required by the pinned project baseline",
-  retryNeedsOneCheck: "keep at least one check before retrying verification, or close the task",
-  retryOnlyProposedChecks: "keep only checks the approved plan proposed",
-  applicationApprovalNotInstalled: "application E2E plans cannot be approved here: the check against the approved setup and the ready runtimes is not installed",
-});

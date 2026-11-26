@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { developerTaskPolicy, IMPLICIT_COMPANY_ID, orgProjectCatalogKey, projectRevisionKey } from "@agentx/contracts";
 import * as appModule from "../../packages/broker/src/core-host/app.js";
 import type { CoreHostAppOptions } from "../../packages/broker/src/core-host/app.js";
-import { CORE_AREAS, CORE_ENGINE_ON } from "../../packages/broker/src/core-host/flags.js";
+import { CORE_AREAS } from "../../packages/broker/src/core-host/flags.js";
 import { buildCoreRegistry } from "../../packages/broker/src/core-host/registry.js";
 import { createBrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-root.js";
 import type { DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
@@ -31,7 +31,7 @@ async function world(share: "optional" | "required" = "optional", registered = t
     });
     if (captured === undefined) throw new Error("runtime was not wired");
     const registry = await buildCoreRegistry({ modules: w.modules, context: w.context(), areas: [...CORE_AREAS] });
-    const sharing = captured(registry, IMPLICIT_COMPANY_ID, CORE_ENGINE_ON).flowOptions?.taskSharing;
+    const sharing = captured(registry, IMPLICIT_COMPANY_ID).flowOptions?.taskSharing;
     if (sharing === undefined) throw new Error("share preparation was not wired");
     return { prepare: sharing.prepare.bind(sharing), caller: createHarness().owner, lookups: () => lookups };
   } finally { spy.mockRestore(); }

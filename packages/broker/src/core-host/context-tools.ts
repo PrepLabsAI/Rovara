@@ -28,7 +28,7 @@ const Hit = z.object({ title: z.string().max(200), system: z.literal("team-recor
 
 export interface CoreContextToolsPorts {
   capabilities: Pick<CallbackCapabilities, "verify">;
-  ownerOfWorkspace(workspaceId: string): Promise<"core" | "workflow">;
+  isCoreWorkspace(workspaceId: string): Promise<boolean>;
   companyOfWorkspace(workspaceId: string): Promise<OrgId | undefined>;
   runtimeFor(companyId: OrgId): Promise<{ flow: TaskFlowDeps; teamSearch: TeamRecordSearch | undefined }>;
 }
@@ -48,7 +48,7 @@ export async function handleCoreContextTools(request: BrokerRequest, ports: Core
       deadline.check();
       if ((path === CONTEXT_TOOLS_PATH ? request.method !== "GET" : request.method !== "POST") || (request.body?.length ?? 0) > MAX_REQUEST_BYTES
         || Buffer.byteLength(request.body ?? "") > MAX_REQUEST_BYTES) return refuse();
-      if (await ports.ownerOfWorkspace(claims.workspaceId) !== "core") return undefined;
+      if (!await ports.isCoreWorkspace(claims.workspaceId)) return undefined;
       deadline.check();
       const companyId = await ports.companyOfWorkspace(claims.workspaceId);
       deadline.check();

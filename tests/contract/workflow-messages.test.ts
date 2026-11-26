@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_PULL_REQUEST_UPDATE_CAUSES, WORKFLOW_REVIEW_FAILURE_REASONS, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, WorkflowStageSchema, WorkflowStateSchema, WORKFLOW_AGENTX_ACTOR_ID, createCandidateManifest, createWorkflowSnapshot, WorkflowSnapshotSchema, WorkflowSnapshotViewSchema, type WorkflowSnapshot } from "@agentx/contracts";
-import { WORKFLOW_ACTION_IDS, documentSummaryLines, feedbackReviewFailedMessage, plainBlockReason, planReviewLink, workflowMessage, workflowMessageKey } from "../../packages/broker/src/developer/workflow-messages.js";
+import { WORKFLOW_ACTION_IDS, documentSummaryLines, plainBlockReason, planReviewLink, workflowMessage, workflowMessageKey } from "../../packages/broker/src/developer/workflow-messages.js";
 import { WORKFLOW_ACTION_IDS as INTERACTIVITY_ACTION_IDS } from "../../packages/broker/src/aws/slack-interactivity.js";
 import { StrictSlackWeb, visibleSlackText } from "../support/strict-slack.js";
 
@@ -465,64 +465,6 @@ describe("workflow Slack messages", () => {
     expect(workflowMessage({ taskId, workflow: snapshot("PLAN_REVIEW", "WAITING") })!.text).not.toMatch(/Checks:|Review only/);
   });
 
-
-  it("says plainly that a PR feedback review failed, why in the owner's words, and offers Retry review", () => {
-    const reasons: Array<[string, string]> = [
-      ["reviewer output: not valid JSON", "the reviewer's answer couldn't be read"],
-      ["reviewer output: not the expected shape", "the reviewer's answer couldn't be read"],
-      ["reviewer output: no answer", "the reviewer's answer couldn't be read"],
-      ["reviewer output: comment review_comment:123 not accounted for", "the reviewer didn't answer every comment"],
-      ["reviewer output: comment review_comment:123 answered more than once", "the reviewer didn't answer every comment"],
-      ["reviewer output: finding 2 names a comment or bundle that was not supplied", "the reviewer didn't answer every comment"],
-      ["reviewer output: fixProposal.tests is empty", "the reviewer's proposal was incomplete"],
-      ["reviewer output: finding 1 field fixProposal.summary is missing or invalid", "the reviewer's proposal was incomplete"],
-      ["reviewer output: fixProposal path does not match the code (MODIFY of a missing file or ADD of an existing one)", "the reviewer's proposal was incomplete"],
-      ["reviewer output was malformed or did not account for every comment", "the reviewer's answer couldn't be read"],
-      // 0.2.8 live test: answers that were read, but broke a rule, are named by the rule, never as unreadable.
-      ["reviewer output: fixProposal.fileChanges is empty for an IMPLEMENT finding", "the reviewer's proposal was incomplete"],
-      ["reviewer output: finding 1 is uncertain but not left for the owner", "the reviewer was unsure but didn't leave the choice to you"],
-      ["reviewer output: finding 1 field confidence is missing or invalid", "the reviewer's answer was missing details"],
-      ["reviewer output: finding 3 does not have the required fields", "the reviewer's answer was missing details"],
-      ["reviewer output: finding IDs are not unique", "the reviewer's answer was missing details"],
-      // 0.2.12: a check change the reviewer proposed broke the rules for checks.
-      ["reviewer output: fixProposal.replacementChecks[1] of finding 1: its program must be a plain program name or a ./ path inside the repository", "the reviewer proposed a check change AgentX can't use"],
-      ["reviewer output: fixProposal.obsoleteChecks of finding 2 names a required project check", "the reviewer proposed a check change AgentX can't use"],
-    ];
-    const slack = new StrictSlackWeb({ briefLimit: 1_200 });
-    for (const [blockReason, plain] of reasons) {
-      const message = feedbackReviewFailedMessage({ taskId, revision: 9, reviewDigest: "f".repeat(64), blockReason,
-        pullRequests: [{ number: 42, url: "https://github.com/example/demo/pull/42" }] });
-      expect(message.text, blockReason).toBe(`I couldn't review the feedback on <https://github.com/example/demo/pull/42|PR #42>: ${plain}. You can retry the review, or merge or close the pull request on GitHub.`);
-      expect(visibleSlackText(message.text), blockReason).not.toMatch(BANNED);
-      expect(message.text, blockReason).not.toContain("reviewer output");
-      const buttons = buttonsOf(message.blocks);
-      expect(buttons.map((button) => [button.action_id, button.text.text])).toEqual([["agentx_feedback_review_retry", "Retry review"]]);
-      expect(JSON.parse(String(buttons[0]!.value))).toEqual({ taskId, revision: 9, reviewDigest: "f".repeat(64) });
-      expect(buttons.map((button) => button.text.text).join(" ")).not.toMatch(BANNED);
-      expect(() => slack.post({ channel: "C0123456789", threadTs: "1695500000.000001", ...message }), blockReason).not.toThrow();
-    }
-    const several = feedbackReviewFailedMessage({ taskId, revision: 9, reviewDigest: "f".repeat(64), blockReason: "reviewer output: not valid JSON",
-      pullRequests: [{ number: 42, url: "https://github.com/example/demo/pull/42" }, { number: 7, url: "" }] });
-    expect(several.text).toBe("I couldn't review the feedback on PRs #7 and <https://github.com/example/demo/pull/42|#42>: the reviewer's answer couldn't be read. You can retry the review, or merge or close the pull requests on GitHub.");
-    expect(WORKFLOW_ACTION_IDS.has("agentx_feedback_review_retry")).toBe(true);
-  });
-
-  it("says plainly that a PR feedback review timed out, was interrupted, or met changed code", () => {
-    const cases: Array<[status: "BLOCKED" | "INTERRUPTED", blockReason: string, plain: string]> = [
-      ["BLOCKED", "review timed out", "the review timed out"],
-      ["INTERRUPTED", "review was cancelled", "the review was stopped before it finished"],
-      ["INTERRUPTED", "review was cancelled before it started", "the review was stopped before it finished"],
-      ["BLOCKED", "candidate changed during review", "the code changed during the review"],
-      ["BLOCKED", "candidate changed before review", "the code changed during the review"],
-      ["BLOCKED", "review could not verify the exact candidate", "the review couldn't check the code"],
-    ];
-    for (const [status, blockReason, plain] of cases) {
-      const message = feedbackReviewFailedMessage({ taskId, revision: 9, reviewDigest: "f".repeat(64), status, blockReason,
-        pullRequests: [{ number: 42, url: "https://github.com/example/demo/pull/42" }] });
-      expect(message.text, blockReason).toBe(`I couldn't review the feedback on <https://github.com/example/demo/pull/42|PR #42>: ${plain}. You can retry the review, or merge or close the pull request on GitHub.`);
-      expect(visibleSlackText(message.text), blockReason).not.toMatch(BANNED);
-    }
-  });
   it("summarises a document in at most three plain lines", () => {
     expect(documentSummaryLines("# Plan\n\n**Goal:** add `greet`.\n\n1. Edit greeting.ts\n2. Add a test\n3. Run checks\n4. Extra")).toEqual(["Goal: add greet.", "1. Edit greeting.ts", "2. Add a test"]);
     expect(documentSummaryLines("```ts\nconst x = 1;\n```\n- [Read](https://example.test) the *spec*\n" + "y".repeat(400), 2)).toEqual(["Read the spec", `${"y".repeat(157)}...`]);

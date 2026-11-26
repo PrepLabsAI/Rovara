@@ -1,30 +1,23 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { beforeAll, describe, expect, it, vi } from "vitest";
-import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
-import { E2EPolicySchema, E2E_DEFAULT_LIMITS, E2E_MODEL_ROUTE_DEFAULT_BUDGETS, canonicalJson, e2ePolicyDigest, type E2EApplicationPlanIntent } from "@agentx/contracts";
+import { describe, expect, it, vi } from "vitest";
+import { E2EPolicySchema, E2E_DEFAULT_LIMITS, E2E_MODEL_ROUTE_DEFAULT_BUDGETS, canonicalJson, e2ePolicyDigest } from "@agentx/contracts";
 import { STALE_RUN_SWEEP_AGE_MS } from "../../packages/verifier/src/host/docker-application-host.js";
 import { e2eApplicationModelUseWithinRound } from "../../packages/verifier/src/application-result-adapter.js";
 import { DEFAULT_E2E_AGENT_MODELS } from "../../packages/model-runtime/src/config.js";
-import { ApplicationDispatchRefusal } from "../../packages/broker/src/e2e/application-dispatch-check.js";
 import {
-  E2E_MODEL_ROUTE_PARTITION, approveE2EAgentRoute, checkE2EAgentRouteCurrent, e2eAgentInstallationFromParameters, planE2EAgentRoute, type E2EAgentInstallation,
+  E2E_MODEL_ROUTE_PARTITION, e2eAgentInstallationFromParameters, type E2EAgentInstallation,
 } from "../../packages/broker/src/e2e/model-route-registry.js";
 import { describeFeatureE2EExecutableKinds } from "../../packages/broker/src/e2e/feature-plan-executable-kinds.js";
 import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
-import { call, loadSlackBroker } from "../support/slack-broker.js";
+import { call } from "../support/slack-broker.js";
 import { contractSnapshot } from "../support/e2e-application-plan-fixtures.js";
-import { FakeDynamoDb, assumeDrivingTestsPassed } from "../support/fake-dynamodb.js";
+import { assumeDrivingTestsPassed, type FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { SECRET_ARN } from "../support/e2e-model-fixtures.js";
-import { testProjectPk } from "../support/orgs.js";
 
 // The gate itself is tested in e2e-driving-test-gate.test.ts; here every digest counts as driven (Task 4.10C).
 assumeDrivingTestsPassed();
 
-// Task 4.2: setup approval derives the route from the installation's worker settings and pins it in the project's policy; dispatch re-derives it.
-type RequireAgentRoute = (dependencies: never, projectName: string, intent: E2EApplicationPlanIntent, policy: ReturnType<typeof E2EPolicySchema.parse>) => Promise<boolean>;
-let requireAgentRouteStillCurrent: RequireAgentRoute;
-beforeAll(async () => { requireAgentRouteStillCurrent = (await loadSlackBroker() as unknown as { requireAgentRouteStillCurrent: RequireAgentRoute }).requireAgentRouteStillCurrent; });
+// Task 4.2: setup approval derives the route from the installation's worker settings and pins it in the project's policy.
 
 const admin = { subject: "admin-subject", admin: true };
 const anthropic: E2EAgentInstallation = { provider: "anthropic", secretArn: SECRET_ARN };
@@ -221,18 +214,6 @@ describe("a setup proposal and its approval carry the AI navigation route", () =
         expect(harness.db.find((item) => item.entityType === "PROJECT_SETUP_APPROVAL")).toEqual([]);
       } finally { assumeDrivingTestsPassed(true); }
     });
-
-    it("refuses at dispatch with model-route-not-tested a route that was approved and has no passed driving test", async () => {
-      const db = new FakeDynamoDb();
-      const planned = await planE2EAgentRoute({ documentClient: { send: db.send } as unknown as DynamoDBDocumentClient, tableName: "state" }, installation);
-      if (planned.status !== "available") throw new Error("expected the assumed driving test to make the route available");
-      const store = { documentClient: { send: db.send } as unknown as DynamoDBDocumentClient, tableName: "state" };
-      await approveE2EAgentRoute(store, installation, planned.revision);
-      assumeDrivingTestsPassed(false);
-      try {
-        expect(await checkE2EAgentRouteCurrent(store, installation, planned.revision)).toMatchObject({ ok: false, code: "model-route-not-tested" });
-      } finally { assumeDrivingTestsPassed(true); }
-    });
   });
 
   it("refuses with model-route-changed-reapprove when the installation's provider changed between the proposal and the approval, and records nothing", async () => {
@@ -310,95 +291,6 @@ describe("a setup proposal and its approval carry the AI navigation route", () =
     await approve(harness, await propose(harness));
     expect(harness.db.commandNames()).not.toContain("ScanCommand");
     expect(harness.db.find((item) => String(item.pk).startsWith("MEMBER#")).map((row) => JSON.stringify(row))).toEqual(membershipsBefore);
-  });
-});
-
-describe("dispatch re-derives the route before an AI navigation round starts", () => {
-  const TABLE = "state";
-  const agentIntent = { scenarios: [{ steps: [{ kind: "navigate", path: "/" }, { kind: "agent", goal: "export", maxActions: 4 }] }] } as unknown as E2EApplicationPlanIntent;
-  const plainIntent = { scenarios: [{ steps: [{ kind: "navigate", path: "/" }] }] } as unknown as E2EApplicationPlanIntent;
-  const policyAt = (modelRouteRevision: string | null) => E2EPolicySchema.parse({ schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds: [], targets: [],
-    defaultSandboxProfileId: "default-sandbox", fallback: "mock-unconnected", modelRouteRevision, capture: { screenshots: true, traces: false, video: false, downloads: true },
-    limits: { runTimeoutMs: 60_000, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000, caseTimeoutMs: 10_000, maxActionsPerCase: 10, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1, maxSpendUsd: null } });
-  async function approved(installation: E2EAgentInstallation) {
-    const db = new FakeDynamoDb();
-    const store = { documentClient: { send: db.send } as unknown as DynamoDBDocumentClient, tableName: TABLE };
-    const planned = await planE2EAgentRoute(store, installation);
-    if (planned.status !== "available") throw new Error("unavailable");
-    await approveE2EAgentRoute(store, installation, planned.revision);
-    const dependencies = (current: (() => Promise<E2EAgentInstallation>) | undefined) => ({ ...store, ...(current === undefined ? {} : { e2eAgentInstallation: current }) });
-    return { db, revision: planned.revision, dependencies };
-  }
-  const refusal = async (promise: Promise<unknown>) => promise.then(() => undefined, (error: unknown) => error as Error);
-
-  it("judges nothing for a plan with no agent step", async () => {
-    const { dependencies } = await approved(anthropic);
-    expect(await requireAgentRouteStillCurrent(dependencies(undefined) as never, "payments", plainIntent, policyAt(null))).toBe(false);
-  });
-
-  it("accepts the route the policy pinned while the installation is unchanged, and says the round has agent steps", async () => {
-    const { dependencies, revision } = await approved(anthropic);
-    expect(await requireAgentRouteStillCurrent(dependencies(async () => anthropic) as never, "payments", agentIntent, policyAt(revision))).toBe(true);
-  });
-
-  it.each<[string, E2EAgentInstallation]>([
-    ["provider", { provider: "amazon-bedrock", region: "us-east-1" }],
-    ["secret ARN", { provider: "anthropic", secretArn: OTHER_ARN }],
-  ])("refuses with model-route-changed-reapprove when the %s changed, as a terminal dispatch refusal", async (_name, changed) => {
-    const { dependencies, revision } = await approved(anthropic);
-    const error = await refusal(requireAgentRouteStillCurrent(dependencies(async () => changed) as never, "payments", agentIntent, policyAt(revision)));
-    expect(error).toBeInstanceOf(ApplicationDispatchRefusal);
-    expect(error?.message).toMatch(/^model-route-changed-reapprove: The AI navigation settings changed; approve the checks again/);
-  });
-
-  it("refuses with model-route-changed-reapprove when the project's pinned revision is no longer the latest", async () => {
-    const { dependencies, db, revision } = await approved(anthropic);
-    const store = { documentClient: { send: db.send } as unknown as DynamoDBDocumentClient, tableName: TABLE };
-    const bedrock = { provider: "amazon-bedrock", region: "us-east-1" } satisfies E2EAgentInstallation;
-    const second = await planE2EAgentRoute(store, bedrock);
-    if (second.status !== "available") throw new Error("unavailable");
-    await approveE2EAgentRoute(store, bedrock, second.revision);
-    const error = await refusal(requireAgentRouteStillCurrent(dependencies(async () => bedrock) as never, "payments", agentIntent, policyAt(revision)));
-    expect(error?.message).toMatch(/^model-route-changed-reapprove:/);
-  });
-
-  it("refuses with agent-route-not-approved when the policy has no route, the settings cannot be read, or the installation lost its secret", async () => {
-    const { dependencies, revision } = await approved(anthropic);
-    expect((await refusal(requireAgentRouteStillCurrent(dependencies(async () => anthropic) as never, "payments", agentIntent, policyAt(null))))?.message).toMatch(/^agent-route-not-approved:/);
-    expect((await refusal(requireAgentRouteStillCurrent(dependencies(undefined) as never, "payments", agentIntent, policyAt(revision))))?.message).toMatch(/^agent-route-not-approved:/);
-    expect((await refusal(requireAgentRouteStillCurrent(dependencies(async () => { throw new Error("ssm down"); }) as never, "payments", agentIntent, policyAt(revision))))?.message).toMatch(/^agent-route-not-approved:/);
-    expect((await refusal(requireAgentRouteStillCurrent(dependencies(async () => ({ provider: "anthropic" })) as never, "payments", agentIntent, policyAt(revision))))?.message).toMatch(/^agent-route-not-approved:/);
-  });
-
-  it("refuses with model-route-budget-exhausted before the run starts when the project's day has no room for the round", async () => {
-    const { dependencies, db, revision } = await approved(anthropic);
-    const day = new Date().toISOString().slice(0, 10);
-    db.set({ pk: testProjectPk("payments"), sk: `E2E_MODEL_BUDGET#${day}`, inputTokens: 1_990_000, calls: 10 });
-    const error = await refusal(requireAgentRouteStillCurrent(dependencies(async () => anthropic) as never, "payments", agentIntent, policyAt(revision)));
-    expect(error).toBeInstanceOf(ApplicationDispatchRefusal);
-    expect(error?.message).toMatch(/^model-route-budget-exhausted:/);
-    // Another project's day is its own.
-    expect(await requireAgentRouteStillCurrent(dependencies(async () => anthropic) as never, "billing", agentIntent, policyAt(revision))).toBe(true);
-    expect(db.commandNames()).not.toContain("ScanCommand");
-  });
-});
-
-describe("the dispatch wiring in broker.ts", () => {
-  // The pre-warm-up site is exercised end to end (tests/unit/workflow-e2e-application-planning.test.ts); the admission site runs only past a committed candidate export, which no
-  // agent-capable harness has, so its presence is pinned here: the route check, and the agentSteps flag on the reference that makes delivery demand the worker feature.
-  const source = readFileSync(new URL("../../packages/broker/src/aws/broker.ts", import.meta.url), "utf8");
-
-  it("checks the route both before compute is woken and when the round is admitted", () => {
-    const calls = source.split("\n").filter((line) => line.includes("await requireAgentRouteStillCurrent("));
-    expect(calls).toHaveLength(2);
-    const warmUp = source.slice(source.indexOf("async function refuseApplicationRoundBeforeWarmUp("), source.indexOf("async function readCandidateBuildSourceManifest("));
-    const admission = source.slice(source.indexOf("async function startApplicationE2EChecksDispatch("), source.indexOf("/** Creates the content-addressed admission and starts the separate current CHECKS operation. */"));
-    expect(warmUp).toContain("await requireAgentRouteStillCurrent(");
-    expect(admission).toContain("await requireAgentRouteStillCurrent(");
-  });
-
-  it("marks the admission reference with agentSteps when the round has an AI navigation step", () => {
-    expect(source).toContain("...(usesAgentSteps ? { agentSteps: true } : {})");
   });
 });
 

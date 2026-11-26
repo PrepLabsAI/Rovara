@@ -199,13 +199,9 @@ export async function getTaskPeopleProposal(deps: TaskPeopleEffectsDependencies,
   return { status: "PENDING", requestId: proposal.requestId, confirmationUrl: `${deps.issuer}/review/${taskId}/task/people/confirm/${proposal.requestId}`, expiresAt: proposal.expiresAt };
 }
 
-/** Server-stored confirmation metadata for an exact still-pending request. */
-export async function getTaskPeopleProposalMetadata(
-  deps: TaskPeopleEffectsDependencies,
-  caller: DeveloperCaller,
-  taskId: string,
-  requestId: string,
-): Promise<TaskPeopleProposal> {
+
+/** Server-stored confirmation metadata for an exact still-pending request (the confirmation page, D1-2 review M3). */
+export async function getTaskPeopleProposalMetadata(deps: TaskPeopleEffectsDependencies, caller: DeveloperCaller, taskId: string, requestId: string): Promise<TaskPeopleProposal> {
   const proposal = await read(deps, taskId, requestId);
   if (proposal === undefined) return denied();
   const payload = proposal.kind === "role"

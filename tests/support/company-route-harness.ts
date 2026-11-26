@@ -2,6 +2,7 @@ import { AgentXError, IMPLICIT_COMPANY_ID, type WorkspaceInstance } from "@agent
 import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import type { DeveloperTaskActions } from "../../packages/broker/src/aws/developer-task-actions.js";
 import type { AdaptedHttpRequest } from "../../packages/broker/src/aws/lambda.js";
+import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { FakeDynamoDb } from "./fake-dynamodb.js";
 import { namedCompany } from "../../packages/broker/src/aws/company-layout.js";
 import { companyProjectRow } from "./company-layout-projects.js";
@@ -25,7 +26,7 @@ export const COMPANY_CHECKED_ROUTES = ["GET /v1/dev/tasks/{taskId}", "GET /v1/de
   "GET /v1/dev/company/learning-model", "PUT /v1/dev/company/learning-model",
   // L4-EGR: two-company cases in tests/contract/company-egress-routes.test.ts.
   "GET /v1/dev/company/egress-addresses",
-  "POST /v1/dev/tasks/{taskId}/merge", "GET /v1/dev/client/projects/{id}/code-settings", "PUT /v1/dev/client/projects/{id}/code-settings",
+  "GET /v1/dev/client/projects/{id}/code-settings", "PUT /v1/dev/client/projects/{id}/code-settings",
   "GET /v1/dev/client/projects/{id}/setup-status", "PUT /v1/dev/client/projects/{id}/setup-status/skips", "PUT /v1/dev/client/projects/{id}/setup-status/eval-none",
   // Guided onboarding PR 16: two-company cases in tests/contract/project-lifecycle-routes.test.ts.
   "GET /v1/dev/client/projects/{id}/archive-preview", "POST /v1/dev/client/projects/{id}/archive", "GET /v1/dev/client/projects/{id}/restore-preview", "POST /v1/dev/client/projects/{id}/restore",
@@ -60,6 +61,8 @@ export function companyRouteHarness() {
       ...(companyId === undefined ? {} : { companyId }),
     };
     db.set(item);
+    // DEC 254zzz502 (D1-2): only a task with the core's mark is listed, so the harness's tasks carry it.
+    db.set({ ...coreTaskMarkKey(id), entityType: "TASK_ENGINE", coreEngine: { engine: "core", areas: { merge: "core", build: "core", flow: "core" }, flags: "cc=on", stampedAt: TIME } });
     db.set({ pk: `DEVELOPER#${PERSON}`, sk: `TASK#${TIME}#${id}`, entityType: "DEVELOPER_TASK_INDEX", taskId: id, title, project: "shared-project", status: "STARTING", shared: false, createdAt: TIME, updatedAt: TIME });
     return item;
   };

@@ -10,10 +10,7 @@ import { E2EAccountRegistryError, e2eAccountDefinitionKey, e2eAccountLatestKey }
 import {
   applicationRuntimeRowFences, e2eRegisteredRuntimeKey, readProjectAdmittedE2ERuntimes, readProjectReadyE2ERuntimes, runtimeRowReader,
 } from "../../packages/broker/src/core/e2e/runtime-readiness.js";
-import {
-  createWorkflowE2EAdmissionAgentStepsReader, createWorkflowE2EAdmissionNeedsModelFreeLimitsReader, createWorkflowE2EAdmissionSchemaReader, loadWorkflowE2EArtifact,
-  readStoredAdmission, storeWorkflowE2EAdmission, storeWorkflowE2EArtifacts,
-} from "../../packages/broker/src/core/e2e/artifacts.js";
+import { loadWorkflowE2EArtifact, putContentAddressed, readStoredAdmission, storeWorkflowE2EArtifacts } from "../../packages/broker/src/core/e2e/artifacts.js";
 import { workflowE2EArtifactKey } from "../../packages/broker/src/aws/workflow-e2e-notifier-projection.js";
 import { ORDERS_APPLICATION_ID, ordersManifestWith, withOwnerB, withViewerRole } from "../support/e2e-account-registry-fixtures.js";
 import { NOW, PROFILE, binding, snapshotOf, webApiRow } from "../support/e2e-application-plan-fixtures.js";
@@ -209,31 +206,15 @@ describe("the files of the checks on the object-storage port", () => {
   const admissionRef = (bytes: Buffer, overrides: Record<string, unknown> = {}) => ({ schemaVersion: 1, taskId: "task-1", workflowRevision: 2, candidateDigest: "c".repeat(64), roundId: "r", groupRunIds: [],
     admissionRef: { key: `workflow-e2e-admissions/sha256/${sha256(bytes)}.json`, sha256: sha256(bytes), byteLength: bytes.byteLength, ...overrides } }) as unknown as E2EWorkflowAdmissionRef;
 
-  it("stores an admission under its content address, holds a reader to its reference, and refuses a changed or oversized object", async () => {
+  it("holds a reader to its reference, and refuses a changed or oversized object", async () => {
     const objects = objectsOf();
     const bytes = Buffer.from(JSON.stringify({ schemaVersion: "workflow-e2e-admission/v2", bundle: { scenarios: [{ steps: [{ kind: "agent" }] }, { steps: [{ kind: "navigate" }] }] }, policy: { modelRouteRevision: "rev-1" } }));
     const ref = admissionRef(bytes);
-    await storeWorkflowE2EAdmission({ objects }, { key: ref.admissionRef.key, sha256: ref.admissionRef.sha256, bytes, taskId: "task-1", candidateDigest: "c".repeat(64) });
-    // Storing the same admission again is fine; a digest that does not match the bytes is refused before anything is written.
-    await storeWorkflowE2EAdmission({ objects }, { key: ref.admissionRef.key, sha256: ref.admissionRef.sha256, bytes, taskId: "task-1", candidateDigest: "c".repeat(64) });
-    await expect(storeWorkflowE2EAdmission({ objects }, { key: "workflow-e2e-admissions/sha256/x.json", sha256: "0".repeat(64), bytes, taskId: "t", candidateDigest: "c" })).rejects.toThrow(/digest/);
+    expect(await putContentAddressed(objects, ref.admissionRef.key, bytes, { contentType: "application/json", metadata: {}, retention: "task-document" })).toBe(true);
     expect((await readStoredAdmission({ objects }, ref))?.text).toBe(bytes.toString("utf8"));
-    expect(await createWorkflowE2EAdmissionSchemaReader({ objects })(ref)).toBe("workflow-e2e-admission/v2");
-    expect(await createWorkflowE2EAdmissionAgentStepsReader({ objects })(ref)).toBe(true);
-    expect(await createWorkflowE2EAdmissionNeedsModelFreeLimitsReader({ objects })(ref)).toBe(true);
     // A reference that names another size or digest than the object holds reads as nothing.
     expect(await readStoredAdmission({ objects }, admissionRef(bytes, { byteLength: bytes.byteLength + 1 }))).toBeUndefined();
     expect(await readStoredAdmission({ objects }, admissionRef(bytes, { sha256: "0".repeat(64) }))).toBeUndefined();
-    expect(await createWorkflowE2EAdmissionSchemaReader({ objects })(admissionRef(Buffer.from("missing")))).toBeUndefined();
-  });
-
-  it("reads an audit replay as needing no agent-steps feature, and an admission that is not JSON as nothing", async () => {
-    const objects = objectsOf();
-    const replay = Buffer.from(JSON.stringify({ bundle: { scenarios: [{ steps: [{ kind: "agent" }] }] }, replay: {} }));
-    const junk = Buffer.from("{ not json");
-    for (const bytes of [replay, junk]) await storeWorkflowE2EAdmission({ objects }, { key: `workflow-e2e-admissions/sha256/${sha256(bytes)}.json`, sha256: sha256(bytes), bytes, taskId: "t", candidateDigest: "c" });
-    expect(await createWorkflowE2EAdmissionAgentStepsReader({ objects })(admissionRef(replay))).toBe(false);
-    expect(await createWorkflowE2EAdmissionAgentStepsReader({ objects })(admissionRef(junk))).toBeUndefined();
-    expect(await createWorkflowE2EAdmissionSchemaReader({ objects })(admissionRef(junk))).toBeUndefined();
+    expect(await readStoredAdmission({ objects }, admissionRef(Buffer.from("missing")))).toBeUndefined();
   });
 });

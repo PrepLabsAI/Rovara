@@ -2,13 +2,10 @@
 // test-proof.json at the end of a CHECKS run, bound to the candidate digest; this reads it at publication. Informational only: no line
 // here ever blocks a pull request. A proof bound to any other candidate, one that does not parse, and one from another workspace's
 // key are ignored. Quoted labels are redacted and made inert by the caller's `inert` (developer-tasks.ts passes inertPlanLine).
-import { AGENT_REPLIES_UNCONFIRMED_WORDS, TEST_PROOF_ARTIFACT, TestProofSchema, redactText, type TestProof } from "@agentx/contracts";
-import { byCreated, type OperationFacts } from "./task-records.js";
+import { TestProofSchema, redactText, type TestProof } from "@agentx/contracts";
+import { type OperationFacts } from "./task-records.js";
 // Used only inside a function (proof-table.ts imports this file too; the cycle is safe at module load).
-import { MOCK_PROOF_PREFIX } from "../core/proof/proof-table.js";
 
-const OPERATIONS_READ = 10;
-const PROOF_READ_BYTES = 256 * 1024;
 const NAMES_LISTED = 3;
 const NAME_MAX = 100;
 
@@ -58,41 +55,3 @@ function linesOfBoundProof(bound: TestProof, inert: (line: string) => string): s
   ];
 }
 
-/**
- * Known limitations: the task page shows no proof lines yet (only the pull request does). After a pushed PR-feedback fix the proof line drops out of the
- * description, because broker.ts (describeFeedbackFixes) rewrites the status lines without it. The line is never stale (it is bound to one candidate digest); it is only absent until a one-line change there passes it.
- *
- * The lines from the newest test-proof.json, among the task's latest operations, that is bound to `candidateDigest`. Only an object under
- * the task's own key prefix is read. Any fault reading it gives no lines: the pull request is published without them.
- */
-export async function loadTestProofLines(
-  actions: TestProofActions,
-  task: { ownerKey: string; workspaceId: string },
-  candidateDigest: string | undefined,
-  inert: (line: string) => string,
-): Promise<string[]> {
-  if (candidateDigest === undefined) return [];
-  try {
-    const newest = (await actions.operations(task.workspaceId)).filter((operation) => operation.kind === "task").sort(byCreated).reverse().slice(0, OPERATIONS_READ);
-    for (const operation of newest) {
-      const artifact = (await actions.artifacts(task.workspaceId, operation.id)).find((entry) => entry.name === TEST_PROOF_ARTIFACT);
-      const prefix = `private/${task.ownerKey}/${task.workspaceId}/${operation.id}/`;
-      if (artifact === undefined || !artifact.objectKey.startsWith(prefix)) continue;
-      const raw: unknown = JSON.parse(await actions.readArtifact(artifact.objectKey, PROOF_READ_BYTES));
-      const parsed = TestProofSchema.safeParse(raw);
-      // Never revive an older proof that lacks the newest proof's unreadable reply provenance.
-      if (!parsed.success && typeof raw === "object" && raw !== null && ("scriptedReplies" in raw || "madeByRovara" in raw)) return [];
-      if (parsed.success && parsed.data.candidateDigest === candidateDigest) {
-        const proving = new Set(parsed.data.items.filter((item) => item.verdict === "proves_change").map((item) => item.checkId));
-        const taskMade = parsed.data.scriptedReplies?.some((facts) => (facts.taskMade > 0 || (facts.independent ?? 0) > 0) && proving.has(facts.checkId)) === true;
-        // This v1 path has no real-model reader. The shared v2 renderer retains its own agreement qualifier.
-        // General fakes (DEC 234): a proving check a Rovara-made fake answered is never proof; the line says so first.
-        const fakeAnswered = parsed.data.madeByRovara?.some((facts) => proving.has(facts.checkId)) === true;
-        return linesOfBoundProof(parsed.data, inert).map((line) => !line.startsWith("Test proof:") ? line : fakeAnswered ? `${MOCK_PROOF_PREFIX}${line}` : taskMade ? `${AGENT_REPLIES_UNCONFIRMED_WORDS}: ${line}` : line);
-      }
-    }
-  } catch {
-    // The proof is a courtesy to the reader: a storage or parse fault only leaves it out.
-  }
-  return [];
-}

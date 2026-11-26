@@ -48,8 +48,6 @@ import { createOwnerTaskAccess } from "../../core/task-flow/access.js";
 import { createLocalE2EAuthority } from "../../core/e2e/local-authority.js";
 import type { RoundRecordReaders } from "../../core/e2e/callbacks.js";
 import { readWorkflowE2EBaselineRecord } from "../../core/e2e/baseline.js";
-import { readWorkflowE2EReplayRecord } from "../../core/e2e/replay.js";
-import { readWorkflowE2EGroundingRecord } from "../../core/e2e/grounding.js";
 
 import { createStoreProjectSource } from "../../core/task-flow/project-source.js";
 import { createStandingInstructions } from "../../core/instructions/step-block.js";
@@ -751,12 +749,10 @@ export async function createLocalApp(options: LocalAppOptions): Promise<LocalApp
   });
 
   pagesServer.current = pages;
-  // A worker's reads of its round's admission and its evidence uploads are held to the round's own record (baseline, replay or grounding) or, for a candidate, to the task's current round.
+  // A worker's reads of its round's admission and its evidence uploads are held to the round's own record (baseline) or, for a candidate, to the task's current round.
   const roundRecords: RoundRecordReaders = {
     task: (taskId) => readTask({ store }, taskId),
     baseline: async (task) => { const full = await readTask({ store }, task.taskId); return full === undefined ? undefined : readWorkflowE2EBaselineRecord({ store }, full); },
-    replay: (taskId, key) => readWorkflowE2EReplayRecord({ store }, taskId, key),
-    grounding: (key) => readWorkflowE2EGroundingRecord({ store }, key),
   };
   browserSuggestion.current = (project) => setupAgent.browserEvidenceSuggestion(project);
   const callbackHandler = createCallbackService({

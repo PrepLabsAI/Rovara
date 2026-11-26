@@ -34,24 +34,13 @@ beforeAll(async () => {
 
 const admin = { subject: "admin-subject", admin: true };
 
-describe("workflow merge recovery schedule", () => {
-  it("runs every minute through the existing GitHub recovery role without requiring a webhook secret", () => {
-    const resources = Template.fromStack(new ControlPlaneStack(new App(), "MergeRecoveryControlPlane")).findResources("AWS::Scheduler::Schedule") as Record<string, { Properties: Record<string, unknown> }>;
-    const schedules = Object.values(resources).map((resource) => resource.Properties);
-    const merge = schedules.find((properties) => properties.Target !== undefined
-      && JSON.stringify(properties.Target).includes("agentx.workflow-merge-recovery"));
-    const webhook = schedules.find((properties) => properties.Target !== undefined
-      && JSON.stringify(properties.Target).includes("agentx.github-webhook-recovery"));
-    expect(merge).toMatchObject({
-      FlexibleTimeWindow: { Mode: "OFF" },
-      ScheduleExpression: "rate(1 minute)",
-      State: "ENABLED",
-      Target: {
-        Input: JSON.stringify({ source: "agentx.workflow-merge-recovery" }),
-        RetryPolicy: { MaximumRetryAttempts: 2, MaximumEventAgeInSeconds: 300 },
-      },
-    });
-    expect((merge!.Target as { RoleArn: unknown }).RoleArn).toEqual((webhook!.Target as { RoleArn: unknown }).RoleArn);
+describe("the retired workflow engine's schedules (D1)", () => {
+  it("are gone from the control plane: no schedule or role for the merge recovery, dispatch recovery or webhook recovery events", () => {
+    const template = Template.fromStack(new ControlPlaneStack(new App(), "RetiredSchedulesControlPlane"));
+    const schedules = Object.values(template.findResources("AWS::Scheduler::Schedule") as Record<string, { Properties: Record<string, unknown> }>).map((resource) => JSON.stringify(resource.Properties.Target ?? {}));
+    for (const source of ["agentx.workflow-merge-recovery", "agentx.github-webhook-recovery", "agentx.workflow-dispatch-recovery"]) {
+      expect(schedules.some((target) => target.includes(source))).toBe(false);
+    }
   });
 });
 

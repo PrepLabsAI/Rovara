@@ -3,6 +3,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { HostRateLimitError, change, type ReadBudget } from "@agentx/contracts";
 import { host, ORG } from "../support/service-host.js";
 import { TASK_ID } from "../support/merge-world.js";
+import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { recoveryRowKey } from "../../packages/broker/src/core/merge/store.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { fixedCodeSettings } from "../../packages/broker/src/core/merge/defaults.js";
@@ -65,6 +66,8 @@ async function world(options: { pollMs?: number; drift?: boolean } = {}) {
       const id = `${String(n + 10).padStart(2, "0")}000000-0000-4000-8000-000000000000`;
       const workflow = JSON.parse(JSON.stringify(meta["workflow"])) as { taskId: string };
       await w.h.store.put({ item: { ...meta, ...taskKey(id), taskId: id, workflow: { ...workflow, taskId: id } } });
+      // The sweep reads only tasks that carry the core's mark (D1-2).
+      await w.h.store.put({ item: { ...(await w.h.store.get(coreTaskMarkKey(TASK_ID)))!, ...coreTaskMarkKey(id), taskId: id } });
       await w.h.store.put({ item: { ...recoveryRowKey(id), entityType: "WORKFLOW_MERGE_RECOVERY", kind: "tracking", taskId: id, nextAttemptAt: 0 } });
       added.push(id);
     }
@@ -177,6 +180,27 @@ it("reads at most DUE_CANDIDATES_MAX owned due rows before it picks, and still t
   hooks.current.reconcile = async (taskId) => { order.push(taskId); return { kind: "OBSERVED" }; };
   expect(await w.tracking.sweep({ budgetMs: 3_000 })).toEqual({ attempted: SWEEP_MAX_ROWS });
   expect(order).toHaveLength(SWEEP_MAX_ROWS);
+});
+
+// D1-2 (ruling g): a task of the retired old workflow (same company, an open pull request, a WORKFLOW_MERGE_RECOVERY row, no core mark) is left exactly as it is: the sweep neither reads GitHub
+// for it nor settles or deletes its row.
+it("leaves an old task's row alone: no mark, the same company, an open pull request: nothing is observed, nothing is written, the row stays", async () => {
+  const w = await world();
+  const [old, marked] = await w.addTasks(2);
+  await w.h.store.delete({ key: coreTaskMarkKey(old!) });
+  const before = JSON.stringify(await w.row(old!));
+  const seen: string[] = [];
+  hooks.current.reconcile = async (taskId) => { seen.push(taskId); return { kind: "OBSERVED" }; };
+  const writes: unknown[] = [];
+  const put = vi.spyOn(w.h.store, "update"); const del = vi.spyOn(w.h.store, "delete"); const tx = vi.spyOn(w.h.store, "transact");
+  // The harness task itself and the marked one are tracked; the old one is not even attempted.
+  expect(await w.tracking.sweep({ budgetMs: 3_000 })).toEqual({ attempted: 2 });
+  expect(seen.sort()).toEqual([TASK_ID, marked!].sort());
+  expect(seen).not.toContain(old!);
+  expect(JSON.stringify(await w.row(old!))).toBe(before);
+  expect(await w.h.store.get(recoveryRowKey(old!))).toBeDefined();
+  for (const call of [...put.mock.calls, ...del.mock.calls, ...tx.mock.calls]) writes.push(JSON.stringify(call).includes(old!) ? call : undefined);
+  expect(writes.filter((call) => call !== undefined)).toEqual([]);
 });
 
 it("a wake does not skip a failing row's backoff, only lowers, and always records its time", async () => {

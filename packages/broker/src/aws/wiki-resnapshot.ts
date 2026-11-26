@@ -9,7 +9,7 @@ import type { FileMapRepository } from "../core/wiki/file-map.js";
 import { createWikiStore } from "../core/wiki/store.js";
 import { resnapshotWikiBuild, type WikiBuildDeps } from "../core/wiki-build/run.js";
 import { createWikiBuildStarter } from "../core/wiki-build/starter.js";
-import { ensureCoreInUse } from "../core-host/engine-stamp.js";
+import { ensureCoreInUse } from "../core-host/core-task-mark.js";
 import type { SetupRunStanding } from "../core-host/setup-run-routes.js";
 import { hostOf, wikiMapServiceOf, type HostedWikiMapWiring } from "../core-host/wiki-map-routes.js";
 

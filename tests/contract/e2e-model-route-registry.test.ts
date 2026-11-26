@@ -3,7 +3,7 @@ import type { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { E2E_DEFAULT_MODEL_ROUTE_ID } from "@agentx/contracts";
 import { DEFAULT_E2E_AGENT_MODELS } from "../../packages/model-runtime/src/config.js";
 import { E2E_BUDGET_EXHAUSTED_PREFIX, createGovernedE2EModelRoute } from "../../packages/model-runtime/src/e2e-route.js";
-import { E2E_MODEL_ROUTE_PARTITION, agentRouteSummary, approveE2EAgentRoute, checkE2EAgentRouteCurrent, createBrokerE2EDayBudget, deriveE2EAgentRoute, isTransientAwsFault, e2eModelRouteRevisionKey, planE2EAgentRoute, readAdmittedE2EModelRoute, readE2EModelRouteLatest, type E2EAgentInstallation } from "../../packages/broker/src/e2e/model-route-registry.js";
+import { E2E_MODEL_ROUTE_PARTITION, agentRouteSummary, approveE2EAgentRoute, createBrokerE2EDayBudget, deriveE2EAgentRoute, isTransientAwsFault, e2eModelRouteRevisionKey, planE2EAgentRoute, readAdmittedE2EModelRoute, readE2EModelRouteLatest, type E2EAgentInstallation } from "../../packages/broker/src/e2e/model-route-registry.js";
 import { FakeDynamoDb, assumeDrivingTestsPassed } from "../support/fake-dynamodb.js";
 import { SECRET_ARN, channelRequest, tapAnswer } from "../support/e2e-model-fixtures.js";
 import { TEST_ORG, testProjectPk } from "../support/orgs.js";
@@ -84,40 +84,8 @@ describe("the registry keeps revisions in the broker table and reads them by key
     if (planned.status !== "available") throw new Error("unavailable");
     await approveE2EAgentRoute(store(db), anthropic, planned.revision);
     await readE2EModelRouteLatest(store(db), E2E_DEFAULT_MODEL_ROUTE_ID);
-    await checkE2EAgentRouteCurrent(store(db), anthropic, planned.revision);
     expect(db.commandNames().filter((name) => name === "ScanCommand")).toEqual([]);
     expect(db.commandNames()).toContain("GetCommand");
-  });
-});
-
-describe("dispatch re-derives the route and compares it with what was approved", () => {
-  const approvedRevision = async (db: FakeDynamoDb, installation: E2EAgentInstallation) => {
-    const planned = await planE2EAgentRoute(store(db), installation);
-    if (planned.status !== "available") throw new Error("unavailable");
-    await approveE2EAgentRoute(store(db), installation, planned.revision);
-    return planned.revision;
-  };
-
-  it.each<[string, E2EAgentInstallation]>([
-    ["the provider changed", bedrock],
-  ])("gives model-route-changed-reapprove when %s", async (_name, changed) => {
-    const db = new FakeDynamoDb();
-    const revision = await approvedRevision(db, anthropic);
-    expect(await checkE2EAgentRouteCurrent(store(db), changed, revision)).toMatchObject({ ok: false, code: "model-route-changed-reapprove" });
-  });
-
-  it("gives model-route-changed-reapprove when the policy pins a revision that is no longer the latest", async () => {
-    const db = new FakeDynamoDb();
-    const first = await approvedRevision(db, anthropic);
-    await approvedRevision(db, bedrock);
-    expect(await checkE2EAgentRouteCurrent(store(db), bedrock, first)).toMatchObject({ ok: false, code: "model-route-changed-reapprove" });
-  });
-
-  it("gives agent-route-not-approved when the installation no longer has a usable route, or none was ever approved", async () => {
-    const db = new FakeDynamoDb();
-    const revision = await approvedRevision(db, anthropic);
-    expect(await checkE2EAgentRouteCurrent(store(db), { provider: "anthropic" }, revision)).toMatchObject({ ok: false, code: "agent-route-not-approved" });
-    expect(await checkE2EAgentRouteCurrent(store(new FakeDynamoDb()), anthropic, revision)).toMatchObject({ ok: false, code: "agent-route-not-approved" });
   });
 });
 

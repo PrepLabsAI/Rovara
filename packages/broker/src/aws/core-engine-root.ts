@@ -68,7 +68,7 @@ import { costUsdOf } from "../core/cost/ledger.js";
 import { estimatePathOf, recordRunCost, runCostInputOf } from "../core/cost/estimate.js";
 import { withSharedMergeRecovery, policyCiReporting } from "./core-job-services.js";
 import type { CoreServiceWiring, CoreRuntimeOptions, CoreService, CoreServiceName } from "../core-host/core-runtime.js";
-import type { CiReporting } from "../core-host/switch-blockers.js";
+import type { CiReporting } from "../core-host/core-wiring-guard.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../core-host/dev-routes.js";
 import { SETUP_RUN_NOT_ALLOWED, type SetupRunStanding } from "../core-host/setup-run-routes.js";
 import { createHostedSetupApproval } from "../core-host/setup-approval.js";
@@ -190,7 +190,7 @@ import { companyInstructionsModules } from "../core-host/company-instructions-ht
 import { createCompanyModelChoices, type OfferedModelsReader } from "../core-host/gateway-model-selection.js";
 import { RepositoryGrantService } from "../repository-access.js";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
-import { ownerOfWorkspace } from "./engine-boundary.js";
+import { isCoreWorkspace } from "./engine-boundary.js";
 import { workspaceCompanyReader } from "./worker-machines/workspace-company.js";
 import { digestPilotOf, switchCovers } from "../core-host/flags.js";
 
@@ -309,7 +309,7 @@ export interface BrokerCoreRootInputs {
   now?: () => Date;
   wrapStorage?: (store: DocumentStore) => DocumentStore;
   /**
-   * L2-4: the Linear OAuth connections (aws/linear-wiring.ts), where Linear is wired. With them, while the switch serves: the tracker intake per company (`intake`), Linear account links
+   * L2-4: the Linear OAuth connections (aws/linear-wiring.ts), where Linear is wired. With them, where the core is wired: the tracker intake per company (`intake`), Linear account links
    * read under the company, and the ticket write-back through the company's own connection on its milestones. Absent: no intake (the Linear app webhook logs `linear.intake_not_wired`).
    */
   linearIntake?: { connections: Pick<LinearConnections, "connection" | "accessToken">; fetch?: typeof fetch };
@@ -322,15 +322,15 @@ export interface BrokerCoreRootInputs {
 
 export interface BrokerCoreRoot {
   readonly app: CoreHostApp;
-  /** The developer task routes' core entry. Undefined while the switch is off: the routes never reach the core. */
+  /** The developer task routes' core entry. Undefined only where the install has no core wired (a test or a self-hosted layout without it): the routes then never reach the core. */
   readonly coreTasks: CoreTaskEntry | undefined;
   /**
    * Lane L12: the core's own /v1/app/* routes for the broker's HTTP API (sessions, decision cards, how we work, script tokens and person erase), over the same caller mapping as
-   * `coreTasks` (company and role from membership). Undefined while the switch is off: the developer API then answers every /v1/app/* path "route not found" and reads nothing.
+   * `coreTasks` (company and role from membership). Undefined only where the install has no core wired: the developer API then answers every /v1/app/* path "route not found" and reads nothing.
    */
   readonly coreApp: CoreAppEntry | undefined;
   /**
-   * Lane LM8: the Code lessons API for the developer routes (`deps.lessons`). Undefined while the engine switch is off, while ROVARA_CORE_LESSONS is off, or without the deployment's
+   * Lane LM8: the Code lessons API for the developer routes (`deps.lessons`). Undefined where no core is wired, while ROVARA_CORE_LESSONS is off, or without the deployment's
    * people port: every lessons route then answers "Lessons are off." and reads nothing.
    */
   readonly lessons: LessonsApi | undefined;
@@ -346,25 +346,25 @@ export interface BrokerCoreRoot {
   /** L4-JA7: the company's "Knowledge stays in Rovara" and a project's "local coding tools can fetch lessons" (`core-host/knowledge-switch-api.ts`), whenever the core serves; it does not depend on the lessons switch. */
   readonly knowledgeSwitch?: KnowledgeSwitchApi | undefined;
   readonly policyHook?: ProjectSettingsHook;
-  /** L2-4: the tracker intake per company (aws/hosted-intake.ts). Undefined while the switch is off, its settings are unreadable, or Linear is not wired. */
+  /** L2-4: the tracker intake per company (aws/hosted-intake.ts). Undefined where no core is wired, its settings are unreadable, or Linear is not wired. */
   readonly intake: HostedIntake | undefined;
   /**
-   * Guided onboarding PR 16: whether archiving a project of this company takes effect, i.e. the switch sends the company's new tasks to the core engine (the only engine that reads the
-   * archived state). Absent while the switch is off: the archive route then refuses an archive.
+   * Guided onboarding PR 16: whether archiving a project of this company takes effect, i.e. the company's tasks run on the core engine (the only engine that reads the
+   * archived state). Present wherever the core is wired (it holds for every company: D1); absent: the archive route refuses an archive.
    */
   readonly projectArchiveTakesEffect?: (companyId: string) => boolean;
   /**
-   * Person erase (row 13.1, #687) on the deployed API: `POST /v1/app/people/<id>/erase`, with the learning step erasing the person's lessons AND Team record rows. Answers `undefined` while the
-   * switch is off or for any other path. The broker's HTTP API reaches it through `coreApp` (lane L12).
+   * Person erase (row 13.1, #687) on the deployed API: `POST /v1/app/people/<id>/erase`, with the learning step erasing the person's lessons AND Team record rows. Answers `undefined` where
+   * no core is wired or for any other path. The broker's HTTP API reaches it through `coreApp` (lane L12).
    */
   personErase(request: BrokerRequest, caller: PersonEraseCaller): Promise<BrokerResponse | undefined>;
-  /** Finishes one company's owed person erases (the learning step first, then the evidence walk). For the scheduled job when it lands. Rejects while the switch is off. */
+  /** Finishes one company's owed person erases (the learning step first, then the evidence walk). For the scheduled job when it lands. Rejects where no core is wired. */
   resumePersonErases(companyId: string, budgetMs: number): Promise<{ finished: number; owed: number }>;
   /** A schedule's core job event, or a State table stream batch. `undefined`: not the core's. */
   handleEvent(event: unknown, options?: { remainingMs?: number | undefined }): Promise<unknown>;
   /**
    * A worker's callback (`/v1/internal/workspaces/<id>/operations/<id>/<action>`) for a workspace a CORE task holds: served by that company's core callback layer (its capability, its
-   * repository grant exchange, the lessons' load report), or a signed context/packet request verified before reads. `undefined`: not a core workspace, or the switch is off.
+   * repository grant exchange, the lessons' load report), or a signed context/packet request verified before reads. `undefined`: not a core workspace, or no core is wired.
    */
   callback(request: BrokerRequest): Promise<BrokerResponse | undefined>;
 }
@@ -1470,7 +1470,6 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
   const intake = settingsBlocked || linearIntake === undefined ? undefined : createHostedIntake({
     connections: linearIntake.connections, fenceKey: intakeFenceKeyOf(inputs.callbackSigningKey), now: () => now().getTime(), log,
     companyFor: async (companyId) => {
-      if (app.engineForNewTask(companyId) !== "core") return undefined;
       const runtime = await app.runtimeFor(companyId);
       const registry = await app.registry();
       const milestones = milestonesByCompany.get(companyId);
@@ -1678,7 +1677,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
     adminNotice,
     ...buildSwitchApis(),
     intake,
-    ...(coreApp === undefined ? {} : { projectArchiveTakesEffect: (companyId: string) => app.engineForNewTask(companyId) === "core" }),
+    ...(coreApp === undefined ? {} : { projectArchiveTakesEffect: () => true }),
     ...buildPolicyHookAccessor(hookSettings, hookProblem, inputs.policyHookInstall),
     async personErase(request, caller) {
       if (settingsBlocked && (request.path.split("?")[0] ?? "").startsWith("/v1/app/people/")) return callbackAnswer(503, "CORE_SWITCH_BLOCKED", CORE_SETTINGS_REFUSAL_WORDS);
@@ -1694,7 +1693,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       if (settingsBlocked && coreContextWorkerRouteOf(request.method, request.path.split("?")[0] ?? "") !== undefined) return callbackAnswer(503, "CORE_SWITCH_BLOCKED", CORE_SETTINGS_REFUSAL_WORDS);
       const context = await handleCoreContextTools(request, {
         capabilities: { verify: (token, action) => new CallbackCapabilities(Buffer.from(inputs.callbackSigningKey)).verify(token, action) },
-        ownerOfWorkspace: (workspaceId) => ownerOfWorkspace(table, workspaceId),
+        isCoreWorkspace: (workspaceId) => isCoreWorkspace(table, workspaceId),
         companyOfWorkspace,
         runtimeFor: async (companyId) => ({ flow: (await app.runtimeFor(companyId)).flow.deps, teamSearch: teamRecords.get(companyId)?.search }),
       });
@@ -1705,7 +1704,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
       if (packetRequest && packetWorkspace === undefined) return callbackAnswer(403, "CALLBACK_FORBIDDEN", "this operation cannot read that packet");
       const workspaceId = packetWorkspace ?? modelAccessWorkspaceOf(request) ?? CORE_CALLBACK.exec(request.path.split("?")[0] ?? "")?.[1];
       if (workspaceId === undefined) return undefined;
-      if (await ownerOfWorkspace(table, workspaceId) !== "core") return packetRequest ? callbackAnswer(403, "CALLBACK_FORBIDDEN", "this operation cannot read that packet") : undefined;
+      if (!await isCoreWorkspace(table, workspaceId)) return packetRequest ? callbackAnswer(403, "CALLBACK_FORBIDDEN", "this operation cannot read that packet") : undefined;
       return await dispatchCoreWorkspaceCallback(request, workspaceId);
     },
     async handleEvent(event, options) {
@@ -1717,7 +1716,7 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
 }
 
 /**
- * The developer API's configuration with the core's entries (lane E2 step 6, lane L12): while the switch serves, the task routes' core entry and the /v1/app/* routes; off (neither is
+ * The developer API's configuration with the core's entries (lane E2 step 6, lane L12): where a core is wired, the task routes' core entry and the /v1/app/* routes; without one (neither is
  * built), the configuration exactly as given, so the developer API is byte-identical.
  */
 export function withCoreRoutes<T extends object>(config: T, root: Pick<BrokerCoreRoot, "coreTasks" | "coreApp" | "policyHook" | "projectArchiveTakesEffect"> & { intake?: HostedIntake | undefined }): T | (T & { coreTasks: CoreTaskEntry; coreApp?: CoreAppEntry; projectArchiveTakesEffect?: (companyId: string) => boolean; coreIntake?: HostedIntake }) {

@@ -118,6 +118,9 @@ export function boundedCompanyReads(client: { send(command: unknown): Promise<un
   let itemLimitReached = false;
   const check = (itemContinuation = false) => {
     if (itemLimitReached && !itemContinuation) throw new CompanyReadItemLimit();
+    // A list page that ends with an explicit continuation is complete as returned: whichever budget it ran out of (items, commands, bytes, time) is what its cursor is for. The page's own reads were
+    // each checked as they ran; only a whole-call check of a page WITHOUT a cursor still refuses.
+    if (itemContinuation) return;
     if (commands > COMPANY_READ_LIMITS.commands || items > COMPANY_READ_LIMITS.items || bytes > COMPANY_READ_LIMITS.bytes || files > COMPANY_READ_LIMITS.files || clock() - started > COMPANY_READ_LIMITS.milliseconds) {
       throw agentXError("CONFIG_INVALID", "company read limit exceeded");
     }

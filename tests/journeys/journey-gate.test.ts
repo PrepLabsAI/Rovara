@@ -18,8 +18,8 @@ const source = (path: string): string => readFileSync(join(ROOT, path), "utf8");
 /** The source without its `//` comment lines, so a sentence that names a skip is not one. */
 const code = (path: string): string => source(path).split("\n").filter((line) => !/^\s*\/\//u.test(line)).join("\n");
 
-/** The ten journeys of the brief (A1), plus the three the plan check requires before D1 (11 to 13), journey 14 (reviews in depth, D1-PLAN 5.3 G-B), and journey 15 (the task page, G-E). */
-const JOURNEYS = ["1", "2", "3a", "3b", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"] as const;
+/** The ten journeys of the brief (A1), plus the three the plan check requires before D1 (11 to 13) and journey 14 (reviews in depth, D1-PLAN 5.3 G-B). D1 took journey 15 (Code's own task page, G-E) off the list with the page itself (owner DEC 254zzz511); what outlives the page is proved by A1-12's tests on the surfaces that stay. */
+const JOURNEYS = ["1", "2", "3a", "3b", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14"] as const;
 /**
  * Journeys with no file yet, each with the reason and the lane that adds it. A row here is a known gap, visible in review; it is not a skipped test. A journey is taken off this table when its file lands, and
  * this test fails if a journey is both on the table and in a file.

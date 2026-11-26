@@ -214,19 +214,16 @@ describe("hosted setup run: starting, re-running and stopping", () => {
     expect(forged.status).toBe(400);
   });
 
-  it("refuses a start before writing anything when the company's new tasks are not on the core, or the install has no model gateway", async () => {
-    for (const mode of ["no-gateway", "not-on-core"] as const) {
-      const { world, person, call, app } = await setupWorld(mode === "no-gateway" ? { gateway: false } : {});
-      if (mode === "not-on-core") vi.spyOn(app, "engineForNewTask").mockReturnValue("workflow");
-      const caller = person("p-owner", FAKE_COMPANY, "owner");
-      const answer = await call(post(RUN, { requestId: randomUUID() }), caller);
-      expect(answer.status, mode).toBe(503);
-      expect(answer.body).toEqual({ error: { code: "RUNTIME_UNAVAILABLE", message: SETUP_RUN_UNAVAILABLE } });
-      expect(await pointerOf(world, FAKE_COMPANY)).toBeUndefined();
-      expect(setupEvents(world)).toEqual([]);
-      // Reading still works.
-      expect((await call(get(RUN), caller)).status).toBe(200);
-    }
+  it("refuses a start before writing anything when the install has no model gateway", async () => {
+    const { world, person, call } = await setupWorld({ gateway: false });
+    const caller = person("p-owner", FAKE_COMPANY, "owner");
+    const answer = await call(post(RUN, { requestId: randomUUID() }), caller);
+    expect(answer.status).toBe(503);
+    expect(answer.body).toEqual({ error: { code: "RUNTIME_UNAVAILABLE", message: SETUP_RUN_UNAVAILABLE } });
+    expect(await pointerOf(world, FAKE_COMPANY)).toBeUndefined();
+    expect(setupEvents(world)).toEqual([]);
+    // Reading still works.
+    expect((await call(get(RUN), caller)).status).toBe(200);
   });
 
   it("refuses an authorized setup run before any write when signed-price readiness fails", async () => {

@@ -482,7 +482,7 @@ The tools keep Cloud's neutral names (H3). What works here: `agentx_whoami`, `ag
 | `agentx_review_workflow_candidate`, `agentx_send_workflow_back`, `agentx_resolve_review_findings`, `agentx_retry_workflow_publish`, `agentx_keep_pull_request`, `agentx_open_pull_request` | the owner-side review and publish controls |
 | `agentx_get_pr_feedback`, `agentx_decide_pr_feedback` | pull request feedback review |
 | `agentx_continue_task` | a task's budget |
-| `rovara session merge` | the local Merge button, which is not built (see "Not wired yet"); the core's `prepareMerge` and `pressMerge` exist |
+| `rovara session merge` | the local Merge button, which is not built (see "Not wired yet"); the core's `prepareMerge` and `pressMergeAsPerson` exist |
 | `rovara session link`, `rovara home`, `rovara lessons` | linking a session to a ticket by hand, the web feed, lessons (a task started from a ticket is linked by intake: see "Tickets that ask for work") |
 
 ## Script tokens

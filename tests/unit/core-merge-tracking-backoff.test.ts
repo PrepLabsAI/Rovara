@@ -4,6 +4,7 @@ import { host, ORG } from "../support/service-host.js";
 import { TASK_ID } from "../support/merge-world.js";
 import { recoveryRowKey } from "../../packages/broker/src/core/merge/store.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
+import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { linkedChangeRequestStep } from "../../packages/broker/src/core/proof/revert/linked-change-requests.js";
 import { HeadFactMemo } from "../../packages/broker/src/core/merge/head-fact-memo.js";
 import { workspaceKeys } from "../../packages/broker/src/core/task-flow/workspace-location.js";
@@ -16,6 +17,12 @@ async function world() {
   w.h.deps.codeHosts = w.registry;
   const codeHost = w.registry.get("code-host", "github") as CodeHost;
   return { ...w, codeHost };
+}
+
+/** D1-2: the merge sweep reads only tasks that carry the core's mark, so a task these cases copy from the world's own task carries a copy of its mark. */
+async function markLikeWorldTask(w: Awaited<ReturnType<typeof world>>, copyId: string): Promise<void> {
+  const mark = (await w.h.store.get(coreTaskMarkKey(TASK_ID)))!;
+  await w.h.store.put({ item: { ...mark, ...coreTaskMarkKey(copyId), taskId: copyId } });
 }
 
 it("backs off allowance-exhausted verification to fifteen minutes without resetting quiet, while reconcile still reads", async () => {
@@ -56,6 +63,7 @@ it("reserves reads for reconcile and another due task when the first verifier sp
   await w.h.store.put({ item: { ...task, ...taskKey(other), taskId: other, workflow: JSON.parse(JSON.stringify({ ...workflow, taskId: other, pullRequests: [pr] })) as never } });
   await w.h.store.transact([linkedChangeRequestStep({ hostKind: "github", repositoryAddress: "https://github.com/acme/app", changeRequestId: cr.id, repositoryId: "app", number: Number(cr.id), url: pr.url,
     taskId: other, workspaceId: task["workspaceId"] as string, candidateDigest: pr.candidateDigest, createdAt: new Date(w.clock.ms).toISOString() })!]);
+  await markLikeWorldTask(w, other);
   await w.h.store.put({ item: { ...recoveryRowKey(other), kind: "tracking", taskId: other, nextAttemptAt: 0 } });
   let reads = 0;
   const fileAtRevision = w.codeHost.fileAtRevision.bind(w.codeHost);
@@ -229,6 +237,7 @@ it("bounds reconcile reads on ten due rows so the last row still gets its share"
     await w.h.store.put({ item: { ...task, ...taskKey(id), taskId: id, workflow: JSON.parse(JSON.stringify({ ...workflow, taskId: id, pullRequests: [pr] })) as never } });
     await w.h.store.transact([linkedChangeRequestStep({ hostKind: "github", repositoryAddress: "https://github.com/acme/app", changeRequestId: cr.id, repositoryId: "app", number: Number(cr.id), url: pr.url,
       taskId: id, workspaceId: task["workspaceId"] as string, candidateDigest: pr.candidateDigest, createdAt: new Date(w.clock.ms).toISOString() })!]);
+    await markLikeWorldTask(w, id);
     await w.h.store.put({ item: { ...recoveryRowKey(id), kind: "tracking", taskId: id, nextAttemptAt: 0 } });
   }
   const reads: number[] = [];

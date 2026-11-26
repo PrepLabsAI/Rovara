@@ -3,16 +3,18 @@
 // fake Slack and GitHub, two companies over one wire-level table.
 import { createHash } from "node:crypto";
 import { decodeJwt } from "jose";
+import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { describe, expect, it } from "vitest";
 import { Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { buildAgentXApp } from "../../infra/lib/app.js";
-import { AgentXError, SIGN_IN_LINK_TEXT, SLACK_OIDC_ISSUER, type WorkspaceInstance } from "@agentx/contracts";
+import { AgentXError, newCompanyInviteCode, SIGN_IN_LINK_TEXT, SLACK_OIDC_ISSUER, type WorkspaceInstance } from "@agentx/contracts";
 import { membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import type { DeveloperTaskActions } from "../../packages/broker/src/aws/developer-task-actions.js";
 import { routeDeveloperRequest } from "../../packages/broker/src/aws/developer-routes.js";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { signInLinksThroughLambda } from "../../packages/broker/src/aws/sign-in-link-routes.js";
+import { adoptableCompanyLessRecord } from "../../packages/broker/src/developer/sign-in-links.js";
 import { GITHUB_ISSUER, githubSignInProvider } from "../../packages/broker/src/developer/providers.js";
 import { sessionBindingOf } from "../../packages/broker/src/developer/session-binding.js";
 import { API, authorizeQuery, httpEvent, TEAM } from "../support/developer-fakes.js";
@@ -163,6 +165,10 @@ describe("connecting a second sign-in (DEC 254w)", () => {
     w.db.set({ pk: `DEVTASK#${taskId}`, sk: "META", entityType: "DEVELOPER_TASK", taskId, developerId: owner, provider: "slack", developerName: "Link Me", client: "slack", project: "p", title: "from Slack",
       workspaceId: "w", ownerKey: owner, conversationId: "c", startingRevision: 1, shared: false, createdAt: at, updatedAt: at, companyId: X });
     w.db.set({ pk: `DEVELOPER#${owner}`, sk: `TASK#${at}#${taskId}`, entityType: "DEVELOPER_TASK_INDEX", taskId, title: "from Slack", project: "p", status: "CLOSED", shared: false, createdAt: at, updatedAt: at });
+    // DEC 254zzz502 (D1-2): a task with no core mark is the retired old workflow's and is not listed ...
+    expect(((await w.api("GET", "/v1/dev/tasks", github)).body.tasks as unknown[])).toEqual([]);
+    // ... and a task the core started (it carries the mark) is, to the linked person's GitHub session.
+    w.db.set({ ...coreTaskMarkKey(taskId), entityType: "TASK_ENGINE", orgId: X, taskId, coreEngine: { engine: "core", areas: { merge: "core", build: "core", flow: "core" }, flags: "cc=on", stampedAt: at } });
     const listed = await w.api("GET", "/v1/dev/tasks", github);
     expect(listed.status).toBe(200);
     expect((listed.body.tasks as Array<{ taskId: string }>).map((task) => task.taskId)).toEqual([taskId]);
@@ -256,9 +262,10 @@ describe("what a link refuses, all with the same words (DEC 254w)", () => {
     expect((await w.link(p, "slack", { slack: "U0LINKME1", team: TEAM })).status).toBe(200);
     const owner = (await w.signIn("owner")).access!;
     expect(await w.link(owner, "slack", { slack: "U0LINKME1", team: TEAM })).toEqual(REFUSED);
-    // A Slack person who signed in on their own (and holds a membership elsewhere) is not merged into anyone either.
-    await w.operator({ kind: "company-preapprove", companyId: B, email: "solo@example.test", role: "member", expiresInHours: 24 });
-    await w.signIn("U0SOLO001", { slackTeam: TEAM });
+    // A Slack person who signed in on their own and holds a membership elsewhere is not merged into anyone either (SLACK-LINK-L2: a company-less record with NO membership is the one that may be adopted).
+    await w.operator({ kind: "company-preapprove", companyId: X, email: "solo@example.test", role: "member", expiresInHours: 24 });
+    await w.signIn("U0SOLO001", { slackTeam: TEAM, company: X });
+    expect(w.db.get(membershipKey(sid("U0SOLO001")).pk, "COMPANY")).toMatchObject({ companyId: X });
     expect(await w.link(owner, "slack", { slack: "U0SOLO001", team: TEAM })).toEqual(REFUSED);
     expect(w.db.get(`DEVELOPER#${sid("U0SOLO001")}`, "META")).not.toHaveProperty("mergedInto");
     expect(w.linkRows()).toHaveLength(1);
@@ -699,6 +706,178 @@ describe("re-linking an unlinked sign-in (DEC 254zzz39)", () => {
     w.tick(1_000);
     expect((await w.signIn("U0LINKME1", { slackTeam: TEAM })).refused).toBeUndefined();
     for (const field of ["factorEmail", "factorEmailSetAt", "factorEmailSetBy", "firstSignInMark"]) expect(kept(w)).not.toHaveProperty(field);
+  });
+});
+
+describe("adopting an unused company-less record (SLACK-LINK-L2)", () => {
+  const SLACK = () => sid("U0LINKME1");
+  const record = (w: ReturnType<typeof world>) => w.db.get(`DEVELOPER#${SLACK()}`, "META")!;
+  const without = <T extends object>(row: T, ...fields: string[]): T => Object.fromEntries(Object.entries(row).filter(([key]) => !fields.includes(key))) as T;
+  const reasons = (w: ReturnType<typeof world>) => w.logs.filter((one) => one.event === "signin.link_refused").map((one) => one.reason);
+  /** P: a GitHub member of X. Then, on their own, the Slack person signs in first (no company: a company-less record), the owner's case. */
+  const slackFirst = async (w: ReturnType<typeof world>) => {
+    const github = await w.githubMember();
+    w.tick(1_000);
+    const alone = await w.signIn("U0LINKME1", { slackTeam: TEAM });
+    expect(decodeJwt(alone.access!).sub).toBe(SLACK());
+    expect(record(w)).toMatchObject({ companyless: true, provider: "slack" });
+    expect(record(w)).not.toHaveProperty("mergedInto");
+    w.tick(1_000);
+    return { github, alone };
+  };
+
+  it("the owner's case: GitHub person connects the Slack identity that already made a fresh company-less record: linked, adopted, audited (red before: identity_taken)", async () => {
+    const w = world();
+    const { github, alone } = await slackFirst(w);
+    expect(await w.link(github, "slack", { slack: "U0LINKME1", team: TEAM })).toEqual({ status: 200, body: { method: "slack" } });
+    expect(record(w)).toMatchObject({ provider: "slack", mergedInto: P, revoked: false, linkedBy: P });
+    // It is a person's linked sign-in now: no company-less flag (an unlink sets it again, below).
+    expect(record(w)).not.toHaveProperty("companyless");
+    expect(record(w)).not.toHaveProperty("email");
+    expect(record(w).sessionsEndedAt).toEqual(expect.any(String));
+    expect(w.db.find((row) => row.pk === `DEVELOPER#${SLACK()}`)).toHaveLength(1);
+    expect(w.linkRows()).toEqual([expect.objectContaining({ personId: P, method: "slack", linkedId: SLACK() })]);
+    expect(w.db.get(`DEVELOPER#${P}`, "META")).toMatchObject({ slackUserId: "U0LINKME1", linkedSlackUserId: "U0LINKME1" });
+    expect(w.companyLog("company-signin-link")).toEqual([expect.objectContaining({ companyId: X, personId: P, createdBy: P, method: "slack", adopted: true, adoptedId: SLACK() })]);
+    expect(JSON.stringify(w.companyLog("company-signin-link"))).not.toContain("U0LINKME1");
+    expect(w.logs).toContainEqual(expect.objectContaining({ event: "signin.linked", developerId: P, method: "slack", adopted: true }));
+    // The adopted record's own earlier session ends; no membership was ever written for it; Slack now signs in as P.
+    expect((await w.refresh(alone.refresh!)).status).toBe(400);
+    expect(w.db.get(membershipKey(SLACK()).pk, membershipKey(SLACK()).sk)).toBeUndefined();
+    const slack = await w.signIn("U0LINKME1", { slackTeam: TEAM });
+    expect(decodeJwt(slack.access!).sub).toBe(P);
+    expect((await w.access(slack.access)).body).toMatchObject({ developerId: P, companyId: X, companyRole: "member" });
+  });
+
+  it("an unlink of the adopted sign-in sets the company-less flag again, as for any kept record", async () => {
+    const w = world();
+    const { github } = await slackFirst(w);
+    expect((await w.link(github, "slack", { slack: "U0LINKME1", team: TEAM })).status).toBe(200);
+    expect(record(w)).not.toHaveProperty("companyless");
+    w.tick(1_000);
+    expect((await w.api("DELETE", "/v1/dev/me/sign-ins/slack", github)).status).toBe(200);
+    expect(record(w)).toMatchObject({ companyless: true, unlinkedFrom: P, unlinkedCompany: X });
+    expect(record(w)).not.toHaveProperty("mergedInto");
+  });
+
+  it("an adopted record's old session can never create a company, even if its end (sessionsEndedAt) were missed and the flag were still set", async () => {
+    const w = world();
+    const { github, alone } = await slackFirst(w);
+    const code = newCompanyInviteCode();
+    await w.operator({ kind: "company-invite-create", codeHash: code.codeHash, expiresInHours: 24 });
+    expect((await w.link(github, "slack", { slack: "U0LINKME1", team: TEAM })).status).toBe(200);
+    // Worst case: the adoption's own guards both missed (the session is not ended, the flag is back).
+    w.db.set({ ...without(record(w), "sessionsEndedAt"), companyless: true });
+    expect(record(w)).toMatchObject({ mergedInto: P, companyless: true });
+    const created = await w.call("POST", "/v1/dev/company", alone.access, { name: "Orphan", inviteCode: code.code });
+    expect(created.status).not.toBe(200);
+    expect(w.db.find((row) => row.entityType === "COMPANY_MEMBERSHIP" && row.personId === SLACK())).toEqual([]);
+    expect((await w.access(alone.access)).status).not.toBe(200);
+  });
+
+  it("a record that is used, a member, merged, turned off, not company-less or another method's stays taken, and nothing changes", async () => {
+    const used: Array<[string, (w: ReturnType<typeof world>) => Promise<void> | void]> = [
+      ["companyless=true but a live membership of its own (the flag is never cleared)", (w) => { const key = membershipKey(SLACK()); const own = membershipKey(P); w.db.set({ ...w.db.get(own.pk, own.sk)!, ...key, personId: SLACK() }); }],
+      ["a revoked membership of its own", (w) => { const key = membershipKey(SLACK()); const own = membershipKey(P); w.db.set({ ...w.db.get(own.pk, own.sk)!, ...key, personId: SLACK(), revokedAt: "2026-01-01T00:00:00.000Z", revokedBy: "x" }); }],
+      ["already merged into another person", (w) => { w.db.set({ ...record(w), mergedInto: person("carol") }); }],
+      ["already merged into the person (a link made some other way)", (w) => { w.db.set({ ...record(w), mergedInto: P }); }],
+      ["turned off", (w) => { w.db.set({ ...record(w), revoked: true }); }],
+      ["not company-less (a legacy person)", (w) => { w.db.set(without(record(w), "companyless")); }],
+      ["another method's record", (w) => { w.db.set({ ...record(w), provider: "github" }); }],
+      ["a connected Slack of its own", (w) => { w.db.set({ ...record(w), linkedSlackUserId: "U0OTHER1" }); }],
+      ["unlinked once", (w) => { w.db.set({ ...record(w), unlinkedAt: "2026-01-01T00:00:00.000Z", unlinkedFrom: person("carol"), unlinkedCompany: B }); }],
+      ["a name the person chose", (w) => { w.db.set({ ...record(w), displayNameChosen: true }); }],
+      ["a second sign-in (a second session)", async (w) => { await w.signIn("U0LINKME1", { slackTeam: TEAM }); }],
+      ["a row whose subject is not the identity's", (w) => { w.db.set({ ...record(w), subject: "U0SOMEONEELSE" }); }],
+    ];
+    for (const [name, change] of used) {
+      const w = world();
+      const { github } = await slackFirst(w);
+      await change(w);
+      w.tick(1_000);
+      const before = structuredClone(record(w));
+      expect(await w.link(github, "slack", { slack: "U0LINKME1", team: TEAM }), name).toEqual(REFUSED);
+      expect(reasons(w).at(-1), name).toBe("identity_taken");
+      expect(record(w), name).toEqual(before);
+      expect(w.linkRows(), name).toEqual([]);
+      expect(w.companyLog("company-signin-link"), name).toEqual([]);
+    }
+  });
+
+  it("companyless=true is never enough: a person who signed in with no company and later joined one keeps the flag AND a live membership, and is never adopted (nor treated as the duplicate)", async () => {
+    const w = world();
+    const github = await w.githubMember();
+    w.tick(1_000);
+    expect((await w.signIn("U0SOLO001", { slackTeam: TEAM })).refused).toBeUndefined();
+    const solo = sid("U0SOLO001");
+    expect(w.db.get(`DEVELOPER#${solo}`, "META")).toMatchObject({ companyless: true });
+    w.tick(1_000);
+    await w.operator({ kind: "company-preapprove", companyId: X, email: "solo@example.test", role: "member", expiresInHours: 24 });
+    expect((await w.signIn("U0SOLO001", { slackTeam: TEAM, company: X })).refused).toBeUndefined();
+    // The flag is never cleared by joining; the membership is live. Make it look like a single sign-in, so only the membership can refuse it.
+    const joined = w.db.get(`DEVELOPER#${solo}`, "META")!;
+    expect(joined).toMatchObject({ companyless: true });
+    w.db.set({ ...joined, lastSignInAt: joined.firstSignInAt });
+    expect(w.db.get(membershipKey(solo).pk, "COMPANY")).toMatchObject({ companyId: X, role: "member" });
+    w.tick(1_000);
+    expect(await w.link(github, "slack", { slack: "U0SOLO001", team: TEAM })).toEqual(REFUSED);
+    expect(reasons(w).at(-1)).toBe("identity_taken");
+    expect(w.db.get(`DEVELOPER#${solo}`, "META")).not.toHaveProperty("mergedInto");
+    expect(w.linkRows()).toEqual([]);
+    // ... and the same record is still seated on its own membership when it signs in again.
+    expect((await w.access((await w.signIn("U0SOLO001", { slackTeam: TEAM, company: X })).access)).body).toMatchObject({ developerId: solo, companyId: X });
+  });
+
+  it("the transaction checks the record again: signed in again, given a membership or connected meanwhile, it is refused", async () => {
+    const changes: Array<[string, (w: ReturnType<typeof world>) => void]> = [
+      ["signed in again", (w) => { w.db.set({ ...record(w), lastSignInAt: "2026-12-31T00:00:00.000Z" }); }],
+      ["merged meanwhile", (w) => { w.db.set({ ...record(w), mergedInto: person("carol") }); }],
+      ["turned off", (w) => { w.db.set({ ...record(w), revoked: true }); }],
+      ["no longer company-less", (w) => { w.db.set(without(record(w), "companyless")); }],
+      ["a name chosen", (w) => { w.db.set({ ...record(w), displayNameChosen: true }); }],
+      ["a membership", (w) => { const key = membershipKey(SLACK()); const own = membershipKey(P); w.db.set({ ...w.db.get(own.pk, own.sk)!, ...key, personId: SLACK() }); }],
+    ];
+    for (const [name, change] of changes) {
+      const w = world();
+      const { github } = await slackFirst(w);
+      const send = w.db.send.bind(w.db);
+      (w.db as unknown as { send: unknown }).send = async (command: { constructor: { name: string } }) => {
+        if (command.constructor.name === "TransactWriteCommand") change(w);
+        return send(command as never);
+      };
+      expect(await w.link(github, "slack", { slack: "U0LINKME1", team: TEAM }), name).toEqual(REFUSED);
+      expect(reasons(w).at(-1), name).toBe("changed_meanwhile");
+      expect(w.linkRows(), name).toEqual([]);
+      expect(record(w).mergedInto, name).not.toBe(P);
+    }
+  });
+
+  it("a Slack identity from another workspace is still refused for a workspace that proves nothing, adopted or not", async () => {
+    const w = world();
+    const github = await w.githubMember();
+    w.tick(1_000);
+    expect((await w.signIn("U0AWAY001", { slackTeam: OTHER })).refused).toBeUndefined();
+    const away = sid(`${OTHER}:U0AWAY001`);
+    w.tick(1_000);
+    expect(await w.link(github, "slack", { slack: "U0AWAY001", team: OTHER })).toEqual(REFUSED);
+    expect(reasons(w).at(-1)).toBe("workspace_refused");
+    expect(w.db.get(`DEVELOPER#${away}`, "META")).not.toHaveProperty("mergedInto");
+  });
+
+  it("the exported check is one function: it reads only the membership row, and says why for each refusal", async () => {
+    const reads: string[] = [];
+    const base = { pk: `DEVELOPER#${SLACK()}`, sk: "META", entityType: "DEVELOPER", provider: "slack", issuer: SLACK_OIDC_ISSUER, subject: "U0LINKME1", displayName: "x", revoked: false, companyless: true, firstSignInAt: "2026-11-25T00:00:00.000Z", lastSignInAt: "2026-11-25T00:00:00.000Z" };
+    const check = (record: Record<string, unknown>, member = false, method?: "slack" | "github") =>
+      adoptableCompanyLessRecord({ read: async (key) => { reads.push(key.pk); return member ? { ...key } : undefined; }, linkedId: SLACK(), record, ...(method === undefined ? {} : { method }) });
+    expect(await check(base)).toEqual({ ok: true, record: { firstSignInAt: base.firstSignInAt } });
+    expect(reads).toEqual([`COMPANY_MEMBER#${SLACK()}`]);
+    expect(await check(base, true)).toEqual({ ok: false, reason: "has_membership" });
+    expect(await check({ ...base, mergedInto: P })).toEqual({ ok: false, reason: "already_connected" });
+    expect(await check({ ...base, companyless: false })).toEqual({ ok: false, reason: "not_company_less" });
+    expect(await check({ ...base, revoked: true })).toEqual({ ok: false, reason: "turned_off" });
+    expect(await check(base, false, "github")).toEqual({ ok: false, reason: "wrong_method" });
+    expect(await check({ ...base, lastSignInAt: "2026-11-25T00:00:01.000Z" })).toEqual({ ok: false, reason: "used_more_than_once" });
+    expect(await check({ ...base, subject: "U0OTHER" })).toEqual({ ok: false, reason: "not_the_identitys_record" });
   });
 });
 

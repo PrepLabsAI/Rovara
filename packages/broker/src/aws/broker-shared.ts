@@ -1,7 +1,6 @@
 // Helpers the broker and the developer task routes share (spec 025 ruling F9): one definition each.
 import { createHash } from "node:crypto";
-import { INDEX_EXPIRY_ATTRIBUTE, OPERATION_PROMPT_MAX_BYTES } from "@agentx/contracts";
-import type { TransactItems } from "./developer-task-actions.js";
+import { OPERATION_PROMPT_MAX_BYTES } from "@agentx/contracts";
 
 export * from "../developer/plan-instructions.js";
 
@@ -10,11 +9,6 @@ export function hashJson(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
-/**
- * What an owner hears when a project's catalog pointer cannot be repaired from its revision history (an administrator
- * must register the project again). Written for Slack and the task page; the project and the reason go to the broker log.
- */
-export const PROJECT_RECORD_NEEDS_ADMIN = "This project's settings record needs an administrator to register it again.";
 
 /** A single write's or a transaction's condition failed (DynamoDB). */
 export function isConditional(error: unknown): boolean {
@@ -59,8 +53,6 @@ export const GATED_TASK_PULL_REQUEST_REFUSAL = "AgentX opens the draft pull requ
 /** Refuses a pull request change through AgentX on a gated task (ruling A); humans change and merge it on GitHub. */
 export const GATED_TASK_PULL_REQUEST_ACTION_REFUSAL = "AgentX does not change this task's pull request on request. Change or merge it on GitHub.";
 
-/** Starts every workflow phase prompt: the worker is one step, and AgentX owns approvals, checks, reviews and publishing. */
-export const WORKFLOW_PREAMBLE = "You are one step inside AgentX's gated task workflow. AgentX itself asks the task owner for every approval, runs the project's checks, runs the independent code and security reviews, and opens the draft pull request. Never plan, describe or perform git push, creating remote branches, opening or updating pull requests (for example gh pr create), merging, or deploying. Never treat any step as already approved: the owner approves each document in Slack.";
 /**
  * The prompt the worker runs: the request's own, and on a shared task the re-read line after it.
  * The line is only a hint, so it is left out when it would take the prompt past a request's limit
@@ -72,39 +64,6 @@ export function workerPrompt(prompt: string, shared: boolean): string {
   return Buffer.byteLength(withLine, "utf8") <= OPERATION_PROMPT_MAX_BYTES ? withLine : prompt;
 }
 
-/**
- * Gap 6: the intent to start the next workflow step with no one asking, written in the same transaction as the
- * result that made it due. The broker runs it right after that commit; the recovery sweep runs any row left behind.
- */
-export interface WorkflowDispatchRecord {
-  pk: "WORKFLOW_DISPATCH";
-  sk: string; // `${taskId}#${revision}`
-  entityType: "WORKFLOW_DISPATCH";
-  taskId: string;
-  workflowRevision: number;
-  /** UPDATE: an approved fix's checks and reviews passed, and it is pushed to the pull requests already open. AUTOFIX: the workflow blocked in VERIFY or REVIEW, and the automatic-fix policy looks at it once (never blocks or gives up anything itself). */
-  kind: "CHECKS" | "REVIEW" | "PUBLISH" | "UPDATE" | "REPLAN" | "AUTOFIX" | "GROUNDING";
-  /** For REPLAN, the digest of `planPrompt`: there is no candidate yet. */
-  candidateDigest: string;
-  /** REPLAN: what the planner is told on the automatic second run of a plan (the findings, or what was unreadable). */
-  planPrompt?: string;
-  /** A single internal resume operation warms EC2 before a required E2E round is immutably admitted. */
-  readinessOperationId?: string;
-  createdAt: string;
-  /** Failed runs so far; the row is retried with backoff and gives up (blocking the task) at the cap. */
-  attempts: number;
-  /** When the sweep may run the row next. */
-  nextAttemptAt: string;
-  /** The due-time index keys (WORKFLOW_DISPATCH_DUE_INDEX): a constant, and `${nextAttemptAt}#${sk}`. */
-  dispatchDuePk: "WORKFLOW_DISPATCH";
-  dispatchDueSk: string;
-  /** TTL backstop (epoch seconds), in case a row is somehow never resolved. */
-  indexExpiresAt: number;
-  /** AUTOFIX only (DISPATCHEXHAUST): how the block this row is for came about when no finished run wrote it. Rows from before carry none. */
-  autofixCause?: string;
-  /** AUTOFIX only (DISPATCHEXHAUST): the look must not happen before this time, the delay of the one automatic retry of an infrastructure fault. */
-  autofixNotBefore?: string;
-}
 
 /** Internal purpose binding for the one pre-admission compute warmup of a required feature E2E dispatch. */
 export interface WorkflowE2EReadinessMarker {
@@ -115,16 +74,4 @@ export interface WorkflowE2EReadinessMarker {
   dispatchSk: string;
 }
 
-export const WORKFLOW_DISPATCH_PK = "WORKFLOW_DISPATCH";
-const WORKFLOW_DISPATCH_RETENTION_SECONDS = 7 * 86_400;
 
-export function workflowDispatchItem(tableName: string, taskId: string, workflowRevision: number, kind: WorkflowDispatchRecord["kind"], candidateDigest: string, now: string, planPrompt?: string): TransactItems[number] {
-  const sk = `${taskId}#${workflowRevision}`;
-  const item: WorkflowDispatchRecord = {
-    pk: WORKFLOW_DISPATCH_PK, sk, entityType: "WORKFLOW_DISPATCH",
-    taskId, workflowRevision, kind, candidateDigest, ...(planPrompt === undefined ? {} : { planPrompt }), createdAt: now,
-    attempts: 0, nextAttemptAt: now, dispatchDuePk: WORKFLOW_DISPATCH_PK, dispatchDueSk: `${now}#${sk}`,
-    [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(Date.parse(now) / 1000) + WORKFLOW_DISPATCH_RETENTION_SECONDS,
-  };
-  return { Put: { TableName: tableName, Item: item, ConditionExpression: "attribute_not_exists(pk)" } };
-}

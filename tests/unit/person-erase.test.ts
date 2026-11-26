@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import * as codeModules from "../../packages/broker/src/core-host/code-modules.js";
 import { createBrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-root.js";
 import { createFakeWorld } from "../support/core-host-fakes.js";
-import { ensureCoreInUse } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { ensureCoreInUse } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { IMPLICIT_COMPANY_ID, orgChannelLinkKey, orgDeveloperChannelLinkKey, when, type AuditEvent, type AuditSink, type OrgId, type StoredDocument } from "@agentx/contracts";
 import { TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";

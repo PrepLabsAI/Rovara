@@ -12,7 +12,6 @@ import { parseChangedFiles } from "../../packages/broker/src/core/proof/changed-
 import { recomputeRisk, withLinearCloseLine } from "../../packages/broker/src/core/proof/pull-request-body.js";
 import { pullRequestTitle, workflowPullRequestBody, workflowPullRequestCheckVerdict, workflowPullRequestStatusLines } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
 import { rewriteAttributionBody } from "../../packages/contracts/src/attribution.js";
-import { feedbackFixesSection, withFeedbackFixes, withStatusLines } from "../../packages/broker/src/developer/pull-request-feedback-section.js";
 
 const taskId = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
 const ownerId = "a".repeat(64);
@@ -544,56 +543,6 @@ describe("the version 2 pull request description", () => {
     expect(body.split("\n")[0]).not.toMatch(/@(?!‍)/u);
     expect(body.split("\n")[0]).toContain("Ping");
   });
-
-  it("stays under the byte cap whatever it is given, and keeps its markers, risk and closing line", () => {
-    const longPlan = Array.from({ length: 400 }, (_, index) => `${index}. ${"A long plan sentence. ".repeat(40)}`).join("\n");
-    const files = Array.from({ length: 200 }, (_, index) => file(`src/${"deep/".repeat(80)}file-${index}.test.ts`, 5, 5));
-    const labels = Array.from({ length: 60 }, (_, index) => check(`c${index}`, `Check number ${index} ${"label ".repeat(10)}`));
-    const findings = Array.from({ length: 20 }, (_, index) => ({ text: `Finding ${index} ${"text ".repeat(100)}`.slice(0, 600), origin: "PRE_EXISTING", severity: "LOW", file: `src/f${index}.ts`, line: 1 }));
-    const code = candidate("1");
-    const heavy = workflowWith({
-      checkPolicy: { required: labels, optional: [], selectedOptionalIds: [], proposed: [] },
-      verification: { candidateDigest: code.digest, producer: "agentx-broker", environmentId: "ci", recordedAt: now, results: labels.map((item) => ({ checkId: item.id, status: "PASS" })) },
-      reviews: [
-        { operationId: randomUUID(), candidateDigest: code.digest, role: "CRITIC", provider: "t", version: "1", status: "PASS", findings, readOnly: true, recordedAt: now },
-        { operationId: randomUUID(), candidateDigest: code.digest, role: "SECURITY", provider: "t", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: now },
-      ],
-      acceptedFindings: findings.map((finding) => ({ candidateDigest: code.digest, role: "CRITIC", fingerprint: workflowFindingFingerprint("CRITIC", finding), text: finding.text, reason: "r".repeat(500), actorId: ownerId, at: now })),
-    });
-    const body = workflowPullRequestBody(task, heavy, longPlan, SESSION, { changedFiles: { files, complete: true } });
-    expect(Buffer.byteLength(body, "utf8")).toBeLessThanOrEqual(30_000);
-    expect(body.split(START)).toHaveLength(2);
-    expect(body.split(END)).toHaveLength(2);
-    expect(body).toMatch(/\n## .* risk · /u);
-    expect(body).toContain("**Risk** ");
-    expect(body).toContain(`Rovara session: ${SESSION}`);
-    expect(body.trimEnd().endsWith(CLOSING)).toBe(true);
-    // A body that big can still be regenerated in place.
-    expect(withStatusLines(body, ["- a new line"])).toBeDefined();
-  });
-
-  it("a pushed fix regenerates only the marked block: the person's words around it stay, and the risk is recomputed", () => {
-    const first = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, context());
-    expect(first).toContain("Low risk");
-    const edited = `Heads up from Priya: please look at the retry cap first.\n\n${first}\n\nPS: merged after the standup.`;
-    // A CI fix then touched infra/: another candidate, with its own diff.
-    const fixed = workflowWith({ candidate: candidate("2"), reviews: workflowWith().reviews!.map((review) => ({ ...review, candidateDigest: candidate("2").digest })),
-      verification: { candidateDigest: candidate("2").digest, producer: "agentx-broker", environmentId: "ci", recordedAt: now, results: [{ checkId: "unit", status: "PASS" }] } });
-    const lines = workflowPullRequestStatusLines(fixed, context({ changedFiles: { files: [file("src/retry.ts"), file("infra/queue.ts")], complete: true } }));
-    const next = withStatusLines(edited, lines);
-    expect(next).toBeDefined();
-    expect(next).toContain("Heads up from Priya: please look at the retry cap first.");
-    expect(next).toContain("PS: merged after the standup.");
-    expect(next).toContain("High risk");
-    expect(next).not.toContain("Low risk");
-    expect(next).toContain("infra/queue.ts");
-    expect(next).toContain(`Rovara session: ${SESSION}`);
-    expect(next).toContain(CLOSING);
-    expect(next).toContain("Add the retry flag.");
-    // Nothing else moved: putting the first lines back gives the first block again.
-    const back = withStatusLines(next!, workflowPullRequestStatusLines(workflowWith(), context()));
-    expect(back).toBe(edited);
-  });
 });
 
 // Blind test 02 (staging 0.4.13): the plan said "Four files change" and the pull request changed five. The count of files comes from the diff; a model's count that differs is corrected in place and
@@ -765,21 +714,6 @@ describe("a pull request for a session bound to a Linear issue", () => {
     }
   });
 
-  it("keeps it exactly once when the block is rewritten after a fix, and adds it when the issue was bound after the pull request opened", () => {
-    const wf = workflowWith();
-    const first = workflowPullRequestBody(task, wf, planOf, SESSION, context({ linearIssueKey: "ENG-142" }));
-    const noted = `A note from Priya, kept.\n\n${first}`;
-    // Rewriting with the same lines changes nothing (undefined); a rewrite after a fix, with the new code's lines, replaces the block and keeps the one line.
-    expect(withStatusLines(noted, workflowPullRequestStatusLines(wf, context({ linearIssueKey: "ENG-142" })))).toBeUndefined();
-    const fixed = withStatusLines(noted, workflowPullRequestStatusLines(wf, { changedFiles: { files: [file("src/retry.ts", 10, 2), file("src/other.ts", 1, 1)], complete: true }, linearIssueKey: "ENG-142" }))!;
-    expect(closers(fixed)).toEqual(["Fixes ENG-142"]);
-    // The rewritten block says what the new code changed (two files now), and the person's note stays.
-    expect(fixed).toContain("**Changed** 2 files, +11 -3.");
-    expect(fixed).toContain("A note from Priya, kept.");
-    const unbound = workflowPullRequestBody(task, wf, planOf, SESSION, context());
-    expect(closers(withStatusLines(unbound, workflowPullRequestStatusLines(wf, context({ linearIssueKey: "ENG-142" })))!)).toEqual(["Fixes ENG-142"]);
-  });
-
   it("keeps the line when the lists shrink to fit the byte cap", () => {
     const many = Array.from({ length: 400 }, (_, index) => file(`src/generated/module-${index}-${"x".repeat(120)}.ts`, 3, 1));
     const body = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, { changedFiles: { files: many, complete: true }, linearIssueKey: "ENG-142" });
@@ -889,21 +823,6 @@ describe("every text path into a version 2 pull request leaves no Linear key but
     const body = workflowPullRequestBody(task, workflowWith(), planOf, SESSION, withOwn());
     expect(body).toContain(`Rovara session: ${SESSION}`);
     expect(body).toContain(CLOSING);
-  });
-
-  it("the 'Fixes from PR feedback' section, which a reviewer model writes from comments anyone can post", () => {
-    const fixes = [
-      { summary: "Fixes OPS-12 and the null check", comments: ["https://github.com/example/demo/pull/42#issuecomment-1"] },
-      { summary: "_Part of OPS-13_: closes OPS-14", comments: [] },
-      { summary: "Resolves UTF-8 handling", comments: ["https://github.com/example/demo/pull/42#issuecomment-2", "https://github.com/example/demo/pull/42#issuecomment-3"] },
-    ];
-    const section = withFeedbackFixes(`${workflowPullRequestBody(task, workflowWith(), planOf, SESSION, withOwn())}`, fixes);
-    expect(section.body).toBeDefined();
-    expect(readable(section.body!)).toEqual(["Fixes ENG-142"]);
-    // Ordinary text of the section is as it was.
-    expect(section.body).toContain("Fixes from PR feedback");
-    expect(section.body).toContain("the null check");
-    expect(readable(feedbackFixesSection(fixes, 10_000))).toEqual([]);
   });
 
   it("without a key of its own, no key at all", () => {

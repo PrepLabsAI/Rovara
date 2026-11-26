@@ -1,6 +1,6 @@
 // Shared AWS broker record shapes, dependency interfaces, and protocol constants (extracted from aws/broker.ts).
 import { e2ePrivateTransferMaxBytes } from "@agentx/verifier";
-import { type AdminChangeOutcome, type ClientRepositoriesResponse, type CodeBuildCheckResult, type DeveloperRequester, type E2ESourceSnapshot, type Ec2RuntimeBinding, IMPLICIT_COMPANY_ID, type ModelIdentifier, type OfferedAgentModels, OrgIdSchema, type PlanDocument, type ProjectDefinition } from "@agentx/contracts";
+import { type AdminChangeOutcome, type ClientRepositoriesResponse, type CodeBuildCheckResult, type DeveloperRequester, type E2ESourceSnapshot, type Ec2RuntimeBinding, IMPLICIT_COMPANY_ID, type ModelIdentifier, type OfferedAgentModels, OrgIdSchema, type ProjectDefinition } from "@agentx/contracts";
 import type { SlackRequester } from "./slack-broker-events.js";
 import type { RuntimeBinding } from "./lambda.js";
 import type { BrokerCoreRoot } from "./core-engine-root.js";
@@ -29,13 +29,13 @@ import type { ConnectorCredentialsConfiguration, CredentialRegistry } from "./cr
 import type { TurnRecordExport } from "./turns.js";
 import type { ConnectorType } from "./connector-types.js";
 import type { AdminReadDependencies } from "./admin-reads.js";
-import type { PlanEvidenceEvent } from "../developer/plan-evidence-jobs.js";
-import type { AutofixConfig } from "./workflow-autofix-runner.js";
+
+
 import type { EvalBatchDependencies } from "./eval-batch.js";
-import type { ApplicationEvidenceVerification } from "../e2e/application-evidence.js";
-import type { DeveloperTaskRecord } from "../developer/task-records.js";
-import type { GroundingUnavailableReason } from "./workflow-e2e-grounding.js";
-import type { startTaskWorkflowE2EChecksFromSystem, startTaskWorkflowReviewFromSystem } from "./developer-tasks.js";
+
+
+
+
 
 export const MAX_ARTIFACT_BYTES = 5_000_000;
 
@@ -49,13 +49,6 @@ export const MAX_SETUP_EVIDENCE_BYTES = e2ePrivateTransferMaxBytes(64, 4);
 export const LEGACY_E2E_COMPANY = OrgIdSchema.parse(IMPLICIT_COMPANY_ID);
 
 export const SETUP_ARTIFACT_CHUNK_BYTES = 64 * 1024;
-
-// 100,000 complete tree paths at the 1,024-byte path ceiling, plus the accepted 4 MiB source
-// materialization (base64 expansion and bounded JSON envelope). This is a private chunked object
-// ceiling, not a larger HTTP/report limit.
-export const MAX_WORKFLOW_CANDIDATE_EXPORT_BYTES = 112 * 1024 * 1024;
-
-export const WORKFLOW_CANDIDATE_CHUNK_BYTES = 64 * 1024;
 
 export const EVENT_TRANSACTION_CHUNK = 80;
 
@@ -265,20 +258,6 @@ export interface AwsBrokerDependencies {
   adminReads?: Partial<Pick<AdminReadDependencies, "me" | "health" | "now" | "log">>;
   /** Spec 025 phase 25e: the admin changes' method switch, clock and metric; the defaults serve production. */
   adminChanges?: { confirm?: { elicitation: boolean; slack: boolean }; now?: () => number; metric?: (outcome: AdminChangeOutcome) => void };
-  /** Spec 061: asks the PlanEvidence job to work a plan's evidence row (an async Lambda invoke); absent when the deployment has none. */
-  startPlanEvidenceJob?: (event: PlanEvidenceEvent) => Promise<void>;
-  /** Plan self-check (checks every coding plan, asks the planner again once when it finds a fixable problem): on unless this is false, the installation's kill switch (PLAN_SELF_CHECK_ENABLED=false). */
-  planSelfCheck?: boolean;
-  /** T7c: false turns the hold for the current-app check off (a plan is shown at once); the default is on. */
-  planGrounding?: boolean;
-  /** T7c: starts the held plan's check on the current app; tests replace it (the real one builds an admission from an exported source). */
-  startPlanGrounding?: (
-    dependencies: AwsBrokerDependencies,
-    routeDependencies: Parameters<typeof startTaskWorkflowE2EChecksFromSystem>[0],
-    input: { task: DeveloperTaskRecord; caller: Parameters<typeof startTaskWorkflowReviewFromSystem>[3]; planOperationId: string; plan: PlanDocument; artifact: { id: string; sha256: string }; attempt?: number },
-  ) => Promise<{ outcome: "STARTED" | "DUPLICATE" | "STALE" } | { outcome: "UNAVAILABLE"; reason: GroundingUnavailableReason } | { outcome: "NOTHING_TO_GROUND" }>;
-  /** AUTOFIX: automatic fixing of blocked checks and reviews. Absent: off (the harnesses); the deployed Lambda sets it from its environment (on unless AUTOFIX_ENABLED=false). */
-  autofix?: AutofixConfig;
   /** Spec 043: SWE-bench runs; absent in a harness that does not exercise them. */
   swebench?: Pick<EvalBatchDependencies, "deployment" | "startExecution" | "stopBatchForThread" | "onRunEnded" | "now" | "estimateRunCostUsd">;
 }
@@ -289,7 +268,7 @@ export interface AwsBrokerDependencies {
  * export from `turnRecordsTableName` unless one is injected.
  */
 export type AwsBrokerInput = Omit<AwsBrokerDependencies, "catalogs"> & {
-  /** Lane E2 step 6: the core engine's root (aws/core-engine-root.ts). Absent, or its switch off: the broker never reaches the core. */
+  /** Lane E2 step 6: the core engine's root (aws/core-engine-root.ts). Absent (no core wired on this install): the broker never reaches the core. */
   core?: BrokerCoreRoot;
   catalogs?: CatalogCache<ScopeDiscovery>;
   connectorCredentials?: ConnectorCredentialsConfiguration;
@@ -328,26 +307,3 @@ export const TASK_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}
  * setup run's owner checks and terminal fence, requireMembership) keys its grant with this.
  */
 export const LEGACY_REVISION_GRANT: undefined = undefined;
-
-/** What a verification hands the presentation: the authenticated plan and round, the broker's own re-collected results, and (for a browser and API round) the display rows derived from them. */
-export type WorkflowE2EProjection = { plan?: unknown; round?: unknown; results: unknown[]; allowStaleProjection?: boolean; display?: NonNullable<ApplicationEvidenceVerification["display"]> };
-
-export interface WorkflowE2EVerificationDiagnostic {
-  reason?: string;
-  /** Set when the evidence verified was an application round's, whose reasons are safe and useful to show the owner. */
-  application?: true;
-  /** Set once current authority was judged (valid or not): a reason found without it is about the evidence, not about authority. */
-  authorityEvaluated?: true;
-  /**
-   * Why an application round's authority moved, when it was the runtime: `requalified` (the admitted row was replaced; the owner approves the plan again against the
-   * new row) or `unusable` (no ready row of that kind; an administrator qualifies the runtime again). `accounts`: a test account the plan was approved with is not the
-   * registered one now (the owner approves the plan again). The result callback words its block by it.
-   */
-  runtimeChange?: "requalified" | "unusable" | "accounts";
-  /** Exact authority rows validated for this result, carried into the same task-state transaction. */
-  authorityChecks?: Array<Record<string, unknown>>;
-}
-
-export type AuthorityMark = (stage: string) => void;
-
-export type AuthorityReject = (reason: string) => false;

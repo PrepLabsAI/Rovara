@@ -5,10 +5,10 @@ import { type CheckEntry } from "../../packages/contracts/src/index.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createDocumentEvidenceBlobStore } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
 import { keepEvidence, loadRepositoryEdges, repositoryEdgesKey, type KeepEvidenceDeps } from "../../packages/broker/src/core/proof/evidence-keep.js";
-import { createRepositoryEdgesSeam, createTaskRepositoryEdgesSeam, mergeOrderOf, prepareMerge, pressMerge, type MergeTask } from "../../packages/broker/src/core/merge/index.js";
+import { createRepositoryEdgesSeam, createTaskRepositoryEdgesSeam, mergeOrderOf, prepareMerge, type MergeTask } from "../../packages/broker/src/core/merge/index.js";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
-import { ORG, TASK_ID, mergeWorld } from "../support/merge-world.js";
+import { ORG, TASK_ID, mergeWorld, pressAsOwner } from "../support/merge-world.js";
 import { scanTextForTests } from "../support/evidence-scan.js";
 
 const DIGEST = "c".repeat(64);
@@ -158,7 +158,7 @@ describe("the merge-order seam", () => {
     merge.deps.repositoryEdges = createRepositoryEdgesSeam({ blobs: w.blobs, companyId: ORG, locate: async (task) => located(task) });
     const prepared = await merge.prepare();
     expect(prepared.mergeOrder).toEqual(["payments-lib", "app"]);
-    expect((await pressMerge(merge.deps, { taskId: TASK_ID, requestId: prepared.request.requestId, proof: merge.proofFor(prepared) })).status).toBe("MERGED");
+    expect((await pressAsOwner(merge.deps, prepared)).status).toBe("MERGED");
     // An unreadable record is "no safe order" until a person confirms.
     const broken = await mergeWorld({ pullRequests: [{ repositoryId: "app", number: 1 }, { repositoryId: "payments-lib", number: 1 }] });
     await broken.seedTracking();

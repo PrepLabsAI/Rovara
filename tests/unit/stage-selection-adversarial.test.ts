@@ -25,8 +25,9 @@ import { workflowUpdateItem } from "../../packages/broker/src/core/merge/store.j
 import { commitWorkflow } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
 import { createTaskFlow } from "../../packages/broker/src/core/task-flow/flow.js";
-import { pressMerge, prepareMerge } from "../../packages/broker/src/core/merge/index.js";
-import { TASK_ID, mergeWorld } from "../support/merge-world.js";
+import { prepareMerge } from "../../packages/broker/src/core/merge/index.js";
+import { TASK_ID, mergeWorld, pressAsOwner } from "../support/merge-world.js";
+import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { scopeBanner, scopeOf } from "../../packages/broker/src/core/build-step/scope-question.js";
 import { vi } from "vitest";
 import { ESTIMATE_MIN_SAMPLES, ROVARA_CODE_AGENT_ID, runCostKey } from "@agentx/contracts";
@@ -853,21 +854,19 @@ describe("T8: what skipping must not skip", () => {
     expect(proofs.items).toEqual([]);
   });
 
-  it("T8b-person-merges: skipping planning changes nothing about the merge approval: the same requirement, and no merge without the person's proof", async () => {
+  it("T8b-person-merges: skipping planning changes nothing about the merge approval: the same requirement and the same kind of request", async () => {
     const at = new Date().toISOString();
     const requirementOf = async (skipped: boolean) => {
       const world = await mergeWorld({ withoutTier: true });
       await world.seedTracking();
       await world.setWorkflow({ flow: { rulesVersion: 1, tier: { level: "small", kinds: ["code_config"], source: "diff", reasons: [], at }, ...(skipped ? { skippedSteps: ["plan_check", "plan_approval"] } : {}) } });
       const prepared = await prepareMerge(world.deps, { taskId: TASK_ID, requestId: world.requestId() });
-      const refused = await pressMerge(world.deps, { taskId: TASK_ID, requestId: prepared.request.requestId, proof: world.proofFor(prepared, { artifactDigest: "0".repeat(64) }) }).then(() => "merged", () => "refused");
-      return { requirement: JSON.stringify(prepared.requirement), kind: prepared.request.kind, refused };
+      return { requirement: JSON.stringify(prepared.requirement), kind: prepared.request.kind };
     };
     const today = await requirementOf(false);
     const lighter = await requirementOf(true);
     expect(lighter.requirement).toBe(today.requirement);
     expect(lighter.kind).toBe("merge");
-    expect(lighter.refused).toBe("refused");
   });
 
   it("T8c-spend: the small route's coding run keeps the run's cost estimate and starts through the same dispatch row as an approved plan's", async () => {
@@ -1642,7 +1641,7 @@ describe("X: the hold never fails open", () => {
     console.log("X4 held", scopeHolds(task.workflow.flow, await readScopeQuestion({ store: world.store }, TASK_ID)));
     // The refusal may come at the request (prepare) or at the press: either way nothing merges.
     const result = await prepareMerge(world.deps, { taskId: TASK_ID, requestId: world.requestId() })
-      .then((prepared) => pressMerge(world.deps, { taskId: TASK_ID, requestId: prepared.request.requestId, proof: world.proofFor(prepared) }))
+      .then((prepared) => pressAsOwner(world.deps, prepared))
       .then(() => "merged", (error: unknown) => `refused: ${error instanceof Error ? error.message : String(error)}`);
     expect(result).not.toBe("merged");
   });
@@ -2118,13 +2117,12 @@ describe("C: a Keep is for the whole change, and no hold is silent or stalled", 
     const kept = { taskId: TASK_ID, kind: "scope", state: "kept", version: 1, headSha: head, request: "x", area: "a sensitive path", files: [{ path: "src/a.ts", additions: 1, deletions: 0, area: "a sensitive path" }], contentDigest: "0", askedAt: at };
     await world.store.put({ item: { ...scopeQuestionKey(TASK_ID), entityType: "SCOPE_QUESTION", version: 1, question: kept } });
     const prepared = await prepareMerge(world.deps, { taskId: TASK_ID, requestId: world.requestId() });
-    // Asked again (new content) while the press checks the person's proof: after the press's own request was made, before the merge.
-    const verify = world.deps.approvers.verify.bind(world.deps.approvers);
-    const deps = { ...world.deps, approvers: { ...world.deps.approvers, verify: async (...args: Parameters<typeof verify>) => {
+    // Asked again (new content) while the press checks the company's rules for the person: after the press's own request was made, before the merge.
+    const deps = { ...world.deps, personPress: async () => {
       await world.store.put({ item: { ...scopeQuestionKey(TASK_ID), entityType: "SCOPE_QUESTION", version: 2, question: { ...kept, state: "open", version: 2 } } });
-      return verify(...args);
-    } } };
-    const result = await pressMerge(deps, { taskId: TASK_ID, requestId: prepared.request.requestId, proof: world.proofFor(prepared) }).then(() => "merged", (error: unknown) => String(error));
+      return { allowed: true };
+    } };
+    const result = await pressAsOwner(deps, prepared, { presser: localOwnerPrincipal() }).then(() => "merged", (error: unknown) => String(error));
     expect(result).toMatch(/grew from small to risky/u);
   });
 
