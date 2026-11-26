@@ -35,3 +35,12 @@ Same method; 34 tests in the contract file. All KILLED.
 |---|--------|--------|-------------------|
 | 14 | Any failure of the lessons part refuses the whole answer again (the catch returns `refuse()`, skills dropped) | KILLED | the lessons' set read throws; learning settings unreadable; a stored mode that is not a mode; the 2.5 s clock; the lessons fail while the skills read is under way |
 | 15 | The skills read is stopped by the lessons' `stopped`/`failed` flags again (`alive: () => !stopped && !failed`) | KILLED | "the lessons fail at once while the skills read is still under way", "learning settings are unreadable" |
+
+## Round 4: the laptop and broker road (`lessons/host-glue.ts` `skillsFor`) follows the same rule
+
+`tests/unit/knowledge/skills.test.ts` (50 tests, `--maxWorkers=1`, includes the hosted-vs-laptop parity test). All KILLED.
+
+| # | Mutant | Result | Tests that failed |
+|---|--------|--------|-------------------|
+| 17 | `skillsFor` gated by the install's lessons switch again (`!enabled()` back) | KILLED | "PARITY with the hosted dispatcher's reader", "sends the live skills whatever the install's lessons switch and the project's learning mode say" |
+| 18 | `skillsFor` gated by the project's learning mode again (`resolveLearning` + `modeAllows` back) | KILLED | the same two |
