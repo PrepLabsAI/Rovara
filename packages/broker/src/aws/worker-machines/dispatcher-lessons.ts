@@ -87,6 +87,9 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
     if (!lessonsOn && !(Array.isArray(input?.features) && input.features.includes(ROVARA_SKILLS_FEATURE))) return {};
     let stopped = false;
     let failed = false;
+    // The skills' own read (started once the task is known) and the end of the whole call: the skills depend on neither the lessons' failures nor their clock, only on this call still being open.
+    let skillsRun: Promise<RovaraSkillFile[]> | undefined;
+    let ended = false;
     let reads = 0;
     let items = 0;
     let bytes = 0;
@@ -173,8 +176,9 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
       // The project's live skills, from the SAME selector the laptop path uses, for THIS task's own company and project (read from the workspace record and the task above, never from the request). Never throws. They are read
       // BESIDE the lessons, on a clock and a share of reads of their own (`DISPATCHER_SKILLS_LIMITS`, through `options.store` directly): the lessons' reads, counters and 2.5 s run clock never see them, and the answer waits
       // for them at most as long as their own clock (it starts here, so by the time the lessons are done it is usually over). Whatever the learning mode and the lessons switch say, they are given.
-      const skillsRun: Promise<RovaraSkillFile[]> = wantsSkills ? readHostedLiveSkills({ store: options.store, company, project: task.project, alive: () => !stopped && !failed }) : Promise.resolve([]);
-      const finish = async (answer: object) => { const skills = await skillsRun; check(); return withSkills(answer, skills); };
+      const started: Promise<RovaraSkillFile[]> = wantsSkills ? readHostedLiveSkills({ store: options.store, company, project: task.project, alive: () => !ended }) : Promise.resolve([]);
+      skillsRun = started;
+      const finish = async (answer: object) => { const skills = await started; check(); return withSkills(answer, skills); };
       if (!wantsLessons) return finish({});
       const resolved = await resolveLearning(settings, company, task.project);
       check();
@@ -298,7 +302,12 @@ export function createDispatcherLearned(options: DispatcherLessonsOptions): Lear
         timer = setTimeout(() => { stopped = true; reject(agentXError("RUNTIME_UNAVAILABLE", DISPATCHER_LESSONS_UNAVAILABLE)); }, LESSON_LOAD_DEADLINE_MS);
         timer.unref?.();
       })]);
-    } catch { return refuse(); }
-    finally { stopped = true; if (timer !== undefined) clearTimeout(timer); }
+    } catch {
+      // ANY failure of the lessons part (unreadable settings, a failed or over-budget read, a refused set, the 2.5 s clock) is no lessons, never no skills: the skills read began once the company and the task were proved, on its
+      // own scope and share, and its own failure is already "no skills". A failure before that point (no company, no task, a foreign workspace) gives nothing at all.
+      const skills = skillsRun === undefined ? [] : await skillsRun;
+      return skills.length === 0 ? refuse() : withSkills({}, skills);
+    }
+    finally { ended = true; stopped = true; if (timer !== undefined) clearTimeout(timer); }
   };
 }

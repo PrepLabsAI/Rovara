@@ -7,7 +7,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { KNOWLEDGE_CONTEXT_FEATURE, LEARNED_CONTEXT_FEATURE, ROVARA_SKILLS_FEATURE, WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, companyScoped, learningModeLockKey, lessonSetKey, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition } from "../../packages/contracts/src/index.js";
+import { KNOWLEDGE_CONTEXT_FEATURE, LEARNED_CONTEXT_FEATURE, ROVARA_SKILLS_FEATURE, WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, companyScoped, learningModeKey, learningModeLockKey, lessonSetKey, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition } from "../../packages/contracts/src/index.js";
 import { hostedDispatcherFlow } from "../../packages/broker/src/aws/worker-machines/dispatcher-core.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { DocumentLessonStore } from "../../packages/broker/src/lessons/document-store.js";
@@ -436,5 +436,93 @@ describe("the skills' read has a share of its own (time, reads, bytes) and can n
     const answer = await w.learned({ workspaceId: WS, operationId: randomUUID(), workflowMode: "PLAN", features: WORKER_FEATURES });
     expect(lessonIds(answer)).toEqual(["les_aaaa1111"]);
     expect(namesOf(answer)).toHaveLength(8);
+  });
+});
+
+// DEC 254zzz577 (a), the second half: the skills' result does not depend on the lessons' result. Whatever goes wrong on the lessons side (unreadable learning settings, a failed or refused lessons read, the 2.5 s run clock) is "no lessons",
+// never "no skills"; the skills fail closed only on their OWN scope and read (a foreign workspace, a throwing skills store).
+describe("a lessons-side failure never takes the skills away (and a skills-side failure never takes the lessons)", () => {
+  const faultOn = (w: Awaited<ReturnType<typeof world>>, hit: (key: { pk: string; sk: string }) => boolean): void => {
+    const original = w.store.get.bind(w.store);
+    vi.spyOn(w.store, "get").mockImplementation(async (key) => { if (hit(key)) throw new Error("store fault"); return original(key); });
+  };
+  const same = (a: { pk: string; sk: string }, b: { pk: string; sk: string }): boolean => a.pk === b.pk && a.sk === b.sk;
+  const WANT = { workspaceId: WS, workflowMode: "PLAN", features: WORKER_FEATURES };
+
+  it("the lessons' set read throws: no lessons, the skill is still delivered (control: with no skill the same fault refuses the step)", async () => {
+    const control = await world({ skill: false });
+    faultOn(control, (key) => same(key, lessonSetKey(A, PROJECT)));
+    await expect(control.learned({ ...WANT, operationId: randomUUID() })).rejects.toThrow();
+    const w = await world();
+    faultOn(w, (key) => same(key, lessonSetKey(A, PROJECT)));
+    for (const workflowMode of ["PLAN", "IMPLEMENT"]) {
+      const answer = await w.learned({ ...WANT, workflowMode, operationId: randomUUID() });
+      expect(answer.learnedContext, workflowMode).toBeUndefined();
+      expect(namesOf(answer), workflowMode).toEqual([SKILL_NAME]);
+    }
+  });
+
+  it("the project's learning settings are unreadable: no lessons, the skill is still delivered (control: with no skill the step is refused)", async () => {
+    for (const hit of [(key: { pk: string; sk: string }) => same(key, learningModeKey(A, PROJECT)), (key: { pk: string; sk: string }) => same(key, learningModeLockKey(A))]) {
+      const control = await world({ skill: false });
+      faultOn(control, hit);
+      await expect(control.learned({ ...WANT, operationId: randomUUID() })).rejects.toThrow();
+      const w = await world();
+      faultOn(w, hit);
+      const answer = await w.learned({ ...WANT, operationId: randomUUID() });
+      expect(answer.learnedContext).toBeUndefined();
+      expect(namesOf(answer)).toEqual([SKILL_NAME]);
+    }
+  });
+
+  it("a stored learning mode that is not a mode: still the skill, no lessons", async () => {
+    const w = await world();
+    await w.store.put({ item: { ...learningModeKey(A, PROJECT), entityType: "LESSON_MODE", mode: "not-a-mode", updatedAt: now } });
+    const answer = await w.learned({ ...WANT, operationId: randomUUID() });
+    expect(answer.learnedContext).toBeUndefined();
+    expect(namesOf(answer)).toEqual([SKILL_NAME]);
+  });
+
+  it("the lessons run out the 2.5 s clock: no lessons, the skill (read beside them in its own 0.7 s) is still delivered", async () => {
+    const w = await world();
+    const original = w.store.get.bind(w.store);
+    vi.spyOn(w.store, "get").mockImplementation(async (key) => { if (same(key, lessonSetKey(A, PROJECT))) await new Promise((resolve) => setTimeout(resolve, 10_000)); return original(key); });
+    vi.useFakeTimers();
+    let answer: Awaited<ReturnType<typeof ask>> | undefined; let refused = false;
+    w.learned({ ...WANT, operationId: randomUUID() }).then((value) => { answer = value; }, () => { refused = true; });
+    for (let step = 0; answer === undefined && !refused && step < 600; step += 1) await vi.advanceTimersByTimeAsync(10);
+    vi.useRealTimers();
+    expect(refused).toBe(false);
+    expect(namesOf(answer ?? {})).toEqual([SKILL_NAME]);
+    expect((answer as { learnedContext?: unknown } | undefined)?.learnedContext).toBeUndefined();
+  });
+
+  it("the lessons fail at once while the skills read is still under way (200 ms a read): the skills read is let finish, and the skill is delivered", async () => {
+    const w = await world();
+    const original = w.store.get.bind(w.store);
+    vi.spyOn(w.store, "get").mockImplementation(async (key) => {
+      if (same(key, lessonSetKey(A, PROJECT))) throw new Error("store fault");
+      if (key.pk.includes("SKILL#")) await new Promise((resolve) => setTimeout(resolve, 200));
+      return original(key);
+    });
+    vi.useFakeTimers();
+    let answer: Awaited<ReturnType<typeof ask>> | undefined; let refused = false;
+    w.learned({ ...WANT, operationId: randomUUID() }).then((value) => { answer = value; }, () => { refused = true; });
+    for (let step = 0; answer === undefined && !refused && step < 300; step += 1) await vi.advanceTimersByTimeAsync(10);
+    vi.useRealTimers();
+    expect(refused).toBe(false);
+    expect(namesOf(answer ?? {})).toEqual([SKILL_NAME]);
+  });
+
+  it("the skills' own failures are still closed: a throwing skills store gives no skills, a foreign workspace gives nothing, and both together give a refused step", async () => {
+    const w = await world();
+    faultOn(w, (key) => key.pk.includes("SKILL#"));
+    const lessonsOnly = await w.learned({ ...WANT, operationId: randomUUID() });
+    expect(lessonsOnly.rovaraSkills).toBeUndefined();
+    expect(lessonsOnly.learnedContext?.lessons.map((lesson) => lesson.id)).toEqual(["les_aaaa1111"]);
+    const both = await world();
+    faultOn(both, (key) => key.pk.includes("SKILL#") || same(key, lessonSetKey(A, PROJECT)));
+    await expect(both.learned({ ...WANT, operationId: randomUUID() })).rejects.toThrow();
+    await expect(w.learned({ ...WANT, workspaceId: "33333333-3333-4333-8333-333333333333", operationId: randomUUID() })).rejects.toThrow();
   });
 });

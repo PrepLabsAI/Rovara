@@ -26,3 +26,12 @@ Same method: one edit at a time (script in the lane's scratchpad), `tests/contra
 | 11 | Time budget 700 ms -> 60 s | KILLED | "S2: a skills read that runs out its whole clock", "S2: a skills-only answer", "S3 (time)" |
 | 12 | Time budget 700 ms -> 100 ms (too tight) | KILLED | "S2: a skills-only answer", "S3 (time)" |
 | 13 | A throwing skills store is no longer swallowed (the `() => undefined` and the `catch` removed) | KILLED | "S3 (fault)", "S3 (bytes)" |
+
+## Round 3: the skills' result is independent of the lessons' result (coordinator, same night)
+
+Same method; 34 tests in the contract file. All KILLED.
+
+| # | Mutant | Result | Tests that failed |
+|---|--------|--------|-------------------|
+| 14 | Any failure of the lessons part refuses the whole answer again (the catch returns `refuse()`, skills dropped) | KILLED | the lessons' set read throws; learning settings unreadable; a stored mode that is not a mode; the 2.5 s clock; the lessons fail while the skills read is under way |
+| 15 | The skills read is stopped by the lessons' `stopped`/`failed` flags again (`alive: () => !stopped && !failed`) | KILLED | "the lessons fail at once while the skills read is still under way", "learning settings are unreadable" |
