@@ -15,7 +15,8 @@ export type TaskAction = "read" | "peopleRead" | "comment" | "suggest" | "decide
 export const TASK_ACTION_ROLES: Record<TaskAction, readonly TaskRole[]> = {
   read: ["owner", "commenter", "viewer"],
   peopleRead: ["owner", "commenter", "viewer"],
-  comment: ["owner", "commenter"],
+  // READ-RULE-SHARE-B (owner DEC 254zzz577, rule 3): a People-list viewer ("Can view") comments too, as the stored share does; a viewer still never suggests, decides, asks or acts.
+  comment: ["owner", "commenter", "viewer"],
   suggest: ["commenter"],
   decide: ["owner"],
   ask: ["owner", "commenter"],
@@ -40,6 +41,11 @@ export interface TaskAccess {
   ownerActorIds: readonly string[];
   /** The person is not on the task's People list: they read only because the task is shared into a Slack channel they are in (a commenter). The read rule decides what that grants (`CHANNEL_SHARE_PARTS`). */
   viaChannelShare?: true;
+  /**
+   * The stored share row ("Can view", spec 067) this access came from, when it did (`sharedCommenterAccess`): the comment's transaction checks that row still holds (a share revoked between the decision and the write
+   * writes nothing: the write is tied to the row, READ-RULE-SHARE-B / Opus S5). Absent for every access that does not come from a stored share.
+   */
+  sharedRow?: { pk: string; sk: string };
 }
 
 const TASK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -83,9 +89,9 @@ export async function resolveCoreTaskAccess(deps: AccessDependencies, caller: De
  * list's revision and owners where the task has a list. The CALLER proves the share (the one read rule's decision says `shared` for this person on this task); nothing here decides who is a share, and a task that is closed
  * still refuses the comment itself.
  */
-export async function sharedCommenterAccess(deps: AccessDependencies, task: DeveloperTaskRecord): Promise<TaskAccess> {
+export async function sharedCommenterAccess(deps: AccessDependencies, task: DeveloperTaskRecord, developerId: string): Promise<TaskAccess> {
   const binding = await taskListBinding(deps, task);
-  return { task, role: "commenter", ownerActorIds: binding.ownerActorIds ?? [taskOwnerKey(task.developerId, task.taskId)], ...(binding.peopleRevision === undefined ? {} : { peopleRevision: binding.peopleRevision }) };
+  return { task, role: "commenter", sharedRow: { pk: taskKey(task.taskId).pk, sk: `READER#${developerId}` }, ownerActorIds: binding.ownerActorIds ?? [taskOwnerKey(task.developerId, task.taskId)], ...(binding.peopleRevision === undefined ? {} : { peopleRevision: binding.peopleRevision }) };
 }
 
 /** The person reads only because the task is shared into a Slack channel they are in (the People list does not name them). */

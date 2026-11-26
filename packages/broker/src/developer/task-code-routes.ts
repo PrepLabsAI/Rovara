@@ -153,7 +153,7 @@ async function commentAccessOf(deps: RouteDeps, caller: DeveloperCaller, task: T
     return await resolveCoreTaskAccess(deps, caller, task, "comment");
   } catch (error) {
     if (sharedWith === undefined || !(error instanceof AgentXError) || error.code !== "TASK_NOT_FOUND" || !(await sharedWith())) throw error;
-    return await sharedCommenterAccess(deps, task);
+    return await sharedCommenterAccess(deps, task, caller.developerId);
   }
 }
 

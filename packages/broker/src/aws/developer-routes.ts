@@ -1298,29 +1298,30 @@ function memberActions(deps: DeveloperRouteDependencies) {
  * answers `mayStart`: the SAME live test the task start meets, `checkProjectAccess`: the grant, or fresh bound-channel membership while the project lets channel members use it and the person is
  * Slack-linked, for an OLD-engine task only (no engine stamp; a core task's own person needs the grant). Read now, nothing kept; a read that fails (Slack unreachable, a refusal, the stamp) is "no", as at the start. A reader never gets it (a reader needs the grant itself).
  */
-async function taskReaderPerson(deps: DeveloperRouteDependencies, developerId: string, project: string, taskCompany?: string, options?: { ownTask?: true; taskId?: string }): Promise<{ name: string; projectMember: boolean; mayStart?: boolean } | undefined> {
+export async function taskReaderPerson(deps: DeveloperRouteDependencies, developerId: string, project: string, taskCompany?: string, options?: { ownTask?: true; taskId?: string }): Promise<{ name: string; projectMember: boolean; companyMember: boolean; mayStart?: boolean } | undefined> {
   const person = await getSignIn<Pick<DeveloperRecord, "revoked" | "displayName" | "slackUserId">>(deps, `DEVELOPER#${developerId}`);
   if (person === undefined || person.revoked === true) return undefined;
   const name = person.displayName ?? "Unknown";
+  // `companyMember`: a LIVE member of the TASK's company (READ-RULE-SHARE-B). Every answer below is given only after that was proved, except the two "not a member" returns, which say false.
   const answer = async (held: boolean) => {
-    if (options?.ownTask !== true) return { name, projectMember: held };
-    if (held) return { name, projectMember: held, mayStart: true };
+    if (options?.ownTask !== true) return { name, projectMember: held, companyMember: true };
+    if (held) return { name, projectMember: held, companyMember: true, mayStart: true };
     try {
       // Channel access holds an OLD-engine task only: the one the engine stamp (`TASK_ENGINE#<id>`, written by the core's own start) is missing for. A core task's own person needs the grant, as its start
       // and every step do (core-engine-root.ts); no task id, a stamp that is there, or a stamp that cannot be read: grant only.
-      if (options.taskId === undefined || await isCoreTaskThatExists(deps, options.taskId)) return { name, projectMember: held, mayStart: false };
+      if (options.taskId === undefined || await isCoreTaskThatExists(deps, options.taskId)) return { name, projectMember: held, companyMember: true, mayStart: false };
       await checkProjectAccess(deps, { developerId, ...(person.slackUserId === undefined ? {} : { slackUserId: person.slackUserId }) }, project);
-      return { name, projectMember: held, mayStart: true };
-    } catch { return { name, projectMember: held, mayStart: false }; }
+      return { name, projectMember: held, companyMember: true, mayStart: true };
+    } catch { return { name, projectMember: held, companyMember: true, mayStart: false }; }
   };
   // DEC 254zzz80 / 254zzz98 (review L2): a reader of a task must be a LIVE member of the TASK's company, and their grant is read where that company keeps it (beside its
   // revision): never in the reader's own other company, so a share never says whether a person of another company holds a grant there. No live company: no grant.
   // With no company layer at all, nothing here is company-scoped: the legacy grant, byte for byte as before.
   if ((deps.companies ?? deps.developer.companies) === undefined) return answer(await projectGrant(memberActions(deps), project, developerId, undefined) !== undefined);
   let company: string | undefined;
-  try { company = await liveNamedCompany(deps, developerId); } catch { return { name, projectMember: false }; }
+  try { company = await liveNamedCompany(deps, developerId); } catch { return { name, projectMember: false, companyMember: false }; }
   const owning = taskCompany === undefined ? company : namedCompany(taskCompany);
-  if (owning !== company) return { name, projectMember: false };
+  if (owning !== company) return { name, projectMember: false, companyMember: false };
   return answer(await projectGrant(memberActions(deps), project, developerId, owning) !== undefined);
 }
 

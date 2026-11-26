@@ -43,18 +43,26 @@ describe("plan comment parity on core", () => {
   });
 
   // Owner decision 254zzz558 (a WRITE permission): a person the task is shared with by the stored share ("Can view") can comment, as the Slack channel share does. Judged by the one read rule's decision for this person, never by the share row alone.
-  it("a person the task is shared with (the stored share, still a project member, a role the code knows) comments; a person with no share, a lapsed member and an unknown role are refused as before, and nothing is written for them", async () => {
+  // READ-RULE-SHARE-B (owner DEC 254zzz577): the stored share needs a live member of the task's company, NOT a project grant (rule 1); the People list's deny beats it (rule 2, REMOVAL WINS); and the comment's own transaction is tied to the share row (Opus S5).
+  it("a person the task is shared with (the stored share, a live member of the company with or without a project grant, a role the code knows) comments; a person with no share, a person who is no member of the company, a person the People list denies and an unknown role are refused as before, and nothing is written for them", async () => {
     const SHARED = "9".repeat(64);
     const principalOf = (developerId: string) => ({ companyId: COMPANY as never, personId: developerId, displayName: "Reader", roles: ["member" as const], provider: HOSTED_IDENTITY_PROVIDER });
-    const attempt = async (developerId: string, options: { role?: string; projectMember?: boolean } = {}) => {
+    const attempt = async (developerId: string, options: { role?: string; projectMember?: boolean; companyMember?: boolean; denied?: boolean; revokeAfterDecision?: boolean } = {}) => {
       const h = corePage();
       if (options.role !== undefined) h.db.set({ pk: `DEVTASK#${h.taskId}`, sk: `READER#${developerId}`, role: options.role });
-      const routes = createCoreTaskRuleRoutes(() => ({ ...h.deps, taskReaderPerson: async () => ({ name: "Reader", projectMember: options.projectMember ?? true }) }));
+      // The People list names the person `denied` (a deny, or a removal).
+      if (options.denied === true) h.db.set({ pk: `DEVTASK#${h.taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false, people: [{ developerId: PRIYA.developerId, name: PRIYA.name, method: "oidc", role: "owner" }, { developerId, name: "Reader", method: "oidc", role: "denied" }] });
+      const routes = createCoreTaskRuleRoutes(() => ({ ...h.deps, taskReaderPerson: async () => ({ name: "Reader", projectMember: options.projectMember ?? true, companyMember: options.companyMember ?? true }) }));
       const path = `/v1/dev/tasks/${h.taskId}/comments`;
       const call = async (method: string, body?: unknown) => {
         try {
           return await routes.route({ request: { method, path, headers: {}, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }, path, person: { developerId, name: "Reader" }, companyId: COMPANY, task: h.row(), store: { query: async () => ({ items: [] }) },
-            authorize: authorizeFor(routes, { companyId: COMPANY, principal: principalOf(developerId), task: h.row() }) });
+            authorize: async (...asked: Parameters<ReturnType<typeof authorizeFor>>) => {
+              const decision = await authorizeFor(routes, { companyId: COMPANY, principal: principalOf(developerId), task: h.row() })(...asked);
+              // The share is revoked after the rule decided and before the comment is written (S5): the write is tied to the share row.
+              if (options.revokeAfterDecision === true) h.db.delete(`DEVTASK#${h.taskId}`, `READER#${developerId}`);
+              return decision;
+            } });
         } catch (error) { return { statusCode: 404, body: JSON.stringify({ error: { code: (error as { code?: string }).code } }) }; }
       };
       const before = h.rows();
@@ -65,11 +73,18 @@ describe("plan comment parity on core", () => {
     expect(shared.posted.statusCode).toBe(200);
     expect(JSON.parse(shared.posted.body)).toMatchObject({ comment: { text: "Looks right to me.", author: { developerId: SHARED } } });
     expect(JSON.parse((await shared.call("GET")).body)).toMatchObject({ comments: [{ text: "Looks right to me." }] });
-    // No share, a member who lapsed from the project, a role the code does not know: the refusal the People rule always gave, and no row.
-    for (const [name, outcome] of [["no share", await attempt(SHARED)], ["lapsed member", await attempt(SHARED, { role: "viewer", projectMember: false })], ["unknown role", await attempt(SHARED, { role: "editor" })]] as const) {
+    // Rule 1: no project grant is needed, the company is. A person with the share row and NO grant comments.
+    const noGrant = await attempt(SHARED, { role: "viewer", projectMember: false });
+    expect(noGrant.posted.statusCode, "a shared person with no project access").toBe(200);
+    // No share, a person who is not (any more, or never) a member of the task's company, a role the code does not know, and a person the People list denies (REMOVAL WINS over the share row): the refusal the People rule always gave, and no row.
+    for (const [name, outcome] of [["no share", await attempt(SHARED)], ["not a member of the company", await attempt(SHARED, { role: "viewer", companyMember: false })], ["unknown role", await attempt(SHARED, { role: "editor" })], ["denied on the People list", await attempt(SHARED, { role: "viewer", denied: true })]] as const) {
       expect([outcome.posted.statusCode, (JSON.parse(outcome.posted.body) as { error: { code: string } }).error.code], name).toEqual([404, "TASK_NOT_FOUND"]);
       expect(outcome.written, `${name}: nothing written`).toBe(false);
     }
+    // S5: the share is revoked between the decision and the write: the comment's transaction checks the share row, so nothing is written.
+    const revoked = await attempt(SHARED, { role: "viewer", revokeAfterDecision: true });
+    expect([revoked.posted.statusCode, (JSON.parse(revoked.posted.body) as { error: { code: string } }).error.code], "revoked between the decision and the write").toEqual([404, "TASK_NOT_FOUND"]);
+    expect(JSON.stringify(revoked.h.db.find((item) => item.entityType === "TASK_COMMENT")), "no comment row").toBe("[]");
   });
 
   it("a missing or corrupt current artifact refuses a new root without writing", async () => {

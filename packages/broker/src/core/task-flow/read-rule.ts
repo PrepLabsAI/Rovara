@@ -10,6 +10,10 @@
 //   - A share admits a person to the task, and then `SHARED_PARTS` says per read whether that part is shown to that role; a part that is not shown answers TASK_PART_NOT_SHOWN with the
 //     words below (never the missing task's answer for a person the page shows the task to).
 //   - `money` and `sourceCode` are part of the decision, so a handler cannot show either by accident.
+//   - OWNER DECISION 254zzz577 (READ-RULE-SHARE-B), three rules on top of the share cells below. (1) A share (the stored share, the Slack channel share) works for a person with NO project access, but ONLY a SAME-COMPANY person: the
+//     company is checked first for every read, the stored share's seam proves a live member of the TASK's company (not a project grant), and the channel share needs the Slack proof of the install's own workspace (a Slack Connect
+//     or foreign-workspace person is refused). (2) REMOVAL WINS: a person the task's People list names `denied` (a deny, or a removal) is never admitted by a share of either kind (the stored share's seam refuses them; the
+//     People rule, which the channel share goes through, refuses them). (3) Both "Can view" kinds are the same: the People list's viewer and the stored share read the whole page (the plan and the proof included) and can comment.
 //   - OWNER DECISION 254zzz558 (option A): a person a task is SHARED with (the stored share, "Can view"; or the Slack channel it is shared into) reads the WHOLE task page, the code changes included, and can comment; a person with no
 //     share is refused as before. So the share cells below are all "shown", and `ADMITTED_BY` lets both kinds of share into every part of the page: the task read, the events, the timeline, the question box (answers), the spec, the checks and their files, the code changes, the diff, the plan, the proof and the comments.
 import { AgentXError, agentXError, type OrgRole, type Principal } from "@agentx/contracts";
@@ -77,7 +81,8 @@ const ADMITTED_BY: Readonly<Record<TaskRead, readonly Basis[]>> = {
   // The events are for everyone the task is shown to (a co-owner, the People list's commenters and viewers, a share); the readers routes stay the task's person and a share (told only the owner may share).
   events: ["developer", "reads", "shared", "channel"], share: ["developer", "shared"],
   // The page rule (People) first; then the stored share and, for the parts the page rule does not already cover, the Slack channel share (`channel`: only a person the People list does not name, who reads because the task is shared into a channel they are in).
-  diff: ["page", "shared"], comments: ["page", "shared"], plan: ["acts", "shared", "channel"], evidence: ["acts", "shared", "channel"],
+  // READ-RULE-SHARE-B (rule 3, owner DEC 254zzz577): the People list's commenters and viewers ("Can view") read the plan and the proof like a share does (`reads` after `acts`: the owner rule still says "owner" first).
+  diff: ["page", "shared"], comments: ["page", "shared"], plan: ["acts", "reads", "shared", "channel"], evidence: ["acts", "reads", "shared", "channel"],
   spec: ["reads", "shared", "channel"], checks: ["reads", "shared", "channel"], changes: ["reads", "shared", "channel"], timeline: ["reads", "shared", "channel"], evidenceFile: ["reads", "shared", "channel"],
 };
 

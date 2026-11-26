@@ -20,7 +20,7 @@ describe("resolveTaskAccess: the task's own person holds it only while they hold
       fixture.addVersion("plan", pagePlan());
       if (projectMember === "throws") fixture.deps.taskReaderPerson = async () => { throw new Error("grant store unavailable"); };
       else if (projectMember === "unavailable") delete (fixture.deps as { taskReaderPerson?: unknown }).taskReaderPerson;
-      else fixture.deps.taskReaderPerson = async () => ({ name: "Priya", projectMember: false });
+      else fixture.deps.taskReaderPerson = async () => ({ name: "Priya", projectMember: false, companyMember: true });
       for (const action of [undefined, "read", "decide", "retry", "close", "control", "publish", "feedback", "ask", "comment"] as const) {
         const error = await refusal(resolveTaskAccess(fixture.deps, PRIYA, fixture.taskId, action));
         expect([String(projectMember), action, error.code]).toEqual([String(projectMember), action, "TASK_NOT_FOUND"]);
@@ -75,7 +75,7 @@ describe("resolveTaskAccess", () => {
   it("the action table includes every C role and retained human action", () => {
     expect(TASK_ACTION_ROLES).toEqual({
       read: ["owner", "commenter", "viewer"], peopleRead: ["owner", "commenter", "viewer"],
-      comment: ["owner", "commenter"], ask: ["owner", "commenter"], suggest: ["commenter"],
+      comment: ["owner", "commenter", "viewer"], ask: ["owner", "commenter"], suggest: ["commenter"],
       decide: ["owner"], retry: ["owner"], publish: ["owner"], feedback: ["owner"], close: ["owner"], control: ["owner"], peopleManage: ["owner"],
       takeOwnership: ["owner", "commenter", "viewer"],
     });
@@ -85,7 +85,9 @@ describe("resolveTaskAccess", () => {
     expect(can("owner", "suggest")).toBe(false);
     expect(can("viewer", "read")).toBe(true);
     expect(can("viewer", "peopleRead")).toBe(true);
-    expect(can("viewer", "comment")).toBe(false);
+    // READ-RULE-SHARE-B (DEC 254zzz577, rule 3): a People viewer ("Can view") comments, like the stored share; every other write stays out of a viewer's reach.
+    expect(can("viewer", "comment")).toBe(true);
+    for (const action of ["suggest", "decide", "ask", "peopleManage", "retry", "publish", "feedback", "close", "control"] as const) expect(can("viewer", action), action).toBe(false);
   });
 
   it("enforces a readable sidecar, denied tombstones, owner actor IDs, and terminal write refusal", async () => {

@@ -713,6 +713,15 @@ export async function taskOwnerDevelopers(deps: Pick<TaskPeopleDependencies, "do
 }
 
 /**
+ * The role the task's STORED People list gives `developerId`, or undefined when the task has no list or the list does not name them. Read as stored (not re-proved against the live directory), so a person the list names `denied`
+ * (a deny, or a removal: a removed person's entry becomes `denied`) is always seen as denied. A list that cannot be read throws, as every People read does: the one caller (the stored share, READ-RULE-SHARE-B) treats that as "no share".
+ */
+export async function taskPeopleRoleOf(deps: Pick<TaskPeopleDependencies, "documentClient" | "tableName">, taskId: string, developerId: string): Promise<StoredTaskRole | undefined> {
+  const people = await loadPeople(deps, taskId);
+  return people?.people.find((person) => person.developerId === developerId)?.role;
+}
+
+/**
  * What a writer who is not on the task's People list is bound to when they act on it (a stored share's comment): the list's current revision (the access fence of the write, so a list that changes under them fails the write) and its
  * owners, or neither when the task has no list. A list that cannot be read throws, as every People read does.
  */

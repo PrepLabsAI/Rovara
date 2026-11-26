@@ -274,7 +274,7 @@ describe("re-admission: a previous owner is out until a current owner says other
     const h = handedOver();
     const verdict = await h.access().checkStep(h.step);
     expect(verdict).toMatchObject({ allowed: true, owner: { personId: WREN_ID } });
-    const reader = { documentClient: h.db, tableName: "state", taskReaderPerson: async () => ({ name: "x", projectMember: true }) } as never;
+    const reader = { documentClient: h.db, tableName: "state", taskReaderPerson: async () => ({ name: "x", projectMember: true, companyMember: true }) } as never;
     expect(await holdsOwnTask(reader, webTask(), GALE_ID)).toBe(false);
     expect(await holdsOwnTask(reader, webTask(), WREN_ID)).toBe(true);
     expect(await listsAsOwn({ ...(reader as object), companyId: COMPANY } as never, webTask(), GALE_ID, new Map())).toBe(false);
@@ -286,7 +286,7 @@ describe("re-admission: a previous owner is out until a current owner says other
     expect(h.people().people.map((person) => [person.developerId, person.role])).toEqual([[GALE_ID, "owner"], [WREN_ID, "owner"]]);
     const verdict = await h.access().checkStep(h.step);
     expect(verdict).toMatchObject({ allowed: true });
-    const reader = { documentClient: h.db, tableName: "state", taskReaderPerson: async () => ({ name: "x", projectMember: true }) } as never;
+    const reader = { documentClient: h.db, tableName: "state", taskReaderPerson: async () => ({ name: "x", projectMember: true, companyMember: true }) } as never;
     expect(await holdsOwnTask(reader, webTask(), GALE_ID)).toBe(true);
     // Wren steps down: the task runs for Gale alone.
     await changeTaskPeople(h.peopleDeps, caller(GALE_ID), TASK, { requestId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", expectedPeopleRevision: 4, targetDeveloperId: WREN_ID, role: "commenter" });
@@ -295,7 +295,7 @@ describe("re-admission: a previous owner is out until a current owner says other
 
   it("a starter of a task with no list who is given the grant back before anyone took the task over owns it again", async () => {
     const h = harness({ grants: { [GALE_ID]: false } });
-    const reader = (granted: boolean) => ({ documentClient: h.db, tableName: "state", taskReaderPerson: async () => ({ name: "x", projectMember: granted }) }) as never;
+    const reader = (granted: boolean) => ({ documentClient: h.db, tableName: "state", taskReaderPerson: async () => ({ name: "x", projectMember: granted, companyMember: true }) }) as never;
     expect(await h.access().checkStep(h.step)).toEqual({ allowed: false, message: NO_PROJECT_GRANT });
     expect(await holdsOwnTask(reader(false), webTask(), GALE_ID)).toBe(false);
     h.grants[GALE_ID] = true;

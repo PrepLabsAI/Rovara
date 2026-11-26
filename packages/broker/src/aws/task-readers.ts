@@ -1,7 +1,8 @@
-// Spec 067: task readers. A task's owner shares it read-only with another member of the task's project, by developer
+// Spec 067: task readers. A task's owner shares it read-only with another member of the task's company, by developer
 // ID. A reader reads the task and its events as the owner does (in the task page's viewer view); what else a share shows is
-// the one read rule's table (core/task-flow/read-rule.ts). A reader's access holds only while they are still a member of the project,
-// checked on every read; for anyone else a shared task reads as not found, exactly as an unshared one.
+// the one read rule's table (core/task-flow/read-rule.ts). A reader's access holds only while they are still a live member of
+// the task's company (NO project grant is needed, owner DEC 254zzz577) and the task's People list does not name them `denied`
+// (a removal wins over a share), checked on every read; for anyone else a shared task reads as not found, exactly as an unshared one.
 //
 // Stored on the task's own partition: `DEVTASK#<taskId>` / `READER#<developerId>`.
 import { DeleteCommand, GetCommand, PutCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
@@ -17,16 +18,21 @@ import {
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
 import { recordInCompany } from "./company-check.js";
 import { taskCompanyId } from "../developer/task-person-identity.js";
-import { taskOwnerDevelopers } from "../developer/task-people.js";
+import { taskOwnerDevelopers, taskPeopleRoleOf } from "../developer/task-people.js";
 
 export interface TaskReaderPerson {
   /** The person's display name now. */
   name: string;
-  /** Whether they hold a grant on the project (a developer or an administrator of it). */
+  /** Whether they hold a grant on the project (a developer or an administrator of it). Information only: a share no longer needs it. */
   projectMember: boolean;
   /**
+   * Whether they are a LIVE member of the task's company (READ-RULE-SHARE-B, owner DEC 254zzz577: a share works for a same-company person with NO project access). False for a person of another company, whatever their
+   * grants, and for anyone with no live membership. With no company layer at all (a laptop-shaped deployment) everyone is of the one company.
+   */
+  companyMember: boolean;
+  /**
    * Only when asked with `ownTask` (and the task's id): whether they may use the project as a task START does now (`checkProjectAccess`): a grant, or, for an OLD-engine task (no engine stamp), fresh
-   * bound-channel membership while the project lets channel members use it. Never given to a reader (a reader needs the grant, `projectMember`).
+   * bound-channel membership while the project lets channel members use it. Never given to a reader (a reader needs the company only, `companyMember`).
    */
   mayStart?: boolean;
 }
@@ -99,15 +105,21 @@ const view = (record: ReaderRecord, now: TaskReaderPerson | undefined): TaskRead
 
 /**
  * The stored share of `developerId` on `task`, for the one read rule (core/task-flow/read-rule.ts, which decides what the share's role may see): the row's role AS STORED (any text; the rule treats a role
- * it does not know as no share), and only while they are still a registered member of the task's project. Undefined for anyone else. The caller has already found they are not the task's own person.
+ * it does not know as no share), and only while they are still a registered, live member of the TASK'S COMPANY (READ-RULE-SHARE-B, owner DEC 254zzz577: a share works with no project grant, and never for a person of
+ * another company) AND the task's People list does not name them `denied` (REMOVAL WINS: a deny or a removal on the People list beats a stored share; a list that cannot be read is a failure of this lookup, which the
+ * rule reads as "no"). Undefined for anyone else. The caller has already found they are not the task's own person.
  */
 export async function readerShare(deps: TaskReaderDependencies, task: DeveloperTaskRecord, developerId: string): Promise<{ role: string } | undefined> {
   if (deps.taskReaderPerson === undefined) return undefined;
   const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: readerKey(task.taskId, developerId), ConsistentRead: true })) as { Item?: { role?: unknown } };
   if (typeof response.Item?.role !== "string") return undefined;
   const now = await deps.taskReaderPerson(developerId, task.project, taskCompanyId(task));
-  if (now?.projectMember !== true) {
-    log(deps, { event: "developer.task_reader_refused", taskId: task.taskId, reason: now === undefined ? "not_registered" : "not_project_member" });
+  if (now?.companyMember !== true) {
+    log(deps, { event: "developer.task_reader_refused", taskId: task.taskId, reason: now === undefined ? "not_registered" : "not_company_member" });
+    return undefined;
+  }
+  if (await taskPeopleRoleOf(deps, task.taskId, developerId) === "denied") {
+    log(deps, { event: "developer.task_reader_refused", taskId: task.taskId, reason: "removed_on_people_list" });
     return undefined;
   }
   return { role: response.Item.role };
@@ -177,15 +189,15 @@ export async function listTaskReaders(deps: TaskReaderDependencies, task: Develo
   return { readers: await Promise.all(records.slice(0, TASK_READERS_MAX).map(async (record) => view(record, await lookup(record.developerId, task)))) };
 }
 
-/** `PUT …/readers/{developerId}`: the owner shares the task with a member of its project. Sharing again changes nothing. */
+/** `PUT …/readers/{developerId}`: the owner shares the task with a member of its company (a project grant is not needed). Sharing again changes nothing. */
 export async function grantTaskReader(deps: TaskReaderDependencies, task: DeveloperTaskRecord, ownerId: string, rawDeveloperId: string, input: unknown): Promise<TaskReaderPutResponse> {
   const parsed = TaskReaderPutRequestSchema.safeParse(input);
   if (!parsed.success) throw agentXError("CONFIG_INVALID", "send a requestId (a UUID) and the role viewer");
   const developerId = developerIdOf(rawDeveloperId);
   if (developerId === ownerId) throw agentXError("CONFIG_INVALID", "you own this task, so you already read it");
   const now = await person(deps)(developerId, task);
-  // Not a person and not a member of the project are worded alike, so the answer doesn't say who is registered.
-  if (now === undefined || !now.projectMember) throw agentXError("CONFIG_INVALID", `that person isn't a member of ${task.project}; add them to the project first`);
+  // Not a person and not a member of the task's company are worded alike, so the answer doesn't say who is registered. A project grant is NOT needed (owner DEC 254zzz577): a share is for any same-company person.
+  if (now === undefined || !now.companyMember) throw agentXError("CONFIG_INVALID", "that person isn't a member of your company; add them to the company first");
   const existing = await readerRecord(deps, task.taskId, developerId);
   if (existing !== undefined) return { reader: view(existing, now), already: true };
   if ((await readerRecords(deps, task.taskId)).length >= TASK_READERS_MAX) throw agentXError("CONFIG_INVALID", `a task can be shared with at most ${String(TASK_READERS_MAX)} people`);

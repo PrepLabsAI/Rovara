@@ -346,6 +346,9 @@ export async function createTaskComment(
     });
   }
   items.push(taskPageFence(deps.tableName, task), taskAccessFence(deps.tableName, task.taskId, actor.peopleRevision));
+  // A comment that came from a stored share ("Can view") is tied to the share row: revoked between the decision and this write, it writes nothing (the share row's own role is the one a share holds: viewer).
+  const shareCheck = actor.sharedRow === undefined ? undefined : items.length;
+  if (actor.sharedRow !== undefined) items.push({ ConditionCheck: { TableName: deps.tableName, Key: actor.sharedRow, ConditionExpression: "attribute_exists(pk) AND #role = :viewer", ExpressionAttributeNames: { "#role": "role" }, ExpressionAttributeValues: { ":viewer": "viewer" } } });
   try {
     await deps.documentClient.send(new TransactWriteCommand({ TransactItems: items as never }));
   } catch (error) {
@@ -355,6 +358,7 @@ export async function createTaskComment(
         const raced = await getComment(deps, task.taskId, commentId);
         if (raced !== undefined) return { comment: raced, duplicate: true };
       }
+      if (shareCheck !== undefined && codes[shareCheck] === "ConditionalCheckFailed") throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
       if (codes[1] === "ConditionalCheckFailed") throw pageRefusal("task_full");
       if (codes[2] === "ConditionalCheckFailed" && parent !== undefined) {
         const now = parent === undefined ? undefined : await getComment(deps, task.taskId, parent.commentId);

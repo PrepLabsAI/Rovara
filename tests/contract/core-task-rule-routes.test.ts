@@ -134,12 +134,27 @@ describe("readers on a core task (spec 067's rule)", () => {
       expect(await h.dev(who, method, `/v1/dev/tasks/${h.task.taskId}${suffix}`, body), `${who.name} ${method} ${suffix}`).toEqual(await h.missing(who, method, suffix, body));
     }
     expect(h.rows()).toBe(before);
-    // The old rule's own refusals reach the owner: a bad body, a person who is not a project member, sharing with themselves.
+    // The old rule's own refusals reach the owner: a bad body, sharing with themselves (a person of another company is refused with the company layer on: see the share tests below).
     expect((await h.dev(MAYA, "PUT", `${base}/${TESS.developerId}`, { role: "viewer" })).body).toMatchObject({ error: { code: "CONFIG_INVALID" } });
-    expect((await h.dev(MAYA, "PUT", `${base}/${OMAR.developerId}`, { requestId: randomUUID(), role: "viewer" })).body).toMatchObject({ error: { code: "CONFIG_INVALID", message: expect.stringContaining("isn't a member of payments") as unknown } });
     expect((await h.dev(MAYA, "PUT", `${base}/${MAYA.developerId}`, { requestId: randomUUID(), role: "viewer" })).body).toMatchObject({ error: { code: "CONFIG_INVALID", message: expect.stringContaining("you own this task") as unknown } });
     expect(await h.dev(MAYA, "DELETE", `${base}/${TESS.developerId}`)).toEqual({ status: 200, body: { developerId: TESS.developerId, removed: true } });
     expect((await h.dev(MAYA, "GET", base)).body).toEqual({ readers: [] });
+  });
+});
+
+// READ-RULE-SHARE-B (owner DEC 254zzz577), rule 2 on the real routes: REMOVAL WINS. (Rule 1's company reads are tests/contract/task-reader-person.test.ts, on the real company layer.)
+describe("a share is no share for a person the People list denies (DEC 254zzz577, rule 2)", () => {
+  it("REMOVAL WINS: a person the People list names `denied` is no share, though the share row stays; they read again when the list no longer denies them", async () => {
+    const h = await ruleWorld();
+    const path = `/v1/dev/tasks/${h.task.taskId}`;
+    await h.dev(MAYA, "PUT", `${path}/readers/${TESS.developerId}`, { requestId: randomUUID(), role: "viewer" });
+    expect((await h.dev(TESS, "GET", path)).status).toBe(200);
+    const peopleKey = { pk: `DEVTASK#${h.task.taskId}`, sk: "PEOPLE" };
+    h.db.set({ ...peopleKey, schemaVersion: 1, revision: 1, orphaned: false, people: [{ developerId: TESS.developerId, name: "Tess", method: "oidc", role: "denied" }] });
+    for (const suffix of ["", "/events"]) expect(await h.dev(TESS, "GET", `${path}${suffix}`), `denied: ${suffix}`).toEqual(await h.missing(TESS, "GET", suffix));
+    expect(h.db.get(`DEVTASK#${h.task.taskId}`, `READER#${TESS.developerId}`)).toBeDefined();
+    h.db.delete(peopleKey.pk, peopleKey.sk);
+    expect((await h.dev(TESS, "GET", path)).status).toBe(200);
   });
 });
 
@@ -175,7 +190,7 @@ describe("the events timeline of a core task (the core's log and decisions)", ()
     for (const limit of ["0", "51", "x"]) expect((await h.dev(MAYA, "GET", `/v1/dev/tasks/${h.task.taskId}/events?limit=${limit}`)).body, limit).toEqual({ error: { code: "CONFIG_INVALID", message: "limit must be a whole number from 1 to 50" } });
   });
 
-  it("a reader the task is shared with reads them while still a project member; a member with no part and another company's caller read no such task", async () => {
+  it("a reader the task is shared with reads them (no project grant is needed, DEC 254zzz577); a member with no part and another company's caller read no such task; a revoked sign-in reads nothing", async () => {
     const h = await ruleWorld();
     await withHistory(h);
     const path = `/v1/dev/tasks/${h.task.taskId}/events`;
@@ -184,10 +199,13 @@ describe("the events timeline of a core task (the core's log and decisions)", ()
     const read = await h.dev(TESS, "GET", path);
     expect(read.status).toBe(200);
     expect(read.body).toEqual((await h.dev(MAYA, "GET", path)).body);
-    // Off the project: no longer a reader.
+    // Off the project: still a reader (rule 1: a share works with NO project access).
     h.db.delete(`MEMBER#${TESS.developerId}`, "PROJECT#payments");
-    expect(await h.dev(TESS, "GET", path)).toEqual(await h.missing(TESS, "GET", "/events"));
+    expect((await h.dev(TESS, "GET", path)).status).toBe(200);
     expect(await h.dev(OMAR, "GET", path)).toEqual(await h.missing(OMAR, "GET", "/events"));
+    // A person whose sign-in was revoked is no one: no share reaches them.
+    h.db.set({ ...h.db.get(`DEVELOPER#${TESS.developerId}`, "META")!, revoked: true });
+    expect(await h.dev(TESS, "GET", path)).toEqual(await h.missing(TESS, "GET", "/events"));
   });
 });
 
@@ -261,7 +279,7 @@ describe("plan comments and People on a core task (the old routes' own functions
 });
 
 describe("DEC 254zzz44 (a): a reader the owner shared a core task with opens it (the old task read's reader rule)", () => {
-  it("reads the task while shared and still a project member; never before sharing, after unsharing or after leaving the project; a member with no part reads no such task", async () => {
+  it("reads the task while shared, with or without a project grant (DEC 254zzz577); never before sharing or after unsharing; a member with no part reads no such task", async () => {
     const h = await ruleWorld();
     const path = `/v1/dev/tasks/${h.task.taskId}`;
     const own = await h.dev(MAYA, "GET", path);
@@ -273,9 +291,9 @@ describe("DEC 254zzz44 (a): a reader the owner shared a core task with opens it 
     expect(money).toBeDefined();
     expect(shared).toEqual({ ...own, body: { ...own.body, task: readableTask } });
     expect(await h.dev(SAM, "GET", path)).toEqual(await h.missing(SAM, "GET", ""));
-    // Off the project: no longer a reader; back on it: a reader again; unshared (revoked): no longer.
+    // Off the project: still a reader (a share needs no project grant); back on it: a reader; unshared (revoked): no longer.
     h.db.delete(`MEMBER#${TESS.developerId}`, "PROJECT#payments");
-    expect(await h.dev(TESS, "GET", path)).toEqual(await h.missing(TESS, "GET", ""));
+    expect((await h.dev(TESS, "GET", path)).status).toBe(200);
     grantProject(h.db, TESS);
     expect((await h.dev(TESS, "GET", path)).status).toBe(200);
     await h.dev(MAYA, "DELETE", `${path}/readers/${TESS.developerId}`);
