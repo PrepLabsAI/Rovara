@@ -131,6 +131,11 @@ describe("the lines of one group share one shell session", () => {
     const result = await run({ cwd: "repo/app", executable: "echo", args: ["$HOME", "&&", "a b"], timeoutSeconds: 30 }, session);
     expect(result.stdout.trim()).toBe("$HOME && a b");
     expect(session.stateful).toBe(false);
+    // Not read by a shell at all: the wrapper that started it is the `exec "$@"` one, and the session's script was never sent.
+    const sent: string[] = [];
+    await runContainerCommand((argv, options) => { sent.push(argv.join("\u0000")); return exec(argv, options); }, root, { cwd: "repo/app", executable: "echo", args: ["a b"], timeoutSeconds: 30 }, undefined, { session });
+    expect(sent[0]).toContain('exec "$@"');
+    expect(sent[0]).not.toContain("__rv_");
   });
 
   it("a command's own `env` is for that command only, and what it changes in its own line is not carried by the session", async () => {
