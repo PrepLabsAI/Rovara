@@ -98,6 +98,12 @@ describe("what the approver is shown for a row ticked anyway", () => {
     expect(classifySetupChange(base, candidateOf(lifted))).toEqual(classifySetupChange(base, candidateOf(confirmed)));
     expect(classifySetupChange(base, candidateOf(lifted))).toEqual({ risk: "low", changes: [{ area: "setup_commands", risk: "low" }] });
   });
+  it("the commands used with no file evidence are kept as typed lines for the approval card: a ticked-anyway row, and a row that could not be checked against a file; a verified row adds none", () => {
+    const proposal = proposalOf({ setup: [row("adapted", ADAPTED_ROW, QUOTES), row("noCite", ["make deps"], QUOTES), row("ok", ["npm ci"], QUOTES)] });
+    const { made } = chooseCandidateItems(proposal, { adapted: "unverified", noCite: "unchecked", ok: "verified" }, definition, ["adapted", "noCite", "ok"], ["adapted"]);
+    expect(made.uncheckedLines).toEqual(["python3 -m venv .venv", ".venv/bin/pip install -r requirements.txt", ".venv/bin/python -m src.db", "make deps"]);
+    expect(chooseCandidateItems(proposal, { adapted: "unverified", noCite: "unchecked", ok: "verified" }, definition, ["ok"]).made.uncheckedLines).toBeUndefined();
+  });
   it("a command that gains an environment entry is still high risk, whatever its verdict", () => {
     const withEnv = { revision: 2, setup: [{ cwd: "repo/demo", executable: "make", args: [], timeoutSeconds: 900, env: { TOKEN: "x" } }], readiness: [] };
     expect(classifySetupChange(base, withEnv).risk).toBe("high");

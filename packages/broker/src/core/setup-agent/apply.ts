@@ -103,6 +103,8 @@ export interface SetupApplyRow {
    * (browser-testing-approval.ts), and only a LIVE company owner or admin may decide it (the host's `approval.browserTesting`), whatever the candidate's risk reads as.
    */
   browserTesting?: BrowserCandidateFacts;
+  /** The candidate's commands (as typed) that were used with no file evidence behind them: a ticked row that did not match the code, or one that could not be checked against a file. The approval card marks them. Absent: none (or a row made before this was kept). */
+  usedWithoutMatch?: string[];
 }
 
 /** The approval a replaced row leaves behind: its own when it was approved, else the one it was itself carrying. Pure; a malformed value is no approval. */
@@ -136,7 +138,11 @@ const pathOf = (definition: { repositories: ReadonlyArray<{ name: string; path: 
 /** Lane F: the limit a proposal's command gets: the one its item recorded, else today's (900 s for setup, 1,800 s for tests). */
 const timeoutOf = (kind: string, recorded: number | undefined): number => recorded ?? (kind === "setup" ? SETUP_TIMEOUT : TEST_TIMEOUT);
 
-export interface CandidateCommands { setup?: ProjectCommand[]; readiness?: ProjectCommand[]; used: string[]; unchecked: string[]; left: Array<{ id: string; reason: SetupConfirmLeftOut }> }
+export interface CandidateCommands {
+  setup?: ProjectCommand[]; readiness?: ProjectCommand[]; used: string[]; unchecked: string[]; left: Array<{ id: string; reason: SetupConfirmLeftOut }>;
+  /** The commands (as typed, one line each) of the used items whose verdict was `unchecked`: used with no file evidence behind them, so the approval card can say so. Absent when there are none. */
+  uncheckedLines?: string[];
+}
 
 /**
  * The setup and test commands the proposal's usable items carry. Setup items become the project's setup commands; test items its readiness commands. An item that failed its re-read, a flagged or secret-shaped command
@@ -150,6 +156,7 @@ export function commandsFromProposal(
   const left: CandidateCommands["left"] = [];
   const used: string[] = [];
   const unchecked: string[] = [];
+  const uncheckedLines: string[] = [];
   const setup: ProjectCommand[] = [];
   const readiness: ProjectCommand[] = [];
   for (const item of wanted) {
@@ -170,12 +177,13 @@ export function commandsFromProposal(
       const target = item.kind === "setup" ? setup : readiness;
       if (target.length >= (item.kind === "setup" ? 20 : 32)) { left.push({ id: item.id, reason: "too_many" }); continue; }
       target.push(command);
+      if (verdict === "unchecked") uncheckedLines.push(formatCommandLine(command));
       kept += 1;
     }
     if (kept > 0) used.push(item.id);
   }
   if (used.length === 0) return { error: "nothing" };
-  return { ...(setup.length === 0 ? {} : { setup }), ...(readiness.length === 0 ? {} : { readiness }), used, unchecked, left };
+  return { ...(setup.length === 0 ? {} : { setup }), ...(readiness.length === 0 ? {} : { readiness }), used, unchecked, left, ...(uncheckedLines.length === 0 ? {} : { uncheckedLines }) };
 }
 
 /**
@@ -283,7 +291,7 @@ export async function confirmSetupAgent(deps: SetupApplyDeps, project: string, r
     origins: { ...(full.definition.origins ?? {}), ...(made.setup === undefined ? {} : { setup: "agent" }), ...(made.readiness === undefined ? {} : { readiness: "agent" }) },
   });
   if (!candidate.success) throw agentXError("CONFIG_INVALID", SETUP_CONFIRM_WORDS.invalid);
-  return storeSetupCandidate(deps, { project, by, requestId: body.requestId, taskId: view.taskId ?? "", baseRevision: full.definition.revision, candidate: candidate.data, replyExtra: { used: [...made.used, ...locations.used], unchecked: [...made.unchecked, ...locations.unchecked], left: [...made.left, ...locations.left] }, alsoTransact: [], ...(fact === undefined ? {} : { noAutomatedTests: fact }) });
+  return storeSetupCandidate(deps, { project, by, requestId: body.requestId, taskId: view.taskId ?? "", baseRevision: full.definition.revision, candidate: candidate.data, replyExtra: { used: [...made.used, ...locations.used], unchecked: [...made.unchecked, ...locations.unchecked], left: [...made.left, ...locations.left] }, alsoTransact: [], ...(made.uncheckedLines === undefined ? {} : { usedWithoutMatch: made.uncheckedLines }), ...(fact === undefined ? {} : { noAutomatedTests: fact }) });
 }
 
 /** Where the run looked for tests, as the fixed words (`testPlacesLooked` of the run's journal). A journal that cannot be read gives none: the candidate is made all the same. */
@@ -321,6 +329,8 @@ export interface StoreCandidateInput {
   noAutomatedTests?: NoAutomatedTests;
   /** Browser testing: marks the proposal row as a browser testing candidate (the facts its approval writes from). Absent: an ordinary setup candidate. */
   rowExtra?: { browserTesting: BrowserCandidateFacts };
+  /** The candidate's commands (as typed) used with no file evidence behind them (see `SetupApplyRow.usedWithoutMatch`). */
+  usedWithoutMatch?: readonly string[];
 }
 
 /**
@@ -345,7 +355,7 @@ export async function storeSetupCandidate(deps: Pick<SetupApplyDeps, "flow" | "s
   const baseCommits = await readBaseCommits(deps.flow, candidate);
   // L4-T2b: the row about to be replaced may hold the project's approved setup; keep that fact on the new row (a row still waiting is refused below by the put's own condition, and an approval that lands first moves the catalog, which fails the check).
   const earlierApproval = earlierApprovalOf(await deps.store.get(setupApplyKey(orgId, project)));
-  const row: SetupApplyRow = { entityType: "SETUP_APPLY", orgId, project, taskId, requestId, by, digest, baseRevision, candidateRevision, state: "checking", check: started.mark, reply, createdAt: now, ...(baseCommits === undefined ? {} : { baseCommits }), ...(earlierApproval === undefined ? {} : { earlierApproval }), ...(input.rowExtra ?? {}) };
+  const row: SetupApplyRow = { entityType: "SETUP_APPLY", orgId, project, taskId, requestId, by, digest, baseRevision, candidateRevision, state: "checking", check: started.mark, reply, createdAt: now, ...(input.usedWithoutMatch === undefined || input.usedWithoutMatch.length === 0 ? {} : { usedWithoutMatch: [...input.usedWithoutMatch] }), ...(baseCommits === undefined ? {} : { baseCommits }), ...(earlierApproval === undefined ? {} : { earlierApproval }), ...(input.rowExtra ?? {}) };
   const result = await deps.store.transact([
     // The candidate revision: stored, not the project's latest (the catalog row still names the base), so no task starts on it.
     { kind: "put", item: { ...projectRevisionKey(orgId, project, candidateRevision), entityType: "PROJECT", candidate: true, definition: JSON.parse(JSON.stringify(candidate)) as never, ...(noTests === undefined ? {} : { noAutomatedTests: noTests }) }, condition: when.absent() },

@@ -11,5 +11,9 @@ Each mutant is applied to the file named, `tests/unit/setup-mismatch-warning.tes
 | M5 the confirm path ignores useAnyway | packages/broker/src/core/setup-agent/apply.ts | KILLED |
 | M6 a ticked-anyway row is counted as verified, not unchecked | packages/broker/src/core/setup-agent/apply.ts | KILLED |
 | M7 the refused-command rule is skipped | packages/broker/src/core/setup-agent/apply.ts | KILLED |
+| M10 used-without-match lines are not stored on the candidate | packages/broker/src/core/setup-agent/apply.ts | KILLED |
+| M11 the approval view drops usedWithoutMatch | packages/broker/src/core-host/setup-run-routes.ts | KILLED |
+| M12 a verified row's commands are also counted as used without match | packages/broker/src/core/setup-agent/apply.ts | KILLED |
+| M13 the audit ids are cut mid-list without bound | packages/broker/src/core-host/setup-run-routes.ts | KILLED |
 | M8 the confirm audit row drops useAnyway | packages/broker/src/core-host/setup-run-routes.ts | KILLED |
-| M9 the audit row cap is removed | packages/broker/src/core-host/setup-run-routes.ts | KILLED |
+| M9 the audit row cap is removed | packages/broker/src/core-host/setup-run-routes.ts | NOT APPLIED (text not found) |
