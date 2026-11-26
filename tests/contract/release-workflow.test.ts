@@ -14,11 +14,14 @@ interface Step {
   with?: Record<string, unknown>;
 }
 interface Job {
+  name?: string;
   if?: string;
   "runs-on"?: string;
+  "timeout-minutes"?: number;
   needs?: string | string[];
   outputs?: Record<string, string>;
   permissions?: Record<string, string>;
+  strategy?: { "fail-fast"?: boolean; matrix?: { shard?: number[] } };
   steps: Step[];
 }
 interface Workflow {
@@ -54,43 +57,100 @@ describe("release workflow", () => {
     expect(text).not.toMatch(/inputs\./);
   });
 
-  it("guards every publishing job and runs the tests first", async () => {
+  it("guards every publishing job and runs the verification gate first", async () => {
     const wf = await workflow();
     for (const name of ["images", "release", "npm"]) {
       expect(wf.jobs[name]?.if, name).toBe("vars.AGENTX_PUBLISH_ENABLED == 'true'");
     }
     expect(wf.jobs.images?.needs).toBe("test");
-    expect(wf.jobs.test?.if).toBeUndefined();
+    expect(wf.jobs.prepare?.if).toBeUndefined();
+    expect(wf.jobs.test?.needs).toEqual(["prepare", "typecheck", "lint", "test-shards"]);
+    expect(wf.jobs.test?.if).toBe("always() && !cancelled()");
   });
 
-  it("installs CI's pinned gitleaks in the test job before the tests, so port-guard.test.ts's secret-scan cases do not fail for a missing scanner", async () => {
+  it("installs CI's pinned gitleaks in the test-shards job before the tests, so port-guard.test.ts's secret-scan cases do not fail for a missing scanner", async () => {
     const wf = await workflow();
     const ci = YAML.parse(await readFile(".github/workflows/ci.yml", "utf8")) as Workflow;
     const install = (job: Job) => job.steps.findIndex((step) => /^Install gitleaks/.test(step.name ?? ""));
-    const steps = wf.jobs.test!.steps;
-    const index = install(wf.jobs.test!);
+    const steps = wf.jobs["test-shards"]!.steps;
+    const index = install(wf.jobs["test-shards"]!);
     expect(index).toBeGreaterThanOrEqual(0);
     expect(steps[index]!.run).toBe(ci.jobs.test!.steps[install(ci.jobs.test!)]!.run);
     expect(index).toBeLessThan(steps.findIndex((step) => (step.run ?? "").includes("npm test")));
   });
 
-  it("the test job runs typecheck, lint, build, test and infra:synth", async () => {
+  it("checks CI proof in prepare, always builds and runs infra:synth, and falls back to parallel typecheck, lint and 8 sharded test jobs gated by test (#1559)", async () => {
     const wf = await workflow();
-    const testRun = wf.jobs.test!.steps.map((s) => s.run ?? "").join("\n");
-    expect(testRun).toContain("npm run typecheck");
-    expect(testRun).toContain("npm run lint");
-    expect(testRun).toContain("npm run build");
-    expect(testRun).toContain("npm test");
-    expect(testRun).toContain("npm run infra:synth");
-    // In the declared order, so a later step can't silently run against a stale build.
-    expect(testRun.indexOf("npm run lint")).toBeLessThan(testRun.indexOf("npm run build"));
-    expect(testRun.indexOf("npm run build")).toBeLessThan(testRun.indexOf("npm test"));
-    expect(testRun.indexOf("npm test")).toBeLessThan(testRun.indexOf("npm run infra:synth"));
+    // prepare: checkout with fetch-depth 2, check CI proof via shared script, build, pack build-output only when not proven, always run infra:synth.
+    const prepare = wf.jobs.prepare!;
+    const checkout = prepare.steps.find((s) => s.uses?.startsWith("actions/checkout"));
+    expect(checkout?.with?.["fetch-depth"]).toBe(2);
+    expect(checkout?.with?.["persist-credentials"]).toBe(false);
+    const proofStep = prepare.steps.find((s) => s.id === "proof")!;
+    expect(proofStep.env?.GH_TOKEN).toBe("${{ github.token }}");
+    expect(proofStep.run).toContain('node scripts/release-ci-proof.ts --repository "$GITHUB_REPOSITORY" --commit "$GITHUB_SHA" --ignore-linux-runtime');
+    expect(prepare.outputs).toEqual({
+      proven: "${{ steps.proof.outputs.proven }}",
+      candidate: "${{ steps.proof.outputs.candidate }}",
+    });
+    const prepareRuns = prepare.steps.map((s) => s.run ?? "");
+    const buildIndex = prepareRuns.findIndex((r) => r.includes("npm run build"));
+    const packIndex = prepare.steps.findIndex((s) => s.name === "Pack the build output");
+    const uploadIndex = prepare.steps.findIndex((s) => s.uses?.startsWith("actions/upload-artifact"));
+    const synthIndex = prepareRuns.findIndex((r) => r.includes("npm run infra:synth"));
+    expect(buildIndex).toBeGreaterThan(-1);
+    expect(packIndex).toBeGreaterThan(buildIndex);
+    expect(uploadIndex).toBeGreaterThan(packIndex);
+    // infra:synth always runs (no `if:` gate) and runs after packing build-output so cdk.out/ is not packed.
+    expect(synthIndex).toBeGreaterThan(uploadIndex);
+    expect(prepare.steps[synthIndex]!.if).toBeUndefined();
+    expect(prepare.steps[packIndex]!.if).toBe("steps.proof.outputs.proven != 'true'");
+    expect(prepare.steps[uploadIndex]!.if).toBe("steps.proof.outputs.proven != 'true'");
+
+    // Fallback jobs run only when no CI proof was found.
+    for (const name of ["typecheck", "lint", "test-shards"]) {
+      expect(wf.jobs[name]?.needs, name).toBe("prepare");
+      expect(wf.jobs[name]?.if, name).toBe("needs.prepare.outputs.proven != 'true'");
+    }
+    expect(wf.jobs.typecheck!.steps.map((s) => s.run ?? "").join("\n")).toContain("npm run typecheck && npm run typecheck:all");
+
+    // lint downloads and unpacks the fresh build output before linting.
+    const lintSteps = wf.jobs.lint!.steps;
+    const lintDownload = lintSteps.findIndex((s) => s.uses?.startsWith("actions/download-artifact"));
+    const lintUnpack = lintSteps.findIndex((s) => s.name === "Unpack the build output");
+    const lintRun = lintSteps.findIndex((s) => (s.run ?? "").includes("npm run lint"));
+    expect(lintDownload).toBeGreaterThan(-1);
+    expect(lintUnpack).toBeGreaterThan(lintDownload);
+    expect(lintRun).toBeGreaterThan(lintUnpack);
+
+    // test-shards runs an 8-way matrix using Vitest's --shard against the unpacked build output.
+    const shards = wf.jobs["test-shards"]!;
+    expect(shards.strategy?.["fail-fast"]).toBe(false);
+    expect(shards.strategy?.matrix?.shard).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    const shardUnpack = shards.steps.findIndex((s) => s.name === "Unpack the build output");
+    const shardTest = shards.steps.findIndex((s) => (s.run ?? "").includes("npm test"));
+    expect(shardUnpack).toBeGreaterThan(-1);
+    expect(shardTest).toBeGreaterThan(shardUnpack);
+    expect(shards.steps[shardTest]!.env).toEqual({
+      SHARD: "${{ matrix.shard }}",
+      SHARD_TOTAL: "${{ strategy.job-total }}",
+    });
+    expect(shards.steps[shardTest]!.run).toBe('npm test -- --shard="$SHARD/$SHARD_TOTAL"');
+
+    // test gate verifies needs with release-ci-proof.ts --gate (no npm ci needed).
+    const gate = wf.jobs.test!;
+    expect(gate.steps.every((s) => s.run !== "npm ci")).toBe(true);
+    const gateStep = gate.steps.find((s) => (s.run ?? "").includes("release-ci-proof.ts --gate"))!;
+    expect(gateStep).toBeDefined();
+    expect(gateStep.env?.NEEDS).toBe("${{ toJSON(needs) }}");
   });
 
   it("grants OIDC and write access only where they are needed", async () => {
     const wf = await workflow();
-    expect(wf.jobs.test?.permissions).toBeUndefined();
+    expect(wf.jobs.prepare?.permissions).toEqual({ contents: "read", checks: "read" });
+    for (const name of ["typecheck", "lint", "test-shards", "test"]) {
+      expect(wf.jobs[name]?.permissions, name).toBeUndefined();
+    }
     expect(wf.jobs.images?.permissions).toEqual({ contents: "read", "id-token": "write" });
     expect(wf.jobs.release?.permissions).toEqual({ contents: "write" });
     expect(wf.jobs.npm?.permissions).toEqual({ contents: "read", "id-token": "write" });
