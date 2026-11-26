@@ -129,7 +129,7 @@ describe("coreWiringGaps", () => {
     expect(coreWiringGaps({ services: wired, ciReporting: reporting })).toEqual({ services: [], blockers: [] });
     expect(coreWiringGaps({ services: {}, ciReporting: undefined })).toEqual({ services: [...REQUIRED_CORE_SERVICES], blockers: ["honest-ci"] });
     for (const name of REQUIRED_CORE_SERVICES) {
-      const { [name]: _left, ...rest } = wired;
+      const rest = Object.fromEntries(Object.entries(wired).filter(([key]) => key !== name));
       expect(coreWiringGaps({ services: rest, ciReporting: reporting })).toEqual({ services: [name], blockers: [] });
     }
   });
