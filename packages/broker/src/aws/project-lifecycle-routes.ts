@@ -199,15 +199,19 @@ async function recordRefusal(ctx: ProjectLifecycleContext, personId: string, cur
   } catch { /* the refusal stands without its row */ }
 }
 
+/** Refuses the change (audited, nothing else written) when the person named an incarnation and it is not the project's now. Names none: no fence from the person's side. A project with no incarnation never equals a named one. */
+async function fenceIncarnation(ctx: ProjectLifecycleContext, personId: string, current: Current, action: "archive" | "restore", body: { requestId: string; expectedProjectIncarnation?: number | undefined }): Promise<void> {
+  if (body.expectedProjectIncarnation === undefined || body.expectedProjectIncarnation === current.incarnationRevision) return;
+  await recordRefusal(ctx, personId, current, action, body);
+  throw agentXError("CHANGE_STALE", LIFECYCLE_INCARNATION_CHANGED);
+}
+
 /** One change (archive or restore), after the caller and the body were checked. */
 async function change(ctx: ProjectLifecycleContext, personId: string, current: Current, action: "archive" | "restore", body: { requestId: string; expectedOrgId?: string | undefined; expectedRevision: number; expectedProjectRevision: number; expectedProjectIncarnation?: number | undefined }): Promise<{ receipt: Record<string, unknown>; replayed: boolean }> {
   if (current.access !== "manage" || current.basis === undefined) throw agentXError("FORBIDDEN", LIFECYCLE_NOT_ALLOWED);
   // The incarnation the person previewed must be the project's now, checked before a receipt is read or anything is written (a replay of an old request must not answer for a project that is a new one).
   // Absent: no fence from the person's side (an older Cloud). A project with no incarnation never equals a named one.
-  if (body.expectedProjectIncarnation !== undefined && body.expectedProjectIncarnation !== current.incarnationRevision) {
-    await recordRefusal(ctx, personId, current, action, body);
-    throw agentXError("CHANGE_STALE", LIFECYCLE_INCARNATION_CHANGED);
-  }
+  await fenceIncarnation(ctx, personId, current, action, body);
   const requestKey = lifecycleRequestKey(current.companyId, current.project, body.requestId);
   const readReceipt = async () => {
     const answer = await ctx.documentClient.send(new GetCommand({ TableName: ctx.tableName, Key: requestKey, ConsistentRead: true })) as { Item?: unknown };
