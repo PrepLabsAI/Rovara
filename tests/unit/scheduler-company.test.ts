@@ -4,9 +4,6 @@ import { createFakeScheduler } from "../../packages/broker/src/ports/fake-schedu
 import { createIntervalScheduler } from "../../packages/local-adapters/src/interval-scheduler.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { handleNightlyFire } from "../../packages/broker/src/core/test-env/nightly.js";
-import { handleScheduleFire } from "../../packages/broker/src/core/triggers/schedules.js";
-import type { TriggerDispatchDeps } from "../../packages/broker/src/core/triggers/dispatch.js";
-import { triggerScheduleId, TRIGGER_SCHEDULE_KIND } from "../../packages/broker/src/core/triggers/schedule-spec.js";
 import { nightlyWorld, ORG } from "../support/nightly-world.js";
 const A = IMPLICIT_COMPANY_ID, B = `org_${"b".repeat(20)}`;
 const entry = (companyId = A): ScheduleEntry => ({ companyId, scheduleId: "shared", when: { kind: "every", minutes: 1 }, enabled: true, target: { kind: "test", ref: {} } });
@@ -42,12 +39,6 @@ it("stored key/entry mismatches never fire or return, and log only the key compa
   expect(JSON.stringify(lines)).not.toContain(B); expect(JSON.stringify(lines)).not.toContain("foreign-canary");
   for (const line of lines) expect(line).toEqual({ companyId: A, event: "scheduler.row_invalid" });
   await scheduler.close?.();
-});
-it("trigger fire compares due, ref and consumer before trigger reads", async () => {
-  const triggerId = `ctr_${"a".repeat(20)}`; const get = vi.fn(); const lines: unknown[] = [];
-  const deps = { companyId: A, automation: { enabled: async () => true }, triggers: { get }, log: (event: string, fields: unknown) => { lines.push({ event, ...(fields as object) }); } } as unknown as TriggerDispatchDeps;
-  await handleScheduleFire(deps, { companyId: B, scheduleId: triggerScheduleId(triggerId), target: { kind: TRIGGER_SCHEDULE_KIND, ref: { orgId: A, triggerId } }, scheduledAt: "2026-11-10T00:00:00.000Z", slotId: "slot", attempt: 1 });
-  expect(get).not.toHaveBeenCalled(); expect(lines).toEqual([{ companyId: A, event: "trigger_schedule.fire_other_company" }]);
 });
 it("fails closed: nightly missing project and resolver failure never read or retry", async () => {
   for (const projectCompany of [async () => undefined, async () => { throw new Error("secret-canary"); }, async () => "bad-canary"]) {

@@ -14,7 +14,6 @@ import {
   PlaybookFileSchema,
   RecipeOverlaySchema,
   canonicalJson,
-  type DesignReviewSetting,
   type PlaybookFile,
   type PlaybookParse,
   type PlaybookProblem,
@@ -146,9 +145,6 @@ export function playbookDigest(file: PlaybookFile): string {
   const stages = stageTexts(file).length === 0 ? undefined : Object.fromEntries(stageTexts(file));
   return createHash("sha256").update(canonicalJson({ version: file.version, rules: rules ?? null, stages: stages ?? null, designReview: file.designReview ?? null })).digest("hex");
 }
-
-/** The design review setting the file carries, if any. */
-export const designReviewOfPlaybook = (file: PlaybookFile): DesignReviewSetting | undefined => file.designReview;
 
 /** A file with nothing to say is the same as no file. */
 export function playbookIsEmpty(file: PlaybookFile): boolean {

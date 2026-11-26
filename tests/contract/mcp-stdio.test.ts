@@ -43,7 +43,7 @@ describe("agentx mcp over stdio (FR-026)", () => {
     await client.connect(transport);
     try {
       const { tools } = await client.listTools();
-      expect(tools).toHaveLength(52); // Batch b18 (rule D): + team_propose (#1034).
+      expect(tools).toHaveLength(46); // Batch b18 (rule D): + team_propose (#1034); #1538: six tools only `rovara up` served were removed.
       // Ruling F3: the tools were listed first, and the error result still passes the SDK's checks.
       const result = await client.callTool({ name: "agentx_whoami", arguments: {} });
       expect(toolError(result)).toMatchObject({ code: "SIGN_IN_REQUIRED", next_step: "run npx @preplabsai/rovara-code login <your AgentX URL>" });

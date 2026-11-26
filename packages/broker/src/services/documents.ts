@@ -3,7 +3,6 @@
 import type { ObjectStorage } from "@agentx/contracts";
 import { createHash } from "node:crypto";
 
-export const DOCUMENT_CHANGED = "This document changed after it was submitted, so it cannot be shown. Ask for a new plan.";
 
 /** The document's text, or undefined when it is gone, too big, or its bytes are not the ones the digest names. */
 export async function readVerifiedText(blobs: Pick<ObjectStorage, "get">, artifact: { objectKey: string; sha256: string }, maxBytes: number): Promise<{ text: string } | { missing: true } | { changed: true }> {

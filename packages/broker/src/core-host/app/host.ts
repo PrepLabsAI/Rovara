@@ -1,5 +1,5 @@
 // Lane L9-wire: the task flow's side of a session's stop, retry and message (L6b's `SessionControlHost`). Each runs only after the sessions module checked who is asking.
-import { INDEX_EXPIRY_ATTRIBUTE, WORKFLOW_THREAD_NOTES_MAX, change, when, type TransactItem } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, change, when, type TransactItem } from "@agentx/contracts";
 import type { SessionMembers } from "../../core/sessions/access.js";
 import { createSessionControl, type MessagePlan, type SessionControlHost } from "../../core/sessions/control.js";
 import { sendLiveSteer } from "../../core/sessions/live-steer.js";
@@ -14,7 +14,6 @@ import { retryBlockedStep } from "../../core/task-flow/retry.js";
 
 /** A person may message a session this many times an hour (a token bucket), and a task keeps this many messages: a live message can mean paid model work. */
 export const MESSAGES_PER_HOUR = 20;
-export const MESSAGES_PER_TASK = WORKFLOW_THREAD_NOTES_MAX;
 export const MESSAGE_RATE_LIMITED = "You have sent a lot of messages to this task in the last hour. Wait a little, then try again.";
 
 export function createSessionControlHost(deps: TaskFlowDeps, options: { expectedRevision?: number } = {}): SessionControlHost {

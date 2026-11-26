@@ -7,7 +7,7 @@ import { join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const ROOT = join(import.meta.dirname, "../../packages/broker/src/core");
-const FOLDERS = ["automation", "automatic-runs", "triggers", "chains", "agents"];
+const FOLDERS = ["automation", "automatic-runs", "chains", "agents"];
 
 function files(folder: string): string[] {
   return readdirSync(join(ROOT, folder), { withFileTypes: true }).flatMap((entry) => (entry.isDirectory() ? files(join(folder, entry.name)) : entry.name.endsWith(".ts") ? [join(folder, entry.name)] : []));
@@ -19,7 +19,7 @@ const importsOf = (text: string): string[] => [...text.matchAll(/from "([^"]+)"/
 
 describe("automation's boundaries", () => {
   it("has files to read", () => {
-    expect(all.length).toBeGreaterThanOrEqual(20);
+    expect(all.length).toBeGreaterThanOrEqual(15);
   });
 
   it("imports nothing that decides for a person", () => {

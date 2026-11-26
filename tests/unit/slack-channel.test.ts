@@ -454,7 +454,7 @@ describe("Request changes asks what should change", () => {
     await until(() => slack.calls.filter((call) => call.method === "chat.postEphemeral").length === 2);
     const notes = slack.calls.filter((call) => call.method === "chat.postEphemeral").map((call) => JSON.parse(call.body) as { channel: string; user: string; thread_ts: string; text: string });
     expect(notes[0]).toMatchObject({ channel: CHANNEL, user: PERSON, thread_ts: "1700000000.000001", text: "That button expired. Open the task page to ask for changes: https://example.test/tasks/1" });
-    expect(notes[1]!.text).toBe("That button expired. Open the task page to ask for changes (`rovara open`).");
+    expect(notes[1]!.text).toBe("That button expired. Open the task page to ask for changes in Rovara.");
     expect(logs).toContainEqual({ event: "slack.changes_box_failed", code: "expired_trigger_id" });
     // An address that is not plain https is not put in the note.
     expect(changesPressOf(press({ message: { ts: "1700000000.000300", blocks: [{ type: "actions", elements: [{ action_id: "rovara_open_task", url: "javascript:alert(1)" }] }] } }))?.taskUrl).toBeUndefined();
@@ -471,12 +471,12 @@ describe("a card with no address to open", () => {
     const withButtons = renderEvent({ ...base, type: "approval_request", data: { ...data, actions: [{ decision: "APPROVE", label: "Approve" }] } }, 3_000)!;
     const elementsOf = (rendered: { blocks?: unknown[] }) => (rendered.blocks as Array<{ type: string; elements?: Array<{ action_id?: string; url?: string; text?: unknown }> }>).filter((block) => block.type === "actions").flatMap((block) => block.elements ?? []);
     expect(elementsOf(withButtons).map((element) => element.action_id)).toEqual(["rovara_decide_APPROVE"]);
-    expect(JSON.stringify(withButtons.blocks)).toContain("rovara open");
+    expect(JSON.stringify(withButtons.blocks)).toContain("Open the task in Rovara.");
     // No buttons and no address: no empty actions block either.
     const bare = renderEvent({ ...base, type: "approval_request", data }, 3_000)!;
     expect((bare.blocks as Array<{ type: string }>).map((block) => block.type)).toEqual(["section", "context"]);
     // The words are not said twice when the card's own text already says it.
-    const said = renderEvent({ ...base, type: "approval_request", data: { ...data, text: "Plan waits.\nOpen it with `rovara open`." } }, 3_000)!;
+    const said = renderEvent({ ...base, type: "approval_request", data: { ...data, text: "Plan waits.\nOpen the task in Rovara." } }, 3_000)!;
     expect((said.blocks as Array<{ type: string }>).map((block) => block.type)).toEqual(["section"]);
     // With an address, the button is there with its url.
     const linked = renderEvent({ ...base, type: "approval_request", data: { ...data, taskUrl: "https://example.test/t" } }, 3_000)!;

@@ -261,7 +261,7 @@ export function createModelSelection(deps: ModelSelectionDependencies): ModelSel
     if (!parsed.success) return { ok: false, code: "invalid", words: "That is not a change the model setting offers." };
     const body = parsed.data;
     // Every change is the owner's own act in a page session opened within ten minutes, never a token's.
-    if (!ctxIn.fresh) return { ok: false, code: "reauth_required", words: deps.words?.reauth ?? "That change needs a recent sign-in. Close this page and run `rovara open models` again, then make the change within ten minutes." };
+    if (!ctxIn.fresh) return { ok: false, code: "reauth_required", words: deps.words?.reauth ?? "That change needs a recent sign-in. Sign in to Rovara again, then make the change within ten minutes." };
     let ctx: Context;
     try { ctx = await context(true); } catch { return { ok: false, code: "settings_unreadable", words: "The model setting could not be read, so it was not changed." }; }
     const policy = ctx.policy;

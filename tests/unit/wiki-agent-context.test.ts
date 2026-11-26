@@ -8,7 +8,6 @@ import { createWikiStore } from "../../packages/broker/src/core/wiki/store.js";
 import { WIKI_INVOCATION_MARGIN_BYTES, invocationTooBigForWiki } from "../../packages/broker/src/core/task-flow/wiki-step.js";
 import { workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { agentPageOf, buildWikiContext, createWikiForStep, createWikiOnEvents, deleteWikiUse, readWikiTaskUse, recordWikiReports, setWikiAgentSwitch, wikiAgentSwitchIsOn, wikiReportsOfEvents } from "../../packages/broker/src/core/wiki/agent-context.js";
-import { COMPANY_PURGE_COOLING_OFF_MS } from "../../packages/broker/src/core/company/purge.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
 const B = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
@@ -17,7 +16,6 @@ const T0 = Date.parse("2026-11-17T10:00:00.000Z");
 const TASK = "11111111-1111-4111-8111-111111111111";
 const TASK_B = "22222222-2222-4222-8222-222222222222";
 const OP = "aaaaaaaa-1111-4111-8111-111111111111";
-void COMPANY_PURGE_COOLING_OFF_MS;
 
 function world() {
   const store = new MemoryDocumentStore();

@@ -63,7 +63,7 @@ export function modeRefusal(code: ModeFailure): Error {
   }
 }
 
-const REAUTH_MESSAGE = "That change needs a recent sign-in: open the page again with `rovara open second-review` and make the change within ten minutes.";
+const REAUTH_MESSAGE = "That change needs a recent sign-in: sign in to Rovara again, then make the change within ten minutes.";
 const reauthRequired = (): Error => agentXError("REAUTH_REQUIRED", REAUTH_MESSAGE);
 
 /** What each refusal of an evidence writer says, in fixed words. */

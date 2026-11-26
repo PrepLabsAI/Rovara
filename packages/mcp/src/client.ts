@@ -13,10 +13,6 @@ import {
   DeveloperTaskResponseSchema,
   TASK_VIEW_HEADER,
   TASK_VIEW_VERSION,
-  SecondReviewStateReaderSchema,
-  ModelSelectionStateReaderSchema,
-  DesignReviewStateReaderSchema,
-  TaskDiagnosisViewReaderSchema,
   SessionListReaderSchema,
   SessionMessageSchema,
   SessionResponseReaderSchema,
@@ -104,9 +100,6 @@ export interface CallOptions {
   busyStep?: string;
 }
 
-/** One task's design review as a client reads it (read only: the owner's acts on it are made on the local page). */
-export type DesignReviewStateReadView = z.infer<typeof DesignReviewStateReaderSchema>;
-
 /** The tickets that wait for the owner, the places a project's work is asked for (the answer of `GET /v1/app/projects/<project>/intake`). */
 export const IntakeListReaderSchema = z.object({
   items: z.array(z.object({ itemId: z.string(), system: z.string(), id: z.string(), title: z.string(), reason: z.string(), waitingSince: z.string(), requester: z.object({ display: z.string() }).passthrough() }).passthrough()),
@@ -115,31 +108,6 @@ export const IntakeListReaderSchema = z.object({
 export type IntakeListRead = z.infer<typeof IntakeListReaderSchema>;
 export const IntakeStartReaderSchema = z.object({ started: z.boolean(), taskId: z.string().optional(), reason: z.string().optional(), state: z.string().optional() }).passthrough();
 export type IntakeStartRead = z.infer<typeof IntakeStartReaderSchema>;
-
-/** The second review's state as a client reads it: a mode this build does not know reads `unknown` (forward-compatible reader). */
-export type SecondReviewStateRead = z.infer<typeof SecondReviewStateReaderSchema>;
-
-/** A task's Fix with agent state as a client reads it (forward-compatible: a proposal kind this build does not know reads `unknown`). */
-export type TaskDiagnosisRead = z.infer<typeof TaskDiagnosisViewReaderSchema>;
-/** The saved connections as a client reads them: never a secret, its name or the vendor account (read only: the owner adds and changes them on the local page). */
-export const ConnectionsReadSchema = z.object({
-  connections: z.array(z.object({
-    connectionId: z.string(), type: z.string(), label: z.string(), access: z.string(), hasCredential: z.boolean(), detail: z.string(),
-    lastCheck: z.object({ ok: z.boolean(), at: z.string() }).optional(),
-  }).passthrough()),
-}).passthrough();
-export type ConnectionsRead = z.infer<typeof ConnectionsReadSchema>;
-
-/** A project's context sources and the changes waiting for the owner, as a client reads them. */
-export const ContextSourcesReadSchema = z.object({
-  project: z.string(), revision: z.number(),
-  sources: z.array(z.object({ sourceId: z.string(), label: z.string(), stages: z.array(z.string()), tools: z.array(z.object({ name: z.string(), role: z.string() }).passthrough()), quotes: z.string(), retention: z.string() }).passthrough()),
-  pending: z.array(z.object({ changeId: z.string(), kind: z.string(), sourceId: z.string(), reasons: z.array(z.string()) }).passthrough()),
-}).passthrough();
-export type ContextSourcesRead = z.infer<typeof ContextSourcesReadSchema>;
-
-/** The model each step uses, as a client reads it (read only: the owner changes it on the local page). */
-export type ModelSelectionStateRead = z.infer<typeof ModelSelectionStateReaderSchema>;
 
 /** What one project said to a read of its team knowledge: the answer, or "not found" (the project does not exist for this person, or the repository is not one of its repositories: the broker words both alike). */
 export type KnowledgeAsk<T> = { kind: "answer"; response: T } | { kind: "not_found" };
@@ -188,24 +156,12 @@ export interface ControlPlaneClient {
   openPullRequest(taskId: string, request: DeveloperPullRequestRequest): Promise<DeveloperPullRequestResponse>;
   /** Spec 025 FR-030: shares the task, or changes a shared task's mode (API 1.2). */
   shareTask(taskId: string, request: ShareDeveloperTaskRequest): Promise<DeveloperTaskClientView>;
-  /** The second review's settings and state (read only: the owner changes them on the local page). Absent route: the install has no second review. */
-  getSecondReview(query: { project?: string; builder?: readonly string[] }): Promise<SecondReviewStateRead>;
   /** The tickets that wait for the owner in a project, and where its work is asked for (read only). */
   getIntake(project: string): Promise<IntakeListRead>;
   /** Starts a task from a ticket that waits (the owner's act: the task is theirs, and its plan still waits for their approval). */
   startIntakeTicket(project: string, itemId: string, requestId: string): Promise<IntakeStartRead>;
   /** Drops a ticket that waits ("not this one"). */
   dismissIntakeTicket(project: string, itemId: string, requestId: string): Promise<{ dismissed: boolean }>;
-  /** The saved connections (read only: the owner adds, changes and removes them on the local page). Absent route: the install has none. */
-  listConnections(): Promise<ConnectionsRead>;
-  /** A project's context sources and the changes waiting for the owner (read only). */
-  getContextSources(project: string): Promise<ContextSourcesRead>;
-  /** The model each step uses, what it would run on now and what it costs (read only: the owner changes it on the local page). Absent route: the install has no per-step model setting. */
-  getModelSelection(): Promise<ModelSelectionStateRead>;
-  /** One task's design review: how it stands, the findings, and what waits for the owner (read only). */
-  getDesignReview(taskId: string): Promise<DesignReviewStateReadView>;
-  /** A task's error, whether Fix with agent is offered for it, and the diagnosis of it (read only: the owner starts one on the task's page). Absent route: the install has no Fix with agent. */
-  getTaskDiagnosis(taskId: string): Promise<TaskDiagnosisRead>;
   getTaskPeople(taskId: string): Promise<TaskPeopleView>;
   getTaskPeopleRequest(taskId: string, requestId: string): Promise<TaskPeopleChangeResult>;
   setTaskPerson(taskId: string, request: TaskPeopleRoleRequest): Promise<TaskPeopleChangeResult>;
@@ -486,20 +442,9 @@ export function httpControlPlaneClient(options: {
     closeTask: (taskId, requestId, discardUnpublished = false) => call(DeveloperCloseResponseSchema, "POST", path(taskId, "/close"), { requestId, ...(discardUnpublished ? { discard_unpublished: true } : {}) }, true, { busyStep: CLOSE_BUSY_STEP }),
     openPullRequest: (taskId, request) => call(DeveloperPullRequestResponseSchema, "POST", path(taskId, "/pull-requests"), request),
     shareTask: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/share"), request, true, { busyStep: SHARE_BUSY_STEP })),
-    getDesignReview: async (taskId) => (await call(z.object({ designReview: DesignReviewStateReaderSchema }).passthrough(), "GET", path(taskId, "/design-review"))).designReview,
-    getTaskDiagnosis: (taskId) => call(TaskDiagnosisViewReaderSchema, "GET", path(taskId, "/diagnosis")),
     getIntake: (project) => call(IntakeListReaderSchema, "GET", `/v1/app/projects/${encodeURIComponent(project)}/intake`),
     startIntakeTicket: (project, itemId, requestId) => call(IntakeStartReaderSchema, "POST", `/v1/app/projects/${encodeURIComponent(project)}/intake/${encodeURIComponent(itemId)}/start`, { requestId }),
     dismissIntakeTicket: (project, itemId, requestId) => call(z.object({ dismissed: z.boolean() }).passthrough(), "POST", `/v1/app/projects/${encodeURIComponent(project)}/intake/${encodeURIComponent(itemId)}/dismiss`, { requestId }),
-    listConnections: () => call(ConnectionsReadSchema, "GET", "/v1/dev/connections"),
-    getContextSources: (project) => call(ContextSourcesReadSchema, "GET", `/v1/dev/context-sources?project=${encodeURIComponent(project)}`),
-    getSecondReview: async (query) => {
-      const search = new URLSearchParams();
-      if (query.project !== undefined) search.set("project", query.project);
-      for (const builder of query.builder ?? []) search.append("builder", builder);
-      return call(SecondReviewStateReaderSchema, "GET", `/v1/dev/second-review${search.size === 0 ? "" : `?${search.toString()}`}`);
-    },
-    getModelSelection: () => call(ModelSelectionStateReaderSchema, "GET", "/v1/dev/model-selection"),
     getTaskPeople: async (taskId) => (await call(TaskPeopleViewResponseSchema, "GET", path(taskId, "/people"))).view,
     getTaskPeopleRequest: async (taskId, requestId) => (await call(TaskPeopleChangeResponseSchema, "GET", path(taskId, `/people/requests/${encodeURIComponent(requestId)}`))).change,
     setTaskPerson: async (taskId, request) => (await call(TaskPeopleChangeResponseSchema, "POST", path(taskId, "/people/role"), request)).change,

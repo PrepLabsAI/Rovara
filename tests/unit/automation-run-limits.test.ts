@@ -1,5 +1,5 @@
 // What bounds an unattended run, and what gives its allowance back. The rules that matter:
-//   1. no run that carries a dollar limit starts where nothing enforces one (the default admission allows everything): the door refuses, and a trigger is not turned on;
+//   1. no run that carries a dollar limit starts where nothing enforces one (the default admission allows everything): the door refuses;
 //   2. a chain step holds only ITS share of the run's dollar limit, never more than the run has left, and the share it was told to Admission is that figure;
 //   3. a reservation is settled when its run's task ends (with what the install says it cost), once; it is given back on every path where no run was made;
 //   4. a task that is stopped is stopped by the step's timeout, the run's own time and a cancel; a step whose task waits for the owner does not time out; a retry never starts beside a task that may still run.

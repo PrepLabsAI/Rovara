@@ -187,8 +187,6 @@ describe("the health route's grants (A13)", () => {
       "packages/broker/src/core/e2e/baseline.ts",
       // Second review: the track record rows (one per answered second opinion, and a pointer per task) expire after their retention (400 days).
       "packages/broker/src/core/second-review/track.ts",
-      // Fix with agent: a diagnosis's request (a day while it waits, 30 days once settled), result and person rows, the open-place row and the rate rows all expire after a named retention.
-      "packages/broker/src/core/diagnosis/store.ts",
       // The setup agent: a run's journal, a person's commands and their request marks, the website asks (with their counters and index rows) and the per-run refusal counts, which are kept 31 days like Cloud's setup rows; and the check's record (31 days).
       "packages/broker/src/core/setup-agent/keys.ts", "packages/broker/src/core/setup-agent/check.ts", "packages/broker/src/core/setup-agent/command.ts", "packages/broker/src/core/setup-agent/host-ask.ts",
       // The project's test environment: the proposal and approval bookkeeping, the saved-environment markers (a closed workspace's row and the rebuild-due marker), the candidate setup check's row and the nightly status rows expire after their own retention.
@@ -203,8 +201,8 @@ describe("the health route's grants (A13)", () => {
       // connection change (7 days). A connection's own record, a project's source document and a registered server are durable and carry no expiry.
       "packages/broker/src/context-sources/store.ts", "packages/broker/src/context-sources/usage.ts", "packages/broker/src/context-sources/quotes.ts", "packages/broker/src/context-sources/citations.ts",
       "packages/broker/src/connections/request-marks.ts",
-      // Automation: a request row (7 days), a trigger's activity (30 days), its hourly and daily counters and its subject note (2 hours to 2 days), the automatic runs' month and claim rows, started and paused markers and the run watch (62 days at most, 14 days for the watch) and the open record of an unattended run with its reservation (62 days).
-      "packages/broker/src/core/automation/kit.ts", "packages/broker/src/core/automation/run-seam.ts", "packages/broker/src/core/triggers/store.ts", "packages/broker/src/core/triggers/dispatch.ts",
+      // Automation: a request row (7 days), the automatic runs' month and claim rows, started and paused markers and the run watch (62 days at most, 14 days for the watch) and the open record of an unattended run with its reservation (62 days).
+      "packages/broker/src/core/automation/kit.ts", "packages/broker/src/core/automation/run-seam.ts",
       "packages/broker/src/core/automatic-runs/cap.ts",
       // Nightly upkeep (lead 4 N1): the last-night, per-night and pause-notice marker rows expire after 62 days (`upkeepExpiryOf`); the switch row (SETTINGS) is durable and carries no expiry.
       "packages/broker/src/core/upkeep/keys.ts",

@@ -1,21 +1,17 @@
-// L4-RC: the "Rovara" Check is on for everyone (owner decision 2026-11-17). The hosted job services and the laptop's tracking both ask for it; the hosted code host (company-scoped) can write it for the
-// company's own repository only; an install without the Checks permission fails soft; a personal token cannot write a Check, so the laptop's token host offers none. All over fakes (never the real GitHub).
+// L4-RC: the "Rovara" Check is on for everyone (owner decision 2026-11-17). The hosted job services ask for it; the hosted code host (company-scoped) can write it for the
+// company's own repository only; an install without the Checks permission fails soft. All over fakes (never the real GitHub).
 import { readFileSync } from "node:fs";
 import { generateKeyPairSync } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
-import { FakeHostModel } from "@agentx/broker/fakes";
-import { SecretValue, type OrgId } from "@agentx/contracts";
-import { createLocalSecretStore } from "../../packages/broker/src/ports/index.js";
+import { describe, expect, it } from "vitest";
+import type { OrgId } from "@agentx/contracts";
 import { createHostedBrokerCoreServices, createBrokerCoreServices } from "../../packages/broker/src/aws/core-job-services.js";
 import { companyScopedGitHubProvider } from "../../packages/broker/src/aws/core-code-host.js";
 import { SUMMARY_CHECK_PERMISSION_RETRY_MS, summaryCheckKey, syncSummaryCheck, type SummaryCheckPass } from "../../packages/broker/src/core/merge/index.js";
-import { createLocalMilestones, createLocalTracking } from "../../packages/broker/src/core-host/app/tracking.js";
 import { githubCodeHost } from "../../packages/broker/src/plugins/code-host/github/index.js";
 import { GitHubAppCredentialProvider } from "../../packages/broker/src/plugins/code-host/github/client.js";
-import { githubTokenCodeHost } from "../../packages/broker/src/plugins/code-host/github/token-code-host.js";
 import { rovaraCheckSource } from "../../packages/broker/src/services/index.js";
 import { writeEvalCheckSetting } from "../../packages/broker/src/core/ci-evidence/eval-check-setting.js";
-import { GITHUB_ORG_SCOPE, GITHUB_REPO_URL, GitHubFixtureApi } from "../support/ports/github-fixture-api.js";
+import { GITHUB_REPO_URL, GitHubFixtureApi } from "../support/ports/github-fixture-api.js";
 import { ORG, TASK_ID, mergeWorld } from "../support/merge-world.js";
 import { host as serviceHost } from "../support/service-host.js";
 
@@ -82,41 +78,6 @@ describe("the hosted job services", () => {
     expect(await services["merge-tracking"].pass({ budgetMs: 1000 })).toMatchObject({ attempted: 1, failed: 0 });
     expect(model.summaryChecks).toEqual([]);
     expect(model.summaryCheckWrites).toBe(0);
-  });
-});
-
-describe("the laptop's tracking", () => {
-  const trackingOf = async (override?: ReturnType<typeof rovaraCheckSource>) => {
-    const w = await serviceHost();
-    const tracking = createLocalTracking({
-      flow: w.h.deps, registry: w.registry, companyId: ORG, milestones: createLocalMilestones({ store: w.h.store, now: () => w.clock.ms }), now: () => w.clock.ms,
-      ...(override === undefined ? {} : { summaryCheck: override }),
-    });
-    return { w, tracking };
-  };
-
-  it("keeps the source a host passes itself (a gate it closes stays closed)", async () => {
-    const { w, tracking } = await trackingOf({ enabled: () => false });
-    await tracking.sweep();
-    expect(w.world.prs[0]!.model.summaryChecks).toEqual([]);
-  });
-
-  // Mutant L2: the token client's method list gains the Check write (a personal token cannot write a Check run).
-  it("a laptop signed in with a personal token offers no Check, so the pass sends nothing to GitHub", async () => {
-    const api = new GitHubFixtureApi(new FakeHostModel({ url: GITHUB_REPO_URL, id: "4242", fullName: "acme/app", webBase: "https://github.com" }), { personalToken: "fixture-personal-token" });
-    const fetchSpy = vi.fn<typeof fetch>((input, init) => api.fetch(input, init));
-    const secrets = createLocalSecretStore({ environment: {}, keyFile: { get: async () => new SecretValue("fixture-personal-token"), providers: async () => ["github"] } });
-    const codeHost = githubTokenCodeHost({ companyId: GITHUB_ORG_SCOPE.orgId, secrets, environment: {}, gh: async () => undefined, fetch: fetchSpy, now: () => NOW, registeredRepositories: () => [GITHUB_REPO_URL] });
-    expect("upsertSummaryCheck" in codeHost).toBe(false);
-    expect("summaryCheckSource" in codeHost).toBe(false);
-    const w = await mergeWorld();
-    const pr = w.prs[0]!;
-    const pass: SummaryCheckPass = {
-      task: { ...(await w.host.loadTask(TASK_ID))!, orgId: ORG }, pullRequest: { repositoryId: "app", number: pr.number }, codeHost, repositoryUrl: GITHUB_REPO_URL, scope: { orgId: ORG },
-      status: { headRevision: pr.head, draft: false, state: "open" }, ci: "passing", ciMode: "their_ci_fix", headByRovara: true, ready: true, proofHoldOn: false,
-    };
-    expect(await syncSummaryCheck({ store: w.store, now: () => NOW, source: rovaraCheckSource() }, pass)).toBe("off");
-    expect(fetchSpy).not.toHaveBeenCalled();
   });
 });
 

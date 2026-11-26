@@ -1,7 +1,6 @@
-// What the owner and a tool see of the per-step model setting: the plain lines for the terminal and an AI tool, what a page may send, and the MCP tool that only reads.
-import { describe, expect, it, vi } from "vitest";
+// What the owner and a tool see of the per-step model setting: the plain lines for the terminal and an AI tool, and what a page may send.
+import { describe, expect, it } from "vitest";
 import { ModelSelectionBodySchema, ModelSelectionStateSchema, modelSelectionLines, type ModelSelectionState } from "@agentx/contracts";
-import { DEVELOPER_TOOLS } from "../../packages/mcp/src/index.js";
 
 const ref = (provider: string, modelId: string) => ({ provider, modelId });
 const effective = (model: ReturnType<typeof ref>, extra: Record<string, unknown> = {}) => ({ model, thinkingLevel: null, reason: "BUILTIN_DEFAULT" as const, sameModelAsChecked: false, priceUsdPerMillion: { input: 3, output: 15, source: "catalog" as const }, ...extra });
@@ -56,31 +55,5 @@ describe("what a page may send", () => {
       { action: "clear", stage: "plan" }, { action: "review-default", value: "anything", expectedRevision: 0 }, { action: "set", stage: "plan", choice: { thinkingLevel: "xhigh" }, expectedRevision: 0 },
       { action: "set", stage: "plan", choice: { model: ref("openai", "gpt-5") }, expectedRevision: 0, extra: true },
     ]) expect(ModelSelectionBodySchema.safeParse(bad).success, JSON.stringify(bad)).toBe(false);
-  });
-});
-
-describe("agentx_get_model_selection", () => {
-  const tool = DEVELOPER_TOOLS.find((entry) => entry.name === "agentx_get_model_selection")!;
-
-  it("is a read: it asks the control plane for the setting and says what each step uses, what it costs, and where the owner changes it", async () => {
-    const client = { getModelSelection: vi.fn(async () => state) };
-    const result = await tool.handler({ client } as never, {}, {} as never);
-    expect(client.getModelSelection).toHaveBeenCalledTimes(1);
-    expect(result.structured).toMatchObject({ checking_default: "install-model", run_limit_held: false, revision: 3 });
-    const steps = (result.structured as { steps: Array<Record<string, unknown>> }).steps;
-    expect(steps).toHaveLength(7);
-    expect(steps[0]).toMatchObject({ step: "understand", set_by_owner: true, thinking: "high", price_usd_per_million: { input: 3, output: 15 } });
-    expect(steps[2]).toMatchObject({ step: "plan_check", set_by_owner: false, same_model_as_checked: true });
-    expect(steps[4]).toMatchObject({ step: "code_review", problem: "No model can be called on this computer." });
-    expect(steps[4]).not.toHaveProperty("model");
-    expect(steps[5]).toMatchObject({ fell_back_from: "anthropic/claude-opus-4-5" });
-    expect(result.text).toContain("plan check: anthropic:claude-sonnet-4-5");
-    expect(result.text).toContain("rovara open models");
-  });
-
-  it("takes no input and says that it only reads", () => {
-    expect(Object.keys(tool.inputSchema)).toEqual([]);
-    expect(tool.description).toContain("only reads");
-    expect(tool.description).toContain("never through a tool");
   });
 });

@@ -1,6 +1,5 @@
 // Chain validation. `chainGraphProblems` checks the shape of the graph (where edges lead, what can run, what can finish, loops without a bound) and is pure. `validateChainForPublish` adds what needs the
-// install: each agent step is pinned to a published version, the recipe of that version passes the guardrails, and no coding agent has to choose a branch. `autonomousTriggerProblems` is what an event or
-// schedule trigger needs of a published chain on top of that (a run limit, and a gate the owner can decide).
+// install: each agent step is pinned to a published version, the recipe of that version passes the guardrails, and no coding agent has to choose a branch.
 import {
   AgentXError, agentXError, builtinDefaultPin, isBuiltinAgentId, recipeRunner,
   type ChainDefinition, type ChainStep, type ChainStepId, type OrgId, type PinnedChainDefinition, type ResolvedRecipe, type StepTarget,
@@ -214,19 +213,4 @@ export async function validateChainForPublish(deps: RosterDependencies, orgId: O
   }
   if (problems.length === 0 && def.steps.length === 0) throw agentXError("CONFIG_INVALID", "a chain needs a step");
   return { pinned: { ...def, steps: steps as PinnedStep[] }, problems, guardrailsRevision: guardrails.revision };
-}
-
-// ---- event and schedule triggers
-
-const RUN_LIMIT_MESSAGE = "set a limit on one run before adding an event or schedule trigger";
-const APPROVERS_MESSAGE = "no one starts an event or schedule run, so a gate must name the owner (or named people) to decide it";
-
-/** What a chain needs to be started by an event or a schedule: a limit on one run (nobody is watching the spend), and no gate only the starter can decide (an event or a schedule has no person to be the starter). */
-export function autonomousTriggerProblems(chain: { pinned: PinnedChainDefinition }): ChainProblem[] {
-  const problems: ChainProblem[] = [];
-  if (chain.pinned.limits?.maxRunUsd === undefined) problems.push({ path: "limits.maxRunUsd", message: RUN_LIMIT_MESSAGE });
-  chain.pinned.steps.forEach((step, index) => {
-    if (step.kind === "gate" && step.approvers.every((rule) => rule.kind === "starter")) problems.push({ path: `steps.${String(index)}.approvers`, message: APPROVERS_MESSAGE });
-  });
-  return problems;
 }

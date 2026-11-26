@@ -169,14 +169,4 @@ describe("gates", () => {
     expect(await readChainRun(world.table, COMPANY, run.runId)).toMatchObject({ status: "succeeded" });
     expect(world.starts).toHaveLength(1);
   });
-
-  it("refuses a gate that only the starter could decide when an event or a schedule starts the chain", async () => {
-    const world = createAutomationWorld();
-    const { agentId } = await publishAgent(world);
-    const design = { ...gated(agentId), steps: gated(agentId).steps.map((step) => (step.kind === "gate" ? { ...step, approvers: [{ kind: "starter" }] } : step)) };
-    const chainId = await publishChain(world, agentId, design);
-    const { createTrigger, triggerEnableRequest, enableTrigger } = await import("../../packages/broker/src/core/triggers/lifecycle.js");
-    const trigger = await createTrigger(world.dispatch, { orgId: COMPANY, target: { kind: "chain", chainId }, project: PROJECT, spec: { kind: "event", source: "github", type: "pull_request.opened" }, by: OWNER.personId });
-    await expect(enableTrigger(world.dispatch, COMPANY, trigger.triggerId, world.proofFor(await triggerEnableRequest(world.dispatch, trigger)))).rejects.toThrow(/no one starts an event or schedule run/u);
-    });
 });
