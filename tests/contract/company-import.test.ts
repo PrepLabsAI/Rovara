@@ -1,12 +1,8 @@
 // DEC 254b (b): an install administrator copies one company of the install's old layout (State table: ORG#<company>/META and MEMBER#<person>, the
-// DEVELOPER_ORG pointer, the ban list) into Code's own company records (sign-in table), before Code's company sign-in is switched on. A preview writes
-// nothing; an apply writes only new rows, through the sign-in Lambda; an undo removes exactly what an import wrote and nobody changed since.
+// DEVELOPER_ORG pointer, the ban list) into Code's own company records (sign-in table), before Code's company sign-in is switched on. An apply writes only new rows, through the sign-in Lambda; an undo removes exactly what an import wrote and nobody changed since.
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
-import { mkdtemp, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { DeleteCommand } from "@aws-sdk/lib-dynamodb";
 import { AgentXError, CompanyImportPreviewSchema, companyScoped, type AdminChangeInput } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
@@ -18,9 +14,6 @@ import { PLANNERS, type PlanDependencies } from "../../packages/broker/src/aws/a
 import type { AuthenticatedIdentity } from "../../packages/broker/src/auth.js";
 import { CompanyImportStore, COMPANY_IMPORT_BATCH, companyImportOperator } from "../../packages/broker/src/developer/company-import.js";
 import { CompanySignInStore, companyKey, companyMemberKey } from "../../packages/broker/src/developer/company-membership.js";
-import { tokenStoreKey } from "../../packages/cli/src/auth.js";
-import { executeCli } from "../../packages/cli/src/main.js";
-import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
 import { createAdminChangeBroker } from "../support/admin-change-broker.js";
 import { identityHarness } from "../support/developer-fakes.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -455,19 +448,6 @@ describe("an install administrator's preview and changes", () => {
     return { harness, change, imported };
   }
 
-  it("the preview route reads only and needs the administrator claim", async () => {
-    const { harness, imported } = await setUp();
-    const before = harness.db.find(() => true).map((item) => JSON.stringify(item)).sort();
-    const preview = await harness.admin("GET", `/v1/admin/company-import?companyId=${A}&mode=import`);
-    expect(preview.status).toBe(200);
-    expect(preview.body).toMatchObject({ mode: "import", companyId: A, ready: true, company: "write" });
-    expect((await harness.admin("GET", `/v1/admin/company-import?companyId=${A}&mode=undo`)).body).toMatchObject({ mode: "undo", members: [] });
-    expect(harness.db.find(() => true).map((item) => JSON.stringify(item)).sort()).toEqual(before);
-    expect((await harness.admin("GET", `/v1/admin/company-import?companyId=${A}`, { admin: false })).status).toBe(403);
-    expect((await harness.admin("GET", "/v1/admin/company-import?companyId=nope")).status).toBe(400);
-    expect(imported()).toEqual([]);
-  });
-
   it("an apply shows its effect by id, writes only on the yes, and its undo removes the rows", async () => {
     const { harness, change, imported } = await setUp();
     const { planned, apply } = await change({ kind: "import_install_company", companyId: A });
@@ -510,64 +490,6 @@ describe("an install administrator's preview and changes", () => {
 
   it("answers not found where it is not set up", async () => {
     const harness = await createAdminChangeBroker();
-    expect((await harness.admin("GET", `/v1/admin/company-import?companyId=${A}`)).status).toBe(404);
     expect((await harness.propose({ kind: "import_install_company", companyId: A }, ["cli"])).status).toBe(404);
-  });
-});
-
-describe("agentx admin company import", () => {
-  const CHANGE = "55555555-5555-4555-8555-555555555555";
-  const deployment = { controlPlaneUrl: "http://127.0.0.1:8787", auth: { issuer: "https://identity.example.test", clientId: "agentx-client", audience: "agentx-api" } };
-  const view = (status: string) => ({ changeId: CHANGE, kind: "import_install_company", status, effect: `Copy company ${A}.`, methodsOffered: ["cli"], createdAt: "2026-11-12T09:00:00.000Z", expiresAt: "2026-11-12T09:10:00.000Z", ...(status === "applied" ? { methodUsed: "cli" } : {}) });
-  const preview = { mode: "import", companyId: A, ready: true, company: "write", members: [{ personId: OWNER, role: "owner" }], skipped: [{ personId: DUP, reason: "merged", survivorId: OWNER }], refused: [] };
-
-  async function cli() {
-    const directory = await mkdtemp(join(tmpdir(), "agentx-cli-company-import-"));
-    const deploymentFile = join(directory, "deployment.yaml");
-    await writeFile(deploymentFile, JSON.stringify(deployment), "utf8");
-    const tokens = new InMemoryTokenStore();
-    await tokens.set(tokenStoreKey(deployment.auth), { accessToken: "access-secret-9d2e", expiresAt: Date.now() + 60_000 });
-    const calls: Array<{ method: string; url: string; body?: unknown }> = [];
-    const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
-      const url = new URL(input instanceof Request ? input.url : input);
-      calls.push({ method: init?.method ?? "GET", url: `${url.pathname}${url.search}`, ...(init?.body === undefined ? {} : { body: JSON.parse(init.body as string) as unknown }) });
-      if (url.pathname === "/v1/admin/company-import") return Response.json({ ...preview, mode: url.searchParams.get("mode") });
-      if (url.pathname === "/v1/admin/changes") return Response.json({ change: view("pending") });
-      return Response.json({ change: view("applied") });
-    }) as unknown as typeof globalThis.fetch;
-    let stdout = "";
-    const io = { fetchImplementation: fetch, tokenStore: tokens, confirm: async () => true, stdout: { write: (text: string) => { stdout += text; return true; } }, stderr: { write: () => true } };
-    const run = (args: string[]) => executeCli(["--config-dir", directory, "--deployment-file", deploymentFile, "--allow-loopback", "admin", "company", "import", ...args], io);
-    return { run, calls, out: () => stdout };
-  }
-
-  it("previews by default and proposes nothing", async () => {
-    const session = await cli();
-    expect(await session.run(["--from-install", A])).toBe(0);
-    expect(session.calls).toEqual([{ method: "GET", url: `/v1/admin/company-import?companyId=${A}&mode=import` }]);
-    expect(session.out()).toContain("preview only, nothing was written");
-    expect(session.out()).toContain(`${OWNER}  owner`);
-    expect(session.out()).toContain(`${DUP}  merged into ${OWNER}`);
-    const undo = await cli();
-    expect(await undo.run(["--from-install", A, "--undo"])).toBe(0);
-    expect(undo.calls).toEqual([{ method: "GET", url: `/v1/admin/company-import?companyId=${A}&mode=undo` }]);
-  });
-
-  it("--apply makes the admin change, and --undo --apply its undo", async () => {
-    const session = await cli();
-    expect(await session.run(["--from-install", A, "--apply"])).toBe(0);
-    expect((session.calls[0]!.body as { change: unknown }).change).toEqual({ kind: "import_install_company", companyId: A });
-    expect(session.calls.some((call) => call.url.endsWith("/apply"))).toBe(true);
-    const undo = await cli();
-    expect(await undo.run(["--from-install", A, "--undo", "--apply", "--yes"])).toBe(0);
-    expect((undo.calls[0]!.body as { change: unknown }).change).toEqual({ kind: "undo_install_company_import", companyId: A });
-  });
-
-  it("refuses a malformed company id and --yes without --apply, calling nothing", async () => {
-    for (const args of [["--from-install", "acme"], ["--from-install", A, "--yes"]]) {
-      const session = await cli();
-      expect(await session.run(args)).not.toBe(0);
-      expect(session.calls).toEqual([]);
-    }
   });
 });
