@@ -5,7 +5,7 @@ import { IMPLICIT_COMPANY_ID, TaskLogViewSchema, agentSessionKey, taskLogKey, ty
 import { createTaskSessionItems, developerIdOf, taskSessionId } from "../../../packages/broker/src/core/sessions/index.js";
 import type { SessionCompanyRole, SessionMembers, SessionProjectRole } from "../../../packages/broker/src/core/sessions/access.js";
 import { answerEntriesOf, appendTaskLog, approvalEntryOf, planSummaryEntryOf, pullRequestEntryOf, questionEntriesOf, statusEntryOf } from "../../../packages/broker/src/core/task-log/index.js";
-import { createSessionRoutes } from "../../../packages/broker/src/local/app/session-routes.js";
+import { createSessionRoutes } from "../../../packages/broker/src/core-host/app/session-routes.js";
 import { MemoryDocumentStore } from "../../../packages/broker/src/ports/memory-document-store.js";
 import { localOwnerPrincipal } from "../../../packages/broker/src/ports/policy-defaults.js";
 

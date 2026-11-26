@@ -9,9 +9,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { IMPLICIT_COMPANY_ID, PLUGIN_POINT_CARDINALITY, companyScoped, isAllowedModuleSpecifier, when, type AuditEvent, type AuditSink, type DocumentStore } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createAdapterRegistry, loadAdapters, parsePluginConfig, registerCodeDefaults, type ModuleImporter } from "../../packages/broker/src/ports/index.js";
-import * as pluginModule from "../../packages/local-adapters/src/audit-sink-plugin.js";
+import * as pluginModule from "../../packages/broker/src/plugins/audit-sink/document/module.js";
 import { AUDIT_DETAILS_MAX_BYTES, AuditLogError, SqliteAuditLog } from "../../packages/local-adapters/src/sqlite-audit-log.js";
-import { DocumentAuditSink, auditRowKey, startAuditCopy, startAuditCopyFromPrimary, verifyAuditCopy } from "../../packages/local-adapters/src/document-audit-sink.js";
+import { DocumentAuditSink } from "../../packages/broker/src/plugins/audit-sink/document/sink.js";
+import { startAuditCopy, startAuditCopyFromPrimary, verifyAuditCopy } from "../../packages/local-adapters/src/audit-copy.js";
+import { auditRowKey } from "@agentx/contracts";
 import { SqliteDocumentStore } from "../../packages/local-adapters/src/sqlite-document-store.js";
 
 const folders: string[] = [];
@@ -213,19 +215,19 @@ describe("bringing the copy up to date at start", () => {
 
 describe("the audit-sink plug-in and Code's defaults", () => {
   const importer: ModuleImporter = async (specifier) => {
-    if (specifier !== "@agentx/local-adapters/audit-sink") throw new Error("no such module");
+    if (specifier !== "@agentx/broker/plugins/audit-sink-document") throw new Error("no such module");
     return pluginModule;
   };
 
   it("loads from a config entry over the registry's storage and replaces the default sink that writes nothing", async () => {
-    expect(isAllowedModuleSpecifier("@agentx/local-adapters/audit-sink")).toBe(true);
+    expect(isAllowedModuleSpecifier("@agentx/broker/plugins/audit-sink-document")).toBe(true);
     expect(PLUGIN_POINT_CARDINALITY["audit-sink"]).toBe("one");
     const store = new MemoryDocumentStore();
     const registry = createAdapterRegistry();
     registry.register("storage", "memory", store);
     registerCodeDefaults(registry, { priceTable: { currency: "USD", models: {} } });
     expect(registry.names("audit-sink")).toEqual(["none"]);
-    await loadAdapters(parsePluginConfig({ version: 1, plugins: [{ point: "audit-sink", name: "document", module: "@agentx/local-adapters/audit-sink" }] }), { registry, importModule: importer });
+    await loadAdapters(parsePluginConfig({ version: 1, plugins: [{ point: "audit-sink", name: "document", module: "@agentx/broker/plugins/audit-sink-document" }] }), { registry, importModule: importer });
     expect(registry.names("audit-sink")).toEqual(["document"]);
     const sink: AuditSink = registry.require("audit-sink");
     await sink.record(event(1));

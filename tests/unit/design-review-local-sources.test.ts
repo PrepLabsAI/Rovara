@@ -2,7 +2,7 @@
 // repository the project does not have; a host that cannot answer leaves the file out; and the task's own ticket thread is withheld from the MCP items.
 import { describe, expect, it } from "vitest";
 import type { CodeHost, ContextSource, ProjectDefinition } from "@agentx/contracts";
-import { localPacketSources } from "../../packages/broker/src/local/app/design-review-sources.js";
+import { localPacketSources } from "../../packages/broker/src/core-host/app/design-review-sources.js";
 import type { ContextToolsDependencies } from "../../packages/broker/src/context-sources/routes.js";
 import { readSlotPacket } from "../../packages/broker/src/core/design-review/packet-store.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";

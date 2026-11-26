@@ -19,7 +19,7 @@ import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { dropBrowserEvidenceUpload, readBrowserEvidenceUpload } from "../../core/proof/browser-evidence-upload.js";
 import { readEvidenceArtifact, type EvidenceRead } from "../../core/proof/evidence-artifacts.js";
 import type { OperationRecord, TaskRecord } from "../../core/task-flow/records.js";
-import { readVerifiedText } from "./documents.js";
+import { readVerifiedText } from "../../services/documents.js";
 
 /** How long keeping evidence may hold up the worker's callback. */
 export const EVIDENCE_KEEP_MAX_MS = 6_000;

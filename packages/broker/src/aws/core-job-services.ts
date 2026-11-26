@@ -8,7 +8,7 @@ import { CI_MODE_UNREADABLE_WORDS, checkedCiReporting, type CiReporting } from "
 import type { CoreService } from "../core-host/core-runtime.js";
 import type { TaskFlow } from "../core/task-flow/flow.js";
 import { createStoreProjectSource } from "../core/task-flow/project-source.js";
-import { createTaskFactsSource } from "../local/app/facts.js";
+import { createTaskFactsSource } from "../core-host/app/facts.js";
 import { createCostLedger, costUsdOf } from "../core/cost/ledger.js";
 import { createSessionService } from "../services/sessions.js";
 import { createNoticeService, type NoticeServiceOptions } from "../services/notices.js";

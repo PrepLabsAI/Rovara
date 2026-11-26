@@ -9,9 +9,9 @@ import { claimIntakeItem, markIntakeStarted } from "../../../packages/broker/src
 import { bindSessionSurface } from "../../../packages/broker/src/core/sessions/bindings.js";
 import { taskKey } from "../../../packages/broker/src/core/task-flow/keys.js";
 import type { HostedLessonPeople } from "../../../packages/broker/src/lessons/hosted-people.js";
-import type { LessonRepositories } from "../../../packages/broker/src/local/app/lessons-repos.js";
-import { createLocalLessonSources, type LessonTicketWiring } from "../../../packages/broker/src/local/app/lessons-sources.js";
-import { createSessionStartExtras } from "../../../packages/broker/src/local/app/session-start.js";
+import type { LessonRepositories } from "../../../packages/broker/src/core-host/app/lessons-repos.js";
+import { createLocalLessonSources, type LessonTicketWiring } from "../../../packages/broker/src/core-host/app/lessons-sources.js";
+import { createSessionStartExtras } from "../../../packages/broker/src/core-host/app/session-start.js";
 import { MemoryDocumentStore } from "../../../packages/broker/src/ports/memory-document-store.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;

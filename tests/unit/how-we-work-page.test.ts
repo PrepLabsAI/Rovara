@@ -8,8 +8,8 @@ import { fixedPlaybookSource } from "../../packages/broker/src/core/playbook/sou
 import { createStoreProjectSource } from "../../packages/broker/src/core/task-flow/project-source.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createNoopAuditSink } from "../../packages/broker/src/ports/policy-defaults.js";
-import { createLocalPlaybook, EDIT_THE_FILE } from "../../packages/broker/src/local/app/playbook.js";
-import { registerProject } from "../../packages/broker/src/local/app/projects.js";
+import { createLocalPlaybook, EDIT_THE_FILE } from "../../packages/broker/src/core-host/app/playbook.js";
+import { registerProject } from "../../packages/broker/src/core-host/app/projects.js";
 import { TASK_FLOW_INDEXES } from "../../packages/broker/src/core/task-flow/flow.js";
 import { fakeWorld, formBody, formOf, raw } from "../support/local-pages-fakes.js";
 

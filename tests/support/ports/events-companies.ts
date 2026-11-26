@@ -3,7 +3,8 @@ import { SHARED_RAW_IDS, TWO_COMPANIES, type IsolationSurface, type TwoCompanyIs
 import { MemoryDocumentStore } from "../../../packages/broker/src/ports/memory-document-store.js";
 import { SqliteDocumentStore } from "../../../packages/local-adapters/src/sqlite-document-store.js";
 import { SqliteAuditLog } from "../../../packages/local-adapters/src/sqlite-audit-log.js";
-import { DocumentAuditSink, startAuditCopy } from "../../../packages/local-adapters/src/document-audit-sink.js";
+import { DocumentAuditSink } from "../../../packages/broker/src/plugins/audit-sink/document/sink.js";
+import { startAuditCopy } from "../../../packages/local-adapters/src/audit-copy.js";
 import { workEventRow, listWorkEvents } from "../../../packages/broker/src/core/work-events/work-events.js";
 import { createFakeScheduler } from "../../../packages/broker/src/ports/fake-scheduler.js";
 import { createInProcessRealtime } from "../../../packages/broker/src/ports/realtime.js";

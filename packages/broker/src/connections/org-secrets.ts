@@ -2,7 +2,7 @@
 //
 // The hosted product keeps each in its secret service under `agentx/<env>/org-connectors/<org>/<id>`, written through a role session tagged with the org. Code keeps the same NAMES (so a later switch
 // needs no rename) and answers them from `ConnectionSecrets`: read, write and schedule-for-deletion of a named secret, which a laptop's adapter keeps in a file only its owner can read
-// (`connections/local-secrets.ts`). The core never holds a secret in a record or an error: a record keeps whether a secret was saved and which VERSION of it is current, and the value
+// (`local/connection-secrets.ts`). The core never holds a secret in a record or an error: a record keeps whether a secret was saved and which VERSION of it is current, and the value
 // is read at the moment it is used.
 import { OrgIdSchema, agentXError, type OrgId } from "@agentx/contracts";
 

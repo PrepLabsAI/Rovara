@@ -4,7 +4,7 @@ import { readTaskMoney } from "../../core/cost/task-money.js";
 // adapter vouches for the principal); nothing here reads who is acting from a body.
 //
 // Plan decisions are NOT here: an approval is authority, and the only proof the local owner can give is the one a local page signs for exactly one request, revision and digest
-// (decisions/local-session.ts). The session token that logs a tool in is not an approval proof, so a tool that asks to approve is told to open the page.
+// (local/page-session-proofs.ts). The session token that logs a tool in is not an approval proof, so a tool that asks to approve is told to open the page.
 import type { ObjectStorage } from "@agentx/contracts";
 import { AgentXError, DEVELOPER_API_VERSION, agentXError, type Principal } from "@agentx/contracts";
 import type { TaskActionsOptions } from "../../core/task-flow/owner-round.js";
@@ -19,9 +19,9 @@ import { DOCUMENT_CHANGED, readVerifiedText } from "./documents.js";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
 import { readTaskPlanDocument } from "../../aws/task-plan-document.js";
 import { textReaderOf } from "../../core/build-step/plan-input.js";
-import { createLocalSessionControl, createSessionControlHost } from "./host.js";
-import { listProjects, registerProject } from "./projects.js";
-import { developerTaskListItem, developerTaskView } from "./task-view.js";
+import { createLocalSessionControl, createSessionControlHost } from "../../core-host/app/host.js";
+import { listProjects, registerProject } from "../../core-host/app/projects.js";
+import { developerTaskListItem, developerTaskView } from "../../core-host/app/task-view.js";
 import type { SecondReview } from "../../core/second-review/index.js";
 import type { ModelSelectionService } from "../../core/model-selection/service.js";
 import { designReviewStateOf } from "../../core/design-review/state-view.js";

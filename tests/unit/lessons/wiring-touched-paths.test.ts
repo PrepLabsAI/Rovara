@@ -12,8 +12,8 @@ import { setLearnedLessonsGate } from "../../../packages/broker/src/lessons/poli
 import { lessonAreaOverlap, lessonCreditShares } from "../../../packages/broker/src/lessons/credit.js";
 import { learnFromEndedTask, type TaskSubjectBase } from "../../../packages/broker/src/lessons/task-end.js";
 import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
-import { createLocalLessonSources, TOUCHED_PATHS_MAX, TOUCHED_READ_MS } from "../../../packages/broker/src/local/app/lessons-sources.js";
-import type { LessonRepositories } from "../../../packages/broker/src/local/app/lessons-repos.js";
+import { createLocalLessonSources, TOUCHED_PATHS_MAX, TOUCHED_READ_MS } from "../../../packages/broker/src/core-host/app/lessons-sources.js";
+import type { LessonRepositories } from "../../../packages/broker/src/core-host/app/lessons-repos.js";
 import type { EvidenceSpan } from "../../../packages/broker/src/lessons/reflect-input.js";
 import type { OutcomeRowReader } from "../../../packages/broker/src/lessons/task-outcome-rows.js";
 import type { ProcessDeps } from "../../../packages/broker/src/lessons/process.js";

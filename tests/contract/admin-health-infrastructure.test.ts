@@ -160,7 +160,7 @@ describe("the health route's grants (A13)", () => {
       // L7a: the pull request head and branch index rows (90 days). L7b: the merge commit index (MERGE_COMMIT_INDEX_KEPT_DAYS), the proof evidence blobs (their retention class) and the CI fix record (EVIDENCE_RETENTION_SECONDS).
       "packages/broker/src/core/merge/store.ts", "packages/broker/src/core/proof/revert/merge-commit-index.ts", "packages/broker/src/core/proof/evidence-blob-store.ts", "packages/broker/src/core/ci-fix/ci-fix.ts",
       // L9-wire: a worker's event rows (14 days), the message bucket (2 hours) and the saved message rows (30 days), and the store's own `ttlAttribute`, which must be this attribute for any of them to expire.
-      "packages/broker/src/services/callbacks.ts", "packages/broker/src/local/app/host.ts", "packages/broker/src/local/runtime.ts",
+      "packages/broker/src/services/callbacks.ts", "packages/broker/src/core-host/app/host.ts", "packages/broker/src/local/runtime.ts",
       // L12: the milestone rows (30 days) merge tracking writes with a session line, and the comment poll's thread and cursor rows (30 days).
       "packages/broker/src/services/merge-tracking.ts", "packages/broker/src/local/app/comments.ts",
       // Chat on a laptop: a link code (10 minutes), the once-claims of an adapter's events and notices (a day, an hour), a card Rovara posted (a day) and the conversation a task started from (the session's retention).
@@ -174,7 +174,7 @@ describe("the health route's grants (A13)", () => {
       // Team record (#724, LM7): every record row carries the retention expiry the lessons rows use, and a reader checks it itself; none a durable record.
       "packages/broker/src/team-record/record.ts",
       // Lessons for local coding tools (decision 46b): the day counter of a person's reads of one project (LESSON_LOCAL_DAY, numbers only) is a per-day row that must expire after the index retention, never a durable record.
-      "packages/broker/src/local/app/lessons-routes.ts",
+      "packages/broker/src/lessons/knowledge-read-stores.ts",
       // Parallel parts: the first progress line of a coding run (event rows, kept as long as the other event rows) and the milestone rows (their retention).
       "packages/broker/src/core/task-flow/accept.ts", "packages/broker/src/core/milestones/milestones.ts",
       // Design review: the reviewers' stored packets and a slot's key record and budget, which expire after the stage's retention (SLOT_PACKET_TTL_SECONDS).

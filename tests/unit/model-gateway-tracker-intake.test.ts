@@ -5,7 +5,7 @@ import { intakePortsOf } from "../../packages/broker/src/core/intake/wiring.js";
 import { ingestIntake } from "../../packages/broker/src/core/intake/engine.js";
 import { operationKey, taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
-import { createSessionStartExtras } from "../../packages/broker/src/local/app/session-start.js";
+import { createSessionStartExtras } from "../../packages/broker/src/core-host/app/session-start.js";
 import { createHarness } from "../support/task-flow-harness.js";
 import { signingWorld } from "../support/model-gateway.js";
 

@@ -9,9 +9,9 @@ import {
 } from "../../../packages/broker/src/core/ticket-updates/index.js";
 import { renderRoot } from "../../../packages/broker/src/core/ticket-updates/thread-render.js";
 import { answerEntriesOf, appendTaskLog, approvalEntryOf, planSummaryEntryOf, pullRequestEntryOf, questionEntriesOf, readTaskLog, statusEntryOf } from "../../../packages/broker/src/core/task-log/index.js";
-import { createLocalIntake, type LocalIntake } from "../../../packages/broker/src/local/app/intake.js";
-import { createLocalMilestones } from "../../../packages/broker/src/local/app/tracking.js";
-import { createSessionStartExtras } from "../../../packages/broker/src/local/app/session-start.js";
+import { createLocalIntake, type LocalIntake } from "../../../packages/broker/src/core-host/app/intake.js";
+import { createLocalMilestones } from "../../../packages/broker/src/core-host/app/tracking.js";
+import { createSessionStartExtras } from "../../../packages/broker/src/core-host/app/session-start.js";
 import { readIntakeItem } from "../../../packages/broker/src/core/intake/store.js";
 import { bindSessionSurface, unbindSessionSurface } from "../../../packages/broker/src/core/sessions/bindings.js";
 import { taskSessionId } from "../../../packages/broker/src/core/sessions/create.js";

@@ -428,7 +428,7 @@ export const ROUTES: readonly Route[] = [
   // L4-EVCI2: the setup card's "Eval check from your CI" (core-host/eval-check-routes.ts): full access only, then any live role on the project reads the confirmed check; a live company owner or admin, or the project's administrator, reads the proposals and confirms one (or none).
   { method: "GET", path: "/v1/app/projects/{project}/ci-eval-check", requires: "full" },
   { method: "PUT", path: "/v1/app/projects/{project}/ci-eval-check", requires: "full" },
-  // Audit gap 11b: a project's ticket-sharing settings (core-host/ticket-updates-routes.ts, the laptop's local/app/intake.ts route): full access only, then any live role on the project reads; a live company
+  // Audit gap 11b: a project's ticket-sharing settings (core-host/ticket-updates-routes.ts, the laptop's core-host/app/intake.ts route): full access only, then any live role on the project reads; a live company
   // owner or admin, or the project's administrator, changes them.
   // R1 + L1 6.2b: a project's waiting tickets (Linear app intake on the core) at the one address the laptop, MCP and CLI use (core-host/intake-routes.ts); full access only, and the route checks the live standing on the project.
   { method: "GET", path: "/v1/app/projects/{project}/intake", requires: "full" },

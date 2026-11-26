@@ -21,8 +21,8 @@ import type { CodeMilestoneHandler } from "../../packages/broker/src/core/milest
 import { COMPANY, createHarness, definition, type Harness } from "../support/task-flow-harness.js";
 import { draft, lessonRecord } from "./lessons/lesson-helpers.js";
 import { LOCAL_ALL_REFUSED, createLessonRoutes } from "../../packages/broker/src/local/app/lessons-routes.js";
-import { createLocalLessonSources } from "../../packages/broker/src/local/app/lessons-sources.js";
-import type { LessonRepositories, LessonRepository } from "../../packages/broker/src/local/app/lessons-repos.js";
+import { createLocalLessonSources } from "../../packages/broker/src/core-host/app/lessons-sources.js";
+import type { LessonRepositories, LessonRepository } from "../../packages/broker/src/core-host/app/lessons-repos.js";
 import type { BrokerRequest } from "../../packages/broker/src/handler.js";
 
 afterEach(() => setLearnedLessonsGate(undefined));

@@ -6,7 +6,7 @@ import { designFirstOf, retryBlockedReview } from "../core/design-review/actions
 import type { DesignReviewRuntime } from "../core/design-review/round-ports.js";
 import { workspaceKeys } from "../core/task-flow/workspace-location.js";
 import { codeHostForRecord } from "../plugins/routing.js";
-import { localPacketSources } from "../local/app/design-review-sources.js";
+import { localPacketSources } from "./app/design-review-sources.js";
 import type { HostedReviewerOptions } from "./hosted-reviewers.js";
 import { createHostedReviewers } from "./hosted-reviewers.js";
 

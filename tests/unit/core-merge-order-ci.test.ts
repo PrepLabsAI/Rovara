@@ -7,7 +7,7 @@ import {
   waitingProviders,
 } from "../../packages/broker/src/core/merge/index.js";
 import { rovaraStatusLines } from "../../packages/broker/src/core/proof/pull-request-body.js";
-import { attentionOf } from "../../packages/broker/src/local/app/attention.js";
+import { attentionOf } from "../../packages/broker/src/core-host/app/attention.js";
 import { ORG, TASK_ID, mergeWorld, type MergeWorld } from "../support/merge-world.js";
 
 const edge = (consumer: string, provider: string) => ({ consumer, provider, language: "node", source: "both" });

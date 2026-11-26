@@ -16,7 +16,7 @@ import {
 } from "@agentx/contracts";
 import { CODE_HOST_COMMENT_METHOD } from "../../ports/policy-defaults.js";
 import { digestNamed, shortDigest } from "./comment-checks.js";
-import type { ApprovalOffer, LocalActionResult } from "../local-pages/views.js";
+import type { ApprovalOffer, LocalActionResult } from "../page-views.js";
 
 /** What the webhook says happened. Only the reference is believed: everything else is read back from the host (`PrCommentHost.lookupComment`). */
 export interface PrCommentEvent {

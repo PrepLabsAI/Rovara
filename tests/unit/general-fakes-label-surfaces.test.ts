@@ -6,7 +6,7 @@ import { WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot
 import { GENERAL_FAKE_MADE_NOTE } from "../../packages/contracts/src/general-fakes.js";
 import { workflowPullRequestBody, workflowPullRequestStatusLines } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
 import { verificationReport } from "../../packages/broker/src/core/proof/verification-report.js";
-import { proofReportOf } from "../../packages/broker/src/local/app/proof-report.js";
+import { proofReportOf } from "../../packages/broker/src/core-host/app/proof-report.js";
 import { testingSectionLines } from "../../packages/broker/src/core/proof/testing-section.js";
 import { checksReplyPrefix, AGENTX_PREAMBLE_VERSION, agentxPreambleSha256, type CheckEntry } from "../../packages/contracts/src/index.js";
 import { workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";

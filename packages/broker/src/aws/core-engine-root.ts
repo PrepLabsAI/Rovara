@@ -135,7 +135,7 @@ import { createCompanyArtifactReader } from "../core-host/company-artifact-reade
 import { hostedKeepEvidence } from "../core-host/hosted-evidence.js";
 import { hostedPlanEvidence } from "../core-host/hosted-plan-evidence.js";
 import { sessionBindingsOf } from "../core/sessions/bindings.js";
-import { createLocalAfterMerge } from "../local/app/after-merge.js";
+import { createLocalAfterMerge } from "../core-host/app/after-merge.js";
 import { hostedAutonomy, reviewerRoomUsd } from "../core-host/reviewer-authority.js";
 import { createHostedReviewers } from "../core-host/hosted-reviewers.js";
 import type { PolicyHookInstall } from "../core/policy-hook/index.js";

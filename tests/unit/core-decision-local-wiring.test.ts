@@ -10,7 +10,7 @@ import { LOCAL_SESSION_METHOD, createNoopAuditSink, registerCodeDefaults } from 
 import { LocalPageSessions } from "../../packages/broker/src/core/local-pages/guard.js";
 import { createDecisionGate } from "../../packages/broker/src/core/decisions/approval-gate.js";
 import { createDecisionActions } from "../../packages/broker/src/core/decisions/local-actions.js";
-import { localSessionProofVerifier } from "../../packages/broker/src/core/decisions/local-session.js";
+import { localSessionProofVerifier } from "../../packages/broker/src/local/page-session-proofs.js";
 import { createWorkflowDocumentSubject, waitingDocumentDigest, workflowTaskKey } from "../../packages/broker/src/core/decisions/workflow-subject.js";
 
 const COMPANY = IMPLICIT_COMPANY_ID;

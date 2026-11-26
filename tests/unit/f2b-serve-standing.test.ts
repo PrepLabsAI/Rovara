@@ -10,7 +10,7 @@ import {
 } from "@agentx/contracts";
 import { DEVELOPER_TOOLS } from "../../packages/mcp/src/index.js";
 import { computeTaskState } from "../../packages/broker/src/core/sessions/summary.js";
-import { createTaskFactsSource } from "../../packages/broker/src/local/app/facts.js";
+import { createTaskFactsSource } from "../../packages/broker/src/core-host/app/facts.js";
 import { performRegistryAction, type ActionCaller, type ActionEnv } from "../../packages/broker/src/core/task-actions/index.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";

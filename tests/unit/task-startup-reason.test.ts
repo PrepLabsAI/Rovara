@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { DeveloperTaskDetailedListResponseSchema, DeveloperTaskViewSchema, OperationSchema, WorkspaceInstanceSchema, change } from "@agentx/contracts";
 import { routeDeveloperTaskRequest, taskView } from "../../packages/broker/src/aws/developer-tasks.js";
 import { taskStartupView, type DeveloperTaskRecord, type OperationFacts } from "../../packages/broker/src/developer/task-records.js";
-import { developerTaskView } from "../../packages/broker/src/local/app/task-view.js";
+import { developerTaskView } from "../../packages/broker/src/core-host/app/task-view.js";
 import { operationKey, taskPointerKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { toDocument } from "../../packages/broker/src/core/task-flow/records.js";
 import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";

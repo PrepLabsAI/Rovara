@@ -2,7 +2,7 @@
 // evidence pack kept for this very code (if one was). Every line is the broker's own words; a name from the repository or a worker is made inert (`inertPlanLine`) and redacted, and nothing here repeats a
 // claim the broker could not check (a missing pack says "no evidence was kept", it never fills the gap).
 import { FAILURE_CAUSES_LISTED_MAX, FailureCausesSchema, GENERAL_FAKE_MADE_NOTE, failureCauseWords, redactText, workflowSelectedChecks, type EvidencePack, type WorkflowReviewReport, type WorkflowSnapshot } from "@agentx/contracts";
-import type { ProofFailuresView, ProofReportView, ProofRowView } from "../../core/local-pages/views.js";
+import type { ProofFailuresView, ProofReportView, ProofRowView } from "../../core/page-views.js";
 import { inertPlanLine } from "../../core/proof/inert-text.js";
 import type { TaskRecord } from "../../core/task-flow/records.js";
 

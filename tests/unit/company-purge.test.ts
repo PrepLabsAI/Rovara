@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { DocumentStoreError, type OrgId, type StoredDocument } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { githubAccountKey, githubAuditPk, githubLinkOf, githubPersonKey, linkGithubAccount, unlinkGithubAccount } from "../../packages/broker/src/core/people/github-links.js";
-import { DocumentAuditSink } from "../../packages/local-adapters/src/document-audit-sink.js";
+import { DocumentAuditSink } from "../../packages/broker/src/plugins/audit-sink/document/sink.js";
 import { MemoryQueueService } from "../../packages/broker/src/ports/memory-queue.js";
 import { workspaceKey, taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { legacyOperationRequestKey } from "../../packages/broker/src/core/task-flow/legacy-keys.js";

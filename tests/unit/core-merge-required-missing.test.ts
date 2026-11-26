@@ -5,7 +5,7 @@ import { CI_STATE_WORDS, MERGE_NOT_READY_MESSAGES as M, type ChangeRequestStatus
 import {
   CI_REQUIRED_MISSING_AFTER_MS, ciAllowsMerge, ciAllowsReady, ciCountsAsPassing, mergeReadiness, readCi, trackPullRequest, type MergePullRequestFacts, type ProjectCiMode, type ReadinessInput,
 } from "../../packages/broker/src/core/merge/index.js";
-import { readyToMerge } from "../../packages/broker/src/local/app/attention.js";
+import { readyToMerge } from "../../packages/broker/src/core-host/app/attention.js";
 import { TASK_ID, githubShapedHost, mergeWorld } from "../support/merge-world.js";
 
 const HEAD = "a".repeat(40);

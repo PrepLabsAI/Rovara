@@ -20,13 +20,13 @@ import { changeRequestRef } from "../../core/merge/host-port.js";
 import { shortDigest, type CommentRequestContext, type FetchedComment } from "../../core/pr-commands/comment-checks.js";
 import { createPrCommentCommands, type LookedUpComment, type PendingOffer, type PrCommentEvent, type PrCommandWorld } from "../../core/pr-commands/handler.js";
 import { codeHostRepositoryKey } from "../../core/proof/revert/repository-key.js";
-import { createLocalSessionControl } from "./host.js";
+import { createLocalSessionControl } from "../../core-host/app/host.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { listTasks, readTask } from "../../core/task-flow/reads.js";
 import type { TaskRecord } from "../../core/task-flow/records.js";
 import { approvalOfferOf } from "./page-data.js";
 import type { LocalLessons } from "./lessons.js";
-import { createReadBudget, createRepositoryResolver } from "./tracking.js";
+import { createReadBudget, createRepositoryResolver } from "../../core-host/app/tracking.js";
 
 /** The comment poll of one pass: threads, requests and time. */
 const POLL_MAX_THREADS = 20;

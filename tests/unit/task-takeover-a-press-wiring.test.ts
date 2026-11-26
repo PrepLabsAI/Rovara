@@ -23,14 +23,14 @@ describe("who starts a paid step", () => {
   it("a session's Retry, a session's or the page's Answers and the page's Retry name the presser (the callers of retryBlockedStep and answerUnderstandQuestions are the pressed ones or the named system ones)", () => {
     const calling = (pattern: RegExp): string[] => walk(SRC).filter((file) => pattern.test(readFileSync(file, "utf8"))).map((file) => relative(SRC, file)).sort();
     // retryBlockedStep: pressed (a person's Retry), or the system's own (the automatic resume, the service wrapper a host injects, the laptop's own route).
-    expect(calling(/\bretryBlockedStep\(/u).filter((file) => !file.endsWith("task-flow/retry.ts"))).toEqual(["core-host/parity-task-actions.ts", "core/setup-agent/auto-resume.ts", "local/app/host.ts", "local/app/page-data.ts", "services/session-actions.ts"]);
-    for (const file of ["core-host/parity-task-actions.ts", "local/app/host.ts", "local/app/page-data.ts"]) expect(readFileSync(join(SRC, file), "utf8"), file).toMatch(/retryBlockedStep\([^)]*(?:\bby\b|personId)[^)]*\)/u);
+    expect(calling(/\bretryBlockedStep\(/u).filter((file) => !file.endsWith("task-flow/retry.ts"))).toEqual(["core-host/app/host.ts", "core-host/parity-task-actions.ts", "core/setup-agent/auto-resume.ts", "local/app/page-data.ts", "services/session-actions.ts"]);
+    for (const file of ["core-host/parity-task-actions.ts", "core-host/app/host.ts", "local/app/page-data.ts"]) expect(readFileSync(join(SRC, file), "utf8"), file).toMatch(/retryBlockedStep\([^)]*(?:\bby\b|personId)[^)]*\)/u);
     // The session control hands the principal to the host's retry; the host's retry hands it on.
     expect(readFileSync(join(SRC, "core/sessions/control.ts"), "utf8")).toContain("retryWorkflow(session.subject.taskId, input.requestId, principal.personId)");
     // answerUnderstandQuestions: both callers name the person.
-    expect(calling(/\banswerUnderstandQuestions\(/u).filter((file) => !file.endsWith("local/app/answers.ts"))).toEqual(["local/app/page-data.ts", "local/app/session-routes.ts"]);
-    for (const file of ["local/app/page-data.ts", "local/app/session-routes.ts"]) expect(readFileSync(join(SRC, file), "utf8"), file).toMatch(/answerUnderstandQuestions\([\s\S]{0,400}personId/u);
-    expect(readFileSync(join(SRC, "local/app/answers.ts"), "utf8")).toContain("input.by.personId");
+    expect(calling(/\banswerUnderstandQuestions\(/u).filter((file) => !file.endsWith("core-host/app/answers.ts"))).toEqual(["core-host/app/session-routes.ts", "local/app/page-data.ts"]);
+    for (const file of ["local/app/page-data.ts", "core-host/app/session-routes.ts"]) expect(readFileSync(join(SRC, file), "utf8"), file).toMatch(/answerUnderstandQuestions\([\s\S]{0,400}personId/u);
+    expect(readFileSync(join(SRC, "core-host/app/answers.ts"), "utf8")).toContain("input.by.personId");
   });
 
   it("the owner moves that make a step due write the presser on its dispatch row", () => {

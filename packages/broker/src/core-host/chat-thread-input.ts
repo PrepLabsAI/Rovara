@@ -31,7 +31,7 @@ import { waitingForAnswers } from "../core/sessions/steer.js";
 import { answerRequestTaken, answerTaskOnRequest } from "../core/task-flow/answer-request.js";
 import type { TaskCaller, TaskFlowDeps } from "../core/task-flow/deps.js";
 import { readTask } from "../core/task-flow/reads.js";
-import { createSessionControlHost, MESSAGE_RATE_LIMITED } from "../local/app/host.js";
+import { createSessionControlHost, MESSAGE_RATE_LIMITED } from "./app/host.js";
 import type { ChatThreads } from "./chat-threads.js";
 import type { DeployedCaller } from "./dev-routes.js";
 

@@ -13,8 +13,8 @@ import { createHostedLessonParts, OtherCompanyError, type HostedLessonPeople } f
 import { learnedLessonsSwitchOn, setLearnedLessonsGate } from "../../packages/broker/src/lessons/policy.js";
 import { pumpReflectQueue, reflectMessageCompany } from "../../packages/broker/src/lessons/host-glue.js";
 import { reflectQueueOf } from "../../packages/broker/src/lessons/reflect-queue.js";
-import { createLocalLessonSources } from "../../packages/broker/src/local/app/lessons-sources.js";
-import { createLessonRepositories, type LessonRepositories } from "../../packages/broker/src/local/app/lessons-repos.js";
+import { createLocalLessonSources } from "../../packages/broker/src/core-host/app/lessons-sources.js";
+import { createLessonRepositories, type LessonRepositories } from "../../packages/broker/src/core-host/app/lessons-repos.js";
 import type { PipelineModel } from "../../packages/broker/src/lessons/ports.js";
 import type { KnowledgeSources } from "../../packages/broker/src/lessons/knowledge-brief.js";
 import { flakyFactsPort } from "../../packages/broker/src/lessons/knowledge-facts.js";

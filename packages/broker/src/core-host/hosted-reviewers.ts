@@ -17,7 +17,7 @@ import { bindingSlotOf, putSlotKey, readSlotCeiling, readSlotKeyRecord, slotKeyR
 import { gatewayRouteOf } from "./gateway-model-selection.js";
 import { reviewerAuthority } from "./reviewer-authority.js";
 import { usdPerMillion } from "../core/cost/price-table.js";
-import { registryModelPrices } from "../local/model-prices.js";
+import { registryModelPrices } from "./model-prices.js";
 
 export const SECOND_PROVIDER_UNAVAILABLE = "Second review not available: connect a second AI provider";
 /** The fixed line when the second-review settings cannot be read: nothing is started, no reviewer grant is requested and no gateway call is made (fail closed; default is OFF). */

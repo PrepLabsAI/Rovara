@@ -2,7 +2,7 @@
 import type { DocumentStore, OrgId } from "@agentx/contracts";
 import { createStoreProjectSource } from "../core/task-flow/project-source.js";
 import { isProjectUnreadable, logProjectLeftOut } from "../core/project-left-out.js";
-import { listProjects } from "./app/projects.js";
+import { listProjects } from "../core-host/app/projects.js";
 
 export async function registeredRepositoryRecordsOf(store: DocumentStore, companyOrg: OrgId): Promise<Array<{ url: string; host?: { kind: string } | undefined }>> {
   const source = createStoreProjectSource(store, companyOrg);

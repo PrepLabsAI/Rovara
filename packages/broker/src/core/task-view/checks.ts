@@ -11,7 +11,7 @@ import {
   FAILURE_CAUSES_LISTED_MAX, FailureCausesSchema, blockingFindings, failureCauseWords, findingAccepted, findingBlocks, notChangingReference, workflowSelectedChecks,
   type EvidencePack, type EvidenceView, type PlanDocument, type WorkflowReviewReport, type WorkflowSnapshot,
 } from "@agentx/contracts";
-import { proofWords, reviewDidNotFinish } from "../../local/app/proof-report.js";
+import { proofWords, reviewDidNotFinish } from "../../core-host/app/proof-report.js";
 
 /** `faked`: a Rovara-made fake answered an outside call of the check, so it is never change proof (DEC 234); it is not shown as Passed. */
 export const CHECK_STATES = ["not_run", "running", "passed", "flaky", "failed", "unverified", "out_of_date", "known_failing", "faked"] as const;

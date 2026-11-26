@@ -1,9 +1,9 @@
-// L4-HW4: the evidence of a task's checks, kept on a hosted company (the laptop's `evidence.keepAfterChecks`, local/app/evidence.ts, over the company-bound object store). When a run's checks are recorded for a
+// L4-HW4: the evidence of a task's checks, kept on a hosted company (the laptop's `evidence.keepAfterChecks`, core-host/app/evidence.ts, over the company-bound object store). When a run's checks are recorded for a
 // candidate, the keeper assembles the pack (per-check output tails, the failing tests with the change that most likely broke each (TE-A6), the baseline words (TE-C1)) with the SAME data guard, caps and
 // redaction as the laptop, and keeps it where the Proof route (`GET /v1/dev/tasks/{id}/evidence`) reads it back. Informational: a fault or a slow store only means there is no pack for this code.
 import { createKnownFailing, verificationResultsEnabled } from "../core/test-env/known-failing.js";
 import type { DocumentStore, ObjectStorage, OrgId } from "@agentx/contracts";
-import { createLocalEvidence, type LocalEvidence } from "../local/app/evidence.js";
+import { createLocalEvidence, type LocalEvidence } from "./app/evidence.js";
 import type { TaskFlowDeps } from "../core/task-flow/deps.js";
 import { createCompanyEvidenceBlobs, type CompanyEvidenceBlobsOptions } from "./company-evidence-blobs.js";
 

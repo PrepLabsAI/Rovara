@@ -13,7 +13,7 @@ import type { ChangeRequestRef, CodeHost, HostScope, OrgId, RepositoryRef } from
 import { providerOf } from "../plugins/routing.js";
 import { changeRequestRef } from "../core/merge/host-port.js";
 import type { TaskRecord } from "../core/task-flow/records.js";
-import { aclSourceOf } from "../local/app/lessons-sources.js";
+import { aclSourceOf } from "../core-host/app/lessons-sources.js";
 import type { HumanEditExtractorPort, HumanEditJob } from "./capture-types.js";
 import { HumanEditAllowanceError, allowanceBudget, readPersonEdit, type HostPerson, type HumanEditRead } from "./human-edit-read.js";
 import type { Audience } from "./types.js";
@@ -21,7 +21,7 @@ import type { Audience } from "./types.js";
 /** What the worker may spend on the host for one job: requests (the commits it walks and the pull request's own read), and no more. */
 export const HUMAN_EDIT_WORK_REQUESTS_MAX = 40;
 
-/** One repository of a task's project, as lessons see it (`local/app/lessons-repos.ts`, which satisfies this). */
+/** One repository of a task's project, as lessons see it (`core-host/app/lessons-repos.ts`, which satisfies this). */
 export interface HumanEditRepository {
   url: string;
   place: string;

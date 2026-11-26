@@ -6,7 +6,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { AgentXError, ON_THE_WEBSITE_MESSAGE, agentDirectoryKey, agentKey, chainDirectoryKey, chainKey } from "@agentx/contracts";
-import { auditEventOfRow } from "@agentx/local-adapters";
+import { auditEventOfRow } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import { companyMemberActionsThroughLambda } from "../../packages/broker/src/aws/company-member-forwarding.js";

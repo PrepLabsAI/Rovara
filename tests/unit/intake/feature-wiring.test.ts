@@ -6,7 +6,7 @@ import { intakePortsOf } from "../../../packages/broker/src/core/intake/wiring.j
 import { ingestIntake } from "../../../packages/broker/src/core/intake/engine.js";
 import { readIntakeItem } from "../../../packages/broker/src/core/intake/store.js";
 import { createFeatureStore } from "../../../packages/broker/src/core/report/feature-store.js";
-import { createSessionStartExtras } from "../../../packages/broker/src/local/app/session-start.js";
+import { createSessionStartExtras } from "../../../packages/broker/src/core-host/app/session-start.js";
 import { developerIdOf } from "../../../packages/broker/src/core/sessions/create.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa", B = "org_bbbbbbbbbbbbbbbbbbbb";

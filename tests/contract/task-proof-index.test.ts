@@ -7,7 +7,7 @@ import { z } from "zod";
 import type { EvidencePack, WorkflowSnapshot } from "@agentx/contracts";
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import { routeDeveloperTaskRequest } from "../../packages/broker/src/aws/developer-tasks.js";
-import { PROOF_INDEX_FAILURES_MAX, PROOF_INDEX_ITEMS_MAX, proofIndexOf } from "../../packages/broker/src/local/app/proof-index.js";
+import { PROOF_INDEX_FAILURES_MAX, PROOF_INDEX_ITEMS_MAX, proofIndexOf } from "../../packages/broker/src/core-host/app/proof-index.js";
 import { OMAR, PRIYA, SAM, pageTask, type PageTaskFixture } from "../support/page-tasks.js";
 import { DIGEST, v1Pack } from "../support/evidence-v2-fixtures.js";
 

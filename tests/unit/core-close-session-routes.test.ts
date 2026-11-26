@@ -6,8 +6,8 @@ import type { MemoryDocumentStore } from "../../packages/broker/src/ports/memory
 import { taskKey, workspaceKey, operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { prepareCloseInspection } from "../../packages/broker/src/core/task-flow/close-inspection.js";
 import { createTaskSessionItems, developerIdOf, taskSessionId } from "../../packages/broker/src/core/sessions/create.js";
-import { createSessionRoutes } from "../../packages/broker/src/local/app/session-routes.js";
-import { createLocalSessionControl } from "../../packages/broker/src/local/app/host.js";
+import { createSessionRoutes } from "../../packages/broker/src/core-host/app/session-routes.js";
+import { createLocalSessionControl } from "../../packages/broker/src/core-host/app/host.js";
 import { handleTaskRoute } from "../../packages/broker/src/core/task-flow/routes.js";
 
 async function fixture(discard = true) {

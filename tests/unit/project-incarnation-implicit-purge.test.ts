@@ -3,7 +3,7 @@ import { IMPLICIT_COMPANY_ID, orgProjectCatalogKey, projectMetaKey } from "@agen
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { retireProjectIncarnation } from "../../packages/broker/src/core/project-incarnation.js";
 import { COMPANY_PURGE_COOLING_OFF_MS, requestCompanyPurge, runCompanyPurge } from "../../packages/broker/src/core/company/purge.js";
-import { DocumentAuditSink } from "../../packages/local-adapters/src/document-audit-sink.js";
+import { DocumentAuditSink } from "../../packages/broker/src/plugins/audit-sink/document/sink.js";
 import { planCoreProjectWrites } from "../../packages/broker/src/aws/core-project-backfill.js";
 import { createBroker, loadSlackBroker } from "../support/slack-broker.js";
 

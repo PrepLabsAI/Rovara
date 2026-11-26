@@ -9,7 +9,7 @@ import type { BrowserEvidencePageAction, BrowserEvidencePageView, LocalActionRes
 import { clearStoredRecipe, effectiveRecipe, readStoredRecipe, saveStoredRecipe } from "../../core/proof/browser-evidence-recipe.js";
 import type { BrowserEvidenceSignIn } from "../../core/proof/browser-evidence-sign-in.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
-import { listProjects } from "./projects.js";
+import { listProjects } from "../../core-host/app/projects.js";
 
 export const BROWSER_EVIDENCE_ON_THE_PAGE = "A project's browser evidence recipe and its saved sign-in are changed on their local page, by you, in a page session opened within the last ten minutes. Run `rovara open browser-evidence` to open it; an assistant cannot change them for you, and neither can this token.";
 export const NEEDS_FRESH_PAGE = "That change needs a page you opened in the last few minutes. Run `rovara open browser-evidence` to open one.";

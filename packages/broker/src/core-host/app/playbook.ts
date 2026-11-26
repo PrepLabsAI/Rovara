@@ -10,7 +10,7 @@
 //   GET  /v1/local/playbook/{p}               the view, the file's state and the stored playbook
 //   POST /v1/local/playbook/{p}/check         `{ text }`: what a draft would make, or what is wrong with it; nothing is written
 import { AgentXError, HowWeWorkViewSchema, PLAYBOOK_FILE_MAX_BYTES, agentXError, type DocumentStore, type OrgId } from "@agentx/contracts";
-import type { HowWeWorkPageData } from "../../core/local-pages/views.js";
+import type { HowWeWorkPageData } from "../../core/page-views.js";
 import type { PlaybookService } from "../../core/playbook/service.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import { listProjects } from "./projects.js";

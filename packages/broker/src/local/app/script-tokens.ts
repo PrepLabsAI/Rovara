@@ -15,7 +15,7 @@ import {
 import { developerIdOf } from "../../core/sessions/create.js";
 import type { TaskCaller } from "../../core/task-flow/deps.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
-import { listProjects } from "./projects.js";
+import { listProjects } from "../../core-host/app/projects.js";
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
 const errorAnswer = (error: AgentXError): BrokerResponse => json(error.statusCode, { error: { code: error.code, message: error.message.slice(error.code.length + 2) } });

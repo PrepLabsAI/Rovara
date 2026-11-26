@@ -19,7 +19,7 @@ import { createTaskTestEnvironment, type TaskTestEnvironment } from "../../core/
 import { machineCard, machineSizeEnabled, setMachineChoice } from "../../core/test-env/machine-size.js";
 import { testEnvironmentEnabled } from "../../core/test-env/switch.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
-import { listProjects } from "./projects.js";
+import { listProjects } from "../../core-host/app/projects.js";
 
 export const APPROVE_TEST_ENVIRONMENT_ON_THE_PAGE = "A test environment is approved on its local page, by you. Run `rovara test-env open <project>` to open it; an assistant cannot approve for you.";
 const PATH = /^\/v1\/app\/projects\/([A-Za-z0-9._-]{1,100})\/test-environment(?:\/(propose|open|machine))?$/u;

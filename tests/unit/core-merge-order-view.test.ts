@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { MergePressBodySchema, MergeViewSchema, MERGE_VIEW_MESSAGE_MAX } from "../../packages/contracts/src/index.js";
 import { MERGE_ORDER_WORDS, mergeOrderLinesOfTask, mergeViewOf, readMergeTracking } from "../../packages/broker/src/core/merge/index.js";
-import { attentionOf } from "../../packages/broker/src/local/app/attention.js";
+import { attentionOf } from "../../packages/broker/src/core-host/app/attention.js";
 import { nextFor } from "../../packages/mcp/src/tools.js";
 import { ORG, TASK_ID, mergeWorld } from "../support/merge-world.js";
 

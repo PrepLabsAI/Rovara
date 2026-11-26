@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { createSecretsManagerSecretStore } from "../../packages/aws-adapters/src/secrets-manager/index.js";
 import { COMPANY_SECRET_PATHS } from "../../packages/aws-adapters/src/secrets-manager/company-names.js";
-import { createLocalConnectionSecrets } from "../../packages/broker/src/connections/local-secrets.js";
+import { createLocalConnectionSecrets } from "../../packages/broker/src/local/connection-secrets.js";
 import { createLocalSecretStore } from "../../packages/broker/src/ports/secret-stores.js";
 import { createAdapterRegistry, loadAdapters, parsePluginConfig } from "../../packages/broker/src/ports/adapter-registry.js";
 import { secretsManagerSecretsPlugin, SecretsManagerSettingsSchema } from "../../packages/broker/src/plugins/secrets/aws-secrets-manager/plugin.js";

@@ -22,7 +22,7 @@ import { developerIdOf, taskSessionId } from "../../core/sessions/create.js";
 import type { TaskFlow } from "../../core/task-flow/flow.js";
 import { withStartFence } from "../../core/task-flow/start-fence.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
-import { listProjects } from "./projects.js";
+import { listProjects } from "../../core-host/app/projects.js";
 
 type Log = (entry: Record<string, unknown>) => void;
 

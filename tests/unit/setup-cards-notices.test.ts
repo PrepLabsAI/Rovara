@@ -9,9 +9,9 @@ import { FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel
 import { PENDING_PK, deliverAttention, queueSetupBroken, queueUpkeepPaused, writeNotifyPrefs } from "../../packages/broker/src/core/notify/index.js";
 import { attentionEmail } from "../../packages/broker/src/core/notify/email-text.js";
 import { sendTicketUpdate } from "../../packages/broker/src/core/ticket-updates/index.js";
-import { createLocalIntake } from "../../packages/broker/src/local/app/intake.js";
-import { createLocalMilestones } from "../../packages/broker/src/local/app/tracking.js";
-import { createSessionStartExtras } from "../../packages/broker/src/local/app/session-start.js";
+import { createLocalIntake } from "../../packages/broker/src/core-host/app/intake.js";
+import { createLocalMilestones } from "../../packages/broker/src/core-host/app/tracking.js";
+import { createSessionStartExtras } from "../../packages/broker/src/core-host/app/session-start.js";
 import { readIntakeItem } from "../../packages/broker/src/core/intake/store.js";
 import { createLocalOwnerIdentity, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { FAKE_TRACKER_KIND, FakeTracker } from "../../packages/broker/src/plugins/fake/tracker.js";
@@ -417,7 +417,7 @@ describe("the pull request description carries the setup's one line (L4-U5)", ()
 // ---- the task page's read
 
 import { DeveloperTaskViewSchema } from "@agentx/contracts";
-import { developerTaskView } from "../../packages/broker/src/local/app/task-view.js";
+import { developerTaskView } from "../../packages/broker/src/core-host/app/task-view.js";
 
 describe("the task view carries the evidence line to the web (L4-U5)", () => {
   const task = { taskId: "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6", title: "Add a retry", project: "payments", startingRevision: 1, client: "cloud", createdAt: iso(), updatedAt: iso() } as never;

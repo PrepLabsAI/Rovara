@@ -17,11 +17,11 @@ import { reflectSubject } from "../../../packages/broker/src/lessons/reflect.js"
 import { InMemoryLessonStore } from "../../../packages/broker/src/lessons/store.js";
 import { LessonProvenanceSchema, SPAN_KINDS } from "../../../packages/broker/src/lessons/types.js";
 import { buildTaskReflectSubject } from "../../../packages/broker/src/lessons/task-subject.js";
-import { createLocalLessonSources } from "../../../packages/broker/src/local/app/lessons-sources.js";
-import type { LessonRepositories } from "../../../packages/broker/src/local/app/lessons-repos.js";
+import { createLocalLessonSources } from "../../../packages/broker/src/core-host/app/lessons-sources.js";
+import type { LessonRepositories } from "../../../packages/broker/src/core-host/app/lessons-repos.js";
 import { recordEndedTask } from "../../../packages/broker/src/team-record/capture.js";
 import { MemoryDocumentStore } from "../../../packages/broker/src/ports/memory-document-store.js";
-import { DocumentAuditSink } from "../../../packages/local-adapters/src/document-audit-sink.js";
+import { DocumentAuditSink } from "../../../packages/broker/src/plugins/audit-sink/document/sink.js";
 import { Alerts, Audit, Clock, KEY, MemoryVectors, ScriptedModel, Spend, candidateJson, draft, embedder, facts, lessonRecord, memberSpan, reply, settings, subject, verifier } from "./lesson-helpers.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;

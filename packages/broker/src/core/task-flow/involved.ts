@@ -10,7 +10,7 @@
 import { IMPLICIT_COMPANY_ID, OrgIdSchema, agentXError, companyScoped, type DeveloperTaskListItem, type DocumentKey, type DocumentStore, type StoredDocument, type TransactItem } from "@agentx/contracts";
 import { DeveloperTaskStatusSchema } from "@agentx/contracts";
 import { taskIndexKey } from "../../developer/task-records.js";
-import { developerTaskListItem } from "../../local/app/task-view.js";
+import { developerTaskListItem } from "../../core-host/app/task-view.js";
 import type { TaskCaller, TaskFlowDeps } from "./deps.js";
 import { readTask } from "./reads.js";
 

@@ -16,8 +16,8 @@ import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, CORE_LESS
 import type { HostedLessonPeople } from "../../../packages/broker/src/lessons/hosted-people.js";
 import { setLearnedLessonsGate } from "../../../packages/broker/src/lessons/policy.js";
 import { reflectQueueOf, humanEditMessageOf } from "../../../packages/broker/src/lessons/reflect-queue.js";
-import { createLocalLessonSources } from "../../../packages/broker/src/local/app/lessons-sources.js";
-import { createLessonRepositories, type LessonRepositories } from "../../../packages/broker/src/local/app/lessons-repos.js";
+import { createLocalLessonSources } from "../../../packages/broker/src/core-host/app/lessons-sources.js";
+import { createLessonRepositories, type LessonRepositories } from "../../../packages/broker/src/core-host/app/lessons-repos.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../../support/core-host-fakes.js";
 
 afterEach(() => setLearnedLessonsGate(undefined));

@@ -8,7 +8,6 @@
     "./storage": "./dist/storage-plugin.js",
     "./queue": "./dist/queue-plugin.js",
     "./object-storage": "./dist/object-storage-plugin.js",
-    "./audit-sink": "./dist/audit-sink-plugin.js",
     "./company-instructions": "./dist/company-instructions-plugin.js"
   },
   "types": "./dist/index.d.ts",

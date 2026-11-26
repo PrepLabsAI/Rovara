@@ -1,6 +1,6 @@
 // The hosted and local GET task view (developerTaskView) used to spread the stored workflow raw: a reason stored raw must be shown redacted (found by the Sonnet pre-review of REDACT-BLOCK-REASON).
 import { describe, expect, it } from "vitest";
-import { developerTaskView } from "../../packages/broker/src/local/app/task-view.js";
+import { developerTaskView } from "../../packages/broker/src/core-host/app/task-view.js";
 import { taskViewOf } from "../../packages/broker/src/core/task-flow/reads.js";
 import { blockedReview, seed, taskOf, TASK_ID } from "../support/task-actions-world.js";
 
