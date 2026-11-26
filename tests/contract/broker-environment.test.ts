@@ -43,9 +43,16 @@ function packedPieces(raw: unknown): Map<string, unknown> {
   return packedPiecesOf(raw);
 }
 
+/**
+ * D1 deleted the PlanEvidence function. Its row stays in the names table (the table is F1's to trim, and a name nobody packs is simply absent, as on the legacy layout), but the stack
+ * packs no `pe`: it is the one code the table holds that the control plane does not give a resource.
+ */
+const RETIRED_NAME_CODES: ReadonlySet<string> = new Set(["pe"]);
+const packedSpecs = (): BrokerNameSpec[] => (Object.values(BROKER_NAMES) as BrokerNameSpec[]).filter((spec) => !RETIRED_NAME_CODES.has(spec.code));
+
 /** The logical id (less its hash) each packed code must point at: a swapped pair of codes would otherwise build valid but wrong values. */
 const EXPECTED_RESOURCE: Record<string, string> = {
-  ts: "State", ar: "Artifacts", st: "DeveloperSignInTable", id: "DeveloperSignInFunction", sl: "SlackThreads", tr: "TurnRecords", pe: "PlanEvidence", sq: "SlackRequestQueue",
+  ts: "State", ar: "Artifacts", st: "DeveloperSignInTable", id: "DeveloperSignInFunction", sl: "SlackThreads", tr: "TurnRecords", sq: "SlackRequestQueue",
   so: "SlackOrchestratorTaskRole", cs: "CompanySecretsRole", ck: "ChatGptConnectionKey", kt: "DeveloperSignInTaskTokenKey", kp: "DeveloperSignInPolicyHookKey",
   pv: "SessionsProvisioner", dl: "SessionsDeleter", ti: "HttpApi", dq: "DispatchDeadLetterQueue", sr: "SlackRequestDeadLetterQueue", dn: "DeveloperTaskNotifierNoticeDeadLetterQueue",
   ds: "DeveloperTaskNotifierStreamFailureQueue", ce: "ChannelApiEventDeadLetters",
@@ -89,17 +96,18 @@ for (const env of ["staging", "a1234567890123456789"] as const) {
     });
 
     it("packs every name in the table, and every setting", () => {
-      expect([...names.keys()].sort()).toEqual(Object.values(BROKER_NAMES).map((spec) => spec.code).sort());
+      expect([...names.keys()].sort()).toEqual(packedSpecs().map((spec) => spec.code).sort());
+      expect(names.has("pe")).toBe(false);
       // #1149: the layout marker is the legacy install's own; a named environment never packs it.
       expect([...settings.keys()].sort()).toEqual(Object.values(BROKER_SETTINGS).filter((spec) => spec.code !== BROKER_SETTINGS.installLayout.code).map((spec) => spec.code).sort());
     });
 
     it("points each code at the resource it names, not another of the same kind", () => {
       for (const [code, prefix] of Object.entries(EXPECTED_RESOURCE)) expect(logicalIdOf(names.get(code)), code).toMatch(new RegExp(`^${prefix}(?:[0-9A-F]{8})?$`, "u"));
-      expect(Object.keys(EXPECTED_RESOURCE).sort()).toEqual(Object.values(BROKER_NAMES).map((spec) => spec.code).sort());
+      expect(Object.keys(EXPECTED_RESOURCE).sort()).toEqual(packedSpecs().map((spec) => spec.code).sort());
     });
 
-    for (const spec of Object.values(BROKER_NAMES) as BrokerNameSpec[]) {
+    for (const spec of packedSpecs()) {
       if (spec.kind === "deadLetterQueue") continue;
       it(`${spec.variable} (${spec.code}, ${spec.kind}) is the resource's own value`, () => {
         const id = logicalIdOf(names.get(spec.code));

@@ -3,7 +3,7 @@ import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it, vi } from "vitest";
 import { agentXError } from "../../packages/contracts/src/index.js";
 import type { Ec2OutboxRecord } from "../../packages/broker/src/aws/lambda.js";
-import { guardTaskDispatch, isTaskDispatchGuardRetryError, resumeTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-access.js";
+import { guardTaskDispatch, isTaskDispatchGuardRetryError } from "../../packages/broker/src/aws/task-dispatch-access.js";
 import { createTaskAuthorityAdmission } from "../../packages/broker/src/aws/task-authority-admission.js";
 import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
 import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
@@ -480,70 +480,6 @@ describe("task dispatch access", () => {
     const h = harness();
     await guardTaskDispatch({ documentClient: h.db, tableName: "state", checkTaskPerson: h.checkTaskPerson }, h.outbox);
     expect(taskOwnerKey(OWNER, TASK_ID)).toMatch(/^[a-f0-9]{64}$/);
-  });
-
-  it("redrives the exact parked invocation only after an explicit current-owner request", async () => {
-    const h = harness();
-    await guardTaskDispatch({ documentClient: h.db, tableName: "state" }, h.outbox);
-    const original = structuredClone(h.db.get(`OUTBOX#${h.outbox.id}`, "OUTBOX"));
-    const newOwner = "b".repeat(64);
-    h.db.set({ pk: `DEVTASK#${TASK_ID}`, sk: "PEOPLE", schemaVersion: 1, revision: 4, orphaned: false,
-      people: [{ developerId: newOwner, slackUserId: "U0NEWOWNER1", name: "Bailey", role: "owner" }] });
-    const requestId = randomUUID();
-    const payloadHash = "d".repeat(64);
-
-    await expect(resumeTaskDispatch({ documentClient: h.db, tableName: "state", now: () => Date.parse("2026-10-11T10:05:00.000Z") }, {
-      task: h.current, peopleRevision: 4, actorId: taskOwnerKey(newOwner, TASK_ID), requestId, payloadHash,
-    })).resolves.toBe(true);
-
-    expect(h.db.get(`OUTBOX#${h.outbox.id}`, "OUTBOX")).toMatchObject({
-      status: "PENDING", operationId: original?.operationId, invocation: original?.invocation,
-    });
-    expect(h.db.get(`OUTBOX#${h.outbox.id}`, "TASK_ACCESS_PAUSE")).toBeUndefined();
-    expect(h.db.get(`DEVTASK#${TASK_ID}`, `TASK_ACCESS_RETRY#${requestId}`)).toMatchObject({
-      actorId: taskOwnerKey(newOwner, TASK_ID), operationId: h.outbox.operationId, payloadHash,
-    });
-    await expect(resumeTaskDispatch({ documentClient: h.db, tableName: "state", now: () => Date.parse("2026-10-11T10:05:00.000Z") }, {
-      task: h.current, peopleRevision: 4, actorId: taskOwnerKey(newOwner, TASK_ID), requestId, payloadHash,
-    })).resolves.toBe(true);
-    await expect(resumeTaskDispatch({ documentClient: h.db, tableName: "state", now: () => Date.parse("2026-10-11T10:05:00.000Z") }, {
-      task: h.current, peopleRevision: 4, actorId: taskOwnerKey(newOwner, TASK_ID), requestId, payloadHash: "e".repeat(64),
-    })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
-  });
-
-  it("reauthorizes the caller before a conditional historical redrive answer", async () => {
-    const h = harness();
-    await guardTaskDispatch({ documentClient: h.db, tableName: "state" }, h.outbox);
-    const requestId = randomUUID();
-    const send = h.db.send.bind(h.db);
-    let current = true;
-    h.db.send = async (command) => {
-      if (command.constructor.name === "TransactWriteCommand" && JSON.stringify(command.input).includes("TASK_ACCESS_RETRY")) {
-        await send(command);
-        current = false;
-        throw Object.assign(new Error("concurrent retry won"), { name: "TransactionCanceledException" });
-      }
-      return send(command);
-    };
-
-    await expect(resumeTaskDispatch({ documentClient: h.db, tableName: "state", now: () => Date.parse("2026-10-11T10:05:00.000Z") }, {
-      task: h.current, peopleRevision: 3, actorId: taskOwnerKey(OWNER, TASK_ID), requestId, payloadHash: "d".repeat(64),
-      reauthorize: async () => { if (!current) throw new Error("caller revoked"); },
-    })).rejects.toThrow("caller revoked");
-  });
-
-  it("reauthorizes the caller before returning a prior redrive audit", async () => {
-    const h = harness();
-    await guardTaskDispatch({ documentClient: h.db, tableName: "state" }, h.outbox);
-    const requestId = randomUUID();
-    let current = true;
-    const input = {
-      task: h.current, peopleRevision: 3, actorId: taskOwnerKey(OWNER, TASK_ID), requestId, payloadHash: "d".repeat(64),
-      reauthorize: async () => { if (!current) throw new Error("caller revoked"); },
-    };
-    await expect(resumeTaskDispatch({ documentClient: h.db, tableName: "state", now: () => Date.parse("2026-10-11T10:05:00.000Z") }, input as never)).resolves.toBe(true);
-    current = false;
-    await expect(resumeTaskDispatch({ documentClient: h.db, tableName: "state", now: () => Date.parse("2026-10-11T10:05:00.000Z") }, input as never)).rejects.toThrow("caller revoked");
   });
 });
 

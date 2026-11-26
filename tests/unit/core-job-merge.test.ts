@@ -177,10 +177,10 @@ it.each(["missing", "foreign-company"])("direct merge reads hide %s tasks before
 it("the tracking feedback adapter leaves an unstamped task to its existing owner", async () => {
   const { feedbackWorld } = await import("../support/pr-feedback-world.js");
   const { collectTrackedFeedback } = await import("../../packages/broker/src/core/pr-feedback/service.js");
-  const { engineStampKey } = await import("../../packages/broker/src/core-host/engine-stamp.js");
+  const { coreTaskMarkKey } = await import("../../packages/broker/src/core-host/core-task-mark.js");
   const w = await feedbackWorld();
   createPrFeedbackRoutes(w.h.deps, async () => ({}));
-  await w.h.store.delete({ key: engineStampKey(w.task.taskId) });
+  await w.h.store.delete({ key: coreTaskMarkKey(w.task.taskId) });
   await expect(collectTrackedFeedback({ ...w.deps, registry: w.registry }, w.task, w.budget)).resolves.toBe("unchanged");
   expect(w.read).not.toHaveBeenCalled();
 });

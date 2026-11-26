@@ -3,7 +3,7 @@
 // workspace that company's, the task's owner); a refusal is a fixed polite answer and writes nothing. The workflow's thread checks are not added: they read records a core task does not have.
 // `undefined`: not the core's, and the broker runs exactly what it ran before.
 import { SLACK_CHANNEL, type SharedTaskRecord, type SlackThread } from "@agentx/contracts";
-import { ownerOfTaskId, type CoreEntryCaller, type CoreTaskEntry, type EngineStateTable } from "./engine-boundary.js";
+import { isCoreTask, type CoreEntryCaller, type CoreTaskEntry, type EngineStateTable } from "./engine-boundary.js";
 import type { ThreadInputNotice } from "./slack-thread-input-words.js";
 
 /** The broker's answer to the ingress for a reply in a core task's thread: the outcome the ingress already reads, and the notice (a code, never words) it says back. */
@@ -32,7 +32,7 @@ export interface CoreThreadNoteInput {
 }
 
 export async function coreThreadNote(table: EngineStateTable, entry: CoreTaskEntry | undefined, input: CoreThreadNoteInput): Promise<CoreThreadNoteAnswer | undefined> {
-  if (await ownerOfTaskId(table, input.shared.taskId) !== "core") return undefined;
+  if (!await isCoreTask(table, input.shared.taskId)) return undefined;
   // An install whose core entry takes no thread input refuses exactly as the old path always refused a core task's reply (the same answer, nothing written).
   if (entry?.threadInput === undefined) return { outcome: "refused" };
   let company: string | undefined;

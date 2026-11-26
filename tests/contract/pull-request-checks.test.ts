@@ -80,7 +80,7 @@ async function finish(h: Harness, operationId: string, status: "SUCCEEDED" | "FA
 }
 
 /** Asks for a pull request, then sends the worker's pull-request callback with publish's checks, when given. */
-async function publish(h: Harness, publishChecks?: CheckEntry[], options: { draft?: boolean } = {}): Promise<{ status: number; invocation: { payload: Record<string, unknown> & { headBranch: string } } }> {
+async function publish(h: Harness, publishChecks?: CheckEntry[], options: { draft?: boolean; expectedTreeSha?: string } = {}): Promise<{ status: number; invocation: { payload: Record<string, unknown> & { headBranch: string } } }> {
   const accepted = await serviceCall(h.handler, thread, user, "POST", `/v1/service/workspaces/${h.workspaceId}/pull-requests`, {
     requestId: randomUUID(), repository: "demo", title: "Fix the bug",
   });
@@ -94,6 +94,11 @@ async function publish(h: Harness, publishChecks?: CheckEntry[], options: { draf
     // As the developer API stores it: its draft default is true (spec 025 FR-023).
     const stored = h.db.get(`WORKSPACE#${h.workspaceId}`, `OPERATION#${operationId}`)!;
     stored.publication = { ...(stored.publication as Record<string, unknown>), draft: options.draft };
+  }
+  if (options.expectedTreeSha !== undefined) {
+    // An operation of the retired old workflow engine records the tree it checked on its publication.
+    const stored = h.db.get(`WORKSPACE#${h.workspaceId}`, `OPERATION#${operationId}`)!;
+    stored.publication = { ...(stored.publication as Record<string, unknown>), expectedTreeSha: options.expectedTreeSha };
   }
   const callback = await call(h.handler, {
     method: "POST",
@@ -168,6 +173,17 @@ describe("the pull request's checks (spec 051 FR-008)", () => {
     expect(sent).not.toHaveProperty("draft");
     expect(sent.body).toContain("After the last task: Not verified (the task failed).");
     expect(sent.body).not.toContain("AgentX reran the project's checks:\n- `npm test (in repo/demo)`: passed → passed, passing\n\nAt publish");
+  });
+
+  // D1 pre-review MUST-1: a publication of the retired old workflow engine (it records `expectedTreeSha`) is refused outright; nothing reaches GitHub.
+  it("refuses a pull request callback for a publication that carries expectedTreeSha, and opens nothing", async () => {
+    const h = await harness();
+    expect((await publish(h, undefined, { expectedTreeSha: "e".repeat(40) })).status).toBe(409);
+    expect(h.reconcilePullRequest).not.toHaveBeenCalled();
+    // the same callback without it opens the pull request
+    const plain = await harness();
+    expect((await publish(plain)).status).toBe(200);
+    expect(plain.reconcilePullRequest).toHaveBeenCalledOnce();
   });
 
   it("refuses checks that are not check entries", async () => {

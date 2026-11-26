@@ -754,7 +754,7 @@ describe("hosted tool approval owner ruling DEC 254zzz334", () => {
 it("lets a hosted tool token with decisions:decide approve as its person, and refuses a token missing that scope", async () => {
   const { MAYA, TOOL_CLIENT, clientBearer, createDeveloperTaskBroker } = await import("../support/developer-task-broker.js");
   const { coreTaskEntryFrom } = await import("../../packages/broker/src/aws/engine-boundary.js");
-  const { engineStampKey } = await import("../../packages/broker/src/core-host/engine-stamp.js");
+  const { coreTaskMarkKey } = await import("../../packages/broker/src/core-host/core-task-mark.js");
   const t = await setup();
   t.memberships.set(MAYA.developerId, { companyId: ORG, role: "member" });
   t.grants.set(`${MAYA.developerId}|payments`, "developer");
@@ -763,7 +763,7 @@ it("lets a hosted tool token with decisions:decide approve as its person, and re
   const routes = createCoreDevRoutes({ app: t.app, companyOf: async (caller) => t.memberships.get(caller.principal.personId), wiring: () => ({ origin: () => "https://api.example", workflowDecision: t.deps.decideWorkflow }) });
   const coreTasks = coreTaskEntryFrom(routes, async (caller) => ({ principal: principalOf(caller.developerId), client: caller.clientId }));
   const broker = await createDeveloperTaskBroker({ register: false, developerExtra: { coreTasks } });
-  for (const key of [taskKey(taskId), engineStampKey(taskId)]) broker.db.set({ ...await t.world.store.get(key), ...key });
+  for (const key of [taskKey(taskId), coreTaskMarkKey(taskId)]) broker.db.set({ ...await t.world.store.get(key), ...key });
   const request = { requestId: randomUUID(), expectedRevision: before.revision, artifactDigest: before.artifacts.at(-1)!.sha256, decision: "APPROVE", reason: "Ship it" };
   const path = `/v1/dev/tasks/${taskId}/workflow/decision`;
   const denied = await broker.client("tool", MAYA, "POST", path, request);

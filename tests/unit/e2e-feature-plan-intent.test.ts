@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { createCandidateManifest, canonicalJson, portableOperationId, buildE2ESharedView, e2ePlanHasCompleteRequiredCriteria, parsePlanDocument, e2eScenarioBundleDigest, type E2EFeaturePlanIntent, type E2EPolicy, type E2ESourceSnapshot } from "@agentx/contracts";
 import { deriveProjectSetupSourceSmoke } from "../../packages/broker/src/e2e/project-setup-source-smoke.js";
 import { selectE2EExecutionPlan } from "../../packages/contracts/src/e2e-execution-plan.js";
-import { buildE2EFeatureRound, deriveE2EFeatureExecutionAdmission, deriveE2EFeaturePortableApprovalBinding } from "../../packages/broker/src/e2e/feature-plan-intent.js";
+import { deriveE2EFeatureExecutionAdmission, deriveE2EFeaturePortableApprovalBinding } from "../../packages/broker/src/e2e/feature-plan-intent.js";
 import { buildFeatureE2EPlanningContext, isExactFeatureE2ESourceSnapshot } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
 import { compileE2EScenarios } from "../../packages/verifier/src/scenarios.js";
 import { e2eFeatureVerifierKey } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
@@ -155,7 +155,7 @@ describe("source-bound portable feature plan binding", () => {
     expect(() => deriveE2EFeaturePortableApprovalBinding({ intent: { ...intent, accountContextRefs: intent.accountContextRefs.map((item) => ({ ...item, sourceSha256: "0".repeat(64) })) }, snapshot, artifactId: "plan-artifact", artifactSha256: "b".repeat(64), planDigest: "c".repeat(64) })).toThrow();
   });
 
-  it("builds candidate-bound portable groups only under the separately admitted feature verifier", () => {
+  it("derives the candidate-bound portable admission only under the separately admitted feature verifier", () => {
     const admission = deriveE2EFeatureExecutionAdmission({ intent, snapshot, artifactId: "plan-artifact", artifactSha256: "b".repeat(64),
       planDigest: "c".repeat(64), policy, runtimeCatalogId: "local-catalog", runtimeBinding: binding,
       featureVerifier: featureRecord, now: Date.parse("2026-10-13T12:30:00.000Z") });
@@ -167,15 +167,6 @@ describe("source-bound portable feature plan binding", () => {
     expect(admission.selectionInput.mockableComponents).toHaveLength(1);
     expect(admission.portableApprovalBinding.mockFixtures).toEqual(admission.selectionInput.mockableComponents);
     expect(admission.runtime.profileId).toBe(policy.defaultSandboxProfileId);
-    const admitted = buildE2EFeatureRound({ admission, taskId: "task-1", operationId: "operation-1", operationFence: 3,
-      workflowRevision: 8, roundId: "22222222-2222-4222-8222-222222222222", runIds: ["33333333-3333-4333-8333-333333333333"],
-      admittedAt: "2026-10-13T12:30:00.000Z", deadlineAt: "2026-10-13T12:31:00.000Z" });
-    expect(admitted.round.groupBindings).toHaveLength(admission.plan.groups.length);
-    expect(admitted.groupAdmissions.map((group) => (group.binding as { groupId: string }).groupId))
-      .toEqual(admission.plan.groups.map((group) => group.groupId));
-    expect(() => buildE2EFeatureRound({ admission, taskId: "task-1", operationId: "operation-1", operationFence: 3,
-      workflowRevision: 8, roundId: "22222222-2222-4222-8222-222222222222", runIds: [],
-      admittedAt: "2026-10-13T12:30:00.000Z", deadlineAt: "2026-10-13T12:31:00.000Z" })).toThrow(/every bounded execution group/u);
     expect(() => deriveE2EFeatureExecutionAdmission({ intent, snapshot, artifactId: "plan-artifact", artifactSha256: "b".repeat(64),
       planDigest: "c".repeat(64), policy, runtimeCatalogId: "local-catalog", runtimeBinding: binding,
       featureVerifier: { ...featureRecord, supportedFeatureScopes: ["source-interface"] }, now: Date.parse("2026-10-13T12:30:00.000Z") })).toThrow();

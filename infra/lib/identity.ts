@@ -13,8 +13,35 @@ export const CLI_CALLBACK_URL = "http://127.0.0.1:8765/callback";
 /** The setup page's own sign-in callback, under its address (packages/cli/src/init/ui/setup-auth.ts). */
 export const SETUP_CALLBACK_PATH = "/auth/callback";
 
+/**
+ * What a signed-in user must never write through the user API (UpdateUserAttributes): the two verified flags
+ * (a user could mark any address as verified). Email itself STAYS writable: Cognito refuses a client's WriteAttributes
+ * that omits a required attribute ("Invalid write attributes"), and email is required in this pool. A changed email is
+ * protected by the pool instead: it takes effect only after the NEW address is verified (keepOriginal, below).
+ * Admin writes (AdminCreateUser, AdminUpdateUserAttributes) are IAM-signed and are not limited by an app client's WriteAttributes.
+ */
+export const USER_WRITE_DENIED = ["email_verified", "phone_number_verified"] as const;
+/** The only denied attribute a federated identity provider may map: Cognito writes it itself at federated sign-in and fails the sign-in if the client cannot. */
+export type IdpMappedAttribute = "email_verified";
+
+/**
+ * The app client's WriteAttributes: every standard attribute (email included, it is required) except USER_WRITE_DENIED,
+ * EXCEPT the denied attributes a configured federated identity provider maps (none today: pass none). One rule, here only.
+ * There are no custom attributes in this pool's schema (adding one replaces the pool), so there is none to list.
+ */
+export function cliWriteAttributes(idpMapped: readonly IdpMappedAttribute[] = []): cognito.ClientAttributes {
+  const writable = (name: (typeof USER_WRITE_DENIED)[number]): boolean => (idpMapped as readonly string[]).includes(name);
+  return new cognito.ClientAttributes().withStandardAttributes({
+    address: true, birthdate: true, email: true, familyName: true, fullname: true, gender: true, givenName: true, lastUpdateTime: true, locale: true,
+    middleName: true, nickname: true, phoneNumber: true, preferredUsername: true, profilePage: true, profilePicture: true, timezone: true, website: true,
+    emailVerified: writable("email_verified"), phoneNumberVerified: writable("phone_number_verified"),
+  });
+}
+
 export interface IdentityStackProps extends StackProps {
   naming: AgentXNaming;
+  /** Attributes a federated identity provider maps onto the pool (none today); they stay writable by the client. */
+  idpMappedAttributes?: readonly IdpMappedAttribute[];
 }
 
 /** Sign-in for a fresh install. The control plane's AdminValues default is agentx-admin. */
@@ -41,6 +68,9 @@ export class IdentityStack extends Stack {
       selfSignUpEnabled: false,
       signInAliases: { email: true },
       autoVerify: { email: true },
+      // The protection for a changed email (the client may write email, it is required): the change takes effect only after the NEW address confirms a code, and the old one stays until then
+      // (UserAttributeUpdateSettings.AttributesRequireVerificationBeforeUpdate = ["email"]). Updates in place (no replacement), and needs the email auto-verify above.
+      keepOriginal: { email: true },
       passwordPolicy: { minLength: 12, requireDigits: true, requireLowercase: true, requireUppercase: true, requireSymbols: false },
       mfa: cognito.Mfa.OPTIONAL,
       mfaSecondFactor: { otp: true, sms: false },
@@ -68,6 +98,8 @@ export class IdentityStack extends Stack {
       },
       supportedIdentityProviders: [cognito.UserPoolClientIdentityProvider.COGNITO],
       preventUserExistenceErrors: true,
+      // Updates in place. A user can never write the verified flags (see USER_WRITE_DENIED); email stays writable (required), verify-before-update guards it.
+      writeAttributes: cliWriteAttributes(props.idpMappedAttributes),
       // The admin sign-in is never refreshed (spec 025 Q4), so this is how long `agentx login --admin` lasts.
       accessTokenValidity: Duration.hours(6),
       idTokenValidity: Duration.hours(6),

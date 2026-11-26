@@ -2,39 +2,7 @@
 // and audit records. No I/O; aws/developer-tasks.ts and the broker's result hook call these.
 import type { StoredSecondOpinion } from "../core/second-review/store.js";
 import { createHash } from "node:crypto";
-import {
-  inertName,
-  AiToolTurnRecordSchema,
-  DEVELOPER_EVENT_TEXT_MAX,
-  DEVELOPER_FAILURE_MESSAGE_MAX,
-  DEVELOPER_TASK_OWNER_ISSUER,
-  PullRequestLifecycleResultSchema,
-  PullRequestResultSchema,
-  TURN_TEXT_LIMIT,
-  UNKNOWN_CLIENT_NAME,
-  WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX,
-  aiToolTurnRecordKeys,
-  capText,
-  lastAssistantResponse,
-  redactAndCap,
-  redactText,
-  slackThreadSubject,
-  slackThreadUrl,
-  type AiToolTurnRecord,
-  type DeveloperRequester,
-  type DeveloperTaskEvent,
-  type DeveloperTaskFailure,
-  type DeveloperTaskFailureCategory,
-  type DeveloperTaskShare,
-  type DeveloperTaskStatus,
-  type DeveloperTaskView,
-  type Operation,
-  type RunEstimate,
-  type WorkflowSnapshot,
-  type WorkflowReviewBase,
-  type DeveloperSignInMethod,
-} from "@agentx/contracts";
-import type { AuthenticatedIdentity } from "../auth.js";
+import { inertName, AiToolTurnRecordSchema, DEVELOPER_EVENT_TEXT_MAX, DEVELOPER_FAILURE_MESSAGE_MAX, DEVELOPER_TASK_OWNER_ISSUER, TURN_TEXT_LIMIT, UNKNOWN_CLIENT_NAME, WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX, aiToolTurnRecordKeys, capText, lastAssistantResponse, redactAndCap, redactText, slackThreadSubject, slackThreadUrl, type AiToolTurnRecord, type DeveloperRequester, type DeveloperTaskEvent, type DeveloperTaskFailure, type DeveloperTaskFailureCategory, type DeveloperTaskShare, type DeveloperTaskStatus, type DeveloperTaskView, type RunEstimate, type WorkflowSnapshot, type WorkflowReviewBase, type DeveloperSignInMethod } from "@agentx/contracts";
 import { isHeartbeat, modelCallView } from "./model-call-view.js";
 import type { ShareDecision } from "./share.js";
 import type { PlanGroundingHold, PlanSelfCheckState } from "./plan-self-check.js";
@@ -503,45 +471,6 @@ export function aiToolTurn(input: {
   return { ...aiToolTurnRecordKeys(record), ...record };
 }
 
-/** A terminal operation status as a completed turn record's outcome. */
-export const OUTCOME: Record<string, AiToolTurnRecord["outcome"]> = { SUCCEEDED: "succeeded", FAILED: "failed", CANCELLED: "cancelled", INTERRUPTED: "interrupted" };
-
-/**
- * R12: the result of a developer's task or publish operation, or of the push of a workflow task's approved fix (a
- * maintain operation). Its turnId and receivedAt are the
- * operation's ID and creation time, so its key is fixed and a repeated result cannot write it
- * twice. The response text is the result summary (FR-037), redacted and capped by aiToolTurn.
- */
-export function completedTurn(input: {
-  task: DeveloperTaskRecord;
-  pointer: Pick<DeveloperTaskPointerRecord, "firstRequestId">;
-  operation: Pick<Operation, "id" | "kind" | "requestId" | "createdAt"> & { result?: unknown; error?: string | undefined };
-  status: string;
-  events: readonly StoredEvent[];
-  now: string;
-}): Record<string, unknown> & AiToolTurnRecord {
-  const { operation } = input;
-  const ended = `ended ${input.status}${operation.error ? `: ${operation.error}` : ""}`;
-  const published = operation.kind === "publish" ? PullRequestResultSchema.safeParse(operation.result) : undefined;
-  const pushed = operation.kind === "maintain" ? PullRequestLifecycleResultSchema.safeParse(operation.result) : undefined;
-  const response = operation.kind === "publish"
-    ? (published?.success ? `Pull request ${published.data.url}` : `The pull request ${ended}`)
-    : operation.kind === "maintain"
-      ? (pushed?.success ? `Pushed the fix to pull request ${pushed.data.url}` : `The fix push ${ended}`)
-      : lastAssistantResponse(input.events) ?? `The task ${ended}`;
-  return aiToolTurn({
-    party: partyOfTask(input.task),
-    turnId: operation.id,
-    action: operation.kind === "publish" || operation.kind === "maintain" ? "pull_request" : operation.requestId === input.pointer.firstRequestId ? "start" : "continue",
-    phase: "completed",
-    outcome: OUTCOME[input.status] ?? "failed",
-    receivedAt: operation.createdAt,
-    finishedAt: input.now,
-    request: "",
-    response,
-    operationId: operation.id,
-  });
-}
 
 /** Moved to the contracts package so the MCP server marks names the same way (final review M7). */
 export { inertName };
@@ -573,15 +502,3 @@ export function developerFooter(name: string, client: string): string {
   return `Requested by ${owner} via AgentX, started from ${slack ? SLACK_CLIENT_NAME : client}`;
 }
 
-/** The identity every workspace handler sees for a developer task: its own owner key (FR-021). */
-export function developerTaskIdentity(task: Pick<DeveloperTaskRecord, "taskId" | "developerId" | "provider" | "developerName" | "client"> & Partial<Pick<DeveloperTaskRecord, "companyId">>): AuthenticatedIdentity {
-  return {
-    issuer: DEVELOPER_TASK_OWNER_ISSUER,
-    subject: taskOwnerSubject(task.developerId, task.taskId),
-    ownerKey: taskOwnerKey(task.developerId, task.taskId),
-    isAdministrator: false,
-    claims: {},
-    developer: { developerId: task.developerId, provider: task.provider, name: task.developerName, client: task.client, taskId: task.taskId,
-      ...(task.companyId === undefined ? {} : { companyId: task.companyId }) },
-  };
-}

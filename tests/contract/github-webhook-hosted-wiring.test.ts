@@ -8,7 +8,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID, prHeadKey, projectRevisionKey } from "@agentx/contracts";
 import { GithubInstallationBindings } from "../../packages/broker/src/aws/github-credentials.js";
 import { LINKED_CHANGE_REQUEST_ENTITY, linkedChangeRequestKey } from "../../packages/broker/src/core/proof/revert/linked-change-requests.js";
-import { stampItem } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { coreTaskMarkItem } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { recoveryRowKey, taskRecordKey } from "../../packages/broker/src/core/merge/store.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { createBroker, loadSlackBroker } from "../support/slack-broker.js";
@@ -35,7 +35,7 @@ async function hostedWorld(options: WorldOptions = {}) {
   if (options.bindInstallation !== false) await bindings.claim(options.bindInstallation ?? ORG, BOUND, "acct-a", "operator");
   // A core task (stamped core) with its neutral change-request link, head row, pinned repository and tracking row: what the core flow writes when it publishes.
   db.set({ ...taskRecordKey(TASK), companyId: ORG, project: "demo", startingRevision: 1, workflow: { stage: "WAIT_FOR_MERGE", pullRequests: [{ repositoryId: "demo", number: 7, url: PR_URL, candidateDigest: DIGEST }] } });
-  db.set(stampItem(ORG, TASK, { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "fixture", stampedAt: "2026-11-22T00:00:00.000Z" }).item);
+  db.set(coreTaskMarkItem(ORG, TASK, { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "fixture", stampedAt: "2026-11-22T00:00:00.000Z" }).item);
   db.set({ ...linkedChangeRequestKey("github", REPO_URL, "7")!, entityType: LINKED_CHANGE_REQUEST_ENTITY, hostKind: "github", repositoryKey: "example/demo", changeRequestId: "7", repositoryId: "demo",
     number: 7, url: PR_URL, taskId: TASK, workspaceId: "workspace", candidateDigest: DIGEST, createdAt: "2026-11-22T00:00:00.000Z" });
   db.set({ ...projectRevisionKey(ORG, "demo", 1), definition: { repositories: [{ name: "demo", url: `${REPO_URL}.git` }] } });
@@ -105,9 +105,9 @@ describe("the core branch is live on the host-shaped broker (clientProjects.bind
     expect(w.sentSince().filter((name) => name !== "GetCommand")).toEqual([]);
   });
 
-  it("an installation nobody bound is the legacy handler's (it ignores the delivery with 202) and wakes nothing", async () => {
+  it("an installation nobody bound is ignored with 202 (the old workflow's handler that used to take it is deleted, D1-2) and wakes nothing", async () => {
     const w = await hostedWorld({ bindInstallation: false });
-    expect(answerOf(await w.invoke("issue_comment", issueComment(7)))).toMatchObject({ status: 202, body: { ignored: true } });
+    expect(answerOf(await w.invoke("issue_comment", issueComment(7)))).toMatchObject({ status: 202, body: { delivery: "IGNORED" } });
     expect(w.tracking()["lastHintKind"]).toBeUndefined();
   });
 
@@ -118,46 +118,21 @@ describe("the core branch is live on the host-shaped broker (clientProjects.bind
   });
 });
 
-describe("the legacy path still serves legacy tasks on the same broker", () => {
-  it("a legacy-linked pull request on a binding of the built-in company reaches the legacy handler (reserved delivery, no core wake)", async () => {
-    const w = await hostedWorld({ bindInstallation: IMPLICIT_COMPANY_ID });
+// D1-2: the old workflow's webhook handler is deleted. A pull request nothing on the core links is answered 202 IGNORED whatever the old link rows say, on every kind of installation,
+// with no delivery row reserved and the core not woken.
+describe("a pull request event the core does not take is ignored on the same broker", () => {
+  const cases: Array<[string, Parameters<typeof hostedWorld>[0]]> = [
+    ["a binding of the built-in company", { bindInstallation: IMPLICIT_COMPANY_ID }],
+    ["an installation with no binding row (no backfill yet)", { bindInstallation: false, marker: false }],
+    ["an installation bound to a NAMED company", {}],
+    ["an installation with no binding row after the backfill marker", { bindInstallation: false }],
+  ];
+  it.each(cases)("%s: 202 IGNORED, no delivery row, no wake", async (_name, options) => {
+    const w = await hostedWorld(options);
     const answer = answerOf(await w.invoke("pull_request", { ...base, action: "opened", pull_request: { number: 1 } }));
-    expect(answer.body).not.toHaveProperty("ignored");
-    expect(answer.body).not.toMatchObject({ delivery: "IGNORED" });
-    expect(w.deliveryRow(1)).toBeDefined();
-    expect(w.deliveryRow(1)).not.toHaveProperty("core");
+    expect(answer).toMatchObject({ status: 202, body: { delivery: "IGNORED" } });
+    expect(w.deliveryRow(1)).toBeUndefined();
     expect(w.tracking()["lastHintKind"]).toBeUndefined();
-  });
-
-  it("a legacy-linked pull request from an installation with no binding row (no backfill yet) reaches the legacy handler too", async () => {
-    const w = await hostedWorld({ bindInstallation: false, marker: false });
-    const answer = answerOf(await w.invoke("pull_request", { ...base, action: "opened", pull_request: { number: 1 } }));
-    expect(answer.body).not.toHaveProperty("ignored");
-    expect(w.deliveryRow(1)).toBeDefined();
-    expect(w.deliveryRow(1)).not.toHaveProperty("core");
-  });
-
-  it("a legacy task of the built-in company (no companyId) on an installation bound to a NAMED company reaches the legacy handler, not a core company_mismatch", async () => {
-    const w = await hostedWorld();
-    const answer = answerOf(await w.invoke("pull_request", { ...base, action: "opened", pull_request: { number: 1 } }));
-    expect(answer.body).not.toMatchObject({ delivery: "IGNORED" });
-    expect(answer.body).not.toHaveProperty("ignored");
-    expect(w.deliveryRow(1)).toBeDefined();
-    expect(w.deliveryRow(1)).not.toHaveProperty("core");
-  });
-
-  it("a legacy task on an installation with NO binding row after the backfill marker reaches the legacy handler, not a core unknown_installation", async () => {
-    const w = await hostedWorld({ bindInstallation: false });
-    const answer = answerOf(await w.invoke("pull_request", { ...base, action: "opened", pull_request: { number: 1 } }));
-    expect(answer.body).not.toMatchObject({ delivery: "IGNORED" });
-    expect(answer.body).not.toHaveProperty("ignored");
-    expect(w.deliveryRow(1)).toBeDefined();
-    expect(w.deliveryRow(1)).not.toHaveProperty("core");
-  });
-
-  it("a legacy event the core branch does not take (a pull request nothing links, on an unbound installation) is the legacy 202 not_linked", async () => {
-    const w = await hostedWorld({ bindInstallation: false, marker: false });
-    expect(answerOf(await w.invoke("pull_request", { ...base, action: "opened", pull_request: { number: 55 } }))).toMatchObject({ status: 202, body: { ignored: true, reason: "not_linked" } });
   });
 });
 

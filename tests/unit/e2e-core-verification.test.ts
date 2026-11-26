@@ -9,7 +9,7 @@ import type { OperationRecord } from "../../packages/broker/src/core/task-flow/r
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createDocumentObjectStorage } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
 import { failClosedAuthority, type E2EAuthority } from "../../packages/broker/src/core/e2e/authority.js";
-import { loadApplicationEvidenceInputs, settleBaselineRound, verifyWorkflowE2EEvidence, type E2EVerificationDiagnostic } from "../../packages/broker/src/core/e2e/verification.js";
+import { isNonCandidateRound, loadApplicationEvidenceInputs, settleBaselineRound, settleNonCandidateRound, verifyWorkflowE2EEvidence, type E2EVerificationDiagnostic } from "../../packages/broker/src/core/e2e/verification.js";
 import { markWorkflowE2EBaselineUnavailable, readWorkflowE2EBaselineRecord, requestWorkflowE2EBaselineRound } from "../../packages/broker/src/core/e2e/baseline.js";
 import { encodeE2EApplicationExecutionAdmission } from "../../packages/verifier/src/application-scenarios.js";
 import { aggregateEvidenceEnvelope, createApplicationEvidenceFixture, groupEvidenceEnvelope, type ApplicationEvidenceFixture } from "../support/e2e-application-evidence-fixture.js";
@@ -112,6 +112,41 @@ describe("verifying a round from its stored evidence", () => {
     const diagnostic: E2EVerificationDiagnostic = {};
     expect(await verifyWorkflowE2EEvidence(round.deps(allowing), baseline, round.task, round.candidate, undefined, diagnostic)).toBe("UNKNOWN");
     expect(diagnostic.reason).toBe("baseline-admission-is-not-a-candidate-round");
+  });
+
+  it.each([["replay"], ["grounding"]] as const)("never reads a retired %s round as the candidate's either", async (purpose) => {
+    const round = await roundOf(PASSING);
+    const retired = { ...round.operation, workflowE2EAdmission: { ...round.reference, purpose } } as unknown as OperationRecord;
+    const diagnostic: E2EVerificationDiagnostic = {};
+    expect(await verifyWorkflowE2EEvidence(round.deps(allowing), retired, round.task, round.candidate, undefined, diagnostic)).toBe("UNKNOWN");
+    expect(diagnostic.reason).toBe(`${purpose}-admission-is-not-a-candidate-round`);
+  });
+});
+
+describe("a retired replay or grounding round that ends", () => {
+  // Nothing starts these rounds or records them any more, and an older release may have left a record or an operation behind: the end of such an operation is handled (so it never falls through to
+  // the candidate's completion) and writes nothing, whatever record is stored.
+  const admissionOf = (purpose: "replay" | "grounding" | undefined) => ({ schemaVersion: 1, taskId: "task-r1", workflowRevision: 1, candidateDigest: "c".repeat(64), roundId: "r1", groupRunIds: [], ...(purpose === undefined ? {} : { purpose }),
+    admissionRef: { key: `workflow-e2e-admissions/sha256/${"d".repeat(64)}.json`, sha256: "d".repeat(64), byteLength: 10 } });
+  const operation = (purpose: "replay" | "grounding" | undefined) => ({ id: "op-r1", workspaceId: WORKSPACE, fence: 1, kind: "task", workflowMode: "CHECKS", status: "SUCCEEDED", workflowE2EAdmission: admissionOf(purpose) }) as never;
+
+  it.each([["replay"], ["grounding"]] as const)("is handled as a non-candidate round and writes nothing for a %s round, with its old record stored", async (purpose) => {
+    const store = new MemoryDocumentStore();
+    await store.put({ item: { pk: "DEVTASK#task-r1", sk: purpose === "replay" ? "E2E_REPLAY#src-1#1" : `E2E_GROUNDING#${"a".repeat(64)}#1`, entityType: purpose === "replay" ? "WORKFLOW_E2E_REPLAY" : "WORKFLOW_E2E_GROUNDING",
+      taskId: "task-r1", state: "STARTED", operationId: "op-r1", roundId: "r1", admissionSha256: "d".repeat(64), attempt: 1, purpose } });
+    const before = JSON.stringify((await store.query({ pk: "DEVTASK#task-r1" })).items);
+    const deps = { state: { store, now: () => new Date("2026-11-10T10:00:00.000Z") }, objects: createDocumentObjectStorage(store, { companyId: COMPANY }), authority: failClosedAuthority,
+      readTask: async () => { throw new Error("a retired round's end must not read the task"); } };
+    expect(isNonCandidateRound(admissionOf(purpose))).toBe(true);
+    expect(await settleNonCandidateRound(deps, operation(purpose), "SUCCEEDED")).toBe(true);
+    expect(JSON.stringify((await store.query({ pk: "DEVTASK#task-r1" })).items)).toBe(before);
+  });
+
+  it("does not claim a candidate's operation", async () => {
+    const store = new MemoryDocumentStore();
+    const deps = { state: { store, now: () => new Date() }, objects: createDocumentObjectStorage(store, { companyId: COMPANY }), authority: failClosedAuthority, readTask: async () => undefined };
+    expect(isNonCandidateRound(admissionOf(undefined))).toBe(false);
+    expect(await settleNonCandidateRound(deps, operation(undefined), "SUCCEEDED")).toBe(false);
   });
 });
 

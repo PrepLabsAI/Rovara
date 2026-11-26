@@ -5,7 +5,7 @@ import { ORG } from "../support/service-host.js";
 import { feedbackWorld as world } from "../support/pr-feedback-world.js";
 import { TASK_ID } from "../support/merge-world.js";
 import { collectPrFeedback, feedbackUnchanged, readCurrentFeedback } from "../../packages/broker/src/core/pr-feedback/collect.js";
-import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { dispatchPartition } from "../../packages/broker/src/core/task-flow/keys.js";
 import { readTask } from "../../packages/broker/src/core/task-flow/reads.js";
 
@@ -89,10 +89,10 @@ it.each(["foreign-company", "missing-stamp", "retired-stamp", "foreign-link", "s
   const w = await world();
   if (kind === "foreign-company") {
     w.task.companyId = "org_bbbbbbbbbbbbbbbbbbbb";
-    await w.h.store.update({ key: engineStampKey(TASK_ID), ops: [change.set("orgId", w.task.companyId)] });
+    await w.h.store.update({ key: coreTaskMarkKey(TASK_ID), ops: [change.set("orgId", w.task.companyId)] });
   }
-  if (kind === "missing-stamp") await w.h.store.delete({ key: engineStampKey(TASK_ID) });
-  if (kind === "retired-stamp") await w.h.store.update({ key: engineStampKey(TASK_ID), ops: [change.set(["coreEngine", "areas", "flow"], "workflow")] });
+  if (kind === "missing-stamp") await w.h.store.delete({ key: coreTaskMarkKey(TASK_ID) });
+  if (kind === "retired-stamp") await w.h.store.update({ key: coreTaskMarkKey(TASK_ID), ops: [change.set(["coreEngine", "areas", "flow"], "workflow")] });
   if (kind === "foreign-link") await w.h.store.update({ key: w.link, ops: [change.set("taskId", "22222222-2222-4222-8222-222222222222")] });
   if (kind === "stale-link") await w.h.store.update({ key: w.link, ops: [change.set("candidateDigest", "0".repeat(64))] });
   expect(await collectPrFeedback(w.deps, w.task, w.budget)).toBe("retry");

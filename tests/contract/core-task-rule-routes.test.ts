@@ -11,7 +11,7 @@ import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { appendTaskLog } from "../../packages/broker/src/core/task-log/store.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { createCoreHostApp, engineStampKey, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
+import { createCoreHostApp, coreTaskMarkKey, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { NOT_ON_THE_CORE_YET, createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { coreTaskEntryFrom, type CoreTaskEntry } from "../../packages/broker/src/aws/engine-boundary.js";
 import { createCoreTaskRuleRoutes } from "../../packages/broker/src/aws/core-task-rule-routes.js";
@@ -90,7 +90,7 @@ async function ruleWorld(options: { rules?: boolean } = {}) {
   const harness = await createDeveloperTaskBroker({ developerExtra: { coreTasks } });
   late.harness = harness;
   const db = harness.db;
-  for (const row of [...await partition(world, `DEVTASK#${task.taskId}`), ...await partition(world, engineStampKey(task.taskId).pk)]) db.set(JSON.parse(JSON.stringify(row)) as Record<string, unknown> & { pk: string; sk: string });
+  for (const row of [...await partition(world, `DEVTASK#${task.taskId}`), ...await partition(world, coreTaskMarkKey(task.taskId).pk)]) db.set(JSON.parse(JSON.stringify(row)) as Record<string, unknown> & { pk: string; sk: string });
   for (const who of [TESS, SAM]) {
     db.set({ pk: `SESSION#${who.sessionId}`, sk: "META", sessionId: who.sessionId, developerId: who.developerId, amr: who.provider, startedAt: new Date(Date.now() - 60_000).toISOString(), endsAt: Math.floor(Date.now() / 1000) + 604_800 });
     db.set({ pk: `DEVELOPER#${who.developerId}`, sk: "META", developerId: who.developerId, provider: who.provider, displayName: who.name, firstSignInAt: "x", lastSignInAt: "x", revoked: false });
@@ -217,13 +217,16 @@ describe("plan comments and People on a core task (the old routes' own functions
     expect(comments.find((comment) => comment.replyTo === root.commentId)).toMatchObject({ anchor: "claim:2.1" });
     await h.dev(MAYA, "PUT", `/v1/dev/tasks/${h.task.taskId}/readers/${TESS.developerId}`, { requestId: randomUUID(), role: "viewer" });
     const before = h.rows();
-    for (const who of [OMAR, SAM, TESS]) {
+    for (const who of [OMAR, SAM]) {
       const body = { requestId: "refused", document: "plan", text: "Must refuse", replyTo: root.commentId };
       const response = await h.dev(who, "POST", path, body);
       expect(response.status).toBe(404);
       expect(response).toEqual(await h.missing(who, "POST", "/comments", body));
     }
     expect(h.rows()).toBe(before);
+    // Owner decision 254zzz558 (a write permission): a person the task is shared with ("Can view", the stored share TESS holds) comments; before it, this was refused.
+    expect(await h.dev(TESS, "POST", path, { requestId: "shared", document: "plan", text: "Looks right to me.", replyTo: root.commentId })).toMatchObject({ status: 200, body: { comment: { replyTo: root.commentId, text: "Looks right to me." } } });
+    expect(h.rows()).not.toBe(before);
   });
 
   it("the owner lists the plan comments; a member with no part and another company's caller read no such task", async () => {

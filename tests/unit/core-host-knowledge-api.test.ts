@@ -13,7 +13,7 @@ import { createMemoryModelKeyStore } from "../../packages/broker/src/ports/model
 import { builtinModelProviderBook } from "../../packages/broker/src/local/model-proxy/index.js";
 import { createLocalLessons } from "../../packages/broker/src/local/app/lessons.js";
 import { createLessonRoutes } from "../../packages/broker/src/local/app/lessons-routes.js";
-import { CORE_ENGINE_ON, buildCoreRegistry, createCoreRuntime } from "../../packages/broker/src/core-host/index.js";
+import { buildCoreRegistry, createCoreRuntime } from "../../packages/broker/src/core-host/index.js";
 import { createCoreLessons, readCoreLessonsSwitch, setCoreLessonsGate, CORE_LESSONS_VARIABLE, type CoreLessons } from "../../packages/broker/src/core-host/lessons.js";
 import { createKnowledgeApi, knowledgeSwitchedOff, knowledgeToolOf, scriptTokenAuthenticator, type KnowledgeApi, type KnowledgeApiOptions, type KnowledgeCaller } from "../../packages/broker/src/core-host/knowledge-api.js";
 import { isLessonsApiPath } from "../../packages/broker/src/core-host/lessons-api.js";
@@ -96,7 +96,7 @@ async function setUp(env: NodeJS.ProcessEnv = { [CORE_LESSONS_VARIABLE]: "on" })
   for (const companyId of [A, B]) {
     await registerProjects(world, companyId);
     const runtime = createCoreRuntime({
-      registry, companyId, flags: CORE_ENGINE_ON, callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
+      registry, companyId, callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
       repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined,
     });
     const built = createCoreLessons({ flow: runtime.flow, registry, companyId, lessonsSwitch, people, hostFor: async (id) => lessons.get(id)?.host, now: () => world.clock.now });

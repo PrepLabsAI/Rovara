@@ -221,12 +221,12 @@ function skippedAiHtml(baseline: E2EDisplayBaseline): string {
   return `<p>${html(skipped.sentence)}</p><p class="muted">${html(E2E_OWNER_SENTENCES.baseline.skippedListLead)}</p><ul class="e2e-skipped">${[...skipped.titles, ...(skipped.more === undefined ? [] : [skipped.more])].map((title) => `<li>${html(title)}</li>`).join("")}</ul>`;
 }
 
-function rowsTable(rows: readonly E2EDisplayScenario[], rowAttribute: string, artifactPath: (sha256: string) => string): string {
+function rowsTable(rows: readonly E2EDisplayScenario[], rowAttribute: string, artifactPath: ((sha256: string) => string) | undefined): string {
   const body = rows.map((row) => {
     const reason = row.reason === undefined ? "" : html(displayText(row.reason, 300));
     const badges = row.mockedOrigins.map((origin) => `<span class="tag">${html(e2eMockedBadge(origin))}</span>`).join(" ");
     const navigated = row.agentNavigation === undefined ? "" : `<span class="tag">${html(e2eAgentBadge(row.agentNavigation))}</span>`;
-    const shot = row.screenshotRef === undefined ? "" : `<a href="${html(artifactPath(row.screenshotRef.sha256))}">View screenshot</a>`;
+    const shot = row.screenshotRef === undefined || artifactPath === undefined ? "" : `<a href="${html(artifactPath(row.screenshotRef.sha256))}">View screenshot</a>`;
     const details = [reason, navigated, badges, shot].filter((part) => part !== "").join(" ");
     const status = row.status === "PASSED" ? "Passed" : row.status === "FAILED" ? "Failed" : "Incomplete";
     return `<tr ${rowAttribute}="${html(displayText(row.scenarioId, 120))}" data-status="${row.status}"><td>${html(displayText(row.title, 120))} <span class="muted">(${row.kind === "web" ? "Browser" : "API"})</span></td>`
@@ -239,7 +239,8 @@ function rowsTable(rows: readonly E2EDisplayScenario[], rowAttribute: string, ar
  * The task page's section of the per-scenario results: a row for each scenario (status, account, what failed, a "<service> mocked" badge, a link to the screenshot) and, apart,
  * what the unchanged code did. A screenshot is a link to the page's API, never an inline image. Empty when there is nothing to show.
  */
-export function renderE2EScenarioRowsHtml(results: E2EScenarioResults, options: { artifactPath: (sha256: string) => string }): string {
+/** `artifactPath`: where a row's screenshot is served; without it a row shows no screenshot link (D1-2: Code's own screenshot route is deleted with its task page, DEC 254zzz511). */
+export function renderE2EScenarioRowsHtml(results: E2EScenarioResults, options: { artifactPath?: (sha256: string) => string }): string {
   if (results.scenarios.length === 0 && results.baseline === undefined) return "";
   const baseline = results.baseline;
   const baselineHtml = baseline === undefined ? ""

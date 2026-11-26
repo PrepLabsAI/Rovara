@@ -19,7 +19,8 @@ import { createDispatcherCoreHost, dispatcherStopInstance, hostedDispatcherFlow,
 import type * as CoreDispatchHostModule from "../../packages/broker/src/aws/worker-machines/core-dispatch-host.js";
 import type { CoreDispatchHostDependencies } from "../../packages/broker/src/aws/worker-machines/core-dispatch-host.js";
 import { createCoreHostApp } from "../../packages/broker/src/core-host/app.js";
-import { CORE_SERVICES, type CoreRuntime } from "../../packages/broker/src/core-host/core-runtime.js";
+import type { CoreRuntime } from "../../packages/broker/src/core-host/core-runtime.js";
+import { REQUIRED_CORE_SERVICES } from "../../packages/broker/src/core-host/core-wiring-guard.js";
 import { hostedPrFeedbackRoutes } from "../../packages/broker/src/core-host/pr-feedback-routes.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
@@ -68,7 +69,7 @@ const observed: Record<string, Row> = {};
 
 /** Every field name `TaskFlowDeps` declares, read from the compiled source once by the fixture writer, and the services a core runtime can have (`CoreServiceName`). */
 const universe = (): string[] => stored?.universe ?? [];
-const SERVICE_UNIVERSE = [...Object.keys(CORE_SERVICES), "automation-stop", "lessons", "person-erase-resume", "after-merge", "upkeep"].sort();
+const SERVICE_UNIVERSE = [...REQUIRED_CORE_SERVICES, "automation-stop", "lessons", "person-erase-resume", "after-merge", "upkeep"].sort();
 
 const definedKeys = (value: object): string[] => Object.entries(value).filter(([, entry]) => entry !== undefined).map(([key]) => key).sort();
 
@@ -116,7 +117,7 @@ describe("root 1: the test harnesses", () => {
     const app = createCoreHostApp({
       modules: world.modules, context: () => world.context(), nowMs: () => world.clock.now,
       runtime: () => ({ callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5), repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined,
-        services: () => Object.fromEntries(Object.keys(CORE_SERVICES).map((name) => [name, { pass: async () => ({}) }])), ciReporting: { honest: true as const, ciMode: () => "their_ci_fix" as const } }),
+        services: () => Object.fromEntries(REQUIRED_CORE_SERVICES.map((name) => [name, { pass: async () => ({}) }])), ciReporting: { honest: true as const, ciMode: () => "their_ci_fix" as const } }),
     });
     const runtime = await app.runtimeFor(FAKE_COMPANY);
     pin("core-runtime/fake-world", rowOf(runtime.flow.deps, runtime.services));

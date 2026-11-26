@@ -476,7 +476,7 @@ it("task Ask history is a full-access GET route, distinct from asking", () => {
 
 import { toDocument } from "../../packages/broker/src/core/task-flow/records.js";
 import { hostedFeedbackWorld } from "../support/hosted-pr-feedback-world.js";
-import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 
 it.each([["GET", "feedback"], ["POST", "feedback-decision"], ["POST", "feedback-retry"], ["POST", "keep-pull-requests"]] as const)("the real developer broker reaches hosted %s %s and preserves missing-task answers", async (method, action) => {
   const w = await hostedFeedbackWorld(action === "feedback-retry" ? "BLOCKED" : "COMPLETE");
@@ -494,7 +494,7 @@ it.each([["GET", "feedback"], ["POST", "feedback-decision"], ["POST", "feedback-
   const authorization = await cli();
   const options = { routeKey: "ANY /v1/dev/{proxy+}", body: action === "feedback-retry" ? { reviewDigest: w.request.reviewDigest } : action === "keep-pull-requests" ? { requestId: w.request.requestId, expectedRevision: w.task.workflow!.revision } : { ...w.request, decision: "DISMISS", selectedFindingIds: [], ownerNote: "The owner kept the pull request as it is." } };
   const missing = await call(method, path, authorization, options);
-  db.set((await w.h.store.get(engineStampKey(w.task.taskId)))!);
+  db.set((await w.h.store.get(coreTaskMarkKey(w.task.taskId)))!);
   db.set(toDocument(w.task));
   if (action === "keep-pull-requests") {
     w.task.workflow!.feedbackReview = { status: "COLLECTING", bundleRefs: w.task.workflow!.feedbackReview!.bundleRefs, threadObservations: [] };
@@ -519,7 +519,7 @@ it.each([["GET", "feedback", "tasks:read"], ["POST", "feedback-decision", "decis
   const route = vi.fn(async (request: BrokerRequest) => w.routes.route(request, w.caller));
   await setUp(undefined, "developer", { route });
   membership(ADA, w.h.deps.companyId, "member");
-  db.set((await w.h.store.get(engineStampKey(w.task.taskId)))!);
+  db.set((await w.h.store.get(coreTaskMarkKey(w.task.taskId)))!);
   db.set(toDocument(w.task));
   const at = new Date(T0 - 60_000).toISOString();
   const client = { pk: "SIGNIN_CLIENTS", sk: "CLIENT#tool", entityType: "SIGN_IN_CLIENT", clientId: "tool", name: "Tool", audience: "tool", redirectUris: ["https://tool.example/callback"], loopback: false, installLevel: true, scopes: ["tasks:start"], secretHash: "f".repeat(64), createdAt: at, updatedAt: at, updatedBy: "operator" };

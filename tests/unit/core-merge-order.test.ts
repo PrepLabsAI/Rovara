@@ -3,11 +3,11 @@
 import { describe, expect, it } from "vitest";
 import { MERGE_NOT_READY_MESSAGES as M, type CodeHost } from "../../packages/contracts/src/index.js";
 import {
-  MERGE_ORDER_EDGES_MAX, MERGE_ORDER_WORDS, mergeOrderLines, mergeOrderOf, partialMergeState, pressMerge, type MergeDependencies,
+  MERGE_ORDER_EDGES_MAX, MERGE_ORDER_WORDS, mergeOrderLines, mergeOrderOf, partialMergeState, type MergeDependencies,
 } from "../../packages/broker/src/core/merge/index.js";
 import { FakeCodeHost, type FakeHostModel } from "@agentx/broker/fakes";
 import { expectLinearScaling } from "../support/scaling.js";
-import { TASK_ID, githubShapedHost, mergeWorld, type MergeWorld } from "../support/merge-world.js";
+import { githubShapedHost, mergeWorld, pressAsOwner, type MergeWorld } from "../support/merge-world.js";
 
 const edge = (consumer: string, provider: string) => ({ consumer, provider, language: "node", source: "both" });
 const rejects = async (run: () => Promise<unknown>): Promise<{ code?: string; message: string }> => {
@@ -93,7 +93,7 @@ describe("merge all in order", () => {
     await world.seedTracking();
     world.deps.repositoryEdges = async () => [edge("app", "payments-lib")];
     const prepared = await world.prepare();
-    const refusal = await rejects(() => pressMerge(world.deps, { taskId: TASK_ID, requestId: prepared.request.requestId, proof: world.proofFor(prepared) }));
+    const refusal = await rejects(() => pressAsOwner(world.deps, prepared));
     const why = "the code host would not merge it (the host says: Required checks have not passed.)";
     expect(refusal.message).toBe(`${M.halfMerged("docs", "payments-lib", why)} ${MERGE_ORDER_WORDS.held(["payments-lib", "app"], ["docs"])}`);
     expect(world.models.get("app")!.getChangeRequest("1").state).toBe("open");
@@ -110,7 +110,7 @@ describe("merge all in order", () => {
     const prepared = await world.prepare();
     expect(prepared.changes).toEqual(["Merge payments-lib pull request 1 (squash)"]);
     expect("orderOverride" in prepared).toBe(false);
-    await pressMerge(world.deps, { taskId: TASK_ID, requestId: prepared.request.requestId, proof: world.proofFor(prepared) });
+    await pressAsOwner(world.deps, prepared);
     expect(mergedOrder(world)).toEqual(["acme/payments-lib"]);
   });
 });

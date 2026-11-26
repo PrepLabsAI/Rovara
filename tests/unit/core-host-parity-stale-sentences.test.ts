@@ -204,10 +204,8 @@ describe("a replay of a committed retry is answered as a replay, never as stale"
 describe("only the pre-write sites keep the original sentences", () => {
   const source = (path: string): string => readFileSync(new URL(`../../packages/broker/src/${path}`, import.meta.url), "utf8");
   const count = (text: string, needle: string): number => text.split(needle).length - 1;
-  it("the verification sentence is thrown once, by the legacy handler's read-only check, and never by the core route", () => {
-    const legacy = source("aws/developer-tasks.ts");
-    expect(count(legacy, VERIFICATION_STALE)).toBe(1);
-    expect(legacy).toMatch(/if \(request\.expectedRevision !== workflow\.revision\) \{\s*throw agentXError\("IDEMPOTENCY_CONFLICT", "the verification retry is stale; refresh the task and choose checks again"\);\s*\}\s*const policy = workflow\.checkPolicy;/u);
+  it("the verification sentence is thrown nowhere any more: its one site, the legacy handler's read-only check, was deleted with the old workflow engine (D1-2), and the core route never threw it", () => {
+    expect(count(source("aws/developer-tasks.ts"), VERIFICATION_STALE)).toBe(0);
     expect(count(source("core-host/parity-task-actions.ts"), VERIFICATION_STALE)).toBe(0);
   });
 

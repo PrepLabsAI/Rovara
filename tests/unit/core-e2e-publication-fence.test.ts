@@ -81,7 +81,7 @@ function publicationPorts(publication: ApplicationE2ESeams["publication"]): Appl
   const unused = async (): Promise<never> => { throw new Error("unexpected application port"); };
   const store = new MemoryDocumentStore();
   return { publication, planning: { context: unused, approve: unused }, results: { read: unused, project: unused, artifact: unused, notice: unused },
-    rounds: { selection: unused, runRow: unused, retry: unused, records: { task: unused, baseline: unused, replay: unused, grounding: unused },
+    rounds: { selection: unused, runRow: unused, retry: unused, records: { task: unused, baseline: unused },
       verification: { state: { store }, objects: createDocumentObjectStorage(store, { companyId: ORG }), authority: { application: unused, portable: unused }, readTask: unused } } };
 }
 

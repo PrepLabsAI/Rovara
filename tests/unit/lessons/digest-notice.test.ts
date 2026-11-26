@@ -6,7 +6,7 @@ import { companyScoped, orgProjectCatalogKey, projectRevisionKey, type ChannelAd
 import { createOwnerTaskAccess } from "../../../packages/broker/src/core/task-flow/access.js";
 import { localOwnerPrincipal } from "../../../packages/broker/src/ports/policy-defaults.js";
 import { prefsKey } from "../../../packages/broker/src/core/notify/prefs.js";
-import { CORE_ENGINE_ON, buildCoreRegistry, createCoreRuntime } from "../../../packages/broker/src/core-host/index.js";
+import { buildCoreRegistry, createCoreRuntime } from "../../../packages/broker/src/core-host/index.js";
 import { createCoreLessons, erasePersonLessons, readCoreLessonsSwitch, setCoreLessonsGate, CORE_LESSONS_VARIABLE, type CoreLessons } from "../../../packages/broker/src/core-host/lessons.js";
 import { digestPilotOf, switchNames } from "../../../packages/broker/src/core-host/flags.js";
 import { DIGEST_RETRY_AFTER_MS, DIGEST_RETRY_MAX, DIGEST_PEOPLE_MAX, DIGEST_PROJECTS_PER_PASS, digestNoticeText, digestWeekOf, readDigestChoiceStrict, readDigestSetting, resolveDigestSettingStrict, sendLessonDigests, writeDigestSetting, type DigestNoticeDeps } from "../../../packages/broker/src/lessons/digest-notice.js";
@@ -56,7 +56,7 @@ async function setUp(setup: { env?: NodeJS.ProcessEnv; chat?: ChannelAdapter; di
     await world.store.put({ item: { ...projectRevisionKey(companyId, PROJECT.name, PROJECT.revision), entityType: "PROJECT", definition: JSON.parse(JSON.stringify(PROJECT)) as JsonValue } });
     await world.store.put({ item: { ...orgProjectCatalogKey(companyId, PROJECT.name), entityType: "PROJECT_CATALOG", latestRevision: PROJECT.revision } });
     const runtime = createCoreRuntime({
-      registry, companyId, flags: CORE_ENGINE_ON, callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
+      registry, companyId, callbackSigningKey: Buffer.alloc(32, 7), access: createOwnerTaskAccess(), repositoryGrantKey: Buffer.alloc(32, 5),
       repositoryCredential: async () => ({ token: "unused" }), now: () => new Date(world.clock.now), log: () => undefined,
     });
     const built = createCoreLessons({ flow: runtime.flow, registry, companyId, lessonsSwitch: readCoreLessonsSwitch(env).value, people: people(), hostFor: async (id) => lessons.get(id)?.host, now: () => world.clock.now, ...(setup.digestPilot === undefined ? {} : { digestPilot: setup.digestPilot }), channelCompanyOf: async ({ tenant }) => (tenant === "TA" ? A : tenant === "TB" ? B : undefined) });

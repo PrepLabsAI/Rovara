@@ -22,7 +22,6 @@ export const StoredBaselineSourceSchema = z.discriminatedUnion("status", [
   z.object({ status: z.literal("REFUSED"), reason: z.string().min(1).max(600) }).strict(),
 ]);
 export type StoredBaselineSource = z.infer<typeof StoredBaselineSourceSchema>;
-export type ReadyBaselineSource = Extract<StoredBaselineSource, { status: "READY" }>;
 
 /** The upload requests that carry the unchanged code, on the baseline-source callback. */
 export const BaselineSourceBodySchema = z.discriminatedUnion("stage", [

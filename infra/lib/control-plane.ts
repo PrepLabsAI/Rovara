@@ -328,52 +328,6 @@ export class ControlPlaneStack extends Stack {
     // Named: the broker's two StartExecution grants (this and the session deleter's, sessions.connectBroker) are one statement, for the same room. Legacy: as before.
     if (naming.env === undefined) broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["states:StartExecution"], resources: [swebenchStateMachineArn] }));
 
-    // Spec 061: a stored plan's cited code is read from GitHub in the background, with retries, so a slow or failing
-    // GitHub never holds up the plan. The broker starts the job right after the plan commits (an async invoke), and
-    // its recovery sweep starts any row that is due; the job needs nothing from the broker. 150 seconds: the code is
-    // read inside 120, and the rest is for attaching the bundle and cleaning up. 1,024 MB: files are read in memory.
-    // Developer tasks, and so their plans, exist only in named environments; the legacy templates gain nothing.
-    let planEvidenceFunction: lambda.Function | undefined;
-    if (naming.env !== undefined) {
-      const planEvidence = packagedFunction(this, "PlanEvidence", "packages/broker/src/aws/plan-evidence-handler.ts", {
-        STATE_TABLE_NAME: state.tableName,
-        ARTIFACT_BUCKET_NAME: artifacts.bucketName,
-        GITHUB_APP_CREDENTIAL_REF: githubAppCredentialRef.valueAsString,
-        GITHUB_APP_ID: githubAppId.valueAsString,
-        GITHUB_APP_PRIVATE_KEY_SECRET_ARN: githubAppPrivateKeySecretArn.valueAsString,
-      }, Duration.seconds(150), [], 1024);
-      // The State table, one action at a time, each on the partitions it needs (the sort key cannot be narrowed here):
-      // reads of the task record, its evidence pointer, the job rows and the project revision the task started from; the
-      // pointer is written with PutItem (DEVTASK#, put once, never the task record's workflow); the job row is claimed and
-      // rescheduled with UpdateItem and removed with DeleteItem. No Query: the sweep runs in the broker.
-      planEvidence.addToRolePolicy(new iam.PolicyStatement({
-        sid: "ReadTaskJobAndProject",
-        actions: ["dynamodb:GetItem"],
-        resources: [state.tableArn],
-        conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["DEVTASK#*", "PLAN_EVIDENCE", "PROJECT#*"] } },
-      }));
-      planEvidence.addToRolePolicy(new iam.PolicyStatement({
-        sid: "PutEvidencePointer",
-        actions: ["dynamodb:PutItem"],
-        resources: [state.tableArn],
-        conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["DEVTASK#*"] } },
-      }));
-      planEvidence.addToRolePolicy(new iam.PolicyStatement({
-        sid: "ClaimAndCloseJobRow",
-        actions: ["dynamodb:UpdateItem", "dynamodb:DeleteItem"],
-        resources: [state.tableArn],
-        conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PLAN_EVIDENCE"] } },
-      }));
-      // The plan is read back from its own folder, and the bundle is written only beside it.
-      planEvidence.addToRolePolicy(new iam.PolicyStatement({ sid: "ReadPlanDocuments", actions: ["s3:GetObject"], resources: [artifacts.arnForObjects("private/*")] }));
-      planEvidence.addToRolePolicy(new iam.PolicyStatement({ sid: "WriteEvidenceBundles", actions: ["s3:PutObject"], resources: [artifacts.arnForObjects("private/*/plan-documents/*.evidence.*.json")] }));
-      // The GitHub App's key, to read files as the broker does.
-      planEvidence.addToRolePolicy(new iam.PolicyStatement({ sid: "GitHubAppKey", actions: ["secretsmanager:GetSecretValue"], resources: [githubAppPrivateKeySecretArn.valueAsString] }));
-      // Named only (this block): the broker's invoke of this function and of the sign-in function are one statement, added with the sign-in function below (ENV-ROOM 2 room).
-      planEvidenceFunction = planEvidence;
-      addBrokerName(broker, naming, "planEvidenceFunction", planEvidence.functionName, planEvidence.functionName);
-    }
-
     const outboxPublisher = packagedFunction(
       this,
       "OutboxPublisher",
@@ -954,56 +908,6 @@ export class ControlPlaneStack extends Stack {
       target: `integrations/${integration.ref}`,
       authorizationType: "NONE",
     });
-    // Confused-deputy guard: only this account's own EventBridge schedules may assume the recovery roles.
-    // Scheduler sets aws:SourceArn to the schedule group's ARN, not the schedule's; these schedules use the default group.
-    const schedulerPrincipal = new iam.ServicePrincipal("scheduler.amazonaws.com", { conditions: {
-      StringEquals: {
-        "aws:SourceAccount": this.account,
-        "aws:SourceArn": `arn:${this.partition}:scheduler:${this.region}:${this.account}:schedule-group/default`,
-      },
-    } });
-    const githubRecoveryRole = new iam.Role(this, "GithubWebhookRecoveryRole", {
-      assumedBy: schedulerPrincipal,
-    });
-    broker.grantInvoke(githubRecoveryRole);
-    new scheduler.CfnSchedule(this, "GithubWebhookRecoverySchedule", {
-      flexibleTimeWindow: { mode: "OFF" },
-      scheduleExpression: "rate(1 minute)",
-      state: "ENABLED",
-      target: {
-        arn: broker.functionArn,
-        roleArn: githubRecoveryRole.roleArn,
-        input: JSON.stringify({ source: "agentx.github-webhook-recovery" }),
-        retryPolicy: { maximumRetryAttempts: 2, maximumEventAgeInSeconds: 300 },
-      },
-    });
-    new scheduler.CfnSchedule(this, "WorkflowMergeRecoverySchedule", {
-      flexibleTimeWindow: { mode: "OFF" },
-      scheduleExpression: "rate(1 minute)",
-      state: "ENABLED",
-      target: {
-        arn: broker.functionArn,
-        roleArn: githubRecoveryRole.roleArn,
-        input: JSON.stringify({ source: "agentx.workflow-merge-recovery" }),
-        retryPolicy: { maximumRetryAttempts: 2, maximumEventAgeInSeconds: 300 },
-      },
-    });
-    // Gap 6: re-run any workflow dispatch (an automatic review start) left behind after its result committed.
-    const workflowDispatchRecoveryRole = new iam.Role(this, "WorkflowDispatchRecoveryRole", {
-      assumedBy: schedulerPrincipal,
-    });
-    broker.grantInvoke(workflowDispatchRecoveryRole);
-    new scheduler.CfnSchedule(this, "WorkflowDispatchRecoverySchedule", {
-      flexibleTimeWindow: { mode: "OFF" },
-      scheduleExpression: "rate(1 minute)",
-      state: "ENABLED",
-      target: {
-        arn: broker.functionArn,
-        roleArn: workflowDispatchRecoveryRole.roleArn,
-        input: JSON.stringify({ source: "agentx.workflow-dispatch-recovery" }),
-        retryPolicy: { maximumRetryAttempts: 2, maximumEventAgeInSeconds: 300 },
-      },
-    });
     // Access log of the `$default` stage (staging stuck-dispatch diagnosis, 2026-11-24: a worker's terminal callback was refused with a 4xx and nothing recorded which route or status).
     // See api-access-log.ts for the fields and what is deliberately left out. Diagnostic data, so it is destroyed with the stack like the other operational log groups.
     const accessLogGroup = new logs.LogGroup(this, "ApiAccessLogs", {
@@ -1132,11 +1036,10 @@ export class ControlPlaneStack extends Stack {
       });
       // The dispatcher's lessons people port (a worker step's source lessons need the project roster): the sign-in table's name and two projected GetItem reads of it, from the real table, both layouts, no switch.
       connectDispatcherLessonsPeople(this, dispatcher, developerSignIn.table);
-      // Named: one statement for the broker's two invokes (the plan evidence job and the sign-in function; developer-signin.ts leaves its grant to this), ENV-ROOM 2's IAM room.
-      // The same resources CDK's grantInvoke gives each: the function and its versions and aliases.
+      // Named: the broker's invoke of the sign-in function (developer-signin.ts leaves its grant to this), ENV-ROOM 2's IAM room.
+      // The same resources CDK's grantInvoke gives it: the function and its versions and aliases. (The plan evidence job's invoke left with D1: the core stores plan evidence itself.)
       if (naming.env !== undefined) {
-        if (planEvidenceFunction === undefined) throw new Error("a named control plane has the plan evidence function");
-        const invoked = [planEvidenceFunction, developerSignIn.function];
+        const invoked = [developerSignIn.function];
         broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["lambda:InvokeFunction"], resources: invoked.flatMap((fn) => [fn.functionArn, `${fn.functionArn}:*`]) }));
       }
       // The Slack Lambda and the channel API Lambda (Slack company mode reads it: lead 2, #873).
