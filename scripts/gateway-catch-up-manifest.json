@@ -1,6 +1,6 @@
 {
   "about": "Proof that Code's copy of the model gateway equals Rovara Cloud's gateway at the commit below, byte for byte, except for the declared differences. Run: node scripts/gateway-catch-up-proof.ts check (CI; needs no Cloud checkout) or ... check --cloud <clone of Rovara Cloud> (also re-reads Cloud's tree). A deliberate later change to a file in Code is recorded under `divergedFromCloud` (path, the new blob, the reason) in the same pull request; nothing else may differ. Blob ids are written as blob:<40 hex> so a secret scanner does not mistake them for keys.",
-  "cloudCommit": "afb494e7551609c6b325f6b4140bf7e06df9098c",
+  "cloudCommit": "771e1701eef43e616f32ae43fa89005a28e0fe99",
   "exact": {
     "contracts/shared/model-gateway-product-ai.v1.json": "blob:1f40c62ef5d27b5486451fe306f438d9a275adf8",
     "contracts/shared/model-gateway-product-bedrock.v2.json": "blob:27ca0a6d8aaea2dc072b95da4d04845c0eb00649",
@@ -16,8 +16,8 @@
     "packages/model-gateway/src/answers-route.ts": "blob:b10cf25415fcabbf417db11d91f2d6508d53e9ea",
     "packages/model-gateway/src/aws-kms.ts": "blob:9b921fc7bc4b796d45071c149e0e22c27852cb8d",
     "packages/model-gateway/src/aws.ts": "blob:707330480a669336e2aff46288083e296d6a8124",
-    "packages/model-gateway/src/bedrock-byo-sessions.ts": "blob:705f98c150cf008b69d1080734f3245c2626d51d",
-    "packages/model-gateway/src/bedrock-byo.ts": "blob:54601f8fb75719508b2feac65e0bbdb6ffc103fd",
+    "packages/model-gateway/src/bedrock-byo-sessions.ts": "blob:2a1ba455315bb36f1c81cddf192de23dd30acb1b",
+    "packages/model-gateway/src/bedrock-byo.ts": "blob:2965a44a9ca6f77926c432c207de1157e96f4fac",
     "packages/model-gateway/src/bedrock-converse.ts": "blob:6f0e80d5c0de0f840a94f1536929a2872a4d5e9b",
     "packages/model-gateway/src/bedrock-event-stream.ts": "blob:ce00f973ea3dbe44d8d73e5dd894563ddbf82b90",
     "packages/model-gateway/src/bedrock-transport.ts": "blob:c7ad48eda8e911f6042cbd7dfc2b183064170097",
@@ -69,12 +69,12 @@
     "packages/model-gateway/src/price-sources.ts": "blob:d58b9ae9751970244dddd45597418a928e2854c6",
     "packages/model-gateway/src/price-tiers.ts": "blob:2f90a484506c50252d3eba79ea670d93e1346bc7",
     "packages/model-gateway/src/price.ts": "blob:09332d18f184f58c12ef351fcbde448b6ba5c171",
-    "packages/model-gateway/src/process.ts": "blob:d98646f9fd6e43e0620e557de46bed3da1bbff1b",
+    "packages/model-gateway/src/process.ts": "blob:1b57263f5ea83938702e48f6e304814e3b098aa2",
     "packages/model-gateway/src/product-bedrock.ts": "blob:24f7d6d4967ffe5a3139e059be69ceab675e5c80",
     "packages/model-gateway/src/product-bridge.ts": "blob:20c40ac2b222fcbaeff9e0b1f0c670b3a058e42c",
     "packages/model-gateway/src/product-eval.ts": "blob:98cb7ed0b9b90b38c08d4004d346d1456d6a9894",
     "packages/model-gateway/src/product-gemini.ts": "blob:b9920e2cc9498db92f550959b662e8817949d8a8",
-    "packages/model-gateway/src/product-keys.ts": "blob:ff714015a6e12e46f4cb5cda0223a4ad5079ee1c",
+    "packages/model-gateway/src/product-keys.ts": "blob:7e2c79cca5ca424e14ca1f57f9475482b26c8f42",
     "packages/model-gateway/src/product-policy.ts": "blob:b00d33747842637080fa8b17c73e45bbb90df50c",
     "packages/model-gateway/src/product-route.ts": "blob:c70c950902f9256ae599ca7acdeff93f6ca296e0",
     "packages/model-gateway/src/product-seal.ts": "blob:0e9ad5f7b75951f71d632142d46c6059415522ad",
@@ -92,7 +92,7 @@
     "packages/model-gateway/src/run-price.ts": "blob:571273866db45a0be719194afb056679a5249b35",
     "packages/model-gateway/src/secrets.ts": "blob:f8cab4235ff7156ed49bba0e43f2bca416af6ee2",
     "packages/model-gateway/src/server.ts": "blob:6a3b3318145cb04a1420aa044f5f6ef784717b61",
-    "packages/model-gateway/src/service-call.ts": "blob:bca15a3329cb0ff6efbcc118df452389e213e697",
+    "packages/model-gateway/src/service-call.ts": "blob:11e1ad832e4e09470fa50e21f0fe8f4bb961b8fa",
     "packages/model-gateway/src/source-stop-cli.ts": "blob:b6cbf1e0b45fe240fc699cd43aae1d7f323b4ee5",
     "packages/model-gateway/src/source-stop.ts": "blob:1405f2f9431d29dd0afd60fa938a13310f1de3de",
     "packages/model-gateway/src/task-ended-notice.ts": "blob:355f5772b70f2f167051fc1fbf1706e917433bc0",
@@ -101,7 +101,7 @@
     "packages/model-gateway/src/upkeep-cap.ts": "blob:703dbafdd477584818e3b9e1f95fef687d48925f",
     "packages/model-gateway/src/usage.ts": "blob:de679f928b8dd1996c10268b65e16036580c6ee0",
     "packages/model-gateway/tsconfig.json": "blob:48793c3fb6813b585758a2425a582a051572a0b9",
-    "scripts/model-gateway-image.ts": "blob:905d943684b59458c68575c466de17d33ab4cdd2",
+    "scripts/model-gateway-image.ts": "blob:31100e214139de772db50dc1682bdffad31467dd",
     "tests/fixtures/model-gateway-bedrock/converse-256/deepseek.v3.2.bin": "blob:afe9f7a127dae93a47a5c87f484c2ec11e7414c7",
     "tests/fixtures/model-gateway-bedrock/converse-256/minimax.minimax-m2.5.bin": "blob:d0ba296afbe3024c3ed436f2876e0db98bd7c7a8",
     "tests/fixtures/model-gateway-bedrock/converse-256/moonshot.kimi-k2-thinking.bin": "blob:0135b54f2f047b8453dedaf2108265d387370a34",
@@ -120,6 +120,7 @@
     "tests/fixtures/model-gateway-bedrock/converse/us.amazon.nova-2-lite-v1_0.bin": "blob:904cecb8512cc782632706c8077be04de0f75546",
     "tests/fixtures/model-gateway-bedrock/converse/zai.glm-4.7.bin": "blob:3cd5147c7d1146351ca26ab99e5f4211046d7a2f",
     "tests/fixtures/model-gateway-bedrock/converse/zai.glm-5.bin": "blob:fe4cfc702992360e1b701ff22e3390b974e97b83",
+    "tests/fixtures/model-gateway-bedrock/invoke-max-tokens-0-haiku-4-5.json": "blob:bae2108ee5a1bd0087ea3c39696354c5b5fd74b0",
     "tests/fixtures/model-gateway-bedrock/invoke-with-response-stream-haiku-4-5.bin": "blob:f7e424c87bd7485e623ee555b2e9842342caf0e2",
     "tests/fixtures/model-gateway-bedrock/two-turn-real/deepseek.v3.2.turn1.json": "blob:a1d66ff22e292313509059c1ada6d0705d9eeb61",
     "tests/fixtures/model-gateway-bedrock/two-turn-real/minimax.minimax-m2.5.turn1.json": "blob:bd7adcff2b92ee57bb614ed331b956835b66f4f9",
@@ -148,7 +149,7 @@
     "tests/unit/model-gateway-product-bedrock-deployed.test.ts": "blob:5cf7a135ff1feb9bab94ad448bd60a0691171750",
     "tests/unit/model-gateway-product-bedrock-eval-hold.test.ts": "blob:24a38454142aa0ba54ce44767cf27c02f78cc258",
     "tests/unit/model-gateway-reviewer-grants.test.ts": "blob:55e41506d3191f375ef07e59b977ceddf66d84c2",
-    "tests/unit/model-gateway-round2.test.ts": "blob:69e89337c7828a688f6c7bad679be2102b0fb3df",
+    "tests/unit/model-gateway-round2.test.ts": "blob:57cf14be25f9b36aaf6e667f27e07f40707ff17b",
     "tests/unit/model-gateway-run-charges-read.test.ts": "blob:94e4da0253bcfda710c310a2415763fd0ee025fa",
     "tests/unit/model-gateway-task-ended-notice.test.ts": "blob:7300f859686478bc875a2911f4f28b018a516ec7"
   },
@@ -471,30 +472,6 @@
     "infra/lib/model-gateway-deployed-sha.ts": {
       "blob": "blob:fba152a6112d5ccf95515f22baa72c2c0a9b8805",
       "reason": "#1478 phase 2: the helper writes DeployedCodeSha from -c rovaraCodeSha (the Code commit the release pipeline builds the gateway from) and no longer writes DeployedCloudSha; Cloud's pipeline reads Cloud's live sha from its web stack only"
-    },
-    "scripts/model-gateway-image.ts": {
-      "blob": "blob:31100e214139de772db50dc1682bdffad31467dd",
-      "reason": "the context hash now also covers this script's own bytes and an IMAGE_FORMAT_VERSION constant, because Cloud's release pipeline tags the gateway image by that hash and would otherwise reuse an old image after a change to how it is built (pr/gateway-image-by-content, DEC 532: the same change is made in Cloud's copy, so the two stay equal)"
-    },
-    "packages/model-gateway/src/bedrock-byo-sessions.ts": {
-      "blob": "blob:2a1ba455315bb36f1c81cddf192de23dd30acb1b",
-      "reason": "Bedrock model check: max_tokens 0 answered by a Messages response is ready, AWS not answering is no_answer (one retry inside a 22 s budget), status, error type and company logged; byte-identical to Rovara Cloud pr/bedrock-byo-check-fixes-cloud-20261125 @ c9878e235"
-    },
-    "packages/model-gateway/src/bedrock-byo.ts": {
-      "blob": "blob:2965a44a9ca6f77926c432c207de1157e96f4fac",
-      "reason": "adds the model-check word no_answer and reads a stored word this release does not know as no_answer; byte-identical to Rovara Cloud pr/bedrock-byo-check-fixes-cloud-20261125 @ c9878e235"
-    },
-    "packages/model-gateway/src/product-keys.ts": {
-      "blob": "blob:7e2c79cca5ca424e14ca1f57f9475482b26c8f42",
-      "reason": "keeps no_answer, reads unknown stored state words as no_answer, adds recheckBedrock (Check again for the saved connection); byte-identical to Rovara Cloud pr/bedrock-byo-check-fixes-cloud-20261125 @ c9878e235"
-    },
-    "packages/model-gateway/src/process.ts": {
-      "blob": "blob:1b57263f5ea83938702e48f6e304814e3b098aa2",
-      "reason": "passes the gateway's log to the Bedrock sessions (model-check status lines); byte-identical to Rovara Cloud pr/bedrock-byo-check-fixes-cloud-20261125 @ c9878e235"
-    },
-    "packages/model-gateway/src/service-call.ts": {
-      "blob": "blob:11e1ad832e4e09470fa50e21f0fe8f4bb961b8fa",
-      "reason": "a per-company limit (one probe at a time, 6 a minute) inside the Bedrock check handler; byte-identical to Rovara Cloud pr/bedrock-byo-check-fixes-cloud-20261125 @ c9878e235"
     }
   }
 }
