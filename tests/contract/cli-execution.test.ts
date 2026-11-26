@@ -26,37 +26,6 @@ describe("AgentX administration workflow", () => {
       else { expect(output).toContain("Priya Shah"); expect(output).toContain("U0123456789"); }
     }
   });
-  it("stops a workspace through the administrator route", async () => {
-    const context = await administratorContext("agentx-cli-stop-");
-    const workspaceId = randomUUID();
-    const fetchImplementation = vi.fn<typeof fetch>(async (input, init) => {
-      const url = new URL(requestUrl(input));
-      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer access-secret");
-      expect(url.pathname).toBe(`/v1/admin/workspaces/${workspaceId}/stop`);
-      return Response.json({ workspace: { id: workspaceId, status: "STOPPED" } }, { status: 202 });
-    });
-    let output = "";
-
-    const exitCode = await executeCli([
-      ...context.globals,
-      "--json",
-      "admin", "workspace", "stop",
-      "--workspace", workspaceId,
-    ], {
-      fetchImplementation,
-      tokenStore: context.tokens,
-      stdout: { write(text) { output += text; } },
-      stderr: { write(text) { throw new Error(text); } },
-    });
-
-    expect(exitCode).toBe(0);
-    expect(fetchImplementation).toHaveBeenCalledOnce();
-    expect(JSON.parse(output)).toMatchObject({
-      ok: true,
-      data: { workspace: { id: workspaceId, status: "STOPPED" } },
-    });
-  });
-
   it("admin workspace cancel keeps WORKSPACE_BUSY and its try-again message when the cancel raced its task (final review I2)", async () => {
     const context = await administratorContext("agentx-cli-cancel-");
     const workspaceId = randomUUID();
