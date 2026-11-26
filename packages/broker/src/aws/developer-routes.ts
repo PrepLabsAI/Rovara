@@ -1162,8 +1162,7 @@ async function companylessSession(deps: DeveloperRouteDependencies, client: Sign
     const membership = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: membershipKey(session.developerId), ConsistentRead: true })) as { Item?: unknown };
     if (membership.Item !== undefined) return false;
     const developer = await getSignIn<{ revoked?: unknown; companyless?: unknown; mergedInto?: unknown }>(deps, `DEVELOPER#${session.developerId}`);
-    // SLACK-LINK-L2: a record that points at a person (connected, adopted or linked again) is never a person with no company, whatever else it says.
-    return developer?.revoked === false && developer.companyless === true && developer.mergedInto === undefined;
+    return developer?.revoked === false && developer.companyless === true && developer.mergedInto === undefined; // SLACK-LINK-L2: a record that points at a person is never one with no company
   } catch { return false; }
 }
 

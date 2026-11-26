@@ -118,8 +118,7 @@ export class CompanySignInStore {
       let legacy = false;
       if (input.companyId === IMPLICIT_COMPANY_ID) {
         const developer = z.object({ entityType: z.literal("DEVELOPER"), provider: z.enum(["slack", "oidc"]), issuer: z.string().min(1), subject: z.string().min(1), revoked: z.literal(false), firstSignInAt: z.iso.datetime(), companyless: z.unknown().optional(), mergedInto: z.unknown().optional() }).safeParse(await this.read({ pk: `DEVELOPER#${input.personId}`, sk: "META" }));
-        // DEC 253z: a record first written by a sign-in with no company is never "legacy": that person joins only by invitation or their own company.
-        // SLACK-LINK-L2: nor is a record that points at a person (a connected or adopted sign-in has no company-less flag): it is that person's, never a seat of its own.
+        // DEC 253z: a record first written by a sign-in with no company is never "legacy": that person joins only by invitation or their own company. SLACK-LINK-L2: nor is a record that points at a person (`mergedInto`): never a seat of its own.
         legacy = developer.success && developer.data.companyless === undefined && developer.data.mergedInto === undefined && ownerKeyForSubject(developer.data.issuer, developer.data.subject) === input.personId;
       }
       const key = input.email === undefined || !CompanyEmail.safeParse(input.email).success ? undefined : preapprovalKey(input.companyId, input.email);
