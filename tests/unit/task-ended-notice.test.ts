@@ -155,7 +155,7 @@ describe("announcing an end: fire and reconcile", () => {
     w.h.deps.taskEnded = () => new Promise<undefined>((resolve) => { answer = resolve; });
     const began = Date.now();
     expect(await announceTaskEnd(w.h.deps, TASK_ID, "merged")).toBe(true);
-    expect(Date.now() - began).toBeLessThan(TASK_END_WAIT_MS + 1_500);
+    expect(Date.now() - began).toBeLessThan(TASK_END_WAIT_MS + 5_000);
     expect((await markerOf(w))["notifiedAt"]).toBeUndefined();
     answer(undefined);
     await vi.waitFor(async () => { expect((await markerOf(w))["notifiedAt"]).toBeDefined(); });

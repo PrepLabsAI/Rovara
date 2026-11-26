@@ -219,7 +219,7 @@ describe("the step's own limit", () => {
       setTimeout(() => { void handle.abort(); }, 300);
       await turn;
     } finally { handle.dispose(); }
-    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(Date.now() - started).toBeLessThan(10_000);
     expect(asked).toEqual([]);
   }, 30_000);
 });

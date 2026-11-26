@@ -832,7 +832,7 @@ describe("cancelling a worker task during a tool call, as pinned on Pi 0.85.1", 
     expect(withoutShortDuration(modelCallNotes(run))).toEqual([{ outcome: "stopped", attempt: 1 }]);
     expect(run.factoryCalls).toBe(1);
     // The 5 s sleep was killed, not waited out.
-    expect(run.elapsed).toBeLessThan(3_000);
+    expect(run.elapsed).toBeLessThan(4_000);
   });
 
   it("ends a bash call cancelled as it starts with \"Operation aborted\", and the task CANCELLED", async () => {

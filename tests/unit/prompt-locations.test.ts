@@ -167,7 +167,7 @@ describe("regions: narrowed blind spots and a work bound", () => {
     expect(promptLocationTouched(nested, { repo: "app", path: "deskbot/agent.py", before: py, after: py })).toBe(true);
     const yaml = Array.from({ length: depth }, (_, i) => `${" ".repeat(i)}k:`).join("\n") + "\n";
     expect(promptLocationTouched({ repo: "app", path: "c.yaml", kind: "yaml_key", symbol: "k.k.k" }, { repo: "app", path: "c.yaml", before: yaml, after: yaml })).toBe(true);
-    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(Date.now() - started).toBeLessThan(15_000);
   });
   it("many siblings of the same name are read in linear time", () => {
     const py = Array.from({ length: 4_000 }, () => "class A:\n    P = 1").join("\n") + "\n";

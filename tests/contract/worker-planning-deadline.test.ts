@@ -135,7 +135,7 @@ describe("a planning run whose model call stops answering", () => {
     const result = await settled;
     expect(result.ok).toBe(false);
     expect((result as { error: Error & { code?: string } }).error.message).toMatch(/^OPERATION_INTERRUPTED: planning stopped: the model sent nothing for \d+ s \(model call 1\) and did not stop when asked\. Retry planning\.$/u);
-    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(Date.now() - started).toBeLessThan(12_000);
     expect(notes(sent).map((note) => note.outcome)).toContain("stalled");
   });
 

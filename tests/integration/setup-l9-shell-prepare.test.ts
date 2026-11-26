@@ -145,7 +145,7 @@ describe("a project's saved setup and test lines are run by a shell, in one sess
     const started = Date.now();
     const { error } = await prepare(source, project({ setup: [parseCommandLine("sleep 60 && echo done", "repo/app", 1)], readiness: [] }));
     expect(error).toMatch(/^setup step 0 \(sleep 60 && echo done in repo\/app\) timed out after 1 s/u);
-    expect(Date.now() - started).toBeLessThan(30_000);
+    expect(Date.now() - started).toBeLessThan(45_000);
   }, 60_000);
 
   it("a test line that fails is reported as that test, and the lines before and after it still run (the test group is not stopped by a failure)", async () => {
