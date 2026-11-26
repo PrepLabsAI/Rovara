@@ -185,14 +185,15 @@ export function withoutBrokerNamesParameter<T>(template: T): T {
   const fnArn = (prefix: string, index: number): boolean => { const id = (invoked[index] as { "Fn::GetAtt"?: [string, string] })["Fn::GetAtt"]?.[0] ?? ""; return id.startsWith(prefix) && same(invoked[index], { "Fn::GetAtt": [id, "Arn"] }) && same(invoked[index + 1], { "Fn::Join": ["", [{ "Fn::GetAtt": [id, "Arn"] }, ":*"]] }); };
   if (invoked.length !== 2 || !fnArn("DeveloperSignInFunction", 0) || Object.keys(invoke).length !== 3) fail("the invoke statement is not the sign-in function's grant (D1: the plan evidence function is gone)");
   const start = one((statement) => statement.Action === "states:StartExecution", "states:StartExecution");
-  const started = start.Resource as unknown[];
-  if (!Array.isArray(started) || started.length !== 2 || !/^SessionsDeleter[0-9A-F]{8}$/u.test((started[0] as { Ref?: string }).Ref ?? "") || !JSON.stringify(started[1]).includes(":stateMachine:") || Object.keys(start).length !== 3) fail("the merged StartExecution statement is not the deleter's and SWE-bench's");
+  // #1539: the SWE-bench machine is gone, so the deleter is the statement's only machine.
+  const started = start.Resource;
+  const deleter = Array.isArray(started) ? started : [started];
+  if (deleter.length !== 1 || !/^SessionsDeleter[0-9A-F]{8}$/u.test((deleter[0] as { Ref?: string }).Ref ?? "") || Object.keys(start).length !== 3) fail("the StartExecution statement is not the deleter's alone");
   const statement = (action: string, resource: unknown): Statement => ({ Action: action, Effect: "Allow", Resource: resource });
   const kept = statements.filter((candidate) => candidate !== invoke && candidate !== start);
   const at = (test: (candidate: Statement) => boolean): number => { const index = kept.findIndex(test); if (index < 0) fail("an anchor statement is missing"); return index; };
-  kept.splice(at((candidate) => candidate === reads) + 1, 0, statement("states:StartExecution", started[1]));
   kept.splice(at((candidate) => Array.isArray(candidate.Action) && candidate.Action[0] === "secretsmanager:CreateSecret") + 1, 0, statement("lambda:InvokeFunction", invoked));
-  kept.push(statement("states:StartExecution", started[0]));
+  kept.push(statement("states:StartExecution", deleter[0]));
   document.Statement = kept;
   return template;
 }

@@ -157,8 +157,8 @@ describe("the worker role's ECR image read is scoped (L4-IAM)", () => {
   });
 
   it("the boot scripts' docker pull sites are exactly the ones this scope was derived from", () => {
-    // every EC2 boot script except the swebench one (its own role): a new script cannot add a pull unseen
-    const scripts = readdirSync("packages/worker/ec2").filter((name) => name.endsWith(".sh") && name !== "swebench-boot.sh").sort();
+    // every EC2 boot script: a new script cannot add a pull unseen
+    const scripts = readdirSync("packages/worker/ec2").filter((name) => name.endsWith(".sh")).sort();
     // L4-NETG: sandbox-egress.sh and devcontainer-docker.sh pull nothing (checked just below); the only image they start is the worker image the boot already pulled, inside the scope above.
     expect(scripts).toEqual(["boot.sh", "devcontainer-docker.sh", "sandbox-egress.sh", "test-services-stage.sh"]);
     const read = (name: string) => readFileSync(`packages/worker/ec2/${name}`, "utf8");

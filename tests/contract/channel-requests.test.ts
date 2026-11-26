@@ -8,7 +8,7 @@ import {
 } from "../../packages/contracts/src/index.js";
 import { createDynamoConfirmationStore } from "../../packages/slack-service/src/confirmation-store.js";
 import { NO_LONGER_PENDING_TEXT, STEP_UP_TEXT, confirmationDigest } from "../../packages/slack-service/src/confirmations.js";
-import { CHATGPT_ELSEWHERE_TEXT, SLACK_ONLY_COMMAND_TEXT, channelRequestHandler, channelTurn, readChannelQueueItem } from "../../packages/slack-service/src/channel-requests.js";
+import { CHATGPT_ELSEWHERE_TEXT, channelRequestHandler, channelTurn, readChannelQueueItem } from "../../packages/slack-service/src/channel-requests.js";
 import { PLAIN_FORMAT } from "../../packages/slack-service/src/conversation-format.js";
 import { confirmationMessage } from "../../packages/slack-service/src/confirmations.js";
 import { limitMessage, preparationFailedMessage } from "../../packages/slack-service/src/messages.js";
@@ -79,13 +79,6 @@ describe("an adapter message", () => {
     expect(approval.data.text).toContain("reply `yes`");
     expect(approval.data.text).not.toContain("<@");
     expect(events.at(-1)?.type).toBe("done");
-  });
-
-  it("refuses a command only Slack offers, and runs no turn", async () => {
-    const { events, turns, run } = harness();
-    await run({ ...message, message: { ...message.message, text: "eval swebench verified astropy__astropy-12907" } });
-    expect(turns).toEqual([]);
-    expect(events[0]).toMatchObject({ type: "message", data: { text: SLACK_ONLY_COMMAND_TEXT } });
   });
 });
 

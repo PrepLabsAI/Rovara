@@ -166,7 +166,6 @@ describe("hydrateBrokerEnvironment: the legacy install's packed broker (#1149)",
     hydrateBrokerEnvironment(env);
     expect(env.STATE_TABLE_NAME).toBe("AgentXControlPlane-State-X");
     expect(env.DEVELOPER_SIGNIN_SLACK).toBe("disabled");
-    expect(env.SWEBENCH_SETTINGS_PREFIX).toBe("/agentx/production/");
     expect(env.CHANNEL_ADAPTER_SECRET_PREFIX).toBe("agentx/production/");
     expect(env.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID).toBe("agentx-production-project-setup-runtime-v1");
     expect(env.AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID).toBe("agentx-production-e2e-mock-runtime-v1");

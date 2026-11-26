@@ -19,7 +19,6 @@ import { redactCredentials, type WorkerEvent } from "../../packages/worker/src/e
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "../../packages/worker/src/git.js";
 import { createDefaultPiSessionAdapter, createWorkerResources, createWorkspacePiSession, openRegisteredWorkspacePiSession, type PiSessionAdapter, type PiSessionHandle } from "../../packages/worker/src/pi-session.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
-import { runSwebenchAgent } from "../../packages/worker/src/swebench/agent.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 
@@ -131,7 +130,7 @@ describe("the worker's Pi session, as pinned on Pi 0.85.1", () => {
         .toEqual({ userMessages: 1, assistantMessages: 1, toolCalls: 0, toolResults: 0, totalMessages: 2 });
       expect({ sessionFile: stats.sessionFile, sessionId: stats.sessionId, cost: stats.cost }).toEqual({ sessionFile: handle.sessionFile, sessionId: conversationId, cost: 0 });
       // The faux model estimates tokens from the prompt's length, which includes this checkout's paths, so
-      // only what the readers rely on is pinned: whole numbers, a positive total (swebench/agent.ts:79).
+      // only what the readers rely on is pinned: whole numbers, a positive total.
       for (const value of Object.values(stats.tokens)) expect(Number.isSafeInteger(value) && value >= 0).toBe(true);
       expect(stats.tokens.total).toBeGreaterThan(0);
       // Ruling D (Pi 0.86+): the prompt and tools are persisted as a leading system message entry, so one more "message".
@@ -354,12 +353,10 @@ describe("the worker's Pi session, as pinned on Pi 0.85.1", () => {
  *   run-task.ts:257            usage telemetry    <- getSessionStats(): tokens.{input, output, cacheRead, cacheWrite, total}, cost (typed, contracts/src/usage.ts:25-28)
  *   tool-loop-guard.ts:38-58   ToolLoopGuard      <- tool_execution_start: type, toolCallId, toolName, args; tool_execution_end: type, toolCallId, toolName, isError, result
  *   tool-loop-guard.ts:78-83   normalizedError    <- tool_execution_end.result.content[]
- *   swebench/agent.ts:75,103-107 assistantEnd     <- message_end: type, message.role, message.stopReason, message.errorMessage
- *   swebench/agent.ts:78-79    cost checks        <- getSessionStats(): tokens.total, cost
  */
 describe("the worker's message_end payloads, as pinned on Pi 0.85.1", () => {
   it("pins message_end for a turn ending in toolUse, stop, error and aborted", async () => {
-    // protects packages/worker/src/run-task.ts (assistantOutcome) and swebench/agent.ts (assistantEnd); guards: AssistantMessage and AgentEvent shape changes (0.99)
+    // protects packages/worker/src/run-task.ts (assistantOutcome); guards: AssistantMessage and AgentEvent shape changes (0.99)
     const shell = recordingShell();
     const running: { handle?: PiSessionHandle } = {};
     const { handle, events } = await workerSession([
@@ -566,23 +563,6 @@ describe("spec 051: the worker's session carries the AgentX preamble and the inl
       .toEqual(expect.arrayContaining([expect.stringContaining("mid-turn failure")]));
   });
 
-  it("gives the eval run's result the diagnostics its session reported (Ruling F)", async () => {
-    // protects packages/worker/src/swebench/agent.ts (onDiagnostic -> AgentRun.diagnostics)
-    const { modelRuntime, faux } = await fauxModelRuntime();
-    faux.setResponses([toolUse(fauxToolCall("bash", { command: "echo hi" }, { id: "call-eval" })), fauxAssistantMessage("Done.")]);
-    const base = createDefaultPiSessionAdapter({ modelRuntime: async () => ({ runtime: modelRuntime, model: FAUX_MODEL }) });
-    const extension: InlineExtension = { name: "agentx-test", factory: (pi) => { pi.on("tool_result", () => { throw new Error("eval failure"); }); } };
-    const rootPath = await workspaceRoot();
-    const run = await runSwebenchAgent({
-      rootPath, model: FAUX_MODEL, bashOperations: recordingShell().operations,
-      paths: { hostFolder: join(rootPath, "testbed"), containerFolder: "/testbed" },
-      problemStatement: "Fix it.", maxCostUsd: 10, timeLimitMs: 60_000,
-      piAdapter: { create: (input) => base.create({ ...input, extensionFactories: [extension] }) },
-    });
-    run.session.dispose();
-    expect(run.diagnostics).toEqual([expect.stringContaining("eval failure")]);
-  });
-
   it("loads exactly one inline extension in a worker task, AgentX verification, and no other (M-7)", async () => {
     // protects packages/worker/src/run-task.ts (extensionFactories: [verificationExtension(...)]) and pi-session.ts
     // Reason (spec 051, allowed pin change 2): the worker now loads one inline extension; before it loaded none.
@@ -602,28 +582,11 @@ describe("spec 051: the worker's session carries the AgentX preamble and the inl
     // Rovara's tool-call limit is a tool_call block, so its extension sits in front of verification (tool-loop-guard.ts); nothing else is loaded.
     expect(resourceLoader.getExtensions().extensions.map((extension) => extension.path)).toEqual(["<inline:rovara-tool-loop-guard>", "<inline:agentx-verification>"]);
   });
-
-  it("gives the eval path's session (runSwebenchAgent through the default adapter) the same preamble", async () => {
-    // protects packages/worker/src/swebench/agent.ts -> createWorkspacePiSession -> createWorkerResources (FR-010)
-    const { modelRuntime, faux } = await fauxModelRuntime();
-    const prompts: string[] = [];
-    faux.setResponses([(context) => { prompts.push(modelView(context).systemPrompt ?? ""); return fauxAssistantMessage("Done."); }]);
-    const rootPath = await workspaceRoot();
-    const run = await runSwebenchAgent({
-      rootPath, model: FAUX_MODEL, bashOperations: recordingShell().operations,
-      paths: { hostFolder: join(rootPath, "testbed"), containerFolder: "/testbed" },
-      problemStatement: "Fix it.", maxCostUsd: 10, timeLimitMs: 60_000,
-      piAdapter: createDefaultPiSessionAdapter({ modelRuntime: async () => ({ runtime: modelRuntime, model: FAUX_MODEL }) }),
-    });
-    run.session.dispose();
-    expect(prompts).toHaveLength(1);
-    expect(prompts[0]).toContain(`<addendum>\n${AGENTX_PREAMBLE}\n</addendum>`);
-  });
 });
 
 describe("the worker's session event shapes, as pinned on Pi 0.85.1", () => {
   it("pins every event session.subscribe delivers in one turn with a tool call", async () => {
-    // protects packages/worker/src/run-task.ts (event log, FileChangeAttempts, assistantOutcome), tool-loop-guard.ts and swebench/agent.ts; guards: AgentEvent union changes (0.99)
+    // protects packages/worker/src/run-task.ts (event log, FileChangeAttempts, assistantOutcome) and tool-loop-guard.ts; guards: AgentEvent union changes (0.99)
     const shell = recordingShell();
     const { handle, events } = await workerSession([
       toolUse(fauxToolCall("bash", { command: "echo pinned" }, { id: "call-bash-1" })),

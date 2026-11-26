@@ -31,7 +31,6 @@ import type { ConnectorType } from "./connector-types.js";
 import type { AdminReadDependencies } from "./admin-reads.js";
 
 
-import type { EvalBatchDependencies } from "./eval-batch.js";
 
 
 
@@ -258,8 +257,6 @@ export interface AwsBrokerDependencies {
   adminReads?: Partial<Pick<AdminReadDependencies, "me" | "health" | "now" | "log">>;
   /** Spec 025 phase 25e: the admin changes' method switch, clock and metric; the defaults serve production. */
   adminChanges?: { confirm?: { elicitation: boolean; slack: boolean }; now?: () => number; metric?: (outcome: AdminChangeOutcome) => void };
-  /** Spec 043: SWE-bench runs; absent in a harness that does not exercise them. */
-  swebench?: Pick<EvalBatchDependencies, "deployment" | "startExecution" | "stopBatchForThread" | "onRunEnded" | "now" | "estimateRunCostUsd">;
 }
 
 /**

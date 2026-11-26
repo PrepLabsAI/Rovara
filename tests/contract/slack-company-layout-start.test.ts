@@ -11,7 +11,6 @@ import { issueChannelLinkCode, redeemChannelLinkCode } from "../../packages/brok
 import type { CoreTaskEntry } from "../../packages/broker/src/aws/engine-boundary.js";
 import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, call, ensureWorkspace, loadSlackBroker, orchestratorPrincipal } from "../support/slack-broker.js";
-import { swebenchDeploymentForTests } from "../support/eval-batch-admin.js";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 
 const A = "org_demoaaaaaaaaaaaaaaaa"; // the staging company
@@ -43,7 +42,7 @@ const companyProject = (company: string, name: string) => ({
  * A broker with Slack company mode on. `installCompany` is what the install team's (SLACK_TEAM's) operator binding names; OTHER_TEAM is company B's (company mode). The person is
  * linked in the install team's company. `legacyInstall`: the install team takes the legacy view (slackWorkspaceLegacyTeamId), as on staging.
  */
-async function world(options: { installCompany: string; legacyInstall?: boolean; core?: false; evals?: boolean }) {
+async function world(options: { installCompany: string; legacyInstall?: boolean; core?: false }) {
   const h = await createDeveloperTaskBroker({ channelMembers: async (r) => ({ ok: true, memberOf: r.channelIds }) });
   h.db.set(companyProject(A, "demo-tasklog"));
   h.db.set(companyProject(B, "b-project"));
@@ -68,9 +67,7 @@ async function world(options: { installCompany: string; legacyInstall?: boolean;
   // `core: false`: the core declines the start (a company the core does not cover answers undefined, engine-boundary.ts), so the legacy start answers it.
   const entry: CoreTaskEntry = { route: options.core === false ? async () => undefined : route, recordThread: vi.fn(async () => true) };
   const module = await loadSlackBroker();
-  const swebench = options.evals ? { deployment: async () => swebenchDeploymentForTests(`111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx-worker@sha256:${"a".repeat(64)}`),
-    startExecution: vi.fn(async () => ({ executionArn: "arn:aws:states:us-east-1:111122223333:execution:test:run" })), estimateRunCostUsd: () => 2 } : undefined;
-  const handler = module.createAwsBrokerHandler({ ...h.brokerInput, ...(swebench === undefined ? {} : { swebench }), store, workspaces, companies: { companyOf: async (id: string) => members.get(id) },
+  const handler = module.createAwsBrokerHandler({ ...h.brokerInput, store, workspaces, companies: { companyOf: async (id: string) => members.get(id) },
     ...(options.legacyInstall === false ? {} : { slackWorkspaceLegacyTeamId: SLACK_TEAM }),
     developer: { ...h.brokerInput.developer!, slackTeamId: SLACK_TEAM, coreTasks: entry, coreApp: { answerForSlackThread: answers } } } as never);
   const start = (team = SLACK_TEAM) => handler({ source: "agentx.slack-ingress", action: "start-workflow", thread: { teamId: team, channelId: SLACK_CHANNEL, threadTs: "1700000000.000001" },
@@ -324,41 +321,6 @@ describe("DEC 254zzz98 (delta review H1): a named company's Slack thread never r
     await refusedWithoutWrites(w, { method, path: method === "GET" ? "/v1/service/project/models" : "/v1/service/project/model", ...(method === "PUT" ? { body: model } : {}) },
       method === "PUT" ? "That needs a web sign-in. Open it in Rovara." : undefined);
   });
-
-  it.each(["swebench", "batches"])("SWE-bench projectModel refuses the namesake through service %s", async (route) => {
-    const w = await world({ installCompany: A, evals: true });
-    w.db.set(companyBinding(A)); w.db.set(foreignRevision());
-    w.db.set({ pk: `SWEBENCH#CHANNEL#${SLACK_TEAM}`, sk: `CHANNEL#${SLACK_CHANNEL}`, teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, maxCostUsd: 5, updatedAt: "2026-11-18T00:00:00.000Z" });
-    const body = route === "swebench" ? { requestId: randomUUID(), dataset: "verified", instanceId: "django__django-11099", model }
-      : { dataset: "verified", instanceIds: ["django__django-11099"], models: [model], selectors: ["Batch"], repeats: 1 };
-    const before = structuredClone(w.db.find(() => true));
-    let writes = 0; w.db.onWrite(() => { writes += 1; });
-    const answer = await call(w.handler, { method: "POST", path: `/v1/service/evals/${route}`, service, body });
-    expect(answer, JSON.stringify(answer.body)).toMatchObject({ status: 403, body: { error: { code: "FORBIDDEN", message: "Slack channel is not bound to a project" } } });
-    expect(JSON.stringify(answer.body)).not.toMatch(/builtin|secret|built-in/);
-    expect(w.db.find(() => true)).toEqual(before); expect(writes).toBe(0);
-  });
-
-  it("SWE-bench projectModel refuses the namesake through the admin batch route", async () => {
-    const w = await world({ installCompany: A, evals: true });
-    w.db.set(companyBinding(A)); w.db.set(foreignRevision());
-    const ownerKey = ownerKeyForSubject("https://identity.example.test", "admin-subject");
-    w.db.set({ pk: `MEMBER#${ownerKey}`, sk: "PROJECT#demo-tasklog", entityType: "MEMBERSHIP", ownerKey, projectName: "demo-tasklog", role: "administrator" });
-    w.db.set({ pk: `SWEBENCH#CHANNEL#${SLACK_TEAM}`, sk: `CHANNEL#${SLACK_CHANNEL}`, teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, maxCostUsd: 5, updatedAt: "2026-11-18T00:00:00.000Z" });
-    const before = structuredClone(w.db.find(() => true));
-    let writes = 0; w.db.onWrite(() => { writes += 1; });
-    const answer = await call(w.handler, { method: "POST", path: "/v1/admin/evals/batches", user: { subject: "admin-subject", admin: true },
-      body: { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, file: { benchmark: "verified", tasks: ["django__django-11099"], models: [{ ...model, thinkingLevel: "low" }], repeats: 1, costCapUsd: 30 } } });
-    expect(answer, JSON.stringify(answer.body)).toMatchObject({ status: 403, body: { error: { code: "FORBIDDEN", message: "Slack channel is not bound to a project" } } });
-    expect(JSON.stringify(answer.body)).not.toMatch(/builtin|secret|built-in/);
-    expect(w.db.find(() => true)).toEqual(before); expect(writes).toBe(0);
-  });
-
-
-
-
-
-
 
   it("valid-body availability: a recorded quick-start reaches the core with and without a namesake", async () => {
     const run = async (namesake: boolean) => {

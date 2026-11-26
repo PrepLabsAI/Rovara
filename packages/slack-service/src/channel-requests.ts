@@ -3,8 +3,6 @@ import {
   SLACK_CHANNEL,
   adapterMayDecide,
   parseChatGptCommand,
-  parseEvalBatchCommand,
-  parseSwebenchCommand,
   channelEventId,
   conversationSubject,
   type ChannelAction,
@@ -25,7 +23,6 @@ import { processConversationRequest, type FinishedTurn, type ProcessorDependenci
  * and link again on every call it makes for the conversation.
  */
 
-export const SLACK_ONLY_COMMAND_TEXT = "SWE-bench runs and eval batches can only be started from Slack.";
 
 /**
  * FR-041: an adapter conversation may be a group, and ChatGPT's sign-in needs a private reply and a pasted address, so
@@ -93,12 +90,6 @@ export interface ChannelRequestDependencies {
   log: ServiceLog;
 }
 
-/** Spec 062 FR-038: eval batches and SWE-bench runs need a Slack thread, so an adapter conversation is told so. */
-const slackOnly: SurfaceCommand<ConversationRef> = (message) =>
-  parseEvalBatchCommand(message.text) === undefined && parseSwebenchCommand(message.text) === undefined
-    ? undefined
-    : { disposition: "abandoned", run: async (context) => { await context.post(SLACK_ONLY_COMMAND_TEXT); } };
-
 const chatGptElsewhere: SurfaceCommand<ConversationRef> = (message) =>
   parseChatGptCommand(message.text) === undefined
     ? undefined
@@ -154,7 +145,7 @@ export function channelRequestHandler(deps: ChannelRequestDependencies): Request
       subjectOf: conversationSubject,
       plainReplies: true,
       format: PLAIN_FORMAT,
-      commands: [slackOnly, chatGptElsewhere],
+      commands: [chatGptElsewhere],
       // FR-032: the step-up set the adapter had when the channel API accepted the item.
       mayApprove: (confirmation) => adapterMayDecide({ stepUp: item.stepUp }, confirmationApprovalKind(confirmation)),
     }, {
