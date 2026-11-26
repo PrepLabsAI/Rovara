@@ -96,9 +96,12 @@ one region Rovara runs in today), with everything filled in but three answers.
 
 The installer is one CloudFormation stack, `agentx-installer`: a CodeBuild job that runs
 `agentx init` in your account, as an administrator role that is deleted with the stack, and the
-setup page. Everything the install makes is in its own `agentx-<name>-*` stacks. Once Rovara
-answers in Slack, delete the `agentx-installer` stack: that removes only the installer, and Rovara
-keeps running. To remove Rovara itself, see [docs/teardown.md](teardown.md).
+setup page. Everything the install makes is in its own 7 `agentx-<name>-*` stacks (`access`,
+`foundation`, `identity`, `control-plane`, `gateway`, `runtime`, `slack`), including a self-hosted
+Model Gateway inside `foundation`'s VPC with zero-domain HTTPS out of the box (no Rovara Cloud
+account or custom domain required). Once Rovara answers in Slack, delete the `agentx-installer`
+stack: that removes only the installer, and Rovara keeps running. To remove Rovara itself, see
+[docs/teardown.md](teardown.md).
 
 ## Install from a terminal
 

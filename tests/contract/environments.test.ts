@@ -25,7 +25,7 @@ describe("environment names", () => {
   });
 
   it("names stacks, settings and connector secrets with the environment", () => {
-    expect(STACK_PARTS).toEqual(["access", "foundation", "identity", "runtime", "control-plane", "slack"]);
+    expect(STACK_PARTS).toEqual(["access", "foundation", "identity", "runtime", "control-plane", "gateway", "slack"]);
     expect(environmentStackName("staging", "control-plane")).toBe("agentx-staging-control-plane");
     expect(environmentStackName("staging", "identity")).toBe("agentx-staging-identity");
     expect(environmentStackName("staging", "access")).toBe("agentx-staging-access");

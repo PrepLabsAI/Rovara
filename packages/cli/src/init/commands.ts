@@ -21,6 +21,7 @@ import { loginWithPkce, openSystemBrowser } from "../auth.js";
 import { cliErrorFor, cloudFormationOutputsReader, prepareDeployment, realCommandRunner, type DeployCliDependencies, type PreparedDeployment, type Writer } from "../deploy/commands.js";
 import { readBundleAnswers, type BundleAnswers } from "../deploy/export-bundle.js";
 import { assertSourceAtRelease } from "../deploy/cdk-engine.js";
+import { usesBuiltInGateway } from "../deploy/core-engine-answers.js";
 import { installOrder } from "../deploy/parameters.js";
 import { assertReleaseCoversRegion, loadRelease, type LoadedRelease } from "../deploy/release.js";
 import { stsCallerIdentity } from "../environments/adopt.js";
@@ -1120,7 +1121,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
         env, controlPlaneUrl: settings.controlPlaneUrl, progress,
         botName: botNameOf(progress, finalAnswers.slack.appName), invocation: session.invocation,
         root: isRootUser(caller.arn), alertsOn: finalAnswers.alert.kind !== "none",
-        created: installOrder(finalAnswers.identity.mode).map((part) => environmentStackName(env, part)),
+        created: installOrder(finalAnswers.identity.mode, { includeGateway: usesBuiltInGateway(finalAnswers.coreEngine) }).map((part) => environmentStackName(env, part)),
         ...(session.log === undefined ? {} : { logPath: session.log.path }),
       }));
     }

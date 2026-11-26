@@ -4,8 +4,9 @@ import { prepareDeployment } from "../../packages/cli/src/deploy/commands.js";
 import type { InitCliDependencies } from "../../packages/cli/src/init/commands.js";
 import type * as WizardServerModule from "../../packages/cli/src/init/ui/server.js";
 import { harness, TERMINAL_FIRST_RUN } from "../support/init-ui-harness.js";
-import { scriptedPrompter } from "../support/init-fakes.js";
-import { installGatewayFixture } from "../support/install-gateway.js";
+import { scriptedPrompter, settingsScript } from "../support/init-fakes.js";
+import { installGatewayFixture, readyCoreEngine } from "../support/install-gateway.js";
+import { ADMIN_EMAIL } from "../support/setup-fakes.js";
 
 vi.mock("../../packages/cli/src/init/ui/server.js", async (importOriginal) => ({
   ...await importOriginal<typeof WizardServerModule>(),
@@ -17,7 +18,14 @@ vi.mock("../../packages/cli/src/init/ui/server.js", async (importOriginal) => ({
 }));
 
 installGatewayFixture();
-const PAGE_SCRIPT = [...TERMINAL_FIRST_RUN.slice(0, -1), "create"];
+const PAGE_SCRIPT = [
+  ...settingsScript({
+    email: ADMIN_EMAIL,
+    owner: "acme",
+    advanced: { modelGatewayUrl: readyCoreEngine.modelGatewayUrl, agentModel: readyCoreEngine.agentModel, alertEmail: "ops@example.com" },
+  }),
+  "create",
+];
 const PAGE_ARGS = ["--ui", "--no-browser", "--stop-after", "access"];
 
 function noWrites(h: Awaited<ReturnType<typeof harness>>) {

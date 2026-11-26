@@ -33,7 +33,8 @@ function withExplicitUndefined<K extends keyof InitFlags>(flags: InitFlags, key:
 // Advanced question, then (on yes) every Advanced setting.
 const FORM_QUESTIONS = [
   "Your email, for your AgentX admin user and alerts", "GitHub organization or user that will own the AgentX GitHub App", "Install name",
-  "App name for GitHub and Slack (unique on GitHub)", "Signed-price model gateway URL", "Core agent model", "Change the advanced settings?",
+  "App name for GitHub and Slack (unique on GitHub)", "Change the advanced settings?",
+  "External signed-price model gateway URL", "Core agent model",
   "Deploy engine", "Sign-in", "How will developers sign in to AgentX from their AI tools?", "Model provider", "Orchestrator model",
   "Action-gate classifier model", "Worker model", "Permission boundary policy ARN (Enter for AgentX's default boundary)",
   "IAM principal allowed to assume the AgentX operator role (Enter for this account)", "Monthly AWS budget for this environment, in US dollars (0 for none; empty for the estimate plus 20%, $260)",

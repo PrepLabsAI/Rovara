@@ -4,7 +4,7 @@ import http, { type IncomingMessage, type Server, type ServerResponse } from "no
 import type { AddressInfo } from "node:net";
 import { credentialsFromEnvironment, type CredentialSource } from "./aws.js";
 import type { CapsSource } from "./caps.js";
-import { CompanyAnswersLimits, CompanyBudgetCaps, CompanyLessonsSwitch, CompanyUpkeepLimits } from "./company-caps.js";
+import { CompanyAnswersLimits, CompanyBudgetCaps, CompanyLessonsSwitch, CompanyUpkeepLimits, StaticBudgetCaps, type StaticBudgetCapsConfig } from "./company-caps.js";
 import type { UpkeepLimits } from "./upkeep-cap.js";
 import { createLearningRoutes, type LearningKeySource, type LearningRouteOptions } from "./learning-route.js";
 import { createAnswersRoutes, type AnswersLimits } from "./answers-route.js";
@@ -16,13 +16,13 @@ import { createGeminiTransport } from "./product-gemini.js";
 import { createVertexTransport } from "./product-vertex.js";
 import { runCorrections, runExpirySweep } from "./correction.js";
 import { awsKms } from "./aws-kms.js";
-import { CompanyAgentAiSource, parseAiSourceKinds, parseRovaraAiExempt, parseRovaraAiModels, storedBedrock, type AgentAiSource, type AgentAiSourceReader, type ByoBedrock, type RovaraAi } from "./agent-ai.js";
+import { CompanyAgentAiSource, parseAiSourceKinds, parseRovaraAiExempt, parseRovaraAiModels, standaloneBedrockModels, storedBedrock, type AgentAiSource, type AgentAiSourceReader, type ByoBedrock, type RovaraAi } from "./agent-ai.js";
 import { InstallRovaraAi } from "./rovara-ai-stop.js";
 import { BedrockExternalIds, type MacGenerator } from "./bedrock-byo.js";
 import { BedrockSessions } from "./bedrock-byo-sessions.js";
 import { createBedrockTransport } from "./bedrock-transport.js";
 import { createBedrockProductTransport } from "./product-bedrock.js";
-import { GATEWAY_AGENT_KEY_MODES, GATEWAY_ANSWERS_ENV, GATEWAY_ENV, GATEWAY_LEARNING_ENV, GATEWAY_LOG_EVENTS, GATEWAY_MODES, GATEWAY_PRODUCT_ENV, type GatewayAgentKeyMode } from "./deploy.js";
+import { GATEWAY_AGENT_KEY_MODES, GATEWAY_ANSWERS_ENV, GATEWAY_COMPANY_BUDGET_MAX, GATEWAY_ENV, GATEWAY_LEARNING_ENV, GATEWAY_LOG_EVENTS, GATEWAY_MODES, GATEWAY_PRODUCT_ENV, GATEWAY_STANDALONE_PROVIDERS, type GatewayAgentKeyMode, type GatewayStandaloneProvider } from "./deploy.js";
 import { DynamoEvalStageStore } from "./dynamo-eval-stages.js";
 import { DynamoProductKeyTable } from "./dynamo-product-keys.js";
 import { DynamoProductOverrunTasks } from "./dynamo-product-overrun.js";
@@ -53,7 +53,7 @@ import { PriceRefresher } from "./price-refresh.js";
 import { fetchAWS, fetchLiteLLM, fetchTransport } from "./price-sources.js";
 import { CALL_HARD_CEILING_MS, createAnthropicTransport, type ProviderKeys, type ProviderTransport } from "./provider.js";
 import { companyRoomMicros, DynamoReviewerGrants } from "./reviewer-grants.js";
-import { createSecretsManagerKeys, ProviderKeyUnavailable } from "./secrets.js";
+import { createSecretsManagerKeys, createStandaloneKeySource, ProviderKeyUnavailable, SECRET_ARN } from "./secrets.js";
 import { createGatewayHandler, type GatewayDependencies, type ProductRouteResolver } from "./server.js";
 import { createTaskTokenVerifier } from "./token.js";
 
@@ -71,7 +71,37 @@ export interface ProductConfig { keysTable: string; keysKeyArn: string; meter: s
 export interface LearningConfig { meter: string; ledger: string; markers: string }
 /** The answers route's meter tables (GATEWAY_ANSWERS_ENV): only with the product route, whose key store holds the company's account. */
 export type AnswersConfig = LearningConfig;
-export interface ServeConfig { mode: "serve"; region: string; port: number; install: InstallConfig; tables: { meter: string; ledger: string; markers: string; prices: string; companies: string }; anthropicKeySecret: string; product?: ProductConfig; learning?: LearningConfig; answers?: AnswersConfig; /** DEC 236. Absent: "install". */ agentKeys?: GatewayAgentKeyMode; /** DEC 240, only with agentKeys "company". Absent: Rovara's AI is off. */ rovaraAi?: RovaraAiConfig; /** DEC 238, only with agentKeys "company" and the product MAC key. Absent: a company's own Bedrock is refused. */ bedrockByo?: BedrockByoConfig; /** DEC 254t, only with agentKeys "company": the switched-on company AI source kinds. Absent: none. */ aiSourceKinds?: ReadonlySet<string>; /** Models left off every company's offered list on Rovara's AI (offered-models.ts). Absent: the default list. */ agentModelsDisabled?: ReadonlySet<string>; /** DEC 254zzz96 (2): publish list prices on the offered list. Absent: off. */ offeredPrices?: true }
+export interface ServeConfig {
+  mode: "serve";
+  region: string;
+  port: number;
+  install: InstallConfig;
+  tables: { meter: string; ledger: string; markers: string; prices: string; companies?: string };
+  anthropicKeySecret?: string;
+  openaiKeySecret?: string;
+  openrouterKeySecret?: string;
+  /** Static budget caps used in standalone (self-hosted) mode when GATEWAY_COMPANY_TABLE is absent. */
+  defaultCaps?: StaticBudgetCapsConfig;
+  /** Primary provider in standalone (self-hosted) mode. */
+  standaloneProvider?: GatewayStandaloneProvider;
+  /** Seed the Prices table on cold start when empty. */
+  seedPricesOnStart?: true;
+  product?: ProductConfig;
+  learning?: LearningConfig;
+  answers?: AnswersConfig;
+  /** DEC 236. Absent: "install". */
+  agentKeys?: GatewayAgentKeyMode;
+  /** DEC 240, with agentKeys "company" or standalone mode. Absent: Rovara's AI / Bedrock is off. */
+  rovaraAi?: RovaraAiConfig;
+  /** DEC 238, only with agentKeys "company" and the product MAC key. Absent: a company's own Bedrock is refused. */
+  bedrockByo?: BedrockByoConfig;
+  /** DEC 254t, only with agentKeys "company" or standalone mode: the switched-on company AI source kinds. Absent: none. */
+  aiSourceKinds?: ReadonlySet<string>;
+  /** Models left off every company's offered list on Rovara's AI (offered-models.ts). Absent: the default list (empty in standalone mode). */
+  agentModelsDisabled?: ReadonlySet<string>;
+  /** DEC 254zzz96 (2): publish list prices on the offered list. Absent: off. */
+  offeredPrices?: true;
+}
 /** Bring your own Bedrock (DEC 238): Rovara's broker role and the KMS HMAC key the companies' external ids come from. */
 export interface BedrockByoConfig { brokerRoleArn: string; externalIdKeyArn: string }
 /** Rovara's AI (DEC 240): the allow-list (agent model to Bedrock id, the gateway's own region's geography) and the exempt companies. */
@@ -105,8 +135,32 @@ export function readGatewayConfig(env: GatewayEnv): GatewayConfig {
   const jwksUrl = need(GATEWAY_ENV.installJwksUrl, (value) => value === `${issuer}${JWKS_PATH}`);
   const taskKids = need(GATEWAY_ENV.installTaskKids, (value) => { const kids = value.split(","); return kids.length >= 1 && kids.length <= 2 && kids.every((kid) => KID.test(kid)) && new Set(kids).size === kids.length; }).split(",");
   const table = (name: string) => need(name, (value) => TABLE.test(value));
-  const anthropicKeySecret = need(GATEWAY_ENV.anthropicKeySecret, (value) => /^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:\d{12}:secret:[A-Za-z0-9/_+=.@-]{1,512}$/u.test(value));
-  const tables = { meter: table(GATEWAY_ENV.meterTable), ledger: table(GATEWAY_ENV.ledgerTable), markers: table(GATEWAY_ENV.markersTable), prices, companies: table(GATEWAY_ENV.companyTable) };
+  const hasCompanyTable = env[GATEWAY_ENV.companyTable] !== undefined;
+  const standalone = !hasCompanyTable;
+  const parseMicros = (name: string): number => {
+    const raw = need(name, (value) => /^[1-9]\d{0,15}$/u.test(value) && Number.isSafeInteger(Number(value)) && Number(value) >= 1 && Number(value) <= GATEWAY_COMPANY_BUDGET_MAX);
+    return Number(raw);
+  };
+  let defaultCaps: StaticBudgetCapsConfig | undefined;
+  if (standalone) {
+    const companyMonth = parseMicros(GATEWAY_ENV.defaultCompanyCapMicros);
+    const projectMonth = env[GATEWAY_ENV.defaultProjectCapMicros] === undefined ? undefined : parseMicros(GATEWAY_ENV.defaultProjectCapMicros);
+    const task = env[GATEWAY_ENV.defaultTaskCapMicros] === undefined ? undefined : parseMicros(GATEWAY_ENV.defaultTaskCapMicros);
+    defaultCaps = { companyMonth, ...(projectMonth === undefined ? {} : { projectMonth }), ...(task === undefined ? {} : { task }) };
+  }
+  const secretArn = (name: string) => need(name, (value) => SECRET_ARN.test(value));
+  const anthropicKeySecret = standalone
+    ? (env[GATEWAY_ENV.anthropicKeySecret] === undefined ? undefined : secretArn(GATEWAY_ENV.anthropicKeySecret))
+    : secretArn(GATEWAY_ENV.anthropicKeySecret);
+  const openaiKeySecret = env[GATEWAY_ENV.openaiKeySecret] === undefined ? undefined : secretArn(GATEWAY_ENV.openaiKeySecret);
+  const openrouterKeySecret = env[GATEWAY_ENV.openrouterKeySecret] === undefined ? undefined : secretArn(GATEWAY_ENV.openrouterKeySecret);
+  const tables: ServeConfig["tables"] = {
+    meter: table(GATEWAY_ENV.meterTable),
+    ledger: table(GATEWAY_ENV.ledgerTable),
+    markers: table(GATEWAY_ENV.markersTable),
+    prices,
+    ...(hasCompanyTable ? { companies: table(GATEWAY_ENV.companyTable) } : {}),
+  };
   // Off unless configured: the product settings all set or none (a partial set is a broken deploy, refused by name).
   const productSet = GATEWAY_PRODUCT_ENV.filter((name) => env[name] !== undefined);
   let product: ProductConfig | undefined;
@@ -148,18 +202,42 @@ export function readGatewayConfig(env: GatewayEnv): GatewayConfig {
     agentKeys = need(GATEWAY_ENV.agentKeys, (value) => (GATEWAY_AGENT_KEY_MODES as readonly string[]).includes(value)) as GatewayAgentKeyMode;
     if (agentKeys === "company" && product === undefined) throw new GatewayConfigError(GATEWAY_ENV.productKeysTable);
   }
-  // DEC 240: Rovara's AI, only in company-key mode (the company picks its agents' source there). The exempt list never on its own.
+  // DEC 240: Rovara's AI, in company-key mode or standalone mode. The exempt list never on its own.
   let rovaraAi: RovaraAiConfig | undefined;
   if (env[GATEWAY_ENV.rovaraAiModels] !== undefined) {
-    if (agentKeys !== "company") throw new GatewayConfigError(GATEWAY_ENV.agentKeys);
+    if (!standalone && agentKeys !== "company") throw new GatewayConfigError(GATEWAY_ENV.agentKeys);
+    const rawModels = need(GATEWAY_ENV.rovaraAiModels, () => true);
     let models: Map<string, string>;
-    try { models = parseRovaraAiModels(need(GATEWAY_ENV.rovaraAiModels, () => true), region); } catch { throw new GatewayConfigError(GATEWAY_ENV.rovaraAiModels); }
+    try {
+      if (standalone && rawModels === "on") {
+        models = standaloneBedrockModels(region);
+        if (models.size === 0) throw new Error("no bedrock models for region");
+      } else {
+        models = parseRovaraAiModels(rawModels, region);
+      }
+    } catch { throw new GatewayConfigError(GATEWAY_ENV.rovaraAiModels); }
     let exempt: Set<string>;
     try { exempt = parseRovaraAiExempt(env[GATEWAY_ENV.rovaraAiExempt]); } catch { throw new GatewayConfigError(GATEWAY_ENV.rovaraAiExempt); }
-    const sourceId = env[GATEWAY_ENV.rovaraAiSourceId] === undefined ? undefined : need(GATEWAY_ENV.rovaraAiSourceId,
-      (value) => /^arn:aws(?:-us-gov|-cn)?:iam::[0-9]{12}:role\/[A-Za-z0-9+=,.@_/-]+@[a-z0-9-]+$/u.test(value) && value.endsWith(`@${region}`) && value.length <= 512);
+    const defaultSourceId = standalone ? `standalone-bedrock@${region}` : undefined;
+    const sourceId = env[GATEWAY_ENV.rovaraAiSourceId] === undefined ? defaultSourceId : need(GATEWAY_ENV.rovaraAiSourceId,
+      (value) => (/^arn:aws(?:-us-gov|-cn)?:iam::[0-9]{12}:role\/[A-Za-z0-9+=,.@_/-]+@[a-z0-9-]+$/u.test(value) || (standalone && value === `standalone-bedrock@${region}`)) && value.endsWith(`@${region}`) && value.length <= 512);
     rovaraAi = { models, exempt, ...(sourceId === undefined ? {} : { sourceId }) };
   } else if (env[GATEWAY_ENV.rovaraAiExempt] !== undefined) throw new GatewayConfigError(GATEWAY_ENV.rovaraAiModels);
+  // Standalone provider selection & requirement: at least one provider must be configured.
+  let standaloneProvider: GatewayStandaloneProvider | undefined;
+  if (env[GATEWAY_ENV.standaloneProvider] !== undefined) {
+    if (!standalone) throw new GatewayConfigError(GATEWAY_ENV.standaloneProvider);
+    standaloneProvider = need(GATEWAY_ENV.standaloneProvider, (value) => (GATEWAY_STANDALONE_PROVIDERS as readonly string[]).includes(value)) as GatewayStandaloneProvider;
+  }
+  if (standalone) {
+    if (rovaraAi === undefined && anthropicKeySecret === undefined && openaiKeySecret === undefined && openrouterKeySecret === undefined) {
+      throw new GatewayConfigError(GATEWAY_ENV.anthropicKeySecret);
+    }
+    if (standaloneProvider === "bedrock" && rovaraAi === undefined) throw new GatewayConfigError(GATEWAY_ENV.rovaraAiModels);
+    if (standaloneProvider === "anthropic" && anthropicKeySecret === undefined) throw new GatewayConfigError(GATEWAY_ENV.anthropicKeySecret);
+    if (standaloneProvider === "openai" && openaiKeySecret === undefined) throw new GatewayConfigError(GATEWAY_ENV.openaiKeySecret);
+    if (standaloneProvider === "openrouter" && openrouterKeySecret === undefined) throw new GatewayConfigError(GATEWAY_ENV.openrouterKeySecret);
+  }
   // DEC 238: both settings or neither; only in company-key mode (the company picks its agents' source there) and with the product
   // MAC key (Cloud's signed set-up and connection test calls, service-call.ts).
   let bedrockByo: BedrockByoConfig | undefined;
@@ -172,22 +250,41 @@ export function readGatewayConfig(env: GatewayEnv): GatewayConfig {
   }
   let agentModelsDisabled: ReadonlySet<string> | undefined;
   if (env[GATEWAY_ENV.agentModelsDisabled] !== undefined) {
-    if (agentKeys !== "company") throw new GatewayConfigError(GATEWAY_ENV.agentKeys);
+    if (!standalone && agentKeys !== "company") throw new GatewayConfigError(GATEWAY_ENV.agentKeys);
     try { agentModelsDisabled = parseDisabledAgentModels(env[GATEWAY_ENV.agentModelsDisabled]); } catch { throw new GatewayConfigError(GATEWAY_ENV.agentModelsDisabled); }
   }
-  // DEC 254t: the switched-on company AI source kinds, only in company-key mode (where a company picks its agents' source).
+  // DEC 254t: the switched-on company AI source kinds, only in company-key mode (where a company picks its agents' source) or standalone mode.
   // DEC 254zzz96 (2): "on" only; any other value is a broken setting (never read as off or on by guess).
   const pricesSetting = env[GATEWAY_ENV.offeredPrices];
   if (pricesSetting !== undefined && pricesSetting !== "on") throw new GatewayConfigError(GATEWAY_ENV.offeredPrices);
+  const seedSetting = env[GATEWAY_ENV.seedPricesOnStart];
+  if (seedSetting !== undefined && seedSetting !== "on") throw new GatewayConfigError(GATEWAY_ENV.seedPricesOnStart);
   let aiSourceKinds: ReadonlySet<string> | undefined;
   if (env[GATEWAY_ENV.aiSourceKinds] !== undefined) {
-    if (agentKeys !== "company") throw new GatewayConfigError(GATEWAY_ENV.agentKeys);
+    if (!standalone && agentKeys !== "company") throw new GatewayConfigError(GATEWAY_ENV.agentKeys);
     try { aiSourceKinds = parseAiSourceKinds(env[GATEWAY_ENV.aiSourceKinds]); } catch { throw new GatewayConfigError(GATEWAY_ENV.aiSourceKinds); }
   }
   // Every table distinct: no two meters, stores or the stage table may share rows.
-  const all = [tables.meter, tables.ledger, tables.markers, tables.prices, tables.companies, ...(product === undefined ? [] : [product.keysTable, product.meter, product.ledger, product.markers, product.stages]), ...(learning === undefined ? [] : [learning.meter, learning.ledger, learning.markers]), ...(answers === undefined ? [] : [answers.meter, answers.ledger, answers.markers])];
+  const all = [tables.meter, tables.ledger, tables.markers, tables.prices, ...(tables.companies === undefined ? [] : [tables.companies]), ...(product === undefined ? [] : [product.keysTable, product.meter, product.ledger, product.markers, product.stages]), ...(learning === undefined ? [] : [learning.meter, learning.ledger, learning.markers]), ...(answers === undefined ? [] : [answers.meter, answers.ledger, answers.markers])];
   if (new Set(all).size !== all.length) throw new GatewayConfigError(product === undefined ? GATEWAY_ENV.meterTable : learning === undefined ? GATEWAY_ENV.productMeterTable : answers === undefined ? GATEWAY_ENV.learningMeterTable : GATEWAY_ENV.answersMeterTable);
-  return { mode, region, port, install: { issuer, jwksUrl, taskKids }, tables, anthropicKeySecret, ...(product === undefined ? {} : { product }), ...(learning === undefined ? {} : { learning }), ...(answers === undefined ? {} : { answers }), ...(agentKeys === undefined ? {} : { agentKeys }), ...(rovaraAi === undefined ? {} : { rovaraAi }), ...(bedrockByo === undefined ? {} : { bedrockByo }), ...(agentModelsDisabled === undefined ? {} : { agentModelsDisabled }), ...(aiSourceKinds === undefined ? {} : { aiSourceKinds }), ...(pricesSetting === "on" ? { offeredPrices: true as const } : {}) };
+  return {
+    mode, region, port, install: { issuer, jwksUrl, taskKids }, tables,
+    ...(anthropicKeySecret === undefined ? {} : { anthropicKeySecret }),
+    ...(openaiKeySecret === undefined ? {} : { openaiKeySecret }),
+    ...(openrouterKeySecret === undefined ? {} : { openrouterKeySecret }),
+    ...(defaultCaps === undefined ? {} : { defaultCaps }),
+    ...(standaloneProvider === undefined ? {} : { standaloneProvider }),
+    ...(seedSetting === "on" ? { seedPricesOnStart: true as const } : {}),
+    ...(product === undefined ? {} : { product }),
+    ...(learning === undefined ? {} : { learning }),
+    ...(answers === undefined ? {} : { answers }),
+    ...(agentKeys === undefined ? {} : { agentKeys }),
+    ...(rovaraAi === undefined ? {} : { rovaraAi }),
+    ...(bedrockByo === undefined ? {} : { bedrockByo }),
+    ...(agentModelsDisabled === undefined ? {} : { agentModelsDisabled }),
+    ...(aiSourceKinds === undefined ? {} : { aiSourceKinds }),
+    ...(pricesSetting === "on" ? { offeredPrices: true as const } : {}),
+  };
 }
 
 /** One JSON object per line on stdout, with an `event` field the alarms' metric filters count (deploy.ts GATEWAY_LOG_EVENTS). */
@@ -311,27 +408,81 @@ export async function startServe(config: ServeConfig, deps: ServeDependencies = 
   const db = deps.db ?? new Dynamo({ region: config.region, credentials });
   // Given meters are checked before anything is read; the deployed ones, built from the configured tables, again after.
   checkMeters(config, deps);
-  const prices = new SnapshotPriceSource(new DynamoPriceSnapshotStore(db, config.tables.prices), { now });
+  const priceStore = new DynamoPriceSnapshotStore(db, config.tables.prices);
+  const prices = new SnapshotPriceSource(priceStore, { now });
   await prices.reload();
-  const caps = deps.caps ?? new CompanyBudgetCaps(db, config.tables.companies);
+  const seedPricesIfEmpty = async (): Promise<void> => {
+    const health = prices.health();
+    if (health.litellm.count > 0 || health.aws.count > 0) return;
+    const priceHttp = fetchTransport(deps.fetch ?? fetch);
+    const refresher = new PriceRefresher({
+      store: priceStore, prices,
+      litellm: (previous) => fetchLiteLLM(priceHttp, { previous }),
+      aws: (previous) => fetchAWS(priceHttp, { previous }),
+      log: (line) => log({ ...line }),
+    });
+    const result = await refresher.run(now());
+    if (result.ok) log({ event: GATEWAY_LOG_EVENTS.priceFetched, gained: result.gained });
+    else log({ event: GATEWAY_LOG_EVENTS.priceFetchFailed });
+  };
+  if (config.seedPricesOnStart === true) {
+    try { await seedPricesIfEmpty(); } catch { log({ event: GATEWAY_LOG_EVENTS.priceFetchFailed }); }
+  }
+  const standalone = config.tables.companies === undefined;
+  const caps = deps.caps ?? (standalone ? new StaticBudgetCaps(config.defaultCaps!) : new CompanyBudgetCaps(db, config.tables.companies!));
   // The deployed product and learning routes, from the configured tables (deps.product / deps.learning still win: tests).
   const built = deployedRoutes(config, deps, { db, credentials, now, prices, caps });
   deps = { ...deps, ...(built.product === undefined ? {} : { product: built.product }), ...(built.learning === undefined ? {} : { learning: built.learning }), ...(built.answers === undefined ? {} : { answers: built.answers }), ...(built.agentKeys === undefined ? {} : { agentKeys: built.agentKeys }), ...(built.byo === undefined ? {} : { byoBedrock: built.byo.agent }) };
   // Company-key mode never starts without the company key source (no silent fallback to the install key).
-  const companyKeys = config.agentKeys === "company" ? deps.agentKeys : undefined;
+  const standaloneKeys: LearningKeySource | undefined = standalone
+    ? (deps.agentKeys ?? createStandaloneKeySource({
+        region: config.region, credentials,
+        secretArns: {
+          ...(config.anthropicKeySecret === undefined ? {} : { anthropic: config.anthropicKeySecret }),
+          ...(config.openaiKeySecret === undefined ? {} : { openai: config.openaiKeySecret }),
+          ...(config.openrouterKeySecret === undefined ? {} : { openrouter: config.openrouterKeySecret }),
+        },
+        now,
+      }))
+    : undefined;
+  const companyKeys = standalone ? standaloneKeys : (config.agentKeys === "company" ? deps.agentKeys : undefined);
   if (config.agentKeys === "company" && companyKeys === undefined) throw new Error("company-key mode needs the company key store");
   checkMeters(config, deps);
   const meter = new DynamoMeter({ db, tables: config.tables, now });
   const modelLimits = deps.modelLimits ?? modelLimitsFrom(prices);
   const transport = deps.transport ?? createAnthropicTransport();
+  const standaloneSourceReader = (): AgentAiSourceReader => {
+    const providerMap: Record<GatewayStandaloneProvider, AgentAiSource> = {
+      bedrock: "rovara", anthropic: "anthropic_key", openai: "openai_key", openrouter: "openrouter_key",
+    };
+    const configured: AgentAiSource[] = [
+      ...(config.rovaraAi === undefined ? [] : ["rovara" as const]),
+      ...(config.anthropicKeySecret === undefined ? [] : ["anthropic_key" as const]),
+      ...(config.openaiKeySecret === undefined ? [] : ["openai_key" as const]),
+      ...(config.openrouterKeySecret === undefined ? [] : ["openrouter_key" as const]),
+    ];
+    const primary: AgentAiSource = config.standaloneProvider !== undefined ? providerMap[config.standaloneProvider] : (configured[0] ?? "rovara");
+    const fallback = configured.filter((source) => source !== primary);
+    return {
+      sourceFor: async () => primary,
+      ...(fallback.length > 0 ? { orderFor: async () => ({ source: primary, fallback }) } : {}),
+    };
+  };
   // DEC 254zzz312: company-billed Rovara AI for learning and answers too; only configured exempt companies are free.
-  const agentAiSources = deps.agentAiSources ?? new CompanyAgentAiSource(db, config.tables.companies);
+  const agentAiSources = deps.agentAiSources ?? (standalone ? standaloneSourceReader() : new CompanyAgentAiSource(db, config.tables.companies!));
+  const switchedOn = new Set<string>(config.aiSourceKinds ?? []);
+  if (standalone) {
+    if (config.anthropicKeySecret !== undefined || config.standaloneProvider === "anthropic") switchedOn.add("anthropic");
+    if (config.openaiKeySecret !== undefined || config.standaloneProvider === "openai") switchedOn.add("openai");
+    if (config.openrouterKeySecret !== undefined || config.standaloneProvider === "openrouter") switchedOn.add("openrouter");
+  }
+  const rovaraDisabled = standalone ? (config.agentModelsDisabled ?? new Set<string>()) : (config.agentModelsDisabled ?? parseDisabledAgentModels(undefined));
   const rovaraBedrock: RovaraAi | undefined = config.rovaraAi === undefined ? undefined : {
     models: config.rovaraAi.models, exempt: config.rovaraAi.exempt, ...(config.rovaraAi.sourceId === undefined ? {} : { sourceId: config.rovaraAi.sourceId }),
     transport: deps.bedrockTransport ?? createBedrockTransport({ region: config.region, credentials, now }), maxOutputTokens: (id: string) => prices.maxOutputTokens("bedrock", id),
   };
-  const rovaraDefault = companyKeys === undefined || rovaraBedrock === undefined ? {} : { rovaraDefault: { ai: rovaraBedrock, sources: agentAiSources, disabled: config.agentModelsDisabled ?? parseDisabledAgentModels(undefined), switchedOn: config.aiSourceKinds ?? new Set<string>() } };
-  const learning = deps.learning === undefined ? undefined : createLearningRoutes({
+  const rovaraDefault = companyKeys === undefined || rovaraBedrock === undefined ? {} : { rovaraDefault: { ai: rovaraBedrock, sources: agentAiSources, disabled: rovaraDisabled, switchedOn } };
+  const learning = deps.learning === undefined || config.tables.companies === undefined ? undefined : createLearningRoutes({
     ...rovaraDefault,
     keys: deps.learning.keys, meter: deps.learning.meter, companyCaps: caps, lessons: new CompanyLessonsSwitch(db, config.tables.companies), transport,
     // Anthropic keeps the agent route's ceilings; the other providers' guards read their own price rows (and fall back to their own defaults).
@@ -339,8 +490,8 @@ export async function startServe(config: ServeConfig, deps: ServeDependencies = 
     transports: deps.learning.transports ?? { gemini: createGeminiTransport(), vertex: createVertexTransport(), openai: createOpenAiTransport() },
     ...(deps.learning.monthCeilingMicros === undefined ? {} : { monthCeilingMicros: deps.learning.monthCeilingMicros }),
   });
-  const upkeepLimits = deps.upkeepLimits ?? new CompanyUpkeepLimits(db, config.tables.companies);
-  const answers = deps.answers === undefined ? undefined : createAnswersRoutes({
+  const upkeepLimits: UpkeepLimits = deps.upkeepLimits ?? (standalone ? { limitFor: async () => undefined } : new CompanyUpkeepLimits(db, config.tables.companies!));
+  const answers = deps.answers === undefined || config.tables.companies === undefined ? undefined : createAnswersRoutes({
     ...rovaraDefault,
     keys: deps.answers.keys, meter: deps.answers.meter, companyCaps: caps, limits: deps.answersLimits ?? new CompanyAnswersLimits(db, config.tables.companies), transport,
     modelLimits: { maxOutputTokens: (provider, model) => provider === "anthropic" ? modelLimits.maxOutputTokens(provider, model) : prices.maxOutputTokens(provider, model) },
@@ -350,7 +501,7 @@ export async function startServe(config: ServeConfig, deps: ServeDependencies = 
   // The ended-task record: the server reads it on every agent call; the task-ended notice (task-ended-notice.ts) is the only writer.
   const endedTasks = new DynamoEndedTasks(db, config.tables.markers, now);
   const handlerDeps: GatewayDependencies = {
-    rovaraAiSetting: new InstallRovaraAi(db, config.tables.companies, now),
+    ...(standalone ? {} : { rovaraAiSetting: new InstallRovaraAi(db, config.tables.companies!, now) }),
     ...(companyKeys === undefined ? {} : { runPriceReady: () => prices.runPriceSnapshotVersion() }),
     // Only the route's admitted, revision-bound source can produce a receipt. Older adapters
     // without that evidence keep legacy provisional settlement; nothing is inferred from a token.
@@ -360,21 +511,21 @@ export async function startServe(config: ServeConfig, deps: ServeDependencies = 
     // The busy answer is counted from its log line (overrun_busy); the process needs no metrics permission.
     metrics: { overrunBusy: () => undefined },
     modelLimits,
-    // Company-key mode: the install key is never read (a call can only go out on the company's own key, `agentKeys`).
-    keys: companyKeys !== undefined ? NO_INSTALL_KEY : deps.keys ?? createSecretsManagerKeys({ region: config.region, credentials, secretArns: { anthropic: config.anthropicKeySecret }, now }),
+    // Company-key mode / standalone mode: the install key is never read (a call goes out through `agentKeys` / `agentAi`).
+    keys: companyKeys !== undefined ? NO_INSTALL_KEY : deps.keys ?? createSecretsManagerKeys({ region: config.region, credentials, secretArns: { anthropic: config.anthropicKeySecret! }, now }),
     ...(companyKeys === undefined ? {} : { agentKeys: companyKeys }),
     // DEC 254zzz41: reviewer grants are claimed once, durably, in the markers table (company keys, TTL): company-key mode only.
     ...(companyKeys === undefined ? {} : { reviewerGrants: new DynamoReviewerGrants(db, config.tables.markers, now) }),
-    // DEC 240: in company-key mode each company's saved choice picks its agents' source; Rovara's AI only when configured.
+    // DEC 240: in company-key / standalone mode the saved/configured source picks agents' source; Rovara's AI / Bedrock only when configured.
     ...(companyKeys === undefined ? {} : { agentAi: {
       sources: agentAiSources,
       ...(rovaraBedrock === undefined ? {} : { rovara: rovaraBedrock }),
       // DEC 238: only when configured (a company that chose its own Bedrock is refused otherwise, never sent elsewhere).
       ...(config.bedrockByo === undefined || deps.byoBedrock === undefined ? {} : { byo: deps.byoBedrock }),
-      // DEC 254t: the kinds the owner switched on (none when unset).
-      switchedOn: config.aiSourceKinds ?? new Set<string>(),
+      // DEC 254t: the kinds the owner switched on (none when unset; configured standalone kinds in standalone mode).
+      switchedOn,
       // DEC 254zzz84(4): Rovara's AI models not enabled yet, so a company's saved order passes Rovara's AI over for them (the offered list leaves them out too).
-      rovaraDisabled: config.agentModelsDisabled ?? parseDisabledAgentModels(undefined),
+      rovaraDisabled,
       // DEC 254t (A2): the company's own OpenAI and OpenRouter keys (fixed hosts), each held to its price row's output limit.
       openai: { transport: deps.openaiAgentTransport ?? createChatCompletionsTransport("openai"), maxOutputTokens: (model: string) => prices.maxOutputTokens("openai", model) },
       openrouter: { transport: deps.openrouterAgentTransport ?? createChatCompletionsTransport("openrouter"), maxOutputTokens: (model: string) => prices.maxOutputTokens("openrouter", model) },
@@ -394,14 +545,14 @@ export async function startServe(config: ServeConfig, deps: ServeDependencies = 
     : createVertexCheckHandler({ issuer: config.install.issuer, kms: built.verifier, macKeyId: config.product.macKeyArn, vertex: built.vertex, now });
   // DEC 238: Cloud's Bedrock set-up and connection test, only with BYO Bedrock built and a KMS that can verify Cloud's MAC.
   const bedrockCalls = built.byo?.service;
-  // The models one company's agents may use (offered-models.ts), signed by the install's broker with its task key: company-key mode only.
+  // The models one company's agents may use (offered-models.ts), signed by the install's broker with its task key: company-key or standalone mode.
   const offeredModels = companyKeys === undefined || handlerDeps.agentAi === undefined ? undefined : createOfferedModelsHandler({
     verify: createSignedTokenVerifier({ registry: new StaticInstallRegistry([config.install]), readJwks: createJwksReader(deps.fetch ?? fetch), now }, SERVICE_TOKEN_KIND),
-    sources: handlerDeps.agentAi.sources, disabled: config.agentModelsDisabled ?? parseDisabledAgentModels(undefined),
+    sources: handlerDeps.agentAi.sources, disabled: rovaraDisabled,
     keys: companyKeys,
     ...(config.rovaraAi === undefined ? {} : { rovara: { models: config.rovaraAi.models, exempt: config.rovaraAi.exempt, ...(config.rovaraAi.sourceId === undefined ? {} : { sourceId: config.rovaraAi.sourceId }) } }),
     ...(config.bedrockByo === undefined || deps.byoBedrock === undefined ? {} : { byo: deps.byoBedrock }), now,
-    switchedOn: config.aiSourceKinds ?? new Set<string>(), chat: { openai: true, openrouter: true },
+    switchedOn, chat: { openai: true, openrouter: true },
     // DEC 254zzz96 (2): list prices on the offered list, only when switched on (display only).
     ...(config.offeredPrices === true ? { priceOf: (model: string, source: AgentAiSource | undefined) => offeredModelPrice(prices, model, source, config.rovaraAi?.models) } : {}),
     // DEC 254zzz41: what reviews may use, from the company's real connections and the room left in its one company cap (the agent meter's company row).
@@ -438,7 +589,7 @@ export async function startServe(config: ServeConfig, deps: ServeDependencies = 
   });
   const rateQuote = companyKeys === undefined ? undefined : createRateQuoteHandler({
     verify: createSignedTokenVerifier({ registry: new StaticInstallRegistry([config.install]), readJwks: createJwksReader(deps.fetch ?? fetch), now }, RATE_QUOTE_TOKEN_KIND),
-    sources: agentAiSources, keys: companyKeys, prices, region: config.region, now, disabled: config.agentModelsDisabled ?? parseDisabledAgentModels(undefined), switchedOn: config.aiSourceKinds ?? new Set<string>(),
+    sources: agentAiSources, keys: companyKeys, prices, region: config.region, now, disabled: rovaraDisabled, switchedOn,
     offeredProviders: new Set(["anthropic", ...(companyKeys === undefined ? [] : ["openai", "openrouter"]), ...(config.rovaraAi === undefined && (config.bedrockByo === undefined || handlerDeps.agentAi?.byo === undefined) ? [] : ["bedrock"])]),
     ...(config.rovaraAi === undefined ? {} : { rovara: { models: config.rovaraAi.models, exempt: config.rovaraAi.exempt, ...(config.rovaraAi.sourceId === undefined ? {} : { sourceId: config.rovaraAi.sourceId }) } }),
     ...(handlerDeps.agentAi?.byo === undefined ? {} : { byo: handlerDeps.agentAi.byo }),
@@ -446,7 +597,7 @@ export async function startServe(config: ServeConfig, deps: ServeDependencies = 
   // L4-HW3c: the company's approved rules for Code's hosted broker (company-instructions.ts), from Cloud's Companies table (the same read-only grant as the budgets), signed with the task key.
   const companyInstructions = createCompanyInstructionsHandler({
     verify: createSignedTokenVerifier({ registry: new StaticInstallRegistry([config.install]), readJwks: createJwksReader(deps.fetch ?? fetch), now }, COMPANY_INSTRUCTIONS_TOKEN_KIND),
-    rules: deps.companyInstructions ?? new CompanyStoredInstructions(db, config.tables.companies), now,
+    rules: deps.companyInstructions ?? (standalone ? { read: async () => undefined } : new CompanyStoredInstructions(db, config.tables.companies!)), now,
   });
   // Code tells the gateway a task ended (closed or merged): the record above, written once and never undone (task-ended-notice.ts), signed with the task key.
   const taskEnded = createTaskEndedHandler({
@@ -486,6 +637,9 @@ export async function startServe(config: ServeConfig, deps: ServeDependencies = 
     maintaining ??= (async () => {
       try {
         await prices.reload();
+        if (config.seedPricesOnStart === true) {
+          try { await seedPricesIfEmpty(); } catch { log({ event: GATEWAY_LOG_EVENTS.priceFetchFailed }); }
+        }
         const runId = randomUUID();
         const expiry = await runExpirySweep({ meter, now: now(), runId, log: (line) => log({ ...line }) });
         const corrections = await runCorrections({ meter, prices, caps, now: now(), runId, log: (line) => log({ ...line }) });

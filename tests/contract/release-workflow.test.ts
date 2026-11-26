@@ -142,6 +142,11 @@ describe("release workflow", () => {
     expect(release).toContain('if [ -n "$EXECUTOR" ]; then executor_flag=(--executor-image "$EXECUTOR"); fi');
     expect(release).toContain('"${executor_flag[@]}"');
     expect(wf.jobs.release!.steps.some((s) => s.env?.EXECUTOR === "${{ needs.images.outputs.executor }}")).toBe(true);
+    // Issue #1554: the self-hosted Model Gateway image ships with every release (linux/arm64) and is passed to release:build.
+    expect(wf.jobs.images!.outputs?.gateway).toBe("${{ steps.push.outputs.gateway }}");
+    expect(push).toContain("environments/model-gateway/Dockerfile");
+    expect(release).toContain('--gateway-image "$GATEWAY"');
+    expect(wf.jobs.release!.steps.some((s) => s.env?.GATEWAY === "${{ needs.images.outputs.gateway }}")).toBe(true);
     expect(wf.jobs.release!.steps.some((s) => s.env?.GH_TOKEN === "${{ github.token }}")).toBe(true);
   });
 
@@ -190,8 +195,8 @@ describe("release workflow", () => {
     const push = wf.jobs.images!.steps.find((step) => step.id === "push")!.run!;
     const lines = push.split("\n").filter((line) => /^\s*images=|^\s*if \[ "\$PUBLISH_EXECUTOR"/.test(line)).join("\n");
     const order = (flag: string) => execFileSync("bash", ["-c", `PUBLISH_EXECUTOR=${flag}\n${lines}\necho "$images"`], { encoding: "utf8" }).trim();
-    expect(order("true")).toBe("executor worker slack");
-    expect(order("")).toBe("worker slack");
+    expect(order("true")).toBe("executor worker slack gateway");
+    expect(order("")).toBe("worker slack gateway");
   });
 
   it("runs the images push step with shell: bash, so a failing `imagetools inspect | tr` fails the step instead of being swallowed by the pipe", async () => {

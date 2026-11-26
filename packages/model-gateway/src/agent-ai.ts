@@ -241,6 +241,34 @@ export const ROVARA_AI_MODELS_MAX = 24;
 export const ROVARA_AI_EXEMPT_MAX = 10;
 
 /**
+ * Default Bedrock model allow-list for standalone (self-hosted) installs (`GATEWAY_ROVARA_AI_MODELS=on`),
+ * built for the gateway's own AWS Region geography (`us`, `eu`, `apac`, `ca`, `us-gov`).
+ */
+export function standaloneBedrockModels(region: string): Map<string, string> {
+  const geographies = geographiesOf(region);
+  const geo = geographies[0];
+  const models = new Map<string, string>();
+  if (geo !== undefined) {
+    models.set("claude-sonnet-4-6", `${geo}.anthropic.claude-sonnet-4-6`);
+    models.set("claude-opus-4-6", `${geo}.anthropic.claude-opus-4-6`);
+    models.set("claude-haiku-4-5", `${geo}.anthropic.claude-haiku-4-5-20251001-v1:0`);
+    models.set("claude-haiku-4-5-20251001", `${geo}.anthropic.claude-haiku-4-5-20251001-v1:0`);
+    models.set("claude-haiku-5-5", `${geo}.anthropic.claude-haiku-5-5`);
+    models.set("claude-sonnet-5-5", `${geo}.anthropic.claude-sonnet-5-5`);
+    models.set("claude-opus-5-5", `${geo}.anthropic.claude-opus-5-5`);
+  }
+  for (const pair of ROVARA_AI_US_CONVERSE_MODELS.split(",")) {
+    const [name, id] = pair.split("=");
+    if (name === undefined || id === undefined) continue;
+    const prefix = id.split(".").length > 2 && /^(?:us|eu|apac|jp|au|ca)\./u.test(id) ? id.slice(0, id.indexOf(".")) : undefined;
+    if (prefix === undefined || geographies.includes(prefix)) {
+      if (models.size < ROVARA_AI_MODELS_MAX) models.set(name, id);
+    }
+  }
+  return models;
+}
+
+/**
  * GATEWAY_ROVARA_AI_MODELS: `<agent model>=<bedrock id>` pairs, comma-separated, e.g.
  * `claude-sonnet-5-5=us.anthropic.claude-sonnet-5-5`. Each id is a Claude system inference profile of the gateway's own Region's
  * geography (DEC 243: `us.` from a US Region). A plain model id, a `global.` profile or another geography's is refused. Throws on

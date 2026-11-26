@@ -40,6 +40,7 @@ export const SERVICE_ROLE_SERVICES: readonly string[] = [
   "ec2",
   "ecr",
   "ecs",
+  "elasticloadbalancing",
   "kms",
   "lambda",
   "logs",
@@ -54,7 +55,8 @@ export const SERVICE_ROLE_SERVICES: readonly string[] = [
 
 /**
  * Services the default permission boundary allows by wildcard: the service role's own, plus what
- * the environment's roles call (Bedrock models, X-Ray, CodeBuild and API Gateway invoke). STS and
+ * the environment's roles call (ACM for the self-hosted gateway's auto-generated internal TLS cert,
+ * Bedrock models, X-Ray, CodeBuild and API Gateway invoke). STS and
  * Service Quotas are not here: sts:* would let a bounded role assume any same-account role that
  * trusts the account, escaping the boundary, and servicequotas:* would let it read every quota in
  * the account instead of only the two EC2 quotas prerequisites checks; the boundary names
@@ -66,13 +68,13 @@ export const SERVICE_ROLE_SERVICES: readonly string[] = [
  * itself. The generated test in access-stack.test.ts keeps this list complete and free of unused
  * services.
  */
-export const BOUNDARY_SERVICES: readonly string[] = [...SERVICE_ROLE_SERVICES, "bedrock", "budgets", "codebuild", "execute-api", "xray"];
+export const BOUNDARY_SERVICES: readonly string[] = [...SERVICE_ROLE_SERVICES, "acm", "bedrock", "budgets", "codebuild", "execute-api", "xray"];
 
 /**
  * Service-linked roles the service role may create while deploying. route53resolver: associating a named environment's DNS firewall query logging config makes Resolver
- * create AWSServiceRoleForRoute53Resolver for the caller on first use in an account.
+ * create AWSServiceRoleForRoute53Resolver for the caller on first use in an account. elasticloadbalancing: creating the self-hosted gateway's ALB creates AWSServiceRoleForElasticLoadBalancing.
  */
-const SERVICE_LINKED_ROLE_SERVICES = ["ecs.amazonaws.com", "route53resolver.amazonaws.com"];
+const SERVICE_LINKED_ROLE_SERVICES = ["ecs.amazonaws.com", "elasticloadbalancing.amazonaws.com", "route53resolver.amazonaws.com"];
 
 /**
  * A named environment's DNS firewall (infra/lib/agent-dns-firewall.ts): its domain lists, rule group, VPC association and query logging config. Not a wildcard service: every

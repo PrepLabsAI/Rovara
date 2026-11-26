@@ -237,8 +237,12 @@ export function templatesDeployer(input: {
     if (request.part !== "control-plane") return;
     installTemplate(request);
     const host = request.parameters.CoreModelGatewayHost;
-    if (!host || !request.parameters.CoreAgentModel) throw agentXError("CONFIG_INVALID", "coreEngine gateway and agent model must be configured before worker activation");
+    if (!request.parameters.CoreAgentModel) throw agentXError("CONFIG_INVALID", "coreEngine gateway and agent model must be configured before worker activation");
     const stack = await describeStack(request.stackName);
+    if (!host) {
+      if (request.allowDeferredGateway !== true) throw agentXError("CONFIG_INVALID", "coreEngine gateway and agent model must be configured before worker activation");
+      return { stack };
+    }
     await assertGatewayRunPrices(`https://${host}`);
     return { stack };
   }

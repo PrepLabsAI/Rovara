@@ -9,6 +9,10 @@ import { InstallerStack, INSTALLER_TIMEOUT, START_INSTALLER_CODE } from "../../i
 import { setupPageFunction, stackSetupIdentity } from "../../packages/cli/src/init/ui/setup-lambda.js";
 import { memorySetupStore } from "../../packages/cli/src/init/ui/setup-store.js";
 import { WIZARD_TOKEN_HEADER } from "../../packages/cli/src/init/ui/protocol.js";
+import { collectInitAnswers, type InitFlags } from "../../packages/cli/src/init/answers.js";
+import { unattendedUntilSteps, type Prompter } from "../../packages/cli/src/init/prompts.js";
+import { installOrder } from "../../packages/cli/src/deploy/parameters.js";
+import { usesBuiltInGateway } from "../../packages/cli/src/deploy/core-engine-answers.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
 skipLambdaBundling();
@@ -46,6 +50,63 @@ describe("the installer stack", () => {
     const spec = project.Properties.Source.BuildSpec;
     expect(spec).toContain('"nodejs": 22');
     expect(spec).toContain('init --region \\"$AWS_REGION\\" --setup-table \\"$SETUP_TABLE\\" --setup-url \\"$SETUP_URL\\" --admin-email \\"$ADMIN_EMAIL\\" --github-account \\"$GITHUB_OWNER\\"');
+  });
+
+  it("executes InstallerStack's exact CodeBuild init flags under unattendedUntilSteps without crashing (issue #1554)", async () => {
+    const stack = template();
+    const project = Object.values(stack.findResources("AWS::CodeBuild::Project"))[0] as { Properties: { Source: { BuildSpec: string } } };
+    const parsedSpec = JSON.parse(project.Properties.Source.BuildSpec) as { phases: { build: { commands: string[] } } };
+    const command = parsedSpec.phases.build.commands[0]!;
+    // Parse InstallerStack's exact CLI invocation with substituted env vars.
+    const envVars: Record<string, string> = {
+      CLI_PACKAGE: "@preplabsai/rovara-code@latest",
+      INSTALL_NAME: "prod",
+      AWS_REGION: "us-east-1",
+      SETUP_TABLE: "setup-table",
+      SETUP_URL: "https://setup.example.com",
+      ADMIN_EMAIL: "admin@example.com",
+      GITHUB_OWNER: "acme",
+    };
+    const tokens = command
+      .replace(/\$([A-Z_]+)/g, (_, key: string) => envVars[key] ?? "")
+      .replaceAll('"', "")
+      .split(/\s+/);
+    const flagValue = (flag: string): string | undefined => {
+      const idx = tokens.indexOf(flag);
+      return idx >= 0 ? tokens[idx + 1] : undefined;
+    };
+    expect(flagValue("--model-gateway-url")).toBeUndefined();
+    expect(flagValue("--agent-model")).toBeUndefined();
+
+    const githubAccount = flagValue("--github-account");
+    const flags: InitFlags = {
+      ...(githubAccount ? { githubAccount } : {}),
+    };
+    const neverCalledPage: Prompter = {
+      ask: async () => { throw new Error("unexpected interactive ask before steps"); },
+      choose: async () => { throw new Error("unexpected interactive choose before steps"); },
+      confirm: async () => { throw new Error("unexpected interactive confirm before steps"); },
+      secret: async () => { throw new Error("unexpected interactive secret before steps"); },
+    };
+    const cloud = unattendedUntilSteps(neverCalledPage);
+    const collected = await collectInitAnswers({
+      env: flagValue("--env")!,
+      region: flagValue("--region")!,
+      account: "123456789012",
+      releaseVersion: "0.5.0",
+      flags,
+      adminEmail: flagValue("--admin-email")!,
+      prompter: cloud.prompter,
+      processEnv: {},
+      now: () => Date.UTC(2026, 10, 26),
+      ownerType: async () => "organization",
+    });
+
+    expect(collected.answers.coreEngine).toEqual({ modelGatewayUrl: "", agentModel: "claude-sonnet-4-6" });
+    expect(usesBuiltInGateway(collected.answers.coreEngine)).toBe(true);
+    expect(installOrder(collected.answers.identity.mode, { includeGateway: usesBuiltInGateway(collected.answers.coreEngine) })).toEqual([
+      "access", "foundation", "identity", "control-plane", "gateway", "runtime", "slack",
+    ]);
   });
 
   it("starts the job as soon as the stack is created", () => {

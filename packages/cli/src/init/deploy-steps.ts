@@ -3,6 +3,7 @@
 // busy from an interrupted run (CloudFormation keeps going after a terminal closes).
 import { agentXError, environmentStackName } from "@agentx/contracts";
 import { deployIdentityAnswers, deployImagesAnswers, progressLine } from "../deploy/commands.js";
+import { usesBuiltInGateway } from "../deploy/core-engine-answers.js";
 import { deployEnvironment, type DeployAnswers } from "../deploy/deploy-environment.js";
 import { installOrder, type DeployPart } from "../deploy/parameters.js";
 import { writeEnvironmentCache } from "../environments/cache.js";
@@ -15,7 +16,7 @@ import type { InitStep, ProgressHandle } from "./steps.js";
 export const DEPLOY_STEP_PARTS = {
   access: ["access"],
   core: ["foundation", "identity"],
-  "control-plane": ["control-plane", "runtime"],
+  "control-plane": ["control-plane", "gateway", "runtime"],
   "slack-service": ["slack"],
 } as const satisfies Record<string, readonly DeployPart[]>;
 export type DeployStepId = keyof typeof DEPLOY_STEP_PARTS;
@@ -46,6 +47,12 @@ export function initDeployAnswers(answers: InitAnswers, progress: InstallProgres
     account: answers.account,
     models: answers.models,
     ...(answers.coreEngine === undefined ? {} : { coreEngine: answers.coreEngine }),
+    ...(answers.gateway === undefined ? {} : {
+      gateway: {
+        ...(answers.gateway.certificateArn === undefined ? {} : { certificateArn: answers.gateway.certificateArn }),
+        ...(answers.gateway.host === undefined ? {} : { host: answers.gateway.host }),
+      },
+    }),
     identity: deployIdentityAnswers(answers.identity),
     github,
     ...(answers.permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn: answers.permissionsBoundaryArn }),
@@ -92,7 +99,7 @@ export function deployStep(input: { id: DeployStepId; title: string; after?: (co
     title: input.title,
     async run(context, progress) {
       const { env, answers } = context;
-      const order = installOrder(answers.identity.mode);
+      const order = installOrder(answers.identity.mode, { includeGateway: usesBuiltInGateway(answers.coreEngine) });
       const parts = DEPLOY_STEP_PARTS[input.id].filter((part) => order.includes(part));
       await waitForIdleStacks({ reader: context.stackStatus, stackNames: parts.map((part) => environmentStackName(env, part)), sleep: context.sleep, write: context.write, now: context.now });
       const deployment = await context.deployment();

@@ -114,7 +114,7 @@ async function exportUpgrade(input: { options: UpgradeOptions; deps: UpgradeDepe
   const target = release.manifest.version;
   deps.write(`Writing the upgrade of ${env} from ${settings.version} to ${target} (${settings.engine} engine) to a bundle`);
   deps.write(notesText(await deps.notes(target), target));
-  const order = upgradeOrder(settings.identity.mode);
+  const order = upgradeOrder(settings.identity.mode, { includeGateway: settings.stacks.gateway !== undefined });
   // Each stack is described once; the answers, the dropped keys and the bundle all read these.
   const described = new Map<string, StackDescription | undefined>();
   for (const part of order) {
@@ -242,7 +242,7 @@ export async function runUpgrade(options: UpgradeOptions, deps: UpgradeDependenc
     deps.write(notesText(await deps.notes(target), target));
 
     const answers = await upgradeAnswers({ settings, stacks: deps.stacks, ...(options.images === undefined ? {} : { images: options.images }) });
-    let parts = upgradeOrder(settings.identity.mode);
+    let parts = upgradeOrder(settings.identity.mode, { includeGateway: settings.stacks.gateway !== undefined });
     // Question 9: the operator role cannot change the access stack (it holds the IAM roles). An
     // unchanged one is skipped; a changed one stops the upgrade before anything deploys. Admin
     // credentials deploy it first, like every other stack.

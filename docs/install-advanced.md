@@ -132,6 +132,19 @@ node packages/cli/dist/bin.js --env <env> init --region <region> --release ./rel
 The images are referenced by digest only. [Releases](releases.md#checking-a-release-on-your-own-machine)
 covers building and checking a release directory.
 
+## Self-hosted vs external Model Gateway
+
+By default, `init` installs all 7 environment stacks (`access`, `foundation`, `identity`,
+`control-plane`, `gateway`, `runtime`, `slack`). The built-in `agentx-<env>-gateway` stack runs
+inside `foundation`'s existing VPC with automatic price seeding on cold start and zero-domain HTTPS
+(no pre-existing Model Gateway, Rovara Cloud account, or custom domain/ACM certificate required).
+
+- **Use an external or shared Model Gateway:** pass `--model-gateway-url https://<gateway-host>`
+  (and optionally `--agent-model <model>`). When `--model-gateway-url` is provided, `init` skips
+  deploying `agentx-<env>-gateway` and wires the control plane directly to your external gateway.
+- **Bring your own ACM certificate / custom hostname for the built-in gateway:** pass
+  `--gateway-certificate-arn <acm-arn>` and `--gateway-host <hostname>`.
+
 ## A permanent public address (PublicApiUrl)
 
 By default every address the control plane gives out (the Slack, GitHub and Linear webhook URLs, the sign-in callbacks, the review and notification links, and the token issuer) is

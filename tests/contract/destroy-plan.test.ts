@@ -5,7 +5,7 @@ import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 
 describe("destroy: the order (docs/architecture-production.md, Tearing down an environment)", () => {
   it("deletes slack, runtime, control-plane, then the workers, then identity, foundation, access", () => {
-    expect([...DELETE_BEFORE_WORKERS, "workers", ...DELETE_AFTER_WORKERS]).toEqual(["slack", "runtime", "control-plane", "workers", "identity", "foundation", "access"]);
+    expect([...DELETE_BEFORE_WORKERS, "workers", ...DELETE_AFTER_WORKERS]).toEqual(["slack", "runtime", "gateway", "control-plane", "workers", "identity", "foundation", "access"]);
   });
 });
 

@@ -35,7 +35,7 @@ export async function releaseDir(regions: readonly string[] = ["us-east-1"]): Pr
   const templates = [];
   for (const region of regions) {
     await mkdir(join(dir, "templates", region), { recursive: true });
-    for (const part of ["access", "foundation", "identity", "control-plane", "runtime", "slack"]) {
+    for (const part of ["access", "foundation", "identity", "control-plane", "gateway", "runtime", "slack"]) {
       const file = `templates/${region}/${part}.template.json`;
       const content = part === "control-plane" ? brokerTemplate() : "{}";
       await writeFile(join(dir, file), content);
@@ -44,7 +44,11 @@ export async function releaseDir(regions: readonly string[] = ["us-east-1"]): Pr
   }
   await writeFile(join(dir, "release.json"), JSON.stringify({
     schemaVersion: 1, version: "1.2.3", gitCommit: "a".repeat(40), environmentPlaceholder: "qqenv-placeholderqq", templates, packages: [],
-    images: { worker: `public.ecr.aws/agentx/worker@sha256:${"a".repeat(64)}`, slack: `public.ecr.aws/agentx/slack@sha256:${"b".repeat(64)}` },
+    images: {
+      worker: `public.ecr.aws/agentx/worker@sha256:${"a".repeat(64)}`,
+      slack: `public.ecr.aws/agentx/slack@sha256:${"b".repeat(64)}`,
+      gateway: `public.ecr.aws/agentx/gateway@sha256:${"c".repeat(64)}`,
+    },
   }));
   return dir;
 }

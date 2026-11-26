@@ -25,6 +25,8 @@ export interface DeployRequest {
   roleArn?: string;
   terminationProtection: boolean;
   onEvent?: (event: DeployEvent) => void;
+  /** True only for the initial control-plane deploy before the self-hosted `gateway` stack has been created and wired back. */
+  allowDeferredGateway?: boolean;
   /**
    * Called after the "changes" event and before the change set executes; a decline deletes the
    * change set (best effort) and refuses the deploy. Only the templates engine consults this: the

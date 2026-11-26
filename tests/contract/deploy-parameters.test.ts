@@ -149,8 +149,10 @@ describe("deploy parameters", () => {
   });
 
   it("orders a fresh install and an upgrade differently, and skips identity for your own OIDC", () => {
-    expect(installOrder("cognito")).toEqual(["access", "foundation", "identity", "control-plane", "runtime", "slack"]);
-    expect(upgradeOrder("cognito")).toEqual(["access", "foundation", "identity", "control-plane", "runtime", "slack"]);
+    expect(installOrder("cognito")).toEqual(["access", "foundation", "identity", "control-plane", "gateway", "runtime", "slack"]);
+    expect(upgradeOrder("cognito")).toEqual(["access", "foundation", "identity", "control-plane", "gateway", "runtime", "slack"]);
+    expect(installOrder("cognito", { includeGateway: false })).toEqual(["access", "foundation", "identity", "control-plane", "runtime", "slack"]);
+    expect(upgradeOrder("cognito", { includeGateway: false })).toEqual(["access", "foundation", "identity", "control-plane", "runtime", "slack"]);
     expect(installOrder("oidc")).not.toContain("identity");
   });
 

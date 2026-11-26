@@ -3,7 +3,7 @@
 import { expect } from "vitest";
 
 type Resource = { Type: string; Properties: Record<string, unknown> };
-type Statement = { Sid?: string; Condition?: { StringLike?: Record<string, unknown> } };
+type Statement = { Sid?: string; Action?: string | string[]; Resource?: unknown; Condition?: { StringLike?: Record<string, unknown> } };
 type Template = { Resources: Record<string, Resource>; Outputs?: Record<string, unknown> };
 
 /** Foundation: the DNS firewall (8 resources), the egress alarms (a metric filter, the blocked-lookup alarm and one alarm per NAT gateway) and the ProjectAllowListId output. */
@@ -60,5 +60,59 @@ export function withoutDnsFirewallAccess(template: unknown): unknown {
   }
   // The deploy role's inline policy and the default boundary.
   expect(firewallDocuments).toBe(2);
+  return template;
+}
+
+/** Access (issue #1554): the self-hosted gateway's ALB/ACM actions, ELB service-linked role, and operator CloudFormation stack ARN. */
+export function withoutGatewayAccess(template: unknown, env: string): unknown {
+  const synthesized = template as Template;
+  const documents: Array<{ Statement: Statement[] }> = [];
+  for (const resource of Object.values(synthesized.Resources)) {
+    if (resource.Type === "AWS::IAM::ManagedPolicy") documents.push(resource.Properties.PolicyDocument as { Statement: Statement[] });
+    if (resource.Type === "AWS::IAM::Role") for (const policy of (resource.Properties.Policies as Array<{ PolicyDocument: { Statement: Statement[] } }> | undefined) ?? []) documents.push(policy.PolicyDocument);
+  }
+  let elbServices = 0;
+  let acmServices = 0;
+  let elbLinked = 0;
+  let gatewayStackArns = 0;
+  let gatewayLogGroups = 0;
+  const gatewaySuffix = `:stack/agentx-${env}-gateway/*`;
+  const gatewayLogSuffix = `:log-group:agentx-${env}-gateway-*`;
+  for (const document of documents) {
+    for (const statement of document.Statement) {
+      if (statement.Sid === "Services" && Array.isArray(statement.Action)) {
+        if (statement.Action.includes("elasticloadbalancing:*")) {
+          elbServices += 1;
+          statement.Action = statement.Action.filter((a) => a !== "elasticloadbalancing:*");
+        }
+        if (statement.Action.includes("acm:*")) {
+          acmServices += 1;
+          statement.Action = statement.Action.filter((a) => a !== "acm:*");
+        }
+      }
+      if (statement.Sid === "ServiceLinkedRoles") {
+        const list = statement.Condition?.StringLike?.["iam:AWSServiceName"];
+        if (Array.isArray(list) && list.includes("elasticloadbalancing.amazonaws.com")) {
+          elbLinked += 1;
+          statement.Condition!.StringLike!["iam:AWSServiceName"] = list.filter((s) => s !== "elasticloadbalancing.amazonaws.com");
+        }
+      }
+      if (Array.isArray(statement.Resource)) {
+        const before = statement.Resource.length;
+        statement.Resource = statement.Resource.filter((entry) => {
+          const text = JSON.stringify(entry);
+          if (text.includes(gatewaySuffix)) { gatewayStackArns += 1; return false; }
+          if (text.includes(gatewayLogSuffix)) { gatewayLogGroups += 1; return false; }
+          return true;
+        });
+        expect(before).toBeGreaterThanOrEqual((statement.Resource as unknown[]).length);
+      }
+    }
+  }
+  expect(elbServices).toBe(3);
+  expect(acmServices).toBe(2);
+  expect(elbLinked).toBe(2);
+  expect(gatewayStackArns).toBe(2);
+  expect(gatewayLogGroups).toBe(1);
   return template;
 }

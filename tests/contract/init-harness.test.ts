@@ -33,28 +33,28 @@ describe("the install gateway fixture", () => {
   });
 });
 
-it("the terminal settings script answers the required core-engine pair and exhausts exactly", async () => {
+it("the terminal settings script defaults to the built-in gateway and provider model and exhausts exactly", async () => {
   const prompter = scriptedPrompter(settingsScript());
   const { answers } = await collectInitAnswers({ env: "staging", region: "us-east-1", account: "123456789012", releaseVersion: "1.2.3", flags: {}, prompter, ownerType: async () => "organization", processEnv: {}, now: () => 0 });
-  expect(answers.coreEngine).toEqual({ modelGatewayUrl: "https://gateway.example", agentModel: "claude-sonnet-4-6" });
+  expect(answers.coreEngine).toEqual({ modelGatewayUrl: "", agentModel: "claude-sonnet-4-6" });
   expect(prompter.remaining()).toBe(0);
   await expect(prompter.ask("Unexpected question", { flag: "--unexpected" })).rejects.toThrow('no scripted answer for "Unexpected question"');
 });
 
-it("the page requires the approved gateway questions in order and keeps their copy plain", async () => {
+it("the page puts optional gateway settings in Advanced with plain copy and accepts empty defaults", async () => {
   const hub = createWizardHub("staging");
   const collected = collectInitAnswers({ env: "staging", region: "us-east-1", account: "123456789012", releaseVersion: "1.2.3", flags: {}, prompter: browserPrompter(hub), ownerType: async () => "organization", processEnv: {}, now: () => 0 });
   try {
     const form = hub.state().question;
     if (form === undefined) throw new Error("test setup: no settings form");
-    expect(form.fields?.filter((field) => ["modelGatewayUrl", "agentModel"].includes(field.name)).map((field) => field.label)).toEqual(["Signed-price model gateway URL", "Core agent model"]);
+    expect(form.fields?.filter((field) => ["modelGatewayUrl", "agentModel"].includes(field.name)).map((field) => field.label)).toEqual([
+      "External signed-price model gateway URL",
+      "Core agent model",
+    ]);
     expect(lintCopy(stateEntries(hub.state(), "settings"))).toEqual([]);
     const values = { email: "ops@example.com", githubAccount: "acme" };
-    expect(hub.answer(form.id, JSON.stringify(values))).toBeDefined();
-    const corrected = hub.state().question;
-    if (corrected === undefined) throw new Error("test setup: no corrected settings form");
-    expect(hub.answer(corrected.id, JSON.stringify({ ...values, modelGatewayUrl: "https://gateway.example", agentModel: "claude-sonnet-4-6" }))).toBeUndefined();
-    expect((await collected).answers.coreEngine).toEqual({ modelGatewayUrl: "https://gateway.example", agentModel: "claude-sonnet-4-6" });
+    expect(hub.answer(form.id, JSON.stringify(values))).toBeUndefined();
+    expect((await collected).answers.coreEngine).toEqual({ modelGatewayUrl: "", agentModel: "claude-sonnet-4-6" });
   } finally {
     hub.close();
     await collected.catch(() => undefined);

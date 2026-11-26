@@ -46,6 +46,7 @@ jobs:
       worker: ${{ steps.push.outputs.worker }}
       slack: ${{ steps.push.outputs.slack }}
       executor: ${{ steps.push.outputs.executor }}
+      gateway: ${{ steps.push.outputs.gateway }}
     steps:
       # AGENTX_PUBLISH_ROLE_ARN's trust policy only allows this repository's v* tags (by immutable ID),
       # so a workflow_dispatch run must be re-run from the tag ref itself; fail clearly here instead
@@ -119,13 +120,14 @@ jobs:
           PUBLISH_EXECUTOR: ${{ vars.AGENTX_PUBLISH_EXECUTOR_IMAGE }}
         run: |
           VERSION="${VERSION#v}"
-          # The executor goes first: its smoke test can fail, and a pushed tag is immutable, so a failure must stop the job before the worker or slack image is pushed.
-          images="worker slack"
+          # The executor goes first: its smoke test can fail, and a pushed tag is immutable, so a failure must stop the job before the worker, slack or gateway image is pushed.
+          images="worker slack gateway"
           if [ "$PUBLISH_EXECUTOR" = "true" ]; then images="executor $images"; fi
           for image in $images; do
             dockerfile=environments/base/Dockerfile
             [ "$image" = slack ] && dockerfile=environments/slack/Dockerfile
             [ "$image" = executor ] && dockerfile=environments/e2e-executor/Dockerfile
+            [ "$image" = gateway ] && dockerfile=environments/model-gateway/Dockerfile
             repo="public.ecr.aws/$ALIAS/agentx-$image"
             # The worker is a multi-architecture image (DEC 254zm): one index digest whose linux/arm64 image is what every install has always run and
             # whose linux/amd64 image is what the x86 machine sizes pull. The Slack and executor images stay arm64 only.
@@ -195,12 +197,13 @@ jobs:
           WORKER: ${{ needs.images.outputs.worker }}
           SLACK: ${{ needs.images.outputs.slack }}
           EXECUTOR: ${{ needs.images.outputs.executor }}
+          GATEWAY: ${{ needs.images.outputs.gateway }}
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="${VERSION#v}"
           executor_flag=()
           if [ -n "$EXECUTOR" ]; then executor_flag=(--executor-image "$EXECUTOR"); fi
-          npm run release:build -- --version "$VERSION" --out "$RUNNER_TEMP/release" --worker-image "$WORKER" --slack-image "$SLACK" "${executor_flag[@]}"
+          npm run release:build -- --version "$VERSION" --out "$RUNNER_TEMP/release" --worker-image "$WORKER" --slack-image "$SLACK" --gateway-image "$GATEWAY" "${executor_flag[@]}"
           npm run release:verify -- "$RUNNER_TEMP/release"
           (cd "$RUNNER_TEMP/release" && tar -czf "$RUNNER_TEMP/agentx-$VERSION.tar.gz" .)
           gh release create "v$VERSION" --verify-tag --title "Rovara $VERSION" --notes-from-tag "$RUNNER_TEMP/agentx-$VERSION.tar.gz" "$RUNNER_TEMP/release/release.json"

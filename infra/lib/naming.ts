@@ -61,8 +61,8 @@ export interface Ec2WorkerNaming {
 /** The deployment that predates named environments has no access or identity stack. */
 const NO_NAMED_ENVIRONMENTS_MESSAGE = "the access stack exists only for named environments";
 
-/** The legacy deployment predates the identity stack; it has no fixed name for it. */
-export const LEGACY_STACK_NAMES: Record<Exclude<StackPart, "identity" | "access">, string> = {
+/** The legacy deployment predates the identity, access and self-hosted gateway stacks; it has no fixed name for them. */
+export const LEGACY_STACK_NAMES: Record<Exclude<StackPart, "identity" | "access" | "gateway">, string> = {
   foundation: "AgentXProductionFoundation",
   runtime: "AgentXProductionRuntime",
   "control-plane": "AgentXControlPlane",
@@ -76,6 +76,7 @@ export function legacyNaming(): AgentXNaming {
     stackName: (part) => {
       if (part === "identity") throw new Error("the legacy deployment has no identity stack");
       if (part === "access") throw new Error(NO_NAMED_ENVIRONMENTS_MESSAGE);
+      if (part === "gateway") throw new Error("the legacy deployment has no self-hosted gateway stack");
       return LEGACY_STACK_NAMES[part];
     },
     apiName: "agentx-control-plane",

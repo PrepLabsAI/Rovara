@@ -23,6 +23,7 @@
     "infra/lib/port-guard-step.ts": 1,
     "infra/lib/public-api-url.ts": 1,
     "infra/lib/release-pipeline.ts": 9,
+    "infra/lib/self-hosted-gateway.ts": 1,
     "infra/lib/session-lifecycle.ts": 1,
     "infra/lib/slack-company-workspaces.ts": 1,
     "infra/lib/slack-orchestrator.ts": 26,

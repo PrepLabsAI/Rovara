@@ -92,7 +92,21 @@ export const GATEWAY_ENV = {
    * exactly as before. Switch it on only once the Code install's release accepts the optional price field (a Code release without it refuses the whole list).
    */
   offeredPrices: "GATEWAY_OFFERED_PRICES",
+  /** Standalone (self-hosted) budget caps in micro-dollars, used when GATEWAY_COMPANY_TABLE is absent. */
+  defaultCompanyCapMicros: "GATEWAY_DEFAULT_COMPANY_CAP_MICROS",
+  defaultProjectCapMicros: "GATEWAY_DEFAULT_PROJECT_CAP_MICROS",
+  defaultTaskCapMicros: "GATEWAY_DEFAULT_TASK_CAP_MICROS",
+  /** Optional provider key secret ARNs for standalone (self-hosted) installs. Never the keys themselves. */
+  openaiKeySecret: "GATEWAY_OPENAI_KEY_SECRET",
+  openrouterKeySecret: "GATEWAY_OPENROUTER_KEY_SECRET",
+  /** Standalone default AI provider ("bedrock" | "anthropic" | "openai" | "openrouter"). */
+  standaloneProvider: "GATEWAY_STANDALONE_PROVIDER",
+  /** "on" to seed the Prices table on cold start when empty (self-hosted installs). */
+  seedPricesOnStart: "GATEWAY_SEED_PRICES_ON_START",
 } as const;
+/** The values of GATEWAY_ENV.standaloneProvider. */
+export const GATEWAY_STANDALONE_PROVIDERS = ["bedrock", "anthropic", "openai", "openrouter"] as const;
+export type GatewayStandaloneProvider = typeof GATEWAY_STANDALONE_PROVIDERS[number];
 /** The values of GATEWAY_ENV.agentKeys. */
 export const GATEWAY_AGENT_KEY_MODES = ["install", "company"] as const;
 export type GatewayAgentKeyMode = typeof GATEWAY_AGENT_KEY_MODES[number];

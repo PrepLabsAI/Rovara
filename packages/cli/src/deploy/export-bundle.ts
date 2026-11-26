@@ -1,6 +1,5 @@
 import { exportReadinessScript } from "./export-readiness.js";
-import { coreEngineParameters } from "./core-engine-answers.js";
-import { CoreEngineAnswersSchema } from "./core-engine-answers.js";
+import { coreEngineParameters, CoreEngineAnswersSchema, usesBuiltInGateway } from "./core-engine-answers.js";
 // The export bundle: everything a platform team needs to deploy the access stack themselves, with
 // their own AWS credentials and no AWS call ever made by our CLI. It writes a self-contained
 // directory: the access stack's template and parameters, a deploy script that uses Node.js and
@@ -131,7 +130,7 @@ const githubMarker = (field: string): string => `{{github:${field}}}`;
  */
 function markerOutputs(): Partial<Record<DeployPart, StackOutputs>> {
   const outputs: Partial<Record<DeployPart, StackOutputs>> = {};
-  for (const part of ["access", "foundation", "identity", "control-plane", "runtime", "slack"] as const) {
+  for (const part of ["access", "foundation", "identity", "control-plane", "gateway", "runtime", "slack"] as const) {
     outputs[part] = new Proxy<StackOutputs>({}, {
       get: (_target, name) => (typeof name === "string" ? outputMarker(part, name) : undefined),
     });
@@ -152,6 +151,7 @@ function markerAnswers(answers: DeployAnswers, release: LoadedRelease): InstallA
     ...answers,
     release: release.manifest,
     callbackSigningKey: `{{secret:${callbackSigningKeySecretName(answers.env)}}}`,
+    gateway: { ...answers.gateway, taskKeyIds: answers.gateway?.taskKeyIds ?? "{{control-plane:taskKeyIds}}" },
     github: {
       appId: githubMarker("appId"),
       privateKeySecretArn: githubMarker("privateKeySecretArn"),
@@ -776,7 +776,8 @@ export async function writeExportBundle(input: ExportBundleInput): Promise<Expor
   const partition = answers.partition ?? "aws";
 
   assertReleaseCoversRegion(release, region);
-  const core = coreEngineParameters(answers.coreEngine);
+  const includeGateway = usesBuiltInGateway(answers.coreEngine);
+  const core = coreEngineParameters(answers.coreEngine, { allowDeferredGateway: includeGateway });
   await assertClaimable(dir);
   const initAnswers = bundleAnswersFor(answers, release);
 
@@ -796,7 +797,7 @@ export async function writeExportBundle(input: ExportBundleInput): Promise<Expor
       files.push(relativePath);
     }
 
-    const order = installOrder(answers.identity.mode);
+    const order = installOrder(answers.identity.mode, { includeGateway });
     // F24: `parameterAnswers` never carries `developerSignIn` (`markerAnswers` does not set it), so
     // `stackParameters`'s control-plane case adds none of the sign-in parameters here. That is
     // correct, not an oversight: an export bundle is always a fresh install of a brand-new access

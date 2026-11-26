@@ -1,10 +1,10 @@
 import { readDeploymentOutputs } from "./cx-b/stack-outputs.js";
-import { coreEngineParameters } from "./core-engine-answers.js";
+import { coreEngineParameters, usesBuiltInGateway } from "./core-engine-answers.js";
 // The deploy orchestrator: ties a stack deployer engine to install/upgrade order, the environment
 // lock, the callback signing key and environment settings. Phase 15d's `agentx init`/`agentx
 // upgrade` build a StackDeployer (the templates or cdk engine), collect DeployAnswers, and call
 // deployEnvironment; everything else (order, outputs feeding forward, the lock, settings) lives here.
-import { assertBrokerRunPrices, assertGatewayRunPrices, assertBrokerArtifactRunPrices } from "./gateway-price-preflight.js";
+import { assertBrokerRunPrices, assertGatewayRunPrices, assertBrokerArtifactRunPrices, fetchControlPlaneTaskKeyIds, waitForGatewayRunPrices } from "./gateway-price-preflight.js";
 import { agentXError, environmentStackName } from "@agentx/contracts";
 import { PROTECTED_PARTS, type DeployEvent, type DeployRequest, type StackDeployer } from "./deployer.js";
 import { currentLockHolder, withEnvironmentLock } from "../environments/lock.js";
@@ -50,6 +50,10 @@ export interface DeployEnvironmentInput {
    * release does: the cdk engine's synth of its source (issue 152, prepareDeployment). Omitted, they
    * are read from the release's own templates (templateParameterNames), as the templates engine does. */
   declaredParameters?: (part: DeployPart) => ReadonlySet<string>;
+  /** Test seam for reading task-purpose JWKS key IDs from the deployed control plane before deploying the self-hosted gateway. */
+  fetchTaskKeyIds?: (controlPlaneUrl: string) => Promise<string>;
+  /** Test seam for polling the newly deployed self-hosted gateway until /healthz reports runPrice.snapshotVersion >= 1. */
+  waitForGateway?: (origin: string) => Promise<void>;
 }
 
 export interface DeployEnvironmentResult {
@@ -235,11 +239,15 @@ function qualifyReleaseBroker(input: DeployEnvironmentInput): void {
 }
 
 /** Before any secret or stack write, qualify the selected broker, then the effective gateway.
- * Partial upgrades that do not replace the broker must qualify the installed one. */
+ * Partial upgrades that do not replace the broker must qualify the installed one.
+ * When deploying the built-in self-hosted `gateway` stack (empty `coreEngine.modelGatewayUrl`), the
+ * gateway does not exist yet on initial install; it is probed after `gateway` deploys and before
+ * `control-plane` is wired and `runtime` activates workers. */
 export async function assertDeployGatewayReady(input: DeployEnvironmentInput, deploySet: ReadonlySet<DeployPart>, declaredFor: (part: DeployPart) => ReadonlySet<string> | undefined): Promise<Record<string, string>> {
   const stackName = environmentStackName(input.answers.env, "control-plane");
+  const builtIn = usesBuiltInGateway(input.answers.coreEngine);
   const keepInstalled = input.mode === "upgrade" && (input.answers.coreEngine === undefined || !deploySet.has("control-plane"));
-  const computed = keepInstalled ? {} : coreEngineParameters(input.answers.coreEngine);
+  const computed = keepInstalled ? {} : coreEngineParameters(input.answers.coreEngine, { allowDeferredGateway: builtIn });
   const deployed = input.mode === "upgrade" ? await input.deployedParameters?.(stackName) : undefined;
   const kept = keptOperatorParameters({ part: "control-plane", computed, deployed, declared: input.mode === "upgrade" && deploySet.has("control-plane") ? declaredFor("control-plane") : undefined }).kept;
   const effective = { ...kept, ...computed };
@@ -250,7 +258,11 @@ export async function assertDeployGatewayReady(input: DeployEnvironmentInput, de
     assertBrokerRunPrices(await input.deployer.outputs(stackName));
   }
   const host = effective.CoreModelGatewayHost;
-  if (!host || !effective.CoreAgentModel) throw agentXError("CONFIG_INVALID", "coreEngine.modelGatewayUrl and coreEngine.agentModel must both be configured before worker activation; supply coreEngine answers to repair this install");
+  if (!effective.CoreAgentModel) throw agentXError("CONFIG_INVALID", "coreEngine.modelGatewayUrl and coreEngine.agentModel must both be configured before worker activation; supply coreEngine answers to repair this install");
+  if (!host) {
+    if (builtIn && input.mode === "install") return effective;
+    throw agentXError("CONFIG_INVALID", "coreEngine.modelGatewayUrl and coreEngine.agentModel must both be configured before worker activation; supply coreEngine answers to repair this install");
+  }
   await assertGatewayRunPrices(`https://${host}`);
   return effective;
 }
@@ -271,7 +283,8 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
   const declaredFor = (part: DeployPart): ReadonlySet<string> | undefined => (declaredBy === undefined ? templateParameterNames(release, part, env) : declaredBy(part));
   const now = input.now ?? Date.now;
 
-  assertDeployAllowed(await readEnvironmentSettings(store, env), mode, engine, input.parts, env);
+  const existingBeforeLock = await readEnvironmentSettings(store, env);
+  assertDeployAllowed(existingBeforeLock, mode, engine, input.parts, env);
   if (answers.identity.mode === "oidc" && answers.identity.clientId === undefined) {
     throw agentXError("CONFIG_INVALID", "bringing your own OIDC provider requires clientId to write environment settings (needed for agentx login)");
   }
@@ -279,7 +292,12 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
   // read the deployed parameters would reset every operator parameter to its template default.
   // The order and the parts are read once, here, and the deploy loop below uses these same values, so
   // the parts this guard checks are exactly the parts that deploy.
-  const fullOrder = mode === "install" ? installOrder(answers.identity.mode) : upgradeOrder(answers.identity.mode);
+  const includeGateway = mode === "install"
+    ? usesBuiltInGateway(answers.coreEngine)
+    : existingBeforeLock?.stacks.gateway !== undefined;
+  const fullOrder = mode === "install"
+    ? installOrder(answers.identity.mode, { includeGateway })
+    : upgradeOrder(answers.identity.mode, { includeGateway });
   const deploySet = new Set(input.parts ?? fullOrder);
   if (mode === "upgrade" && input.deployedParameters === undefined && [...deploySet].some((part) => OPERATOR_PARAMETERS[part].length > 0)) {
     throw agentXError("CONFIG_INVALID", "an upgrade must read the deployed stacks' parameters to keep what the operator set; this is an AgentX bug, so report it");
@@ -329,10 +347,20 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
 
     await readDeploymentOutputs({ existing, deployer, env, fullOrder, deploySet, outputs });
 
+    let deferredControlPlaneParameters: Record<string, string> | undefined;
+    const fetchTaskKeyIds = input.fetchTaskKeyIds ?? fetchControlPlaneTaskKeyIds;
+    const waitForGateway = input.waitForGateway ?? waitForGatewayRunPrices;
+
     for (const part of fullOrder) {
       if (!deploySet.has(part)) continue;
       const stackName = environmentStackName(env, part);
-      const rawParameters = stackParameters(part, answersWithAddress, outputs, { packages: engine === "templates" });
+      let effectiveAnswers = answersWithAddress;
+      if (part === "gateway") {
+        const controlPlaneUrl = controlPlaneUrlOf(outputs["control-plane"] ?? {}, () => requiredOutput(outputs, "control-plane", "ApiEndpoint", env));
+        const taskKeyIds = effectiveAnswers.gateway?.taskKeyIds ?? await fetchTaskKeyIds(controlPlaneUrl);
+        effectiveAnswers = { ...effectiveAnswers, gateway: { ...effectiveAnswers.gateway, taskKeyIds } };
+      }
+      const rawParameters = stackParameters(part, effectiveAnswers, outputs, { packages: engine === "templates" });
       // F24: only when this deploy is actually sending a stored sign-in choice to the control plane
       // are the declared parameters even consulted (every other deploy never calls `release.template`).
       let parameters = part === "control-plane" && developerSignIn !== undefined
@@ -358,21 +386,52 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
         }
       }
       const roleArn = part === "access" ? undefined : requiredOutput(outputs, "access", "CloudFormationRoleArn", env);
+      const allowDeferredGateway = part === "control-plane" && includeGateway && !parameters.CoreModelGatewayHost;
       const request: DeployRequest = {
         part,
         stackName,
         parameters,
         terminationProtection: PROTECTED_PARTS.has(part),
+        ...(allowDeferredGateway ? { allowDeferredGateway: true } : {}),
         ...(input.onEvent === undefined ? {} : { onEvent: input.onEvent }),
         ...(input.confirm === undefined ? {} : { confirm: input.confirm }),
         ...(roleArn === undefined ? {} : { roleArn }),
       };
-      if (part === "control-plane") gatewayParameters = parameters;
+      if (part === "control-plane") {
+        gatewayParameters = parameters;
+        if (allowDeferredGateway) deferredControlPlaneParameters = parameters;
+      }
       if (part === "runtime") {
         assertBrokerRunPrices(outputs["control-plane"]);
-        await assertGatewayRunPrices(`https://${gatewayParameters.CoreModelGatewayHost}`);
+        const effectiveHost = gatewayParameters.CoreModelGatewayHost ?? outputs.gateway?.GatewayHost;
+        if (!effectiveHost) throw agentXError("CONFIG_INVALID", "coreEngine.modelGatewayUrl and coreEngine.agentModel must both be configured before worker activation");
+        await assertGatewayRunPrices(`https://${effectiveHost}`);
       }
       outputs[part] = await deployer.deploy(request);
+
+      // Break the control-plane <-> gateway cycle (issue #1554): once the self-hosted gateway is
+      // deployed and cold-start prices are seeded (/healthz reports runPrice.snapshotVersion >= 1),
+      // wire its GatewayHost back into control-plane before runtime activates workers.
+      if (part === "gateway") {
+        const gatewayHost = requiredOutput(outputs, "gateway", "GatewayHost", env);
+        await waitForGateway(`https://${gatewayHost}`);
+        if (deferredControlPlaneParameters !== undefined) {
+          const cpStackName = environmentStackName(env, "control-plane");
+          const wiredParameters = { ...deferredControlPlaneParameters, CoreModelGatewayHost: gatewayHost };
+          const cpRoleArn = requiredOutput(outputs, "access", "CloudFormationRoleArn", env);
+          gatewayParameters = wiredParameters;
+          outputs["control-plane"] = await deployer.deploy({
+            part: "control-plane",
+            stackName: cpStackName,
+            parameters: wiredParameters,
+            terminationProtection: PROTECTED_PARTS.has("control-plane"),
+            ...(input.onEvent === undefined ? {} : { onEvent: input.onEvent }),
+            ...(input.confirm === undefined ? {} : { confirm: input.confirm }),
+            roleArn: cpRoleArn,
+          });
+          deferredControlPlaneParameters = undefined;
+        }
+      }
     }
 
     const controlPlaneOutputs = outputs["control-plane"];
@@ -404,6 +463,7 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
         ...(outputs.access === undefined ? {} : { access: environmentStackName(env, "access") }),
         foundation: foundationStack,
         ...(outputs.identity === undefined ? {} : { identity: environmentStackName(env, "identity") }),
+        ...(outputs.gateway === undefined ? {} : { gateway: environmentStackName(env, "gateway") }),
         runtime: runtimeStack,
         "control-plane": controlPlaneStack,
         slack: slackStack,

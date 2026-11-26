@@ -21,6 +21,7 @@ import { BetaDomainStack } from "./beta-domain.js";
 import { BetaReleaseAccessStack } from "./beta-release-access.js";
 import { WorkerSettingsStack } from "./worker-settings.js";
 import { maybeModelGateway } from "./model-gateway-app.js";
+import { SelfHostedModelGatewayStack } from "./self-hosted-gateway.js";
 
 /** The context the App will go on to use, with CDK's own precedence (moved out of buildAgentXApp unchanged, to keep its complexity under the ratchet). */
 function mergedAppContext(context: Record<string, unknown>): Record<string, unknown> {
@@ -143,6 +144,17 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
     new IdentityStack(app, "AgentXIdentity", {
       description: "AgentX Cognito user pool, admin group and CLI app client for a named environment",
       stackName: naming.stackName("identity"),
+      terminationProtection: true,
+      naming,
+      env: { region: deploymentRegion ?? "us-east-1" },
+    });
+  }
+  // The self-hosted Model Gateway runs inside foundation's existing VPC for named environments
+  // (issue #1554). The legacy deployment brings its own external gateway.
+  if (naming.env !== undefined) {
+    new SelfHostedModelGatewayStack(app, "AgentXModelGateway", {
+      description: "Self-hosted Model Gateway for a named environment: ECS Fargate service, DynamoDB meter/prices, internal ALB and HTTPS entry point",
+      stackName: naming.stackName("gateway"),
       terminationProtection: true,
       naming,
       env: { region: deploymentRegion ?? "us-east-1" },

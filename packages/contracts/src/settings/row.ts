@@ -10,7 +10,7 @@ import type { SettingRow } from "./types.js";
 const KEY = /^[a-z][A-Za-z0-9-]*(\.[A-Za-z0-9][A-Za-z0-9-]*)+$/u;
 /** An `agentx config` key is the one name already in people's hands (`workerSandboxEgress` has no dot), so it is held to a looser pattern than a row key. */
 const CONFIG_KEY = /^[a-z][A-Za-z0-9-]*(\.[A-Za-z0-9][A-Za-z0-9-]*)*$/u;
-const PART = z.enum(["access", "foundation", "identity", "runtime", "control-plane", "slack"]);
+const PART = z.enum(["access", "foundation", "identity", "control-plane", "gateway", "runtime", "slack"]);
 
 const SettingLevelSchema = z.strictObject({
   level: z.enum(["install", "company", "project", "person", "repo-file"]),
@@ -150,7 +150,7 @@ export function settingRowProblems(rows: readonly SettingRow[]): string[] {
   for (const install of installs) if (install.packed !== undefined && Object.hasOwn(RESERVED_PACKED_CODES, install.packed.code)) problems.push(`the packed code ${install.packed.code} is reserved: ${RESERVED_PACKED_CODES[install.packed.code]}`);
   report("the packed key", duplicates(installs.flatMap((install) => (install.packed === undefined ? [] : [install.packed.key]))));
   report("the packed order", duplicates(installs.flatMap((install) => (install.packed === undefined ? [] : [install.packed.order]))));
-  for (const part of ["access", "foundation", "identity", "runtime", "control-plane", "slack"]) {
+  for (const part of ["access", "foundation", "identity", "control-plane", "gateway", "runtime", "slack"]) {
     const positions = rows.flatMap((row) => (row.install !== undefined && row.install.kept !== undefined && rowStackParameters(row).some((each) => each.part === part) ? [row.install.kept] : []));
     report(`the kept-on-upgrade position in ${part},`, duplicates(positions));
   }

@@ -27,7 +27,7 @@ beforeAll(() => { named = templates({ agentxEnv: "staging" }); }, 300_000);
 describe("retained resources in a named environment", () => {
   it("covers every stack the installer creates", () => {
     expect(Object.keys(named).sort()).toEqual([
-      "agentx-staging-access", "agentx-staging-control-plane", "agentx-staging-foundation", "agentx-staging-identity", "agentx-staging-runtime", "agentx-staging-slack",
+      "agentx-staging-access", "agentx-staging-control-plane", "agentx-staging-foundation", "agentx-staging-gateway", "agentx-staging-identity", "agentx-staging-runtime", "agentx-staging-slack",
     ]);
   });
 
@@ -50,6 +50,7 @@ describe("retained resources in a named environment", () => {
         "NatEip1 AWS::EC2::EIP", "NatEip2 AWS::EC2::EIP",
         "VpcFlowLogs AWS::Logs::LogGroup", "WorkspaceKey AWS::KMS::Key",
       ],
+      "agentx-staging-gateway": ["Ledger AWS::DynamoDB::Table", "Meter AWS::DynamoDB::Table"],
       "agentx-staging-identity": [],
       "agentx-staging-runtime": [],
       "agentx-staging-slack": [],

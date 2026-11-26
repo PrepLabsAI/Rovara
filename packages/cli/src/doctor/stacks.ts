@@ -1,11 +1,13 @@
 // FR-050: that stacks exist and are healthy, that they run the release the settings name, the engine
 // they were deployed with, and their last drift result.
 import { environmentStackName, type ReleaseManifest } from "@agentx/contracts";
+import { assertGatewayRunPrices } from "../deploy/gateway-price-preflight.js";
 import { installOrder, type DeployPart } from "../deploy/parameters.js";
 import { check, type DoctorCheck, type DoctorContext, type DoctorStack } from "./checks.js";
 
 const HEALTHY = new Set(["CREATE_COMPLETE", "UPDATE_COMPLETE", "IMPORT_COMPLETE"]);
-const IMAGE_PARAMETERS: Partial<Record<DeployPart, { parameter: string; image: "worker" | "slack" }>> = {
+const IMAGE_PARAMETERS: Partial<Record<DeployPart, { parameter: string; image: "worker" | "slack" | "gateway" }>> = {
+  gateway: { parameter: "GatewayImageUri", image: "gateway" },
   runtime: { parameter: "WorkerImageUri", image: "worker" },
   slack: { parameter: "OrchestratorImageUri", image: "slack" },
 };
@@ -50,11 +52,24 @@ export async function stackChecks(context: DoctorContext): Promise<DoctorCheck[]
   const { env, settings, services } = context;
   const described = new Map<DeployPart, { name: string; stack: DoctorStack | undefined }>();
   const checks: DoctorCheck[] = [];
-  for (const part of installOrder(settings.identity.mode)) {
+  for (const part of installOrder(settings.identity.mode, { includeGateway: settings.stacks.gateway !== undefined })) {
     const name = settings.stacks[part] ?? environmentStackName(env, part);
     const stack = await services.stacks.describe(name);
     described.set(part, { name, stack });
     checks.push(stackHealth(env, settings.region, part, name, stack));
+  }
+
+  // Self-hosted Model Gateway health + runPrice readiness check (issue #1554).
+  const gatewayEntry = described.get("gateway");
+  const gatewayUrl = gatewayEntry?.stack?.outputs.GatewayUrl
+    ?? (gatewayEntry?.stack?.outputs.GatewayHost ? `https://${gatewayEntry.stack.outputs.GatewayHost}` : undefined);
+  if (gatewayUrl !== undefined) {
+    try {
+      await assertGatewayRunPrices(gatewayUrl, services.fetch);
+      checks.push(check("stacks", "model gateway", "ok", `${gatewayUrl}/healthz reports runPrice snapshot ready`));
+    } catch {
+      checks.push(check("stacks", "model gateway", "fail", `${gatewayUrl}/healthz is not serving ready run prices`, `check the ${gatewayEntry!.name} ECS service logs and verify Prices snapshot seeding completed`));
+    }
   }
 
   const wrongEngine = [...described.values()].flatMap(({ name, stack }) => {

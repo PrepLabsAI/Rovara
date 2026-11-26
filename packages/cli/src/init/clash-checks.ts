@@ -4,6 +4,7 @@
 // platforms and is free on GitHub. Each is a PrerequisiteCheck for the checklist; nothing is
 // created, and a GitHub that cannot answer is "could not check", never a wrong answer.
 import { environmentStackName } from "@agentx/contracts";
+import { usesBuiltInGateway } from "../deploy/core-engine-answers.js";
 import { installOrder } from "../deploy/parameters.js";
 import type { StackStatusReader } from "./context.js";
 import { githubAppSlug, type GitHubApi } from "./github-app.js";
@@ -28,7 +29,7 @@ export async function clashChecks(input: {
   const checks: PrerequisiteCheck[] = [];
 
   const expected = new Set(input.expectedStacks ?? []);
-  const stacks = installOrder(answers.identity.mode).map((part) => environmentStackName(answers.env, part)).filter((stack) => !expected.has(stack));
+  const stacks = installOrder(answers.identity.mode, { includeGateway: usesBuiltInGateway(answers.coreEngine) }).map((part) => environmentStackName(answers.env, part)).filter((stack) => !expected.has(stack));
   // Fix round 1: a failed stack read (AccessDenied on DescribeStacks) or a failed `installUsed`
   // (an SSM read) must become a failed check like every other clash check here, never escape and
   // abort `checkPrerequisites` part way through (its `extraChecks` call has no try/catch of its
