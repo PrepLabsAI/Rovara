@@ -16,6 +16,9 @@ const DIGESTS: Readonly<Record<string, string>> = {
   // 1.5 (RD-2.0): the task page's reads. The six that were served unlisted (events, plan, people, diff, comments, the proof index) name themselves and carry tolerant response schemas; four new rows (spec, checks, changes, timeline) with schemas and the
   // not-served refusal; the code ROUTE_NOT_SERVED (404), appended; the read rule adds the code TASK_PART_NOT_SHOWN (403), appended, and lists it on the spec, checks and changes rows (digest recomputed: 1.5 is unreleased). Code first: an older client never calls the new rows and ignores a schema it does not read.
   "1.5": "57877feaca923f6f862507a78c1439528eaf78145ef38f0dd3387cf2af4e1fb6",
+  // 1.8 (PROJECT-INCARNATION-FENCE): the archive and restore confirm bodies accept the optional `expectedProjectIncarnation` the preview carries. Those two rows carry no schema in ROUTES, so the digest is the same as 1.5's; the number is how Cloud
+  // learns (from the discovery document's apiVersion) that Code accepts the field, and sends it only then. Code first: an older Code's strict body would refuse a Cloud that sends it. 1.6 and 1.7 are taken by lanes still in flight.
+  "1.8": "57877feaca923f6f862507a78c1439528eaf78145ef38f0dd3387cf2af4e1fb6",
 };
 
 const schemaOf = (schema: z.ZodType | undefined) => (schema === undefined ? null : z.toJSONSchema(schema));

@@ -7,7 +7,7 @@ import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-c
 import { companyMembershipFromDynamo } from "../../packages/broker/src/aws/company-check.js";
 import { namedCompany, revisionKeyFor } from "../../packages/broker/src/aws/company-layout.js";
 import { routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
-import { ARCHIVE_NOT_ON_ENGINE, LIFECYCLE_BODY, LIFECYCLE_NOT_ALLOWED, LIFECYCLE_STALE, LIFECYCLE_UNREADABLE, lifecycleAccess, lifecycleAuditPrefix, lifecycleRequestKey, routeProjectLifecycle } from "../../packages/broker/src/aws/project-lifecycle-routes.js";
+import { ARCHIVE_NOT_ON_ENGINE, LIFECYCLE_BODY, LIFECYCLE_INCARNATION_CHANGED, LIFECYCLE_NOT_ALLOWED, LIFECYCLE_STALE, LIFECYCLE_UNREADABLE, lifecycleAccess, lifecycleAuditPrefix, lifecycleRequestKey, routeProjectLifecycle } from "../../packages/broker/src/aws/project-lifecycle-routes.js";
 import { createStoreProjectSource } from "../../packages/broker/src/core/task-flow/project-source.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { definition } from "../support/task-flow-harness.js";
@@ -281,4 +281,37 @@ describe("archiving and restoring", () => {
     }
   });
 
+});
+
+describe("the incarnation the preview showed, named by the confirm (PROJECT-INCARNATION-FENCE)", () => {
+  const withIncarnation = (incarnation: number) => {
+    const h = harness(); h.join(ADA, A, "owner"); h.project("alpha", A);
+    h.db.set({ ...projectMetaKey(A, "alpha"), entityType: "PROJECT_META", companyId: A, project: "alpha", status: "active", incarnationRevision: incarnation });
+    return h;
+  };
+  it("accepts the previewed incarnation over the wire, answers 409 with the stable sentence when the project is not that one, and changes nothing", async () => {
+    const h = withIncarnation(4);
+    const previewed = (await h.call("GET", P("archive-preview"))).body["expectedProjectIncarnation"];
+    expect(previewed).toBe(4);
+    h.db.set({ ...projectMetaKey(A, "alpha"), entityType: "PROJECT_META", companyId: A, project: "alpha", status: "active", incarnationRevision: 5 });
+    expect(await h.call("POST", P("archive"), archiveBody({ expectedProjectIncarnation: previewed }))).toEqual({ status: 409, body: error("CHANGE_STALE", LIFECYCLE_INCARNATION_CHANGED) });
+    expect(h.meta(A)).toMatchObject({ status: "active", incarnationRevision: 5 });
+    expect(h.db.find((item) => String(item.pk).includes("PROJECT_LIFECYCLE#") && (String(item.sk).startsWith("REQUEST#") || String(item.sk).startsWith(lifecycleAuditPrefix)))).toEqual([]);
+    expect(await h.call("POST", P("archive"), archiveBody({ expectedProjectIncarnation: 5 }))).toMatchObject({ status: 200, body: { receipt: { status: "archived" } } });
+    expect(h.meta(A)).toMatchObject({ status: "archived", incarnationRevision: 5 });
+  });
+  it("restore: the same over the wire; a confirm that names none still works", async () => {
+    const h = withIncarnation(4);
+    expect((await h.call("POST", P("archive"), archiveBody())).status).toBe(200);
+    expect(await h.call("POST", P("restore"), restoreBody({ expectedProjectIncarnation: 3 }))).toEqual({ status: 409, body: error("CHANGE_STALE", LIFECYCLE_INCARNATION_CHANGED) });
+    expect(h.meta(A)).toMatchObject({ status: "archived" });
+    expect(await h.call("POST", P("restore"), restoreBody({ expectedProjectIncarnation: 4 }))).toMatchObject({ status: 200, body: { receipt: { status: "active" } } });
+  });
+  it("still refuses a body with an unknown member, and one whose incarnation is not a positive whole number", async () => {
+    const h = withIncarnation(4);
+    for (const bad of [{ somethingElse: 1 }, { expectedProjectIncarnation: 0 }, { expectedProjectIncarnation: "4" }]) {
+      expect(await h.call("POST", P("archive"), archiveBody(bad))).toEqual({ status: 400, body: error("CONFIG_INVALID", LIFECYCLE_BODY) });
+    }
+    expect(h.meta(A)).toMatchObject({ status: "active" });
+  });
 });

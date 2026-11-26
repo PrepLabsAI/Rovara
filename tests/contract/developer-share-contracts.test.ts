@@ -106,6 +106,6 @@ describe("records and codes", () => {
     // errorStatus answers 409 for any code it does not list, so pin the code's membership too.
     expect(AgentXErrorCodeSchema.options).toContain("CHANNEL_AMBIGUOUS");
     expect(agentXError("CHANNEL_AMBIGUOUS", "name one").statusCode).toBe(409);
-    expect(DEVELOPER_API_VERSION).toBe("1.5");
+    expect(DEVELOPER_API_VERSION).toBe("1.8");
   });
 });
