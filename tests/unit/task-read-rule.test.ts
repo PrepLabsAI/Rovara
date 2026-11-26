@@ -320,6 +320,8 @@ describe("the one read rule: what the decision carries", () => {
     expect(await post("shared reader"), "the stored share").toEqual({ status: 409, code: "IDEMPOTENCY_CONFLICT" });
     expect(await post("admin and shared"), "the stored share, a company admin").toEqual({ status: 409, code: "IDEMPOTENCY_CONFLICT" });
     for (const name of ["stranger", "left the project", "unknown role", "company admin", "project member", "other company"] as const) expect(await post(name), name).toEqual({ status: 404, code: "TASK_NOT_FOUND" });
+    // A People-list viewer READS the comments (the page rule admits them, mode "page") but may not WRITE one: only a decision of mode "shared" (the stored share) turns the People rule's refusal into the commenter role.
+    expect(await post("viewer"), "a People viewer").toEqual({ status: 404, code: "TASK_NOT_FOUND" });
   });
 
   it("each Slack share cell is its own: one cell withheld refuses that read for the channel share alone (the one-line change of a later answer)", async () => {
