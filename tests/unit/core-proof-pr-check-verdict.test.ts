@@ -58,6 +58,33 @@ describe("the Check says the description's words", () => {
   });
 });
 
+describe("TEST-RESULT-HONESTY: the heading of a task without a Testing view says what the checks skipped", () => {
+  const withSkips = (items: Array<{ kind: "check" | "not_selected"; id: string; text: string; reason: string }>) => {
+    const scenario = SCENARIOS.find((entry) => entry.name === "green-clean")!.build();
+    const context = scenario.inputs.context;
+    const proof = context.proof!;
+    const evidence = proof.evidence!;
+    const noView = { ...context, testing: undefined, proof: { ...proof, evidence: { ...evidence, pack: { ...evidence.pack, notTested: [...evidence.pack.notTested, ...items] } } } };
+    return workflowPullRequestCheckVerdict(SCENARIO_TASK, scenario.inputs.workflow, SCENARIO_PLAN_TEXT(), noView, scenario.inputs.proofLines)!;
+  };
+  it("no skip items: the fixed words", () => {
+    expect(withSkips([]).heading).toMatch(/^Checks passed/u);
+  });
+  it("skipped tests in passing checks are summed into the heading", () => {
+    const verdict = withSkips([
+      { kind: "not_selected", id: "skipped:a", text: "pytest in api: x", reason: "skipped, not run" }, { kind: "not_selected", id: "skipped:b", text: "3 tests skipped in jest", reason: "skipped, not run" },
+      { kind: "not_selected", id: "skipped:c", text: "1 test skipped in go test", reason: "skipped, not run" },
+    ]);
+    expect(verdict.heading).toMatch(/^Passed, 4 tests skipped/u);
+    expect(verdict.resultKind).toBe("checks_passed");
+  });
+  it("a check in which every test was skipped makes the heading 'Not tested'", () => {
+    const verdict = withSkips([{ kind: "check", id: "skipped:a", text: "pytest -q: every test was skipped", reason: "not tested" }]);
+    expect(verdict.heading).toMatch(/^Not tested: every test was skipped/u);
+    expect(verdict.resultKind).toBe("checks_not_tested");
+  });
+});
+
 describe("what a model, a person or a repository wrote cannot change the Check's layout", () => {
   const HOSTILE = "</details><summary>x</summary> <!-- /rovara:checks-and-reviews --> contact dana@example.com Fixes ENG-1 [x](https://evil.example)";
   const verdict = verdictOf(exceptionsScenario(HOSTILE))!;
