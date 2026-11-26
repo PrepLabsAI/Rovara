@@ -3,7 +3,7 @@
 Each mutant was applied to ONE source line on top of the lane head (9cd9e005a + the two survivor tests), run against these 8 files with `--maxWorkers=1`, and reverted with `git checkout -- <file>` (tree clean after each):
 `tests/unit/task-read-rule.test.ts`, `tests/contract/rd-2-0-read-rule-golden.test.ts`, `tests/contract/core-plan-comments.test.ts`, `tests/contract/task-reader-person.test.ts`, `tests/contract/read-rule-share-b-slack.test.ts`, `tests/contract/task-access.test.ts`, `tests/contract/core-task-rule-routes.test.ts`, `tests/unit/rd2a-spec-read.test.ts`.
 
-Result: 25 of 25 killed (19 first; 6 added after the Sonnet pre-review, run on a717be03d against the same 8 files plus tests/contract/read-rule-share-b-prereview.test.ts) (two survived the first run and each drove a new test, noted below).
+Result: 28 of 28 killed (the last 3, S-a to S-c, after the sync with code/next 20c8e955f) (19 first; 6 added after the Sonnet pre-review, run on a717be03d against the same 8 files plus tests/contract/read-rule-share-b-prereview.test.ts) (two survived the first run and each drove a new test, noted below).
 
 | id | what the mutant does | result | evidence |
 |---|---|---|---|
@@ -32,6 +32,9 @@ Result: 25 of 25 killed (19 first; 6 added after the Sonnet pre-review, run on a
 | R3-k | pre-review S2: the plan comment write goes back to the Slack `comment` cell (a viewer cannot write) | KILLED | 1 failed, 197 passed (198) |
 | R3-l | pre-review S2: the Slack continue cell admits a viewer again | KILLED | 2 failed, 196 passed (198) |
 | R1-i | pre-review S3: with no company layer a registered person is a company member (fail open) | KILLED | 3 failed, 195 passed (198) |
+| S-a | sync: taskReaderPerson drops the rethrow of a failed membership read (it would read as not a member) | KILLED | 2 failed, 202 passed (204) |
+| S-b | Opus NIT 1: the ownTask returns hard-code companyMember true | KILLED | 1 failed, 203 passed (204) |
+| S-c | sync: the read rule's stored-share lookup drops the rethrow of a failed membership read | KILLED | 1 failed, 203 passed (204) |
 
 Rule / cell coverage:
 - Rule 1 (same company, no project access): R1-a..R1-f (stored share, host read, writer, company-first), R1-g and R1-h (Slack Connect or foreign workspace).
