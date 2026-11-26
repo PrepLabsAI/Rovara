@@ -329,22 +329,25 @@ function tokenIdOf(raw: string): string {
   try { return decodeURIComponent(raw); } catch { throw agentXError("NOT_FOUND", "route not found"); }
 }
 
+const GET_ONLY_PATHS: readonly RegExp[] = [TASK_READ, TASK_EVIDENCE, PLAYBOOK, TEST_ENVIRONMENT, SAVED_ENV_IMAGE];
+const POST_ONLY_PATHS: readonly RegExp[] = [START_ESTIMATES, TASK_ANSWERS, TEST_ENVIRONMENT_APPROVE, TASK_ACTION, TASK_CANCEL, TASK_PAGE_FINDINGS];
+const HOSTED_ROUTE_MATCHERS: ReadonlyArray<(path: string, method: string) => boolean> = [
+  isHostedMergePath, isSetupRunPath, isSetupCheckPath, isWikiMapPath, isReportPath, isKnownFailingPath,
+  isWikiPath, isWikiCorrectionPath, isWikiBuildPath, isAnswersPath, isStartSuggestPath, isUpkeepPath,
+  isEvalCheckPath, isBrowserTestingPath, isAgentDirectoryPath, isSystemRunsPath, isPackageRegistriesPath,
+  isTicketUpdatesPath, isIntakePath, isPrFeedbackPath,
+];
+
 /** Only the methods the core's handlers serve: anything else under these paths stays the old broker's (a playbook PUT is its editor's). */
 function owns(path: string, method: string, query: string): boolean {
   // The ordinary list (`GET /v1/dev/tasks`) is the old broker's; only `?involved=1` (exactly) is the core's: the tasks the caller was added to.
   if (path === TASK_START) return method === "POST" || (method === "GET" && wantsInvolved(new URLSearchParams(query)));
-  if (START_ESTIMATES.test(path)) return method === "POST";
-  if (TASK_ANSWERS.test(path)) return method === "POST";
-  if (TASK_READ.test(path) || TASK_EVIDENCE.test(path) || PLAYBOOK.test(path) || TEST_ENVIRONMENT.test(path) || SAVED_ENV_IMAGE.test(path)) return method === "GET";
-  if (TEST_ENVIRONMENT_APPROVE.test(path)) return method === "POST";
-  if (TASK_ACTION.test(path) || TASK_CANCEL.test(path) || TASK_PAGE_FINDINGS.test(path)) return method === "POST";
-  if (isHostedMergePath(path, method)) return true;
-  if (coreTaskRuleOf(path, method) !== undefined) return true;
+  if (POST_ONLY_PATHS.some((pattern) => pattern.test(path))) return method === "POST";
+  if (GET_ONLY_PATHS.some((pattern) => pattern.test(path))) return method === "GET";
   if (INBOX_PATH.test(path)) return inboxOwns(path, method);
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
-  if (isSetupRunPath(path, method) || isSetupCheckPath(path, method) || isWikiMapPath(path, method) || isReportPath(path, method)) return true;
-  if (isKnownFailingPath(path, method) || isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method) || isAnswersPath(path, method) || isStartSuggestPath(path, method) || isUpkeepPath(path, method) || isEvalCheckPath(path, method) || isBrowserTestingPath(path, method) || isAgentDirectoryPath(path, method) || isSystemRunsPath(path, method) || isPackageRegistriesPath(path, method) || isTicketUpdatesPath(path, method) || isIntakePath(path, method)) return true;
-  return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path) || parityTaskRoute(path, method) !== undefined || isPrFeedbackPath(path, method) || taskScreenRoute(path, method) !== undefined || taskEvidenceFileRoute(path, method) !== undefined;
+  if (HOSTED_ROUTE_MATCHERS.some((matches) => matches(path, method))) return true;
+  return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path) || coreTaskRuleOf(path, method) !== undefined || parityTaskRoute(path, method) !== undefined || taskScreenRoute(path, method) !== undefined || taskEvidenceFileRoute(path, method) !== undefined;
 }
 /** Neither decisions surface relies on sign-in time or methods (DEC 254zzz73). */
 function decisionCallerOf(caller: DeployedCaller, companyId: string): DeployedDecisionCaller {
@@ -633,6 +636,488 @@ function taskSurfaceAnswer(target: Mounted, request: BrokerRequest, taskCaller: 
   }, parity, request);
 }
 
+const UNMATCHED = Symbol("unmatched");
+type RouteOutcome = BrokerResponse | undefined | typeof UNMATCHED;
+
+interface RouteContext {
+  request: BrokerRequest;
+  path: string;
+  caller: DeployedCaller;
+  membership: CompanyMembership;
+  companyId: string;
+  target: Mounted;
+  taskCaller: TaskCaller;
+  log?: ((entry: Record<string, unknown>) => void) | undefined;
+}
+
+type RouteHandler = (ctx: RouteContext) => Promise<RouteOutcome>;
+
+function requireWired<T>(value: T | undefined): T {
+  if (value === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+  return value;
+}
+
+function isValidMembership(membership: CompanyMembership | undefined): membership is CompanyMembership {
+  return membership !== undefined && membership !== null && typeof membership === "object"
+    && typeof membership.companyId === "string" && ORG_ID.test(membership.companyId)
+    && OrgRoleSchema.safeParse(membership.role).success;
+}
+
+type MembershipResolution =
+  | { kind: "ok"; membership: CompanyMembership }
+  | { kind: "passthrough" }
+  | { kind: "response"; response: BrokerResponse };
+
+async function resolveCallerMembership(
+  options: CoreDevRoutesOptions,
+  caller: DeployedCaller,
+  path: string,
+  method: string,
+): Promise<MembershipResolution> {
+  const starting = path === TASK_START && method === "POST";
+  let membership: CompanyMembership | undefined;
+  try {
+    membership = await options.companyOf(caller);
+  } catch {
+    // The involved list says "nothing" only when it is sure: a membership that could not be read is a fixed outage answer, never an empty list.
+    // A membership read that FAILED (any route, not only the involved list) is the retryable 503 (membership-read.ts), never the sign-in refusal or a missing task.
+    return { kind: "response", response: errorAnswer(agentXError("RUNTIME_UNAVAILABLE", path === TASK_START && method === "GET" ? INVOLVED_UNAVAILABLE : MEMBERSHIP_READ_FAILED_WORDS)) };
+  }
+  // A start by a person with no member company is no core company's: the old broker starts it, as before. (Every other route refuses below.)
+  if (starting && (membership === undefined || membership === null)) return { kind: "passthrough" };
+  // Fail closed: no member company, a malformed one, an unknown role, or a principal of another company is a sign-in refusal, never the install's company.
+  if (!isValidMembership(membership) || caller.principal.companyId !== membership.companyId) return { kind: "response", response: unauthenticated() };
+  return { kind: "ok", membership };
+}
+
+function isScriptTokenHiddenTaskRoute(path: string, method: string): boolean {
+  return TASK_ANSWERS.test(path) || feedbackOrParity(path, method) || TASK_ACTION.test(path)
+    || TASK_CANCEL.test(path) || TASK_PAGE_FINDINGS.test(path) || isHostedMergePath(path, method)
+    || taskEvidenceFileRoute(path, method) !== undefined || coreTaskRuleOf(path, method) !== undefined;
+}
+
+function scriptTokenPreCheck(caller: DeployedCaller, path: string, method: string): BrokerResponse | undefined {
+  if (caller.scriptToken === undefined) return undefined;
+  // Answering the agent or acting on a task is never a script token's, and its answer must not tell a token which task ids exist: it reads like a missing task (the boundary's own answer).
+  if (isScriptTokenHiddenTaskRoute(path, method)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
+  // A task's proof index is refused to a script token too, but only AFTER the task is looked up: refusing it here, by path alone, told another company's token that the id is a real task (403) where an
+  // id with no task reads as a missing task (404). Every other path left here names no task id.
+  if (!TASK_READ.test(path) && !TASK_EVIDENCE.test(path) && scriptTokenRoute(method, path)?.permission !== "wiki") {
+    return errorAnswer(agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS));
+  }
+  return undefined;
+}
+
+async function handleInboxOrSessionRoute(ctx: RouteContext): Promise<RouteOutcome> {
+  if (INBOX_PATH.test(ctx.path)) return await inboxAnswer(ctx.target.inbox, ctx.request, ctx.taskCaller);
+  if (SESSIONS.test(ctx.path)) return await sessionAnswer(ctx.target, ctx.request, ctx.taskCaller, ctx.path);
+  return UNMATCHED;
+}
+
+async function handleTaskRead(ctx: RouteContext, taskId: string): Promise<BrokerResponse | undefined> {
+  if (ctx.request.method !== "GET") return undefined;
+  // Another company's task, or none, answers the same "not found" (the rule checks the company first). A person's own read also lets the People list's commenters and viewers read it (C6, the same
+  // live rule) and someone the owner shared the task with (spec 067); a script token reads exactly as before (its own closed list), never through People.
+  const { task: record } = await decideRead(ctx.target, ctx.caller, ctx.membership.role, { read: "task", taskId });
+  await observeHostedBlockedTask(ctx.target.runtime.flow.deps, record, ctx.target.wiring.testEnvironment?.env);
+  const testing = await hostedTestingView(ctx.target.runtime.flow.deps, ctx.target.blobs, record, ctx.target.wiring.testEnvironment?.env);
+  const view = await taskViewFor(ctx.target, record, ctx.caller, ctx.membership);
+  return json(200, { task: { ...view, ...(testing === undefined ? {} : { testing }), ...await applicationReadProjection(ctx.target.runtime, record, ctx.caller.principal.personId) } });
+}
+
+async function handleTaskEvidence(ctx: RouteContext, taskId: string): Promise<BrokerResponse> {
+  // Exactly the task read's rule (the flow's owned read: the company, then the company's access rule; another company's task, or none, answers the same "not found"), then the pack kept for
+  // exactly the task's current code, as the proof page reads it. A pack that is missing or cannot be read leaves only what Rovara recorded itself.
+  const { task: record } = await decideRead(ctx.target, ctx.caller, ctx.membership.role, { read: "evidence", taskId });
+  // Only now: someone who may not read the task has been told it is missing; the task's own owner's script token is told what a script token cannot do.
+  if (ctx.caller.scriptToken !== undefined && scriptTokenRoute(ctx.request.method, ctx.path)?.permission !== "wiki") throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
+  // The pack is read through the company-bound store (the key must name a workspace of this company and its owner), not the shared bucket as it is.
+  const pack = await loadEvidencePack(hostedEvidenceBlobs({ blobs: ctx.target.blobs, store: ctx.target.runtime.flow.deps.store, companyId: ctx.target.runtime.companyId }), { ownerKey: record.ownerKey, workspaceId: record.workspaceId, taskId: record.taskId }, record.workflow?.candidate?.digest);
+  return json(200, proofIndexOf(record.taskId, record.workflow, pack));
+}
+
+async function handleTaskReadAndStartRoute(ctx: RouteContext): Promise<RouteOutcome> {
+  if (ctx.path === TASK_START && ctx.request.method === "GET") {
+    // The involved list: the caller's own rows in this company, each re-checked against the live task access (the core's task read rule). Another company's task is never listed.
+    return json(200, await listInvolvedTasks(ctx.target.runtime.flow.deps, ctx.taskCaller, involvedListOptions(new URLSearchParams(ctx.request.path.split("?")[1] ?? ""))));
+  }
+  if (ctx.path === TASK_START && ctx.request.method === "POST") {
+    // The core's own start (it parses the request, checks the person may start on the project, holds the admission and writes the core mark in one transaction). A retry with the
+    // same request id answers the first task. The answer is the developer task view, as the old start's.
+    const started = await ctx.target.runtime.flow.start({ ...ctx.taskCaller, origin: ctx.caller.client === undefined ? "cli" : "app" }, bodyOf(ctx.request));
+    const record = await loadOwnedTask(ctx.target.runtime.flow.deps, ctx.taskCaller, started.task.taskId);
+    return json(200, { task: await taskViewFor(ctx.target, record, ctx.caller, ctx.membership) });
+  }
+  const task = TASK_READ.exec(ctx.path);
+  if (task !== null) return await handleTaskRead(ctx, task[1]!);
+  const taskSurface = taskSurfaceAnswer(ctx.target, ctx.request, ctx.taskCaller, ctx.caller, ctx.membership);
+  if (taskSurface !== undefined) return await taskSurface;
+  const evidence = TASK_EVIDENCE.exec(ctx.path);
+  if (evidence !== null) return await handleTaskEvidence(ctx, evidence[1]!);
+  return UNMATCHED;
+}
+
+async function handleTaskCancel(ctx: RouteContext, taskId: string): Promise<BrokerResponse | undefined> {
+  // Served only with the company's owner rule (never Code's laptop rule on a hosted company); without it the engine boundary says "not on the core yet" to a reader, and a missing task to anyone else.
+  if (ctx.target.runtime.flow.deps.access.ownerActing === undefined) return undefined;
+  // The task's owner, or a live owner or admin of the task's company (the role is membership's, read for this request; the task's company is checked against it). Anyone who may not
+  // read the task gets the missing task's answer whatever they sent; a reader who may not stop gets fixed words. One request id is one stop.
+  const stopped = await stopTaskOnRequest(ctx.target.runtime.flow.deps, { ...ctx.taskCaller, companyRole: ctx.membership.role }, taskId, () => jsonBodyOf(ctx.request));
+  return json(200, { task: await taskViewFor(ctx.target, stopped.task, ctx.caller, ctx.membership) });
+}
+
+async function handleTaskAction(ctx: RouteContext, taskId: string, actionName: string): Promise<BrokerResponse | undefined> {
+  // Not wired here: the caller of these routes (the engine boundary) tells a person who may read the task that it is not on the core yet, and anyone else that there is no such task.
+  if (ctx.target.actions === undefined) return undefined;
+  // The task is read first, so someone who may not see it reads "no such task" whatever they sent (a body the move refuses would otherwise tell them the task exists).
+  await loadOwnedTask(ctx.target.runtime.flow.deps, ctx.taskCaller, taskId);
+  // The body as JSON, judged by the move's own schema (its words name the field), as the old workflow routes do.
+  const body = jsonBodyOf(ctx.request);
+  // Each move re-checks who acts (owner or co-owner, else "no such task"), the revision they saw, and the round's money, and writes nothing on a refusal.
+  const publication = await performTaskAction(ctx.target, ctx.taskCaller, taskId, actionName, body);
+  return await committedResponse(async () => {
+    const record = await loadOwnedTask(ctx.target.runtime.flow.deps, ctx.taskCaller, taskId);
+    return json(200, { ...publicationAnswer(publication), task: await taskViewFor(ctx.target, record, ctx.caller, ctx.membership) });
+  });
+}
+
+async function handleTaskRule(ctx: RouteContext, taskId: string): Promise<BrokerResponse | undefined> {
+  // Not wired here: the engine boundary tells a person who may read the task that it is not on the core yet, and anyone else that there is no such task.
+  if (ctx.target.wiring.taskRules === undefined) return undefined;
+  // The task, from the caller's OWN company (membership's): another company's task, or none, reads "no such task" before any rule is asked.
+  const record = await readTask(ctx.target.runtime.flow.deps, taskId);
+  if (record === undefined || record.companyId !== ctx.companyId) throw agentXError("TASK_NOT_FOUND", `no task ${taskId} of yours`);
+  return await ctx.target.wiring.taskRules.route({
+    request: ctx.request, path: ctx.path, person: { developerId: ctx.caller.principal.personId, name: ctx.caller.principal.displayName }, companyId: ctx.target.runtime.companyId,
+    task: record, store: ctx.target.runtime.flow.deps.store,
+    authorize: (read, seams) => decideRead(ctx.target, ctx.caller, ctx.membership.role, { read, task: record, ...(seams === undefined ? {} : { seams }) }),
+  });
+}
+
+async function handleTaskPageFindings(ctx: RouteContext, taskId: string): Promise<BrokerResponse> {
+  // The web page's own act: anyone else (the CLI's token, an AI tool's, another full-access client) is refused before anything is read, whatever they sent.
+  if (ctx.caller.webApp !== true) throw agentXError("FORBIDDEN", SECURITY_ACCEPT_ON_THE_PAGE);
+  // Served only with the owner moves' own wiring (the money cap and the company's owner rule); otherwise fixed words, the same for every task id.
+  const actions = requireWired(ctx.target.actions);
+  // The task's owner (or a People co-owner) only: anyone else, another company's task, or none, reads "no such task" whatever they sent.
+  await loadOwnedTask(ctx.target.runtime.flow.deps, ctx.taskCaller, taskId);
+  const body = jsonBodyOf(ctx.request);
+  // The move re-checks the owner, the revision and digest they saw, and the round's money, then the security-accept rule (the web app's client, `via: "page"`); a refusal writes nothing.
+  await actions.resolveFindings({ ...ctx.taskCaller, webApp: true }, taskId, body, "page");
+  return await committedResponse(async () => {
+    const record = await loadOwnedTask(ctx.target.runtime.flow.deps, ctx.taskCaller, taskId);
+    return json(200, { task: await taskViewFor(ctx.target, record, ctx.caller, ctx.membership) });
+  });
+}
+
+function handleHostedMerge(ctx: RouteContext): Promise<BrokerResponse> {
+  // DEC 254zzz94: the Merge button (hosted-merge-routes.ts holds every rule: the website only for a press, who may merge, Rovara's checks and GitHub's mergeable state, one merge at a time, audit).
+  const audit = auditOf(ctx.target, ctx.caller);
+  return routeHostedMerge({
+    request: ctx.request, path: ctx.path, principal: ctx.caller.principal, companyId: ctx.target.runtime.companyId, role: ctx.membership.role, flow: ctx.target.runtime.flow.deps, wiring: ctx.target.wiring.merge, audit,
+    now: () => nowOf(ctx.target), webApp: ctx.caller.webApp === true, ...(ctx.log === undefined ? {} : { log: ctx.log }),
+  });
+}
+
+async function handleTaskAnswers(ctx: RouteContext, taskId: string): Promise<BrokerResponse | undefined> {
+  // Served only with the company's owner rule (never Code's laptop rule on a hosted company); without it the engine boundary says "not on the core yet" to a reader, and a missing task to anyone else.
+  if (ctx.target.runtime.flow.deps.access.ownerActing === undefined) return undefined;
+  // Only the task's owner (People owners count; a company admin who is not one does not). Anyone who may not read the task gets the missing task's answer whatever they sent; a
+  // reader who is not its owner gets fixed words. One request id is one answer, and the round asked is checked.
+  const answered = await answerTaskOnRequest(ctx.target.runtime.flow.deps, ctx.taskCaller, taskId, () => jsonBodyOf(ctx.request));
+  return json(200, { task: await taskViewFor(ctx.target, answered.task, ctx.caller, ctx.membership) });
+}
+
+async function handleTaskControlRoute(ctx: RouteContext): Promise<RouteOutcome> {
+  const cancel = TASK_CANCEL.exec(ctx.path);
+  if (cancel !== null) return await handleTaskCancel(ctx, cancel[1]!);
+  const action = TASK_ACTION.exec(ctx.path);
+  if (action !== null) return await handleTaskAction(ctx, action[1]!, action[2]!);
+  const rule = coreTaskRuleOf(ctx.path, ctx.request.method);
+  if (rule !== undefined) return await handleTaskRule(ctx, rule.taskId);
+  const pageFindings = TASK_PAGE_FINDINGS.exec(ctx.path);
+  if (pageFindings !== null) return await handleTaskPageFindings(ctx, pageFindings[1]!);
+  if (isHostedMergePath(ctx.path, ctx.request.method)) return await handleHostedMerge(ctx);
+  const answers = TASK_ANSWERS.exec(ctx.path);
+  if (answers !== null) return await handleTaskAnswers(ctx, answers[1]!);
+  return UNMATCHED;
+}
+
+async function handleDecisionRoute(ctx: RouteContext): Promise<BrokerResponse> {
+  const decisions = requireWired(ctx.target.wiring.decisions);
+  const body = ctx.request.method === "GET" ? {} : bodyOf(ctx.request);
+  const url = new URL(ctx.request.path, "http://core");
+  const decisionCaller = decisionCallerOf(ctx.caller, ctx.companyId);
+  const reply = await routeDecisionCards(decisions, decisionCaller, { method: ctx.request.method, pathname: ctx.path, searchParams: url.searchParams, body });
+  if (reply === undefined) throw agentXError("NOT_FOUND", "route not found");
+  return json(reply.statusCode, reply.body);
+}
+
+async function handleDecisionsAndModelsRoute(ctx: RouteContext): Promise<RouteOutcome> {
+  if (DECISIONS.test(ctx.path)) return await handleDecisionRoute(ctx);
+  if (ctx.path === AGENT_MODELS_PATH) {
+    const choice = requireWired(ctx.target.wiring.modelChoice);
+    return await agentModelRoute({
+      method: ctx.request.method, body: ctx.request.body, principal: ctx.caller.principal, role: ctx.membership.role, choice,
+      audit: ctx.target.wiring.auditFor === undefined ? undefined : ctx.target.wiring.auditFor(ctx.caller, ctx.target.runtime.flow.deps.audit),
+    });
+  }
+  return UNMATCHED;
+}
+
+async function assertScriptTokenWikiAccess(ctx: RouteContext): Promise<void> {
+  if (ctx.caller.scriptToken === undefined) return;
+  // Re-read scope in the live member company's store: a verified token id alone grants no wiki access.
+  const route = scriptTokenRoute(ctx.request.method, ctx.path);
+  const token = await readScriptToken({ store: ctx.target.runtime.flow.deps.store }, ctx.companyId, ctx.caller.scriptToken.tokenId);
+  const tokensWiring = ctx.target.wiring.scriptTokens;
+  if (tokensWiring === undefined || !(tokensWiring.enabled ?? scriptTokensEnabled)()) throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
+  if (route?.permission !== "wiki" || route.project !== "path") throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
+  if (token === undefined || scriptTokenStatus(token, nowOf(ctx.target)) !== "active") throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
+  const matchesPerson = token.personId === undefined || token.personId === ctx.caller.principal.personId;
+  if (!matchesPerson || token.developerId !== developerIdOf(ctx.caller.principal) || token.createdRole !== ctx.membership.role) throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
+  if (!token.permissions.includes("wiki") || !token.projects.includes(route.name)) throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
+}
+
+async function handleSetupAndWikiRoute(ctx: RouteContext): Promise<RouteOutcome> {
+  if (isSetupRunPath(ctx.path, ctx.request.method) || isSetupCheckPath(ctx.path, ctx.request.method)) {
+    // Guided onboarding L2-3: the company's own runtime, the caller's live standing on the project (read inside), the request's audit sink naming the caller.
+    const wiring = requireWired(ctx.target.wiring.setupRun);
+    return await (isSetupCheckPath(ctx.path, ctx.request.method) ? routeHostedSetupCheck : routeHostedSetupRun)({
+      request: ctx.request, path: ctx.path, principal: ctx.caller.principal, client: ctx.caller.client, webApp: ctx.caller.webApp === true, companyId: ctx.target.runtime.companyId, flow: ctx.target.runtime.flow.deps, wiring,
+      audit: auditOf(ctx.target, ctx.caller), now: () => nowOf(ctx.target),
+    });
+  }
+  if (isWikiMapPath(ctx.path, ctx.request.method)) {
+    // Wiki W0: the company's own runtime, the caller's live standing on the project (read inside), the company's code host.
+    return await routeHostedWikiMap({ request: ctx.request, path: ctx.path, principal: ctx.caller.principal, companyId: ctx.target.runtime.companyId, flow: ctx.target.runtime.flow.deps, wiring: requireWired(ctx.target.wiring.wikiMap), now: () => nowOf(ctx.target), log: ctx.log });
+  }
+  if (isWikiPath(ctx.path, ctx.request.method)) {
+    // Lead 4 W2: the member company's own store; the caller's live standing on the project is read inside (any project role reads).
+    await assertScriptTokenWikiAccess(ctx);
+    return await routeHostedWiki({ request: ctx.request, path: ctx.path, personId: ctx.caller.principal.personId, companyId: ctx.target.runtime.companyId, store: ctx.target.runtime.flow.deps.store, wiring: requireWired(ctx.target.wiring.wiki), now: () => nowOf(ctx.target), webApp: ctx.caller.webApp === true });
+  }
+  if (isWikiCorrectionPath(ctx.path, ctx.request.method)) {
+    // Lead 4 C1: the same member company's own store; the caller's role on the project is read live inside (never from the request).
+    return await routeHostedWikiCorrections({ request: ctx.request, path: ctx.path, personId: ctx.caller.principal.personId, companyId: ctx.target.runtime.companyId, store: ctx.target.runtime.flow.deps.store, wiring: requireWired(ctx.target.wiring.wikiCorrections), now: () => nowOf(ctx.target) });
+  }
+  if (isReportPath(ctx.path, ctx.request.method)) {
+    // Lead 4 A1/A2: the company's own runtime, the caller's live role from membership, the request's audit sink naming the caller.
+    return await routeHostedReport({
+      request: ctx.request, path: ctx.path, principal: ctx.caller.principal, role: ctx.membership.role, companyId: ctx.target.runtime.companyId, flow: ctx.target.runtime.flow.deps, wiring: requireWired(ctx.target.wiring.report),
+      audit: auditOf(ctx.target, ctx.caller), now: () => nowOf(ctx.target),
+    });
+  }
+  return UNMATCHED;
+}
+
+async function handleProjectOpsRoute(ctx: RouteContext): Promise<RouteOutcome> {
+  if (isUpkeepPath(ctx.path, ctx.request.method)) {
+    // Lead 4 N1: the company's own runtime, the caller's live standing on the project (read inside), the request's audit sink naming the caller.
+    return await routeHostedUpkeep({
+      request: ctx.request, path: ctx.path, principal: ctx.caller.principal, companyId: ctx.target.runtime.companyId, flow: ctx.target.runtime.flow.deps, wiring: requireWired(ctx.target.wiring.upkeep), webApp: ctx.caller.webApp === true,
+      audit: auditOf(ctx.target, ctx.caller), now: () => nowOf(ctx.target),
+    });
+  }
+  if (isEvalCheckPath(ctx.path, ctx.request.method)) {
+    // L4-EVCI2: the company's own runtime, the caller's live standing on the project (read inside), the request's audit sink naming the caller.
+    return await routeHostedEvalCheck({
+      request: ctx.request, path: ctx.path, principal: ctx.caller.principal, companyId: ctx.target.runtime.companyId, flow: ctx.target.runtime.flow.deps, wiring: requireWired(ctx.target.wiring.evalCheck),
+      audit: auditOf(ctx.target, ctx.caller), now: () => nowOf(ctx.target), log: ctx.log,
+    });
+  }
+  if (isBrowserTestingPath(ctx.path, ctx.request.method)) {
+    // Browser testing: the company's own runtime, the caller's LIVE standing on the project (read inside; only a company owner or admin changes anything), the request's audit sink naming the caller.
+    return await routeHostedBrowserTesting({
+      request: ctx.request, path: ctx.path, principal: ctx.caller.principal, companyId: ctx.target.runtime.companyId, flow: ctx.target.runtime.flow.deps, wiring: requireWired(ctx.target.wiring.browserTesting),
+      audit: auditOf(ctx.target, ctx.caller), now: () => nowOf(ctx.target),
+    });
+  }
+  if (isKnownFailingPath(ctx.path, ctx.request.method)) {
+    return await routeKnownFailing({ flow: ctx.target.runtime.flow.deps, principal: ctx.caller.principal, companyId: ctx.target.runtime.companyId, members: ctx.target.wiring.members, webApp: ctx.caller.webApp === true, path: ctx.path, request: ctx.request, ...(ctx.target.wiring.testEnvironment === undefined ? {} : { env: ctx.target.wiring.testEnvironment.env }) });
+  }
+  if (isIntakePath(ctx.path, ctx.request.method)) {
+    // R1 + L1 6.2b: the company's own runtime, the caller's live standing on the project (read inside); the company's intake is built by the root, so an install without it is "not on the core".
+    const wiring = requireWired(ctx.target.wiring.intake);
+    const intake = requireWired(wiring.intake());
+    return await routeHostedIntake({ request: ctx.request, path: ctx.path, principal: ctx.caller.principal, companyId: ctx.target.runtime.companyId, flow: ctx.target.runtime.flow.deps, wiring, intake });
+  }
+  if (isTicketUpdatesPath(ctx.path, ctx.request.method)) {
+    // Audit gap 11b: the company's own runtime and store, the caller's live standing on the project (read inside), the request's audit sink naming the caller.
+    return await routeHostedTicketUpdates({
+      request: ctx.request, path: ctx.path, principal: ctx.caller.principal, companyId: ctx.target.runtime.companyId, flow: ctx.target.runtime.flow.deps, wiring: requireWired(ctx.target.wiring.ticketUpdates),
+      audit: auditOf(ctx.target, ctx.caller), now: () => nowOf(ctx.target),
+    });
+  }
+  return UNMATCHED;
+}
+
+async function handleCompanyAndToolsRoute(ctx: RouteContext): Promise<RouteOutcome> {
+  if (isPackageRegistriesPath(ctx.path, ctx.request.method)) {
+    // PRIVATE-PACKAGES P1b: the company's own runtime and store; the role is membership's, read for this request; the request's audit sink names the caller. No route answers a stored token.
+    return await routeHostedPackageRegistries({
+      request: ctx.request, path: ctx.path, principal: ctx.caller.principal, role: ctx.membership.role, companyId: ctx.target.runtime.companyId, flow: ctx.target.runtime.flow.deps, wiring: requireWired(ctx.target.wiring.packageRegistries),
+      audit: auditOf(ctx.target, ctx.caller), now: () => nowOf(ctx.target),
+    });
+  }
+  if (isSystemRunsPath(ctx.path, ctx.request.method)) {
+    // L4-P3: the company's one control over Rovara's automatic runs. The role is membership's, read for this request; the ceiling is the upkeep wiring's.
+    const upkeep = requireWired(ctx.target.wiring.upkeep);
+    return await routeHostedSystemRuns({
+      request: ctx.request, path: ctx.path, principal: ctx.caller.principal, companyId: ctx.target.runtime.companyId, flow: ctx.target.runtime.flow.deps, role: ctx.membership.role, available: upkeep.available, webApp: ctx.caller.webApp === true,
+      audit: auditOf(ctx.target, ctx.caller), now: () => nowOf(ctx.target),
+    });
+  }
+  if (isWikiBuildPath(ctx.path, ctx.request.method)) {
+    // Lead 4 W4: the company's own runtime, the caller's live standing on the project (read inside), the request's audit sink naming the caller.
+    return await routeHostedWikiBuild({
+      request: ctx.request, path: ctx.path, principal: ctx.caller.principal, client: ctx.caller.client, companyId: ctx.target.runtime.companyId, flow: ctx.target.runtime.flow.deps, wiring: requireWired(ctx.target.wiring.wikiBuild),
+      audit: auditOf(ctx.target, ctx.caller), now: () => nowOf(ctx.target), log: ctx.log,
+    });
+  }
+  if (isStartSuggestPath(ctx.path, ctx.request.method)) {
+    // Lead 4 J3: the member company's own role read live inside; nothing is started; only the hourly counter row (ids and a count) is stored.
+    return await routeHostedStartSuggest({ request: ctx.request, path: ctx.path, personId: ctx.caller.principal.personId, companyId: ctx.target.runtime.companyId, store: ctx.target.runtime.flow.deps.store, wiring: requireWired(ctx.target.wiring.startSuggest), now: () => nowOf(ctx.target), log: ctx.log });
+  }
+  if (isAnswersPath(ctx.path, ctx.request.method)) {
+    // Lead 4 J1: the member company's own store and code; the caller's live standing on the project is read inside (any project role asks).
+    return await routeHostedAnswers({
+      request: ctx.request, path: ctx.path, personId: ctx.caller.principal.personId, companyId: ctx.target.runtime.companyId, store: ctx.target.runtime.flow.deps.store, wiring: requireWired(ctx.target.wiring.answers), now: () => nowOf(ctx.target), log: ctx.log,
+      tasks: answerTasks(ctx.target, ctx.caller, ctx.membership.role),
+    });
+  }
+  if (isAgentDirectoryPath(ctx.path, ctx.request.method)) {
+    // Lead 4 L4-MF3: the company-wide agent directory. The live role from membership (read for this request) decides inside: only a company owner or administrator reads it.
+    return await routeHostedAgentDirectory({
+      request: ctx.request, path: ctx.path, companyId: ctx.target.runtime.companyId, role: ctx.membership.role, developerId: developerIdOf(ctx.caller.principal),
+      store: ctx.target.runtime.flow.deps.store, audit: ctx.target.runtime.flow.deps.audit, now: () => nowOf(ctx.target),
+    });
+  }
+  return UNMATCHED;
+}
+
+async function handleStartEstimates(ctx: RouteContext, project: string): Promise<BrokerResponse> {
+  requireWired(ctx.target.wiring.canReadProject);
+  if (!(await mayReadProject(ctx.target, ctx.caller, ctx.membership, project))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
+  const parsed = parsePreviewRequestV2(jsonBodyOf(ctx.request));
+  if (parsed === undefined) throw agentXError("CONFIG_INVALID", "invalid start estimate request");
+  const context = await ctx.target.wiring.startEstimates?.(project) ?? { policyRevision: "unavailable", stages: {}, limits: [] };
+  const quote = await startEstimates({ store: ctx.target.runtime.flow.deps.store }, { orgId: ctx.companyId, project, request: parsed, asOf: new Date(nowOf(ctx.target)).toISOString(), context });
+  return json(200, ctx.membership.role === "owner" || ctx.membership.role === "admin" ? quote : restrictPreviewV2(quote));
+}
+
+async function handlePlaybook(ctx: RouteContext, project: string): Promise<BrokerResponse> {
+  const playbook = requireWired(ctx.target.playbook);
+  requireWired(ctx.target.wiring.canReadProject);
+  // A project the person may not read, and one that does not exist, answer the same words. A live company owner or admin needs no grant on a project of THEIR company (GET only: a write is the old broker's).
+  if (!(await mayReadProject(ctx.target, ctx.caller, ctx.membership, project))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
+  const answer = (await playbook.routes(ctx.request)) ?? errorAnswer(agentXError("NOT_FOUND", PROJECT_NOT_FOUND));
+  return answer.statusCode === 404 ? errorAnswer(agentXError("NOT_FOUND", PROJECT_NOT_FOUND)) : answer;
+}
+
+function testEnvironmentApprovalErrorCode(reason: string): "NOT_AVAILABLE_HERE" | "CHANGE_STALE" | "NOT_FOUND" | "FORBIDDEN" {
+  if (reason === "off") return "NOT_AVAILABLE_HERE";
+  if (reason === "stale") return "CHANGE_STALE";
+  if (reason === "not_found" || reason === "not_wired") return "NOT_FOUND";
+  return "FORBIDDEN";
+}
+
+async function handleTestEnvironmentApprove(ctx: RouteContext, project: string): Promise<BrokerResponse> {
+  const approval = requireWired(ctx.target.wiring.testEnvironmentApproval);
+  const canRead = requireWired(ctx.target.wiring.canReadProject);
+  // A live company owner or admin (the risk rule's top approvers, who need no grant on the project), or a person the company lets read the project; anyone else gets the words of a missing project
+  // and nothing is decided for them. A project that does not exist is the decision's own "not found" for an owner or admin.
+  if (ctx.membership.role !== "owner" && ctx.membership.role !== "admin" && !(await canRead(ctx.caller.principal.personId, project).catch(orIfNotMembershipFailure(false)))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
+  const parsedBody = ApproveTestEnvironmentBodySchema.safeParse(jsonBodyOf(ctx.request));
+  if (!parsedBody.success) throw agentXError("CONFIG_INVALID", `${parsedBody.error.issues[0]?.path.join(".") || "body"}: invalid`);
+  const result = await approval.approve({ personId: ctx.caller.principal.personId, project, approval: parsedBody.data });
+  if (result.ok) return json(200, { project, message: result.message });
+  // The decision's own words (fixed, never an echo); the status by reason.
+  throw agentXError(testEnvironmentApprovalErrorCode(result.reason), result.message);
+}
+
+async function handleTestEnvironment(ctx: RouteContext, project: string): Promise<BrokerResponse> {
+  const wired = requireWired(ctx.target.wiring.testEnvironment);
+  requireWired(ctx.target.wiring.canReadProject);
+  // A project the person may not read, and one that does not exist, answer the same words; nothing is read for it. A live company owner or admin (the role is membership's, read for this request)
+  // needs no grant on a project of THEIR company (the same reach as approving; the project must exist in that company); anyone else needs the grant.
+  if (!(await mayReadProject(ctx.target, ctx.caller, ctx.membership, project))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
+  return json(200, await testEnvironmentAnswer(ctx.target, wired, project));
+}
+
+async function handleSavedEnvImage(ctx: RouteContext, project: string): Promise<BrokerResponse> {
+  const wired = requireWired(ctx.target.wiring.savedEnv);
+  const canRead = requireWired(ctx.target.wiring.canReadProject);
+  // A project the person may not read, and one that does not exist, answer the same words; nothing is read for it.
+  if (!(await canRead(ctx.caller.principal.personId, project).catch(orIfNotMembershipFailure(false)))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
+  // The company is the membership's (the runtime's), never the request's. Role "viewer": a reader never gets Reset or the setting control, whatever their grant (the writes are not on the core here).
+  const deps = { store: documentSavedEnvStore({ store: ctx.target.runtime.flow.deps.store, audit: ctx.target.runtime.flow.deps.audit }), session: { config: { enabled: wired.enabled === true } }, now: () => nowOf(ctx.target) };
+  const panel = await savedEnvPanel(deps, { orgId: ctx.target.runtime.companyId, projectId: project }, { projectRole: "viewer" });
+  if (!panel.ok) throw agentXError("NOT_FOUND", SAVED_ENV_OFF);
+  return json(200, SavedEnvPanelSchema.parse(panel.panel));
+}
+
+async function handleProjectStateRoute(ctx: RouteContext): Promise<RouteOutcome> {
+  const preview = START_ESTIMATES.exec(ctx.path);
+  if (preview !== null) return await handleStartEstimates(ctx, preview[1]!);
+  const playbook = PLAYBOOK.exec(ctx.path);
+  if (playbook !== null) return await handlePlaybook(ctx, playbook[1]!);
+  const approveEnvironment = TEST_ENVIRONMENT_APPROVE.exec(ctx.path);
+  if (approveEnvironment !== null) return await handleTestEnvironmentApprove(ctx, approveEnvironment[1]!);
+  const testEnvironment = TEST_ENVIRONMENT.exec(ctx.path);
+  if (testEnvironment !== null) return await handleTestEnvironment(ctx, testEnvironment[1]!);
+  const savedEnvImage = SAVED_ENV_IMAGE.exec(ctx.path);
+  if (savedEnvImage !== null) return await handleSavedEnvImage(ctx, savedEnvImage[1]!);
+  return UNMATCHED;
+}
+
+async function handleCreateScriptToken(
+  ctx: RouteContext,
+  deps: Parameters<typeof createScriptToken>[0],
+  scriptCaller: ScriptTokenCaller,
+): Promise<BrokerResponse> {
+  // Refuse the role before reading the body; core creation enforces it too.
+  if (scriptCaller.orgRole !== "owner" && scriptCaller.orgRole !== "admin") throw agentXError("FORBIDDEN", SCRIPT_TOKEN_CREATE_ADMIN_ONLY);
+  // Owner DEC 254zzz91: a long-lived credential is made only from the Rovara website's own client, never by a CLI or AI-tool token.
+  if (ctx.caller.webApp !== true) throw agentXError("FORBIDDEN", ON_THE_WEBSITE_MESSAGE);
+  const canRead = requireWired(ctx.target.wiring.canReadProject);
+  const cap = ctx.target.wiring.sessionCapSeconds;
+  if (cap !== undefined && (typeof cap !== "number" || !Number.isSafeInteger(cap) || cap <= 0)) throw agentXError("RUNTIME_UNAVAILABLE", SESSION_CAP_UNREADABLE);
+  // A token is made only for projects this person may read now; one they may not read answers exactly like a missing one.
+  // The record keeps how the maker signed in (the verified token's amr, when known), and the token never outlives the install's session cap.
+  const made = await createScriptToken(deps, scriptCaller, bodyOf(ctx.request), async (project) => {
+    if (!(await canRead(ctx.caller.principal.personId, project).catch(orIfNotMembershipFailure(false)))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
+  }, { ...(cap === undefined ? {} : { lifetimeCapSeconds: cap }), ...(ctx.caller.amr === undefined ? {} : { signIn: { amr: ctx.caller.amr } }) });
+  return json(201, made);
+}
+
+async function handleScriptTokenRoute(ctx: RouteContext): Promise<RouteOutcome> {
+  const tokens = SCRIPT_TOKENS.exec(ctx.path);
+  if (tokens === null) return UNMATCHED;
+  const enabled = ctx.target.wiring.scriptTokens?.enabled ?? (() => scriptTokensEnabled());
+  if (ctx.target.wiring.scriptTokens === undefined || !enabled()) throw agentXError("NOT_FOUND", "route not found");
+  const audit = auditOf(ctx.target, ctx.caller);
+  const deps = { store: ctx.target.runtime.flow.deps.store, audit, now: () => nowOf(ctx.target) };
+  // Read live for this request: the role controls creation and whether list/revoke reach every company token or only the caller's own.
+  const scriptCaller: ScriptTokenCaller = { developerId: developerIdOf(ctx.caller.principal), personId: ctx.caller.principal.personId, orgId: ctx.companyId, orgRole: ctx.membership.role };
+  if (tokens[1] === undefined && ctx.request.method === "POST") return await handleCreateScriptToken(ctx, deps, scriptCaller);
+  if (tokens[1] === undefined && ctx.request.method === "GET") return json(200, { canCreate: scriptCaller.orgRole === "owner" || scriptCaller.orgRole === "admin", tokens: await listScriptTokens(deps, scriptCaller, async (developerId) => (developerId === scriptCaller.developerId ? ctx.caller.principal.displayName : undefined)) });
+  if (tokens[1] !== undefined && ctx.request.method === "POST") return json(200, { token: await revokeScriptToken(deps, scriptCaller, tokenIdOf(tokens[1])) });
+  throw agentXError("NOT_FOUND", "route not found");
+}
+
+const ROUTE_HANDLERS: readonly RouteHandler[] = [
+  handleInboxOrSessionRoute,
+  handleTaskReadAndStartRoute,
+  handleTaskControlRoute,
+  handleDecisionsAndModelsRoute,
+  handleSetupAndWikiRoute,
+  handleProjectOpsRoute,
+  handleCompanyAndToolsRoute,
+  handleProjectStateRoute,
+  handleScriptTokenRoute,
+];
+
 export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoutes {
   const mounted = new Map<string, Promise<Mounted>>();
   const mount = (companyId: string): Promise<Mounted> => {
@@ -718,373 +1203,18 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
     async route(request, caller) {
       const path = request.path.split("?")[0] ?? request.path;
       if (!owns(path, request.method, request.path.split("?")[1] ?? "")) return undefined;
-      const starting = path === TASK_START && request.method === "POST";
-      let membership: CompanyMembership | undefined;
-      let unreadable = false;
-      try {
-        membership = await options.companyOf(caller);
-      } catch {
-        membership = undefined;
-        unreadable = true;
-      }
-      // A start by a person with no member company is no core company's: the old broker starts it, as before. (Every other route refuses below.)
-      if (starting && !unreadable && (membership === undefined || membership === null)) return undefined;
-      // The involved list says "nothing" only when it is sure: a membership that could not be read is a fixed outage answer, never an empty list.
-      if (unreadable && path === TASK_START && request.method === "GET") return errorAnswer(agentXError("RUNTIME_UNAVAILABLE", INVOLVED_UNAVAILABLE));
-      // A membership read that FAILED (any route, not only the involved list) is the retryable 503 (membership-read.ts), never the sign-in refusal or a missing task.
-      if (unreadable) return errorAnswer(agentXError("RUNTIME_UNAVAILABLE", MEMBERSHIP_READ_FAILED_WORDS));
-      // Fail closed: no member company, a malformed one or an unknown role is a sign-in refusal, never the install's company.
-      if (membership === undefined || membership === null || typeof membership !== "object" || typeof membership.companyId !== "string" || !ORG_ID.test(membership.companyId) || !OrgRoleSchema.safeParse(membership.role).success) return unauthenticated();
-      const companyId = membership.companyId;
-      // The principal the identity point vouched for must be of the member company (checked before anything is built for it); the task flow checks it again on every task read.
-      if (caller.principal.companyId !== companyId) return unauthenticated();
-      // Answering the agent is never a script token's either, and reads like a missing task for the same reason.
-      if (caller.scriptToken !== undefined && TASK_ANSWERS.test(path)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
-      // A script token reaches task reads or the two scoped wiki reads; never sessions, decisions, playbooks or token management.
-      // An owner's move on a task is never a script token's, and its answer must not tell a token which task ids exist: it reads like a missing task (the boundary's own answer).
-      if (caller.scriptToken !== undefined && (feedbackOrParity(path, request.method) || TASK_ACTION.test(path) || TASK_CANCEL.test(path) || TASK_PAGE_FINDINGS.test(path) || isHostedMergePath(path, request.method) || taskEvidenceFileRoute(path, request.method) !== undefined || coreTaskRuleOf(path, request.method) !== undefined)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
-      // A task's proof index is refused to a script token too, but only AFTER the task is looked up (below): refusing it here, by path alone, told another company's token that the id is a real task (403) where an
-      // id with no task reads as a missing task (404). Every other path left here names no task id.
-      if (caller.scriptToken !== undefined && !TASK_READ.test(path) && !TASK_EVIDENCE.test(path) && scriptTokenRoute(request.method, path)?.permission !== "wiki") return errorAnswer(agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS));
+      const resolved = await resolveCallerMembership(options, caller, path, request.method);
+      if (resolved.kind === "passthrough") return undefined;
+      if (resolved.kind === "response") return resolved.response;
+      const tokenRefusal = scriptTokenPreCheck(caller, path, request.method);
+      if (tokenRefusal !== undefined) return tokenRefusal;
+      const companyId = resolved.membership.companyId;
       const target: Mounted = await mount(companyId);
-      const taskCaller = taskCallerOf(caller);
+      const ctx: RouteContext = { request, path, caller, membership: resolved.membership, companyId, target, taskCaller: taskCallerOf(caller), log: options.log };
       try {
-        if (INBOX_PATH.test(path)) return await inboxAnswer(target.inbox, request, taskCaller);
-        if (SESSIONS.test(path)) return await sessionAnswer(target, request, taskCaller, path);
-        if (path === TASK_START && request.method === "GET") {
-          // The involved list: the caller's own rows in this company, each re-checked against the live task access (the core's task read rule). Another company's task is never listed.
-          return json(200, await listInvolvedTasks(target.runtime.flow.deps, taskCaller, involvedListOptions(new URLSearchParams(request.path.split("?")[1] ?? ""))));
-        }
-        if (starting) {
-          // The core's own start (it parses the request, checks the person may start on the project, holds the admission and writes the core mark in one transaction). A retry with the
-          // same request id answers the first task. The answer is the developer task view, as the old start's.
-          const started = await target.runtime.flow.start({ ...taskCaller, origin: caller.client === undefined ? "cli" : "app" }, bodyOf(request));
-          const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, started.task.taskId);
-          return json(200, { task: await taskViewFor(target, record, caller, membership) });
-        }
-        const task = TASK_READ.exec(path);
-        if (task !== null) {
-          if (request.method !== "GET") return undefined;
-          // Another company's task, or none, answers the same "not found" (the rule checks the company first). A person's own read also lets the People list's commenters and viewers read it (C6, the same
-          // live rule) and someone the owner shared the task with (spec 067); a script token reads exactly as before (its own closed list), never through People.
-          const { task: record } = await decideRead(target, caller, membership.role, { read: "task", taskId: task[1]! });
-          await observeHostedBlockedTask(target.runtime.flow.deps, record, target.wiring.testEnvironment?.env);
-          const testing = await hostedTestingView(target.runtime.flow.deps, target.blobs, record, target.wiring.testEnvironment?.env);
-          const view = await taskViewFor(target, record, caller, membership);
-          return json(200, { task: { ...view, ...(testing === undefined ? {} : { testing }), ...await applicationReadProjection(target.runtime, record, caller.principal.personId) } });
-        }
-        const taskSurface = taskSurfaceAnswer(target, request, taskCaller, caller, membership);
-        if (taskSurface !== undefined) return await taskSurface;
-        const evidence = TASK_EVIDENCE.exec(path);
-        if (evidence !== null) {
-          // Exactly the task read's rule (the flow's owned read: the company, then the company's access rule; another company's task, or none, answers the same "not found"), then the pack kept for
-          // exactly the task's current code, as the proof page reads it. A pack that is missing or cannot be read leaves only what Rovara recorded itself.
-          const { task: record } = await decideRead(target, caller, membership.role, { read: "evidence", taskId: evidence[1]! });
-          // Only now: someone who may not read the task has been told it is missing; the task's own owner's script token is told what a script token cannot do.
-          if (caller.scriptToken !== undefined && scriptTokenRoute(request.method, path)?.permission !== "wiki") throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
-          // The pack is read through the company-bound store (the key must name a workspace of this company and its owner), not the shared bucket as it is.
-          const pack = await loadEvidencePack(hostedEvidenceBlobs({ blobs: target.blobs, store: target.runtime.flow.deps.store, companyId: target.runtime.companyId }), { ownerKey: record.ownerKey, workspaceId: record.workspaceId, taskId: record.taskId }, record.workflow?.candidate?.digest);
-          return json(200, proofIndexOf(record.taskId, record.workflow, pack));
-        }
-        const cancel = TASK_CANCEL.exec(path);
-        if (cancel !== null) {
-          // Served only with the company's owner rule (never Code's laptop rule on a hosted company); without it the engine boundary says "not on the core yet" to a reader, and a missing task to anyone else.
-          if (target.runtime.flow.deps.access.ownerActing === undefined) return undefined;
-          // The task's owner, or a live owner or admin of the task's company (the role is membership's, read for this request; the task's company is checked against it). Anyone who may not
-          // read the task gets the missing task's answer whatever they sent; a reader who may not stop gets fixed words. One request id is one stop.
-          const stopped = await stopTaskOnRequest(target.runtime.flow.deps, { ...taskCaller, companyRole: membership.role }, cancel[1]!, () => jsonBodyOf(request));
-          return json(200, { task: await taskViewFor(target, stopped.task, caller, membership) });
-        }
-        const action = TASK_ACTION.exec(path);
-        if (action !== null) {
-          // Not wired here: the caller of these routes (the engine boundary) tells a person who may read the task that it is not on the core yet, and anyone else that there is no such task.
-          if (target.actions === undefined) return undefined;
-          const taskId = action[1]!;
-          // The task is read first, so someone who may not see it reads "no such task" whatever they sent (a body the move refuses would otherwise tell them the task exists).
-          await loadOwnedTask(target.runtime.flow.deps, taskCaller, taskId);
-          // The body as JSON, judged by the move's own schema (its words name the field), as the old workflow routes do.
-          const body = jsonBodyOf(request);
-          // Each move re-checks who acts (owner or co-owner, else "no such task"), the revision they saw, and the round's money, and writes nothing on a refusal.
-          const publication = await performTaskAction(target, taskCaller, taskId, action[2]!, body);
-          return await committedResponse(async () => {
-            const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, taskId);
-            return json(200, { ...publicationAnswer(publication), task: await taskViewFor(target, record, caller, membership) });
-          });
-        }
-        const rule = coreTaskRuleOf(path, request.method);
-        if (rule !== undefined) {
-          // Not wired here: the engine boundary tells a person who may read the task that it is not on the core yet, and anyone else that there is no such task.
-          if (target.wiring.taskRules === undefined) return undefined;
-          // The task, from the caller's OWN company (membership's): another company's task, or none, reads "no such task" before any rule is asked.
-          const record = await readTask(target.runtime.flow.deps, rule.taskId);
-          if (record === undefined || record.companyId !== companyId) throw agentXError("TASK_NOT_FOUND", `no task ${rule.taskId} of yours`);
-          return await target.wiring.taskRules.route({
-            request, path, person: { developerId: caller.principal.personId, name: caller.principal.displayName }, companyId: target.runtime.companyId,
-            task: record, store: target.runtime.flow.deps.store,
-            authorize: (read, seams) => decideRead(target, caller, membership.role, { read, task: record, ...(seams === undefined ? {} : { seams }) }),
-          });
-        }
-        const pageFindings = TASK_PAGE_FINDINGS.exec(path);
-        if (pageFindings !== null) {
-          // The web page's own act: anyone else (the CLI's token, an AI tool's, another full-access client) is refused before anything is read, whatever they sent.
-          if (caller.webApp !== true) throw agentXError("FORBIDDEN", SECURITY_ACCEPT_ON_THE_PAGE);
-          // Served only with the owner moves' own wiring (the money cap and the company's owner rule); otherwise fixed words, the same for every task id.
-          if (target.actions === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          const taskId = pageFindings[1]!;
-          // The task's owner (or a People co-owner) only: anyone else, another company's task, or none, reads "no such task" whatever they sent.
-          await loadOwnedTask(target.runtime.flow.deps, taskCaller, taskId);
-          const body = jsonBodyOf(request);
-          // The move re-checks the owner, the revision and digest they saw, and the round's money, then the security-accept rule (the web app's client, `via: "page"`); a refusal writes nothing.
-          await target.actions.resolveFindings({ ...taskCaller, webApp: true }, taskId, body, "page");
-          return await committedResponse(async () => {
-            const record = await loadOwnedTask(target.runtime.flow.deps, taskCaller, taskId);
-            return json(200, { task: await taskViewFor(target, record, caller, membership) });
-          });
-        }
-        if (isHostedMergePath(path, request.method)) {
-          // DEC 254zzz94: the Merge button (hosted-merge-routes.ts holds every rule: the website only for a press, who may merge, Rovara's checks and GitHub's mergeable state, one merge at a time, audit).
-          const audit = auditOf(target, caller);
-          return await routeHostedMerge({
-            request, path, principal: caller.principal, companyId: target.runtime.companyId, role: membership.role, flow: target.runtime.flow.deps, wiring: target.wiring.merge, audit,
-            now: () => nowOf(target), webApp: caller.webApp === true, ...(options.log === undefined ? {} : { log: options.log }),
-          });
-        }
-        const answers = TASK_ANSWERS.exec(path);
-        if (answers !== null) {
-          // Served only with the company's owner rule (never Code's laptop rule on a hosted company); without it the engine boundary says "not on the core yet" to a reader, and a missing task to anyone else.
-          if (target.runtime.flow.deps.access.ownerActing === undefined) return undefined;
-          // Only the task's owner (People owners count; a company admin who is not one does not). Anyone who may not read the task gets the missing task's answer whatever they sent; a
-          // reader who is not its owner gets fixed words. One request id is one answer, and the round asked is checked.
-          const answered = await answerTaskOnRequest(target.runtime.flow.deps, taskCaller, answers[1]!, () => jsonBodyOf(request));
-          return json(200, { task: await taskViewFor(target, answered.task, caller, membership) });
-        }
-        if (DECISIONS.test(path)) {
-          if (target.wiring.decisions === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          const body = request.method === "GET" ? {} : bodyOf(request);
-          const url = new URL(request.path, "http://core");
-          const decisionCaller = decisionCallerOf(caller, companyId);
-          const reply = await routeDecisionCards(target.wiring.decisions, decisionCaller, { method: request.method, pathname: path, searchParams: url.searchParams, body });
-          if (reply === undefined) throw agentXError("NOT_FOUND", "route not found");
-          return json(reply.statusCode, reply.body);
-        }
-        if (path === AGENT_MODELS_PATH) {
-          if (target.wiring.modelChoice === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          return await agentModelRoute({
-            method: request.method, body: request.body, principal: caller.principal, role: membership.role, choice: target.wiring.modelChoice,
-            audit: target.wiring.auditFor === undefined ? undefined : target.wiring.auditFor(caller, target.runtime.flow.deps.audit),
-          });
-        }
-        if (isSetupRunPath(path, request.method) || isSetupCheckPath(path, request.method)) {
-          // Guided onboarding L2-3: the company's own runtime, the caller's live standing on the project (read inside), the request's audit sink naming the caller.
-          if (target.wiring.setupRun === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          return await (isSetupCheckPath(path, request.method) ? routeHostedSetupCheck : routeHostedSetupRun)({
-            request, path, principal: caller.principal, client: caller.client, webApp: caller.webApp === true, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.setupRun,
-            audit: auditOf(target, caller),
-            now: () => nowOf(target),
-          });
-        }
-        if (isWikiMapPath(path, request.method)) {
-          // Wiki W0: the company's own runtime, the caller's live standing on the project (read inside), the company's code host.
-          if (target.wiring.wikiMap === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          return await routeHostedWikiMap({ request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.wikiMap, now: () => nowOf(target), log: options.log });
-        }
-        if (isWikiPath(path, request.method)) {
-          // Lead 4 W2: the member company's own store; the caller's live standing on the project is read inside (any project role reads).
-          if (caller.scriptToken !== undefined) {
-            // Re-read scope in the live member company's store: a verified token id alone grants no wiki access.
-            const route = scriptTokenRoute(request.method, path);
-            const token = await readScriptToken({ store: target.runtime.flow.deps.store }, companyId, caller.scriptToken.tokenId);
-            if (target.wiring.scriptTokens === undefined || !(target.wiring.scriptTokens.enabled ?? scriptTokensEnabled)()
-              || route?.permission !== "wiki" || route.project !== "path"
-              || token === undefined || scriptTokenStatus(token, nowOf(target)) !== "active"
-              || (token.personId !== undefined && token.personId !== caller.principal.personId) || token.developerId !== developerIdOf(caller.principal)
-              || token.createdRole !== membership.role || !token.permissions.includes("wiki") || !token.projects.includes(route.name)) {
-              throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
-            }
-          }
-          if (target.wiring.wiki === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          return await routeHostedWiki({ request, path, personId: caller.principal.personId, companyId: target.runtime.companyId, store: target.runtime.flow.deps.store, wiring: target.wiring.wiki, now: () => nowOf(target), webApp: caller.webApp === true });
-        }
-        if (isWikiCorrectionPath(path, request.method)) {
-          // Lead 4 C1: the same member company's own store; the caller's role on the project is read live inside (never from the request).
-          if (target.wiring.wikiCorrections === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          return await routeHostedWikiCorrections({ request, path, personId: caller.principal.personId, companyId: target.runtime.companyId, store: target.runtime.flow.deps.store, wiring: target.wiring.wikiCorrections, now: () => nowOf(target) });
-        }
-        if (isReportPath(path, request.method)) {
-          // Lead 4 A1/A2: the company's own runtime, the caller's live role from membership, the request's audit sink naming the caller.
-          if (target.wiring.report === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          return await routeHostedReport({
-            request, path, principal: caller.principal, role: membership.role, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.report,
-            audit: auditOf(target, caller), now: () => nowOf(target),
-          });
-        }
-        if (isUpkeepPath(path, request.method)) {
-          // Lead 4 N1: the company's own runtime, the caller's live standing on the project (read inside), the request's audit sink naming the caller.
-          if (target.wiring.upkeep === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          return await routeHostedUpkeep({
-            request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.upkeep, webApp: caller.webApp === true,
-            audit: auditOf(target, caller), now: () => nowOf(target),
-          });
-        }
-        if (isEvalCheckPath(path, request.method)) {
-          // L4-EVCI2: the company's own runtime, the caller's live standing on the project (read inside), the request's audit sink naming the caller.
-          if (target.wiring.evalCheck === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          return await routeHostedEvalCheck({
-            request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.evalCheck,
-            audit: auditOf(target, caller), now: () => nowOf(target), log: options.log,
-          });
-        }
-        if (isBrowserTestingPath(path, request.method)) {
-          // Browser testing: the company's own runtime, the caller's LIVE standing on the project (read inside; only a company owner or admin changes anything), the request's audit sink naming the caller.
-          if (target.wiring.browserTesting === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          return await routeHostedBrowserTesting({
-            request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.browserTesting,
-            audit: auditOf(target, caller), now: () => nowOf(target),
-          });
-        }
-        if (isKnownFailingPath(path, request.method)) return await routeKnownFailing({ flow: target.runtime.flow.deps, principal: caller.principal, companyId: target.runtime.companyId, members: target.wiring.members, webApp: caller.webApp === true, path, request, ...(target.wiring.testEnvironment === undefined ? {} : { env: target.wiring.testEnvironment.env }) });
-        if (isIntakePath(path, request.method)) {
-          // R1 + L1 6.2b: the company's own runtime, the caller's live standing on the project (read inside); the company's intake is built by the root, so an install without it is "not on the core".
-          const intake = target.wiring.intake?.intake();
-          if (target.wiring.intake === undefined || intake === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          return await routeHostedIntake({ request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.intake, intake });
-        }
-        if (isTicketUpdatesPath(path, request.method)) {
-          // Audit gap 11b: the company's own runtime and store, the caller's live standing on the project (read inside), the request's audit sink naming the caller.
-          if (target.wiring.ticketUpdates === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          return await routeHostedTicketUpdates({
-            request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.ticketUpdates,
-            audit: auditOf(target, caller), now: () => nowOf(target),
-          });
-        }
-        if (isPackageRegistriesPath(path, request.method)) {
-          // PRIVATE-PACKAGES P1b: the company's own runtime and store; the role is membership's, read for this request; the request's audit sink names the caller. No route answers a stored token.
-          if (target.wiring.packageRegistries === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          return await routeHostedPackageRegistries({
-            request, path, principal: caller.principal, role: membership.role, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.packageRegistries,
-            audit: auditOf(target, caller), now: () => nowOf(target),
-          });
-        }
-        if (isSystemRunsPath(path, request.method)) {
-          // L4-P3: the company's one control over Rovara's automatic runs. The role is membership's, read for this request; the ceiling is the upkeep wiring's.
-          if (target.wiring.upkeep === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          return await routeHostedSystemRuns({
-            request, path, principal: caller.principal, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, role: membership.role, available: target.wiring.upkeep.available, webApp: caller.webApp === true,
-            audit: auditOf(target, caller), now: () => nowOf(target),
-          });
-        }
-        if (isWikiBuildPath(path, request.method)) {
-          // Lead 4 W4: the company's own runtime, the caller's live standing on the project (read inside), the request's audit sink naming the caller.
-          if (target.wiring.wikiBuild === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          return await routeHostedWikiBuild({
-            request, path, principal: caller.principal, client: caller.client, companyId: target.runtime.companyId, flow: target.runtime.flow.deps, wiring: target.wiring.wikiBuild,
-            audit: auditOf(target, caller),
-            now: () => nowOf(target), log: options.log,
-          });
-        }
-        if (isStartSuggestPath(path, request.method)) {
-          // Lead 4 J3: the member company's own role read live inside; nothing is started; only the hourly counter row (ids and a count) is stored.
-          if (target.wiring.startSuggest === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          return await routeHostedStartSuggest({ request, path, personId: caller.principal.personId, companyId: target.runtime.companyId, store: target.runtime.flow.deps.store, wiring: target.wiring.startSuggest, now: () => nowOf(target), log: options.log });
-        }
-        if (isAnswersPath(path, request.method)) {
-          // Lead 4 J1: the member company's own store and code; the caller's live standing on the project is read inside (any project role asks).
-          if (target.wiring.answers === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          return await routeHostedAnswers({ request, path, personId: caller.principal.personId, companyId: target.runtime.companyId, store: target.runtime.flow.deps.store, wiring: target.wiring.answers, now: () => nowOf(target), log: options.log,
-            tasks: answerTasks(target, caller, membership.role),
-          });
-        }
-        if (isAgentDirectoryPath(path, request.method)) {
-          // Lead 4 L4-MF3: the company-wide agent directory. The live role from membership (read for this request) decides inside: only a company owner or administrator reads it.
-          return await routeHostedAgentDirectory({
-            request, path, companyId: target.runtime.companyId, role: membership.role, developerId: developerIdOf(caller.principal),
-            store: target.runtime.flow.deps.store, audit: target.runtime.flow.deps.audit, now: () => nowOf(target),
-          });
-        }
-        const preview = START_ESTIMATES.exec(path);
-        if (preview !== null) {
-          if (target.wiring.canReadProject === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          const project = preview[1]!;
-          if (!(await mayReadProject(target, caller, membership, project))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
-          const parsed = parsePreviewRequestV2(jsonBodyOf(request));
-          if (parsed === undefined) throw agentXError("CONFIG_INVALID", "invalid start estimate request");
-          const context = await target.wiring.startEstimates?.(project) ?? { policyRevision: "unavailable", stages: {}, limits: [] };
-          const quote = await startEstimates({ store: target.runtime.flow.deps.store }, { orgId: companyId, project, request: parsed, asOf: new Date(nowOf(target)).toISOString(), context });
-          return json(200, membership.role === "owner" || membership.role === "admin" ? quote : restrictPreviewV2(quote));
-        }
-        const playbook = PLAYBOOK.exec(path);
-        if (playbook !== null) {
-          if (target.playbook === undefined || target.wiring.canReadProject === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          // A project the person may not read, and one that does not exist, answer the same words. A live company owner or admin needs no grant on a project of THEIR company (GET only: a write is the old broker's).
-          if (!(await mayReadProject(target, caller, membership, playbook[1]!))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
-          const answer = (await target.playbook.routes(request)) ?? errorAnswer(agentXError("NOT_FOUND", PROJECT_NOT_FOUND));
-          return answer.statusCode === 404 ? errorAnswer(agentXError("NOT_FOUND", PROJECT_NOT_FOUND)) : answer;
-        }
-        const approveEnvironment = TEST_ENVIRONMENT_APPROVE.exec(path);
-        if (approveEnvironment !== null) {
-          const approval = target.wiring.testEnvironmentApproval;
-          if (approval === undefined || target.wiring.canReadProject === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          const project = approveEnvironment[1]!;
-          // A live company owner or admin (the risk rule's top approvers, who need no grant on the project), or a person the company lets read the project; anyone else gets the words of a missing project
-          // and nothing is decided for them. A project that does not exist is the decision's own "not found" for an owner or admin.
-          if (membership.role !== "owner" && membership.role !== "admin" && !(await target.wiring.canReadProject(caller.principal.personId, project).catch(orIfNotMembershipFailure(false)))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
-          const parsedBody = ApproveTestEnvironmentBodySchema.safeParse(jsonBodyOf(request));
-          if (!parsedBody.success) throw agentXError("CONFIG_INVALID", `${parsedBody.error.issues[0]?.path.join(".") || "body"}: invalid`);
-          const result = await approval.approve({ personId: caller.principal.personId, project, approval: parsedBody.data });
-          if (result.ok) return json(200, { project, message: result.message });
-          // The decision's own words (fixed, never an echo); the status by reason.
-          throw agentXError(result.reason === "off" ? "NOT_AVAILABLE_HERE" : result.reason === "stale" ? "CHANGE_STALE" : result.reason === "not_found" || result.reason === "not_wired" ? "NOT_FOUND" : "FORBIDDEN", result.message);
-        }
-        const testEnvironment = TEST_ENVIRONMENT.exec(path);
-        if (testEnvironment !== null) {
-          const wired = target.wiring.testEnvironment;
-          if (wired === undefined || target.wiring.canReadProject === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          const project = testEnvironment[1]!;
-          // A project the person may not read, and one that does not exist, answer the same words; nothing is read for it. A live company owner or admin (the role is membership's, read for this request)
-          // needs no grant on a project of THEIR company (the same reach as approving; the project must exist in that company); anyone else needs the grant.
-          if (!(await mayReadProject(target, caller, membership, project))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
-          return json(200, await testEnvironmentAnswer(target, wired, project));
-        }
-        const savedEnvImage = SAVED_ENV_IMAGE.exec(path);
-        if (savedEnvImage !== null) {
-          const wired = target.wiring.savedEnv;
-          if (wired === undefined || target.wiring.canReadProject === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-          const project = savedEnvImage[1]!;
-          // A project the person may not read, and one that does not exist, answer the same words; nothing is read for it.
-          if (!(await target.wiring.canReadProject(caller.principal.personId, project).catch(orIfNotMembershipFailure(false)))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
-          // The company is the membership's (the runtime's), never the request's. Role "viewer": a reader never gets Reset or the setting control, whatever their grant (the writes are not on the core here).
-          const deps = { store: documentSavedEnvStore({ store: target.runtime.flow.deps.store, audit: target.runtime.flow.deps.audit }), session: { config: { enabled: wired.enabled === true } }, now: () => nowOf(target) };
-          const panel = await savedEnvPanel(deps, { orgId: target.runtime.companyId, projectId: project }, { projectRole: "viewer" });
-          if (!panel.ok) throw agentXError("NOT_FOUND", SAVED_ENV_OFF);
-          return json(200, SavedEnvPanelSchema.parse(panel.panel));
-        }
-        const tokens = SCRIPT_TOKENS.exec(path);
-        if (tokens !== null) {
-          const enabled = target.wiring.scriptTokens?.enabled ?? (() => scriptTokensEnabled());
-          if (target.wiring.scriptTokens === undefined || !enabled()) throw agentXError("NOT_FOUND", "route not found");
-          const audit = auditOf(target, caller);
-          const deps = { store: target.runtime.flow.deps.store, audit, now: () => nowOf(target) };
-          // Read live for this request: the role controls creation and whether list/revoke reach every company token or only the caller's own.
-          const scriptCaller: ScriptTokenCaller = { developerId: developerIdOf(caller.principal), personId: caller.principal.personId, orgId: companyId, orgRole: membership.role };
-          if (tokens[1] === undefined && request.method === "POST") {
-            // Refuse the role before reading the body; core creation enforces it too.
-            if (scriptCaller.orgRole !== "owner" && scriptCaller.orgRole !== "admin") throw agentXError("FORBIDDEN", SCRIPT_TOKEN_CREATE_ADMIN_ONLY);
-            // Owner DEC 254zzz91: a long-lived credential is made only from the Rovara website's own client, never by a CLI or AI-tool token.
-            if (caller.webApp !== true) throw agentXError("FORBIDDEN", ON_THE_WEBSITE_MESSAGE);
-            const canRead = target.wiring.canReadProject;
-            if (canRead === undefined) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
-            const cap = target.wiring.sessionCapSeconds;
-            if (cap !== undefined && (typeof cap !== "number" || !Number.isSafeInteger(cap) || cap <= 0)) throw agentXError("RUNTIME_UNAVAILABLE", SESSION_CAP_UNREADABLE);
-            // A token is made only for projects this person may read now; one they may not read answers exactly like a missing one.
-            // The record keeps how the maker signed in (the verified token's amr, when known), and the token never outlives the install's session cap.
-            const made = await createScriptToken(deps, scriptCaller, bodyOf(request), async (project) => {
-              if (!(await canRead(caller.principal.personId, project).catch(orIfNotMembershipFailure(false)))) throw agentXError("NOT_FOUND", PROJECT_NOT_FOUND);
-            }, { ...(cap === undefined ? {} : { lifetimeCapSeconds: cap }), ...(caller.amr === undefined ? {} : { signIn: { amr: caller.amr } }) });
-            return json(201, made);
-          }
-          if (tokens[1] === undefined && request.method === "GET") return json(200, { canCreate: scriptCaller.orgRole === "owner" || scriptCaller.orgRole === "admin", tokens: await listScriptTokens(deps, scriptCaller, async (developerId) => (developerId === scriptCaller.developerId ? caller.principal.displayName : undefined)) });
-          if (tokens[1] !== undefined && request.method === "POST") return json(200, { token: await revokeScriptToken(deps, scriptCaller, tokenIdOf(tokens[1])) });
-          throw agentXError("NOT_FOUND", "route not found");
+        for (const handle of ROUTE_HANDLERS) {
+          const outcome = await handle(ctx);
+          if (outcome !== UNMATCHED) return outcome;
         }
         return undefined;
       } catch (error) {

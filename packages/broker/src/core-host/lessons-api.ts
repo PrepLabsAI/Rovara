@@ -250,6 +250,570 @@ export function skillRefusalOf(code: string): AgentXError {
   }
 }
 
+const SKILLS_PATH = /^\/v1\/dev\/projects\/[^/]+\/skills(?:\/|$)/u;
+const ALLOWED_METHODS: Record<string, string> = { list: "GET", task: "GET", weekly: "GET", "retire-requests": "GET", measure: "GET", tuning: "GET", replay: "GET", decisions: "POST", "mode/trial-offer": "POST", approve: "POST", reject: "POST", retire: "POST", "retire-request": "POST", keep: "POST", "not-helpful": "POST", areas: "GET", "learning-sources": "GET", "learning-source": "PUT", skill: "POST", skills: "GET", "skill-edit": "PUT", "skill-approve": "POST", "skill-retire": "POST" };
+
+interface ParsedLessonsRoute {
+  graduation: RegExpExecArray | null;
+  route: string;
+  method: string;
+  rawProject: string;
+  rawLesson: string | undefined;
+  action: string | undefined;
+  rawTask: string | undefined;
+  rawTaskLesson: string | undefined;
+  rawSource: string | undefined;
+  rawSkill: string | undefined;
+}
+
+interface LessonsContext {
+  options: LessonsApiOptions;
+  log: (event: string, fields?: Record<string, unknown>) => void;
+  caller: LessonsApiCaller;
+  companyId: OrgId;
+  role: OrgRole;
+  personId: string;
+  project: string;
+  onRoster: boolean;
+  lessons: LessonsApiCompany;
+  runtime: LessonsApiCompany["runtime"];
+  deps: LessonsApiCompany["runtime"]["routes"];
+  who: { orgId: OrgId; developerId: string };
+  where: { workspaceId: OrgId; project: string };
+  mayChange: () => Promise<boolean>;
+}
+
+type DecisionItem = z.infer<typeof DecisionSchema>;
+type DecisionOutcome = { lessonId: string; ok: true; status: string } | { lessonId: string; ok: false; code: string; message: string };
+type ProjectLearningMode = { settings: Awaited<ReturnType<LessonsApiCompany["runtime"]["settings"]["read"]>>; resolved: Awaited<ReturnType<typeof resolveLearning>>; own: LessonApiMode };
+
+function resolveRouteName(
+  graduation: RegExpExecArray | null,
+  skillsPath: boolean,
+  fixed: string | undefined,
+  action: string | undefined,
+  rawTask: string | undefined,
+  rawTaskLesson: string | undefined,
+  rawSource: string | undefined,
+  rawSkill: string | undefined,
+  skillAction: string | undefined,
+): string {
+  if (graduation !== null) return "graduation";
+  if (skillsPath) {
+    if (rawSkill === undefined) return "skills";
+    return skillAction === undefined ? "skill-edit" : `skill-${skillAction}`;
+  }
+  if (rawSource !== undefined) return "learning-source";
+  if (rawTaskLesson !== undefined) return "not-helpful";
+  if (rawTask !== undefined) return "task";
+  return fixed ?? action ?? "list";
+}
+
+function isMethodAllowed(route: string, method: string): boolean {
+  if (route === "mode" || route === "weekly-summary") return method === "GET" || method === "PUT";
+  return ALLOWED_METHODS[route] === method;
+}
+
+function parseLessonsRoute(request: LessonsApiRequest): ParsedLessonsRoute {
+  // Lessons phase 4 (`lessons-graduation.ts`): its paths are tried first (`tidy` and `check-drafts` would otherwise read as a lesson id); it shares everything below up to the roster check.
+  const graduation = LESSONS_GRADUATION_API.exec(request.path);
+  const match = graduation ?? LESSONS_API.exec(request.path);
+  if (match === null) throw notFound(ROUTE_NOT_FOUND);
+  const [, rawProject, fixed, rawLesson, action, rawTask, rawTaskLesson, , rawSource, rawSkill, skillAction] = graduation === null ? match : [match[0], match[1]] as unknown as typeof match;
+  const method = request.method;
+  // The skills paths (`skills`, `skills/{name}`, `skills/{name}/approve|retire`) and the lesson's `skill` action are the skill routes.
+  const skillsPath = SKILLS_PATH.test(request.path);
+  const route = resolveRouteName(graduation, skillsPath, fixed, action, rawTask, rawTaskLesson, rawSource, rawSkill, skillAction);
+  if (graduation === null && !isMethodAllowed(route, method)) throw notFound(ROUTE_NOT_FOUND);
+  return { graduation, route, method, rawProject: rawProject!, rawLesson, action, rawTask, rawTaskLesson, rawSource, rawSkill };
+}
+
+function hasDuplicateQueryKeys(query: URLSearchParams | undefined): boolean {
+  if (query === undefined) return false;
+  const keys = [...query.keys()];
+  return keys.length !== new Set(keys).size;
+}
+
+function decodeLessonId(raw: string | undefined): string {
+  let lessonId: string;
+  try { lessonId = decodeURIComponent(raw!); } catch { throw notFound(NO_SUCH_LESSON); }
+  if (!LESSON_ID.test(lessonId)) throw notFound(NO_SUCH_LESSON);
+  return lessonId;
+}
+
+function decodeTaskId(raw: string | undefined): string {
+  let taskId: string;
+  try { taskId = decodeURIComponent(raw!); } catch { throw agentXError("TASK_NOT_FOUND", NO_SUCH_TASK); }
+  if (!TASK_ID.test(taskId)) throw agentXError("TASK_NOT_FOUND", NO_SUCH_TASK);
+  return taskId;
+}
+
+function retireAskKey(companyId: OrgId, project: string, lessonId: string): { pk: string; sk: string } {
+  return { pk: companyScoped(companyId, `LESSON_RETIRE_ASK#${project}`), sk: lessonId };
+}
+
+async function resolveCompanyLessons(
+  options: LessonsApiOptions,
+  membershipOf: (caller: LessonsApiCaller) => Promise<{ companyId: OrgId; role: OrgRole }>,
+  caller: LessonsApiCaller,
+): Promise<{ companyId: OrgId; role: OrgRole; lessons: LessonsApiCompany }> {
+  // The switch first: off reads nothing at all, not even who is asking.
+  if (options.lessonsSwitch.mode === "off") throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
+  const { companyId, role } = await membershipOf(caller);
+  if (!switchCovers(options.lessonsSwitch, companyId)) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
+  let lessons: LessonsApiCompany | undefined;
+  try { lessons = await options.lessonsOf(companyId); } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
+  if (lessons === undefined) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
+  // The lessons handed back must be the member company's own: anything else is a wiring fault, refused before any read.
+  if (lessons.companyId !== companyId) throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE);
+  // A script token neither reads nor changes lessons here: the lists are for team members, on their own screens, a page at a time.
+  if (caller.scriptToken !== undefined) throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
+  return { companyId, role, lessons };
+}
+
+async function resolveProjectAccess(
+  options: LessonsApiOptions,
+  lessons: LessonsApiCompany,
+  companyId: OrgId,
+  personId: string,
+  rawProject: string,
+): Promise<{ project: string; onRoster: boolean }> {
+  let project: string;
+  try { project = decodeURIComponent(rawProject); } catch { throw notFound(NO_SUCH_PROJECT); }
+  if (!AgentXNameSchema.safeParse(project).success) throw notFound(NO_SUCH_PROJECT);
+  let onRoster: boolean;
+  let exists: boolean;
+  try {
+    [exists, onRoster] = await Promise.all([lessons.projectExists(project), options.people.onProjectRoster(companyId, project, personId)]);
+  } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
+  if (!exists) throw notFound(NO_SUCH_PROJECT);
+  return { project, onRoster };
+}
+
+async function resolveRequestContext(
+  options: LessonsApiOptions,
+  membershipOf: (caller: LessonsApiCaller) => Promise<{ companyId: OrgId; role: OrgRole }>,
+  log: (event: string, fields?: Record<string, unknown>) => void,
+  caller: LessonsApiCaller,
+  rawProject: string,
+): Promise<LessonsContext> {
+  const { companyId, role, lessons } = await resolveCompanyLessons(options, membershipOf, caller);
+  const personId = caller.personId;
+  const { project, onRoster } = await resolveProjectAccess(options, lessons, companyId, personId, rawProject);
+  const runtime = lessons.runtime;
+  /** Who may inspect replay or change the project's lessons settings: company owner/admin or project maintainer. */
+  const mayChange = async (): Promise<boolean> => {
+    if (role === "owner" || role === "admin") return true;
+    try { return (await options.projectRole(companyId, project, personId)) === "maintainer"; } catch (error) { rethrowMembershipReadFailure(error); return false; }
+  };
+  return {
+    options, log, caller, companyId, role, personId, project, onRoster, lessons, runtime,
+    deps: runtime.routes,
+    who: { orgId: companyId, developerId: personId },
+    where: { workspaceId: companyId, project },
+    mayChange,
+  };
+}
+
+async function handleWeekly(ctx: LessonsContext): Promise<unknown> {
+  if (!ctx.onRoster) throw notFound(NO_SUCH_PROJECT);
+  try {
+    const digest = await buildLessonsDigest(ctx.deps, ctx.who, ctx.project);
+    return { project: ctx.project, weekly: { needLook: digest.weekly?.needLook ?? [], picks: digest.weekly?.picks ?? [] } };
+  } catch (error) {
+    if (error instanceof AgentXError) throw error;
+    throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE);
+  }
+}
+
+async function handleTaskRoute(ctx: LessonsContext, request: LessonsApiRequest, parsed: ParsedLessonsRoute): Promise<unknown> {
+  const taskId = decodeTaskId(parsed.rawTask);
+  const task = await ctx.lessons.readTask(taskId).catch(() => { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); });
+  // A task of another company or project, or one the person may not read (not on the roster and not its own person), is the same "no such task".
+  // A person off the roster learns nothing about the project from a task id (the same "No such project." as a project that does not exist), not even from a task they started: a person removed from the project keeps no hold on it.
+  if (!ctx.onRoster) throw notFound(NO_SUCH_PROJECT);
+  if (task === undefined || task.companyId !== ctx.companyId || task.project !== ctx.project) throw agentXError("TASK_NOT_FOUND", NO_SUCH_TASK);
+  if (parsed.route === "task") {
+    const wikiUse = ctx.onRoster ? await ctx.options.wikiTaskUse?.(ctx.companyId, ctx.project, taskId) : undefined;
+    return { project: ctx.project, taskId, ...(await buildLoadedLessons(ctx.deps, ctx.who, ctx.project, taskId)), ...(wikiUse === undefined ? {} : { wikiUse }) };
+  }
+  // Not helpful: the one-tap thumbs-down of a person on the project, for a lesson this task was given (the library checks it was, and that they can read it). One mark per person per lesson;
+  // a lesson live on trial is retired by it, any other lesson gets a "wrong here" mark that asks a person to decide.
+  bodyOf(EmptyBody, request.body, "not helpful takes no fields");
+  const lessonId = decodeLessonId(parsed.rawTaskLesson);
+  if (!ctx.onRoster) throw notFound(NO_SUCH_LESSON);
+  const viewer = await ctx.deps.directory.identity(ctx.companyId, ctx.personId);
+  const marked = await recordFeedback({ ...ctx.runtime.counters, access: ctx.runtime.access }, { ...ctx.where, taskId, lessonId, userId: ctx.personId, viewer, kind: "thumbs_down", projectMember: true });
+  if (!marked.ok) {
+    if (marked.code === "repeat") throw agentXError("IDEMPOTENCY_CONFLICT", "You already marked this lesson.");
+    throw notFound(NO_SUCH_LESSON);
+  }
+  return { project: ctx.project, taskId, lessonId, marked: "not_helpful" };
+}
+
+async function handleReplay(ctx: LessonsContext, request: LessonsApiRequest): Promise<unknown> {
+  if (ctx.caller.scriptToken !== undefined) throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
+  // The measure read's rule (DEC 254zzz34): on the project's roster like every lesson read, then a maintainer, company admin or owner.
+  if (!ctx.onRoster) throw notFound(NO_SUCH_PROJECT);
+  if (!(await ctx.mayChange())) throw agentXError("FORBIDDEN", MEASURE_NEEDS_ADMIN);
+  const params = Object.fromEntries(request.query?.entries() ?? []);
+  if (Object.keys(params).some((name) => name !== "tasks") || (request.query?.getAll("tasks").length ?? 0) > 1) throw agentXError("CONFIG_INVALID", "replay takes tasks (1 to 50), once");
+  const rawTasks = request.query?.get("tasks") ?? undefined;
+  if (rawTasks !== undefined && !/^(?:[1-9]|[1-4][0-9]|50)$/u.test(rawTasks)) throw agentXError("CONFIG_INVALID", "replay takes tasks (1 to 50), once");
+  try { return { project: ctx.project, ...(await ctx.lessons.replay(ctx.project, rawTasks === undefined ? 30 : Number(rawTasks))) }; }
+  catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
+}
+
+async function handleSkillsList(ctx: LessonsContext, request: LessonsApiRequest, skillDeps: SkillDeps): Promise<unknown> {
+  const byYou = (approvers: readonly string[]) => approvers.some((id) => id.normalize("NFC").trim().toLowerCase() === ctx.personId.normalize("NFC").trim().toLowerCase());
+  // L4-JA: whether this person may decide skills (what every skill write asks the approver directory), so the screen shows the buttons only to them. Code still refuses anyone else.
+  const canDecide = await mayDecideSkills(skillDeps, ctx.where, ctx.personId);
+  // `?name=<skill>` (L4-JA): that one skill with the text of its newest version (the text a person approves) and, when it reads back exactly, the form to start an edit from. No other query is taken.
+  const queryNames = request.query?.getAll("name") ?? [];
+  if ([...(request.query?.keys() ?? [])].some((key) => key !== "name") || queryNames.length > 1 || (queryNames[0] !== undefined && !ROVARA_SKILL_NAME.test(queryNames[0]))) throw agentXError("CONFIG_INVALID", "skills takes name (one skill's name), once");
+  if (queryNames[0] !== undefined) {
+    let detail: Awaited<ReturnType<typeof readSkill>>;
+    try { detail = await readSkill(ctx.runtime, ctx.where, queryNames[0]); } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
+    if (detail === undefined) throw notFound("That skill is no longer there.");
+    const { approvers, ...rest } = detail;
+    return { project: ctx.project, canDecide, skills: [{ ...rest, approvedByYou: byYou(approvers) }] };
+  }
+  let skills: Awaited<ReturnType<typeof listSkills>>;
+  try { skills = await listSkills(ctx.runtime, ctx.where); } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
+  return { project: ctx.project, canDecide, skills: skills.map(({ approvers, ...rest }) => ({ ...rest, approvedByYou: byYou(approvers) })) };
+}
+
+async function handleSkillDraft(ctx: LessonsContext, request: LessonsApiRequest, rawLesson: string | undefined, skillDeps: SkillDeps): Promise<unknown> {
+  const body = bodyOf(SkillDraftBody, request.body, "a skill draft takes an optional name (lowercase letters, digits and hyphens)");
+  const lessonId = decodeLessonId(rawLesson);
+  const made = await draftSkillFromLesson(skillDeps, ctx.where, { lessonId, by: ctx.personId, name: body.name });
+  if (!made.ok) throw skillRefusalOf(made.code);
+  ctx.log("skill_drafted", { companyId: ctx.companyId });
+  return { project: ctx.project, name: made.name, version: made.version, ...(made.note === undefined ? {} : { note: made.note }) };
+}
+
+async function handleSkillEdit(ctx: LessonsContext, request: LessonsApiRequest, skillName: string, skillDeps: SkillDeps): Promise<unknown> {
+  const body = bodyOf(SkillEditBody, request.body, "a skill edit takes expectedVersion, description, when, steps (1 to 12), and optionally doneWhen and why");
+  const done = await editSkill(skillDeps, ctx.where, { name: skillName, by: ctx.personId, expectedVersion: body.expectedVersion, form: { description: body.description, when: body.when, steps: body.steps, doneWhen: body.doneWhen, why: body.why } });
+  if (!done.ok) throw skillRefusalOf(done.code);
+  return { project: ctx.project, name: skillName, version: done.version, ...(done.note === undefined ? {} : { note: done.note }) };
+}
+
+async function handleSkillApprove(ctx: LessonsContext, request: LessonsApiRequest, skillName: string, skillDeps: SkillDeps): Promise<unknown> {
+  const body = bodyOf(SkillApproveBody, request.body, "an approval takes the version you read");
+  const done = await approveSkill(skillDeps, ctx.where, { name: skillName, version: body.version, by: ctx.personId });
+  if (!done.ok) throw skillRefusalOf(done.code);
+  return { project: ctx.project, name: skillName, version: body.version, approvals: done.approvals, live: done.live };
+}
+
+async function handleSkillRoute(ctx: LessonsContext, request: LessonsApiRequest, parsed: ParsedLessonsRoute): Promise<unknown> {
+  // Rovara skills (L4-AK3). Reads need the roster; every write is a person who decides (the library asks the approver directory now), never a script token (refused above), and is audited by the library before it is made.
+  const skillDeps: SkillDeps = skillDepsOf(ctx.runtime, { companyId: ctx.companyId, now: ctx.options.now, log: ctx.log });
+  if (parsed.route === "skills") return await handleSkillsList(ctx, request, skillDeps);
+  if (parsed.route === "skill") return await handleSkillDraft(ctx, request, parsed.rawLesson, skillDeps);
+  const skillName = parsed.rawSkill;
+  if (skillName === undefined) throw notFound(ROUTE_NOT_FOUND);
+  if (parsed.route === "skill-edit") return await handleSkillEdit(ctx, request, skillName, skillDeps);
+  if (parsed.route === "skill-approve") return await handleSkillApprove(ctx, request, skillName, skillDeps);
+  bodyOf(EmptyBody, request.body, "retiring a skill takes no fields");
+  const retired = await retireSkill(skillDeps, ctx.where, { name: skillName, by: ctx.personId });
+  if (!retired.ok) throw skillRefusalOf(retired.code);
+  return { project: ctx.project, name: skillName, retired: true };
+}
+
+async function handleList(ctx: LessonsContext, request: LessonsApiRequest): Promise<unknown> {
+  const query = PageQuery.safeParse(Object.fromEntries(request.query?.entries() ?? []));
+  if (!query.success || hasDuplicateQueryKeys(request.query)) throw agentXError("CONFIG_INVALID", "list takes list (proposed, approved or retired), since, limit (1 to 50) and cursor, once each");
+  const after = query.data.cursor === undefined ? undefined : decodeCursor(query.data.cursor, query.data.list);
+  const page = await buildLessonsPage(ctx.deps, ctx.who, ctx.project, { list: query.data.list, limit: query.data.limit ?? PAGE_DEFAULT, ...(after === undefined ? {} : { after }), ...(query.data.since === undefined ? {} : { since: query.data.since }) });
+  // "Used in N tasks": the distinct tasks each shown lesson was given to (its use rows, this company and project only). A lesson that could not be counted has no `usedInTasks`, and the page says so (`usedInIncomplete`).
+  // A proposed lesson has never been given to a task, so the proposed list is not counted (no `usedInTasks`, and the page is not incomplete for it).
+  const used = query.data.list === "proposed" ? { counts: new Map<string, { tasks: number; more?: true }>(), incomplete: false } : await countLessonUses(ctx.runtime.documents, { companyId: ctx.companyId, project: ctx.project, lessonIds: page.lessons.map((one) => one.id), now: ctx.options.now() });
+  const lessonsShown = page.lessons.map((one) => { const count = used.counts.get(one.id); return count === undefined ? one : { ...one, usedInTasks: count.tasks, ...(count.more === true ? { usedInTasksMore: true as const } : {}) }; });
+  return { ...page, lessons: lessonsShown, ...(used.incomplete ? { usedInIncomplete: true } : {}), ...(page.next === undefined ? {} : { next: encodeLessonCursor(page.next) }) };
+}
+
+async function handleMeasure(ctx: LessonsContext): Promise<unknown> {
+  // Phase 0 (measure only, `lessons/measure.ts`): numbers about loads and merges, ids never shown. For the people who run the project's learning, never a script token.
+  if (ctx.caller.scriptToken !== undefined) throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
+  if (!(await ctx.mayChange())) throw agentXError("FORBIDDEN", MEASURE_NEEDS_ADMIN);
+  try { return await readLessonMeasure(ctx.runtime.documents, { companyId: ctx.companyId, project: ctx.project, now: ctx.options.now() }); } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
+}
+
+function parseAreaSelection(data: z.infer<typeof AreasQuery>): AreaSelection | undefined {
+  if (data.whole === "1") {
+    if (data.repo !== undefined || data.folder !== undefined) throw agentXError("CONFIG_INVALID", "whole=1 takes nothing else");
+    return { whole: true };
+  }
+  if (data.repo !== undefined) {
+    const folder = folderOfRequest(data.folder ?? "");
+    if (folder === undefined) throw agentXError("CONFIG_INVALID", "folder is not a plain folder path");
+    return { repo: data.repo === "*" ? null : data.repo, folder };
+  }
+  if (data.folder !== undefined) throw agentXError("CONFIG_INVALID", "folder needs repo");
+  return undefined;
+}
+
+async function handleAreas(ctx: LessonsContext, request: LessonsApiRequest): Promise<unknown> {
+  // Lead 4 L4-LP3W: the approved lessons by code area (anyone on the project reads, like the approved list).
+  const query = AreasQuery.safeParse(Object.fromEntries(request.query?.entries() ?? []));
+  if (!query.success || hasDuplicateQueryKeys(request.query)) throw agentXError("CONFIG_INVALID", "areas takes repo (a name, or *), folder and whole=1, once each");
+  const selection = parseAreaSelection(query.data);
+  return await buildLessonsByArea(ctx.deps, ctx.who, ctx.project, selection === undefined ? {} : { selection });
+}
+
+async function handleLearningSource(ctx: LessonsContext, request: LessonsApiRequest, rawSource: string | undefined): Promise<unknown> {
+  const sourceKey = SOURCE_KEY.safeParse(rawSource);
+  if (!sourceKey.success) throw notFound(ROUTE_NOT_FOUND);
+  const body = bodyOf(LearningSourcePauseBodySchema, request.body, "pause takes paused: true or false");
+  if (!(await ctx.mayChange())) throw agentXError("FORBIDDEN", SOURCE_NEEDS_ADMIN);
+  let outcome: Awaited<ReturnType<typeof setLearningSourcePause>>;
+  try { outcome = await setLearningSourcePause({ store: ctx.runtime.store, audit: ctx.runtime.audit, now: ctx.options.now, log: (event, fields) => ctx.log(event, fields) }, ctx.where, ctx.personId, sourceKey.data, body.paused); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "That could not be saved. Try again."); }
+  if (!outcome.ok) throw agentXError("AUDIT_UNAVAILABLE", NOT_RECORDED);
+  ctx.log("learning_source_set", { companyId: ctx.companyId, paused: outcome.paused });
+  return { project: ctx.project, key: sourceKey.data, paused: outcome.paused };
+}
+
+async function handleTuning(ctx: LessonsContext): Promise<unknown> {
+  // The tuning report (`lessons/tuning.ts`): suggested values for the settings phases 1 and 2 introduce, from the project's own measured rows; "not enough data yet (N of M loads)" until there are enough.
+  // Read only: an operator or admin applies a value; nothing here changes by itself. For the people who run the project's learning, never a script token.
+  if (ctx.caller.scriptToken !== undefined) throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
+  if (!(await ctx.mayChange())) throw agentXError("FORBIDDEN", TUNING_NEEDS_ADMIN);
+  try { return await readTuningReport(ctx.runtime.documents, { companyId: ctx.companyId, project: ctx.project, now: ctx.options.now() }); } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
+}
+
+async function handleWeeklySummary(ctx: LessonsContext, request: LessonsApiRequest, method: string): Promise<unknown> {
+  if (method === "GET") {
+    let setting: Awaited<ReturnType<typeof resolveDigestSettingStrict>>;
+    try { setting = await resolveDigestSettingStrict(ctx.runtime.documents, ctx.companyId, ctx.project, digestPilotOf(ctx.options)); } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
+    return { project: ctx.project, on: setting.on, source: setting.source, canChange: await ctx.mayChange() };
+  }
+  const body = bodyOf(WeeklySummaryBody, request.body, "the weekly summary takes on: true or false");
+  if (!(await ctx.mayChange())) throw agentXError("FORBIDDEN", SUMMARY_NEEDS_ADMIN);
+  // The record first: no record, no change.
+  if (!(await requireAudit(ctx.runtime.audit, { action: "lesson.digest_switched", workspaceId: ctx.companyId, project: ctx.project, actor: ctx.personId, facts: { enabled: body.on } }))) throw agentXError("AUDIT_UNAVAILABLE", NOT_RECORDED);
+  try { await writeDigestSetting(ctx.runtime.documents, ctx.companyId, ctx.project, body.on, ctx.options.now()); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "That could not be saved. Try again."); }
+  ctx.log("weekly_summary_set", { companyId: ctx.companyId, on: body.on });
+  return { project: ctx.project, on: body.on, source: "chosen", canChange: true };
+}
+
+async function readProjectLearningMode(ctx: LessonsContext): Promise<ProjectLearningMode> {
+  const settings = await ctx.runtime.settings.read(ctx.companyId, ctx.project).catch(() => { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); });
+  const resolved = await resolveLearning(ctx.runtime.settings, ctx.companyId, ctx.project);
+  // No settings, or no mode stored, is the default (Suggest, DEC 226).
+  const stored = (settings as { mode?: unknown } | undefined)?.mode ?? DEFAULT_LEARNING_MODE;
+  const own: LessonApiMode = typeof stored === "string" && stored in FROM_STORED ? FROM_STORED[stored as LearningMode] : "off";
+  return { settings, resolved, own };
+}
+
+/**
+ * The earned-trust offer (DEC 231): only while the project's own mode and the mode in force are both Suggest (no company lock), accepting would really start trials and nothing more (Standard preset,
+ * no approval floor, required group or two-person rule, tier 0 not set to go live by itself: `trialWouldStart`), the offer is earned and nobody said "not now" lately. Undefined: no offer. Who may not
+ * change the mode is never offered it.
+ */
+async function readTrialOfferDue(ctx: LessonsContext, mode: ProjectLearningMode): Promise<TrialOfferTally | undefined> {
+  if (mode.own !== "suggest" || FROM_STORED[mode.resolved.chosenMode] !== "suggest" || mode.resolved.preset !== "standard") return undefined;
+  if (!trialWouldStart(mode.settings ?? {}, mode.resolved)) return undefined;
+  if (await trialOfferSnoozed(ctx.runtime.documents, ctx.companyId, ctx.project, ctx.options.now())) return undefined;
+  const tally = await tallyTrialOffer(ctx.runtime.store, ctx.where, ctx.options.now());
+  return tally !== undefined && trialOfferEarned(tally) ? tally : undefined;
+}
+
+async function handleTrialOffer(ctx: LessonsContext, request: LessonsApiRequest, mode: ProjectLearningMode): Promise<unknown> {
+  const body = bodyOf(TrialOfferBody, request.body, "the decision is accept or not_now");
+  if (!(await ctx.mayChange())) throw agentXError("FORBIDDEN", MODE_NEEDS_ADMIN);
+  // Answered against the offer as it stands now: one that is no longer due (the mode changed, a lock came, a drop, someone answered) is not answered under the person.
+  const tally = await readTrialOfferDue(ctx, mode);
+  if (tally === undefined) throw agentXError("IDEMPOTENCY_CONFLICT", "There is no offer to answer now.");
+  if (body.decision === "not_now") {
+    // The record first: no record, no change.
+    if (!(await requireAudit(ctx.runtime.audit, { action: "lesson.trial_offer_answered", workspaceId: ctx.companyId, project: ctx.project, actor: ctx.personId, facts: { answer: "not_now", approvals: tally.approvals, drops: tally.drops } }))) throw agentXError("AUDIT_UNAVAILABLE", NOT_RECORDED);
+    try { await snoozeTrialOffer(ctx.runtime.documents, ctx.companyId, ctx.project, ctx.options.now()); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "That could not be saved. Try again."); }
+    ctx.log("trial_offer_not_now", { companyId: ctx.companyId });
+    return { project: ctx.project, decision: "not_now", mode: mode.own };
+  }
+  // Accepting is a change of mode: ONE record (the mode change, marked as the offer's), before the write. The write holds only while the mode is still Suggest, so a mode someone changed since the
+  // offer was read is never written over (the person is told there is no offer now; the record then stands for an answer that changed nothing, the safe way round).
+  if (!(await requireAudit(ctx.runtime.audit, { action: "lesson.mode_changed", workspaceId: ctx.companyId, project: ctx.project, actor: ctx.personId, facts: { from: mode.own, to: "auto", via: "trial_offer", approvals: tally.approvals, drops: tally.drops } }))) throw agentXError("AUDIT_UNAVAILABLE", NOT_RECORDED);
+  let written: boolean;
+  try { written = await writeLearningModeFromSuggest(ctx.runtime.documents, ctx.where, TO_STORED.auto, ctx.options.now()); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "The mode could not be saved. Try again."); }
+  if (!written) throw agentXError("IDEMPOTENCY_CONFLICT", "There is no offer to answer now.");
+  // Best effort: a project that goes back to Suggest later is not offered trial again at once.
+  await snoozeTrialOffer(ctx.runtime.documents, ctx.companyId, ctx.project, ctx.options.now()).catch(() => undefined);
+  ctx.log("trial_offer_accepted", { companyId: ctx.companyId });
+  const after = await resolveLearning(ctx.runtime.settings, ctx.companyId, ctx.project);
+  return { project: ctx.project, decision: "accept", mode: "auto", effective: FROM_STORED[after.chosenMode] };
+}
+
+async function handleModeRoute(ctx: LessonsContext, request: LessonsApiRequest, parsed: ParsedLessonsRoute): Promise<unknown> {
+  const mode = await readProjectLearningMode(ctx);
+  if (parsed.route === "mode/trial-offer") return await handleTrialOffer(ctx, request, mode);
+  if (parsed.method === "GET") {
+    const effective = FROM_STORED[mode.resolved.chosenMode];
+    const canChange = await ctx.mayChange();
+    // The offer is extra: a tally that cannot be read is no offer, never a failed read of the mode.
+    const offer = canChange ? await readTrialOfferDue(ctx, mode).catch(() => undefined) : undefined;
+    return { project: ctx.project, mode: mode.own, effective, lockedByCompany: effective !== mode.own, canChange, ...(offer === undefined ? {} : { trialOffer: { approvals: offer.approvals, drops: offer.drops, since: offer.since } }) };
+  }
+  const body = bodyOf(ModeBody, request.body, "the mode is off, suggest or auto");
+  if (!(await ctx.mayChange())) throw agentXError("FORBIDDEN", MODE_NEEDS_ADMIN);
+  // The record first: no record, no change.
+  if (!(await requireAudit(ctx.runtime.audit, { action: "lesson.mode_changed", workspaceId: ctx.companyId, project: ctx.project, actor: ctx.personId, facts: { from: mode.own, to: body.mode } }))) throw agentXError("AUDIT_UNAVAILABLE", NOT_RECORDED);
+  try { await writeLearningMode(ctx.runtime.documents, ctx.where, TO_STORED[body.mode], ctx.options.now()); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "The mode could not be saved. Try again."); }
+  ctx.log("mode_set", { companyId: ctx.companyId, mode: body.mode });
+  const after = await resolveLearning(ctx.runtime.settings, ctx.companyId, ctx.project);
+  return { project: ctx.project, mode: body.mode, effective: FROM_STORED[after.chosenMode], lockedByCompany: FROM_STORED[after.chosenMode] !== body.mode, canChange: true };
+}
+
+async function resolveRetireRequestRow(
+  ctx: LessonsContext,
+  viewer: Awaited<ReturnType<LessonsApiCompany["runtime"]["routes"]["directory"]["identity"]>>,
+  row: Record<string, unknown>,
+): Promise<{ lessonId: string; title: string; status: string; by: string; at: number } | undefined> {
+  const asker = row["personId"];
+  if (typeof asker !== "string" || typeof row["sk"] !== "string") return undefined;
+  // An erased person's request is never shown (erase removes it too); a person whose standing cannot be read is left out.
+  const erased = await ctx.options.people.isErased(ctx.companyId, asker).catch(() => true);
+  if (erased) return undefined;
+  const name = await ctx.options.people.displayName(ctx.companyId, asker).catch(() => undefined);
+  const lesson = await ctx.runtime.store.get(ctx.where, row["sk"]);
+  if (lesson === undefined || lesson.status === "retired" || lesson.status === "rejected" || lesson.status === "expired") return undefined;
+  if ((await readVisible({ access: ctx.runtime.access, key: ctx.where, viewer, lessons: [lesson], where: "view" })).length !== 1) return undefined;
+  return { lessonId: lesson.id, title: lesson.title, status: lesson.status, by: name === undefined ? "a former member" : attributionNameOf(name), at: typeof row["at"] === "number" ? row["at"] : 0 };
+}
+
+async function handleRetireRequests(ctx: LessonsContext): Promise<unknown> {
+  const eligibility = await ctx.deps.directory.eligibility(ctx.companyId, ctx.project).catch(() => undefined);
+  if (eligibility === undefined || !eligibility.complete || !idIn(eligibility.eligibleIds, ctx.personId)) throw agentXError("FORBIDDEN", "Only a maintainer of this project, or an admin, can see retire requests.");
+  const page = await ctx.runtime.documents.query({ pk: companyScoped(ctx.companyId, `LESSON_RETIRE_ASK#${ctx.project}`), limit: RETIRE_REQUESTS_MAX + 1 }).catch(() => { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); });
+  const viewer = await ctx.deps.directory.identity(ctx.companyId, ctx.personId);
+  const requests: Array<{ lessonId: string; title: string; status: string; by: string; at: number }> = [];
+  for (const row of page.items.slice(0, RETIRE_REQUESTS_MAX)) {
+    const entry = await resolveRetireRequestRow(ctx, viewer, row);
+    if (entry !== undefined) requests.push(entry);
+  }
+  requests.sort((a, b) => b.at - a.at || a.lessonId.localeCompare(b.lessonId));
+  return { project: ctx.project, requests, more: page.items.length > RETIRE_REQUESTS_MAX };
+}
+
+function refusalOutcome(lessonId: string, code: ApprovalFailure): DecisionOutcome {
+  const refused = refusalOf(code);
+  return { lessonId, ok: false, code: refused.code, message: refused.message.slice(refused.code.length + 2) };
+}
+
+async function applyOneDecision(ctx: LessonsContext, decision: DecisionItem): Promise<DecisionOutcome> {
+  const one = { ...ctx.where, lessonId: decision.lessonId, approverId: ctx.personId, expectedVersion: decision.version };
+  // A fault on one lesson answers for that lesson only: the decisions already made are still reported.
+  try {
+    if (decision.decision === "keep") {
+      const result = await approveLesson(ctx.deps, { ...one, ...(decision.edit === undefined ? {} : { edit: decision.edit }) });
+      return result.ok ? { lessonId: decision.lessonId, ok: true, status: result.status } : refusalOutcome(decision.lessonId, result.code);
+    }
+    const result = await rejectLesson(ctx.deps, { ...one, reason: decision.reason });
+    return result.ok ? { lessonId: decision.lessonId, ok: true, status: "rejected" } : refusalOutcome(decision.lessonId, result.code);
+  } catch (error) {
+    ctx.log("decision_failed", { error: error instanceof Error ? error.name : "unknown" });
+    return { lessonId: decision.lessonId, ok: false, code: "RUNTIME_UNAVAILABLE", message: UNAVAILABLE };
+  }
+}
+
+async function handleDecisions(ctx: LessonsContext, request: LessonsApiRequest): Promise<unknown> {
+  const body = bodyOf(DecisionsBody, request.body, `decisions takes 1 to ${String(DECISIONS_MAX)} distinct lessons, each { lessonId, version, decision: keep, edit? } or { lessonId, version, decision: drop, reason }`);
+  // One at a time, in the order given; each answers for itself (a refusal of one never undoes or blocks another). Each is the same library call as the single routes, audited the same way.
+  const results: DecisionOutcome[] = [];
+  for (const decision of body.decisions) results.push(await applyOneDecision(ctx, decision));
+  return { project: ctx.project, results };
+}
+
+async function handleRetireRequest(ctx: LessonsContext, request: LessonsApiRequest, lessonId: string): Promise<unknown> {
+  // A retire request: anyone on the project who can see the lesson asks; the people who decide answer it.
+  bodyOf(EmptyBody, request.body, "a retire request takes no fields");
+  const lesson = await ctx.runtime.store.get(ctx.where, lessonId);
+  const viewer = await ctx.deps.directory.identity(ctx.companyId, ctx.personId);
+  if (lesson === undefined || (lesson.status !== "active" && lesson.status !== "stale" && lesson.status !== "pending")
+    || (await readVisible({ access: ctx.runtime.access, key: ctx.where, viewer, lessons: [lesson], where: "view" })).length !== 1) throw notFound(NO_SUCH_LESSON);
+  if (!(await requireAudit(ctx.runtime.audit, { action: "lesson.retire_requested", workspaceId: ctx.companyId, project: ctx.project, lessonId, actor: ctx.personId, facts: { via: "api" } }))) throw agentXError("AUDIT_UNAVAILABLE", NOT_RECORDED);
+  const documents = ctx.runtime.documents;
+  const at = ctx.options.now();
+  await documents.put({ item: {
+    ...retireAskKey(ctx.companyId, ctx.project, lessonId), entityType: "LESSON_RETIRE_ASK", personId: ctx.personId, via: "api", at,
+    ...(documents.ttlAttribute === undefined ? {} : { [documents.ttlAttribute]: Math.floor(at / 1000) + RETIRE_REQUEST_KEEP_SECONDS }),
+  // The first open request stands (a later asker does not replace it, so erasing the later asker never drops an earlier person's request).
+  }, condition: { op: "notExists", path: ["pk"] } }).catch(() => { throw agentXError("RUNTIME_UNAVAILABLE", "The request could not be saved. Try again."); });
+  return { project: ctx.project, lessonId, requested: true };
+}
+
+async function handleSingleLessonAction(ctx: LessonsContext, request: LessonsApiRequest, parsed: ParsedLessonsRoute): Promise<unknown> {
+  // The writes on one lesson.
+  const lessonId = decodeLessonId(parsed.rawLesson);
+  switch (parsed.action) {
+    case "approve": {
+      const body = bodyOf(ApproveBody, request.body, "approve takes the version you read");
+      const result = await approveLesson(ctx.deps, { ...ctx.where, lessonId, approverId: ctx.personId, expectedVersion: body.version, ...(body.edit === undefined ? {} : { edit: body.edit }) });
+      if (!result.ok) throw refusalOf(result.code);
+      return { project: ctx.project, lessonId, status: result.status, version: result.lesson.version, needs: result.needs };
+    }
+    case "reject": {
+      const body = bodyOf(RejectBody, request.body, `reject takes the version you read and a reason: ${REJECT_REASONS.join(", ")}`);
+      const result = await rejectLesson(ctx.deps, { ...ctx.where, lessonId, approverId: ctx.personId, reason: body.reason, expectedVersion: body.version });
+      if (!result.ok) throw refusalOf(result.code);
+      return { project: ctx.project, lessonId, status: "rejected" };
+    }
+    case "retire": {
+      const body = bodyOf(RetireBody, request.body, `retire takes a reason: ${RETIRE_REASONS.join(", ")}`);
+      const result = await retireByPerson(ctx.deps, { ...ctx.where, lessonId, actorId: ctx.personId, reason: body.reason });
+      if (!result.ok) throw refusalOf(result.code);
+      // The request (if any) is answered: best effort, it no longer shows once the lesson is retired either way.
+      await ctx.runtime.documents.delete({ key: retireAskKey(ctx.companyId, ctx.project, lessonId) }).catch(() => undefined);
+      return { project: ctx.project, lessonId, status: "retired" };
+    }
+    case "keep": {
+      // The answer to "Keep it?": the people who decide (read live) renew a lesson a question stands on. Audited before the write by the library; a refusal is its fixed words.
+      bodyOf(EmptyBody, request.body, "keep takes no fields");
+      const result = await keepByPerson({ ...ctx.deps, evidence: ctx.runtime.evidence }, { ...ctx.where, lessonId, actorId: ctx.personId });
+      if (!result.ok) throw refusalOf(result.code);
+      return { project: ctx.project, lessonId, kept: true };
+    }
+    default:
+      return await handleRetireRequest(ctx, request, lessonId);
+  }
+}
+
+async function dispatchRosterRoute(ctx: LessonsContext, request: LessonsApiRequest, parsed: ParsedLessonsRoute): Promise<unknown> {
+  switch (parsed.route) {
+    case "skills":
+    case "skill":
+    case "skill-edit":
+    case "skill-approve":
+    case "skill-retire":
+      return await handleSkillRoute(ctx, request, parsed);
+    case "list":
+      return await handleList(ctx, request);
+    case "measure":
+      return await handleMeasure(ctx);
+    case "areas":
+      return await handleAreas(ctx, request);
+    case "learning-sources":
+      // Lead 4 L4-LP3W: "Where Rovara learns from" and its Pause.
+      return await buildLearningSources(ctx.deps, ctx.who, ctx.project, { canPause: await ctx.mayChange() });
+    case "learning-source":
+      return await handleLearningSource(ctx, request, parsed.rawSource);
+    case "tuning":
+      return await handleTuning(ctx);
+    case "weekly-summary":
+      return await handleWeeklySummary(ctx, request, parsed.method);
+    case "mode":
+    case "mode/trial-offer":
+      return await handleModeRoute(ctx, request, parsed);
+    case "retire-requests":
+      return await handleRetireRequests(ctx);
+    case "decisions":
+      return await handleDecisions(ctx, request);
+    default:
+      return await handleSingleLessonAction(ctx, request, parsed);
+  }
+}
+
 export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
   const log = (event: string, fields: Record<string, unknown> = {}): void => options.log?.({ component: "lessons-api", event, ...fields });
 
@@ -265,389 +829,14 @@ export function createLessonsApi(options: LessonsApiOptions): LessonsApi {
   }
 
   async function answer(request: LessonsApiRequest, caller: LessonsApiCaller): Promise<unknown> {
-    // Lessons phase 4 (`lessons-graduation.ts`): its paths are tried first (`tidy` and `check-drafts` would otherwise read as a lesson id); it shares everything below up to the roster check.
-    const graduation = LESSONS_GRADUATION_API.exec(request.path);
-    const match = graduation ?? LESSONS_API.exec(request.path);
-    if (match === null) throw notFound(ROUTE_NOT_FOUND);
-    const [, rawProject, fixed, rawLesson, action, rawTask, rawTaskLesson, , rawSource, rawSkill, skillAction] = graduation === null ? match : [match[0], match[1]] as unknown as typeof match;
-    const method = request.method;
-    // The skills paths (`skills`, `skills/{name}`, `skills/{name}/approve|retire`) and the lesson's `skill` action are the skill routes.
-    const skillsPath = /^\/v1\/dev\/projects\/[^/]+\/skills(?:\/|$)/u.test(request.path);
-    const route = graduation !== null ? "graduation" : skillsPath ? (rawSkill === undefined ? "skills" : skillAction === undefined ? "skill-edit" : `skill-${skillAction}`) : rawSource !== undefined ? "learning-source" : rawTaskLesson !== undefined ? "not-helpful" : rawTask !== undefined ? "task" : fixed !== undefined ? fixed : action !== undefined ? action : "list";
-    const allowed: Record<string, string> = { list: "GET", task: "GET", weekly: "GET", "retire-requests": "GET", measure: "GET", tuning: "GET", replay: "GET", decisions: "POST", "mode/trial-offer": "POST", approve: "POST", reject: "POST", retire: "POST", "retire-request": "POST", keep: "POST", "not-helpful": "POST", areas: "GET", "learning-sources": "GET", "learning-source": "PUT", skill: "POST", skills: "GET", "skill-edit": "PUT", "skill-approve": "POST", "skill-retire": "POST" };
-    if (graduation === null && (route === "mode" || route === "weekly-summary" ? method !== "GET" && method !== "PUT" : allowed[route] !== method)) throw notFound(ROUTE_NOT_FOUND);
-
-    // The switch first: off reads nothing at all, not even who is asking.
-    if (options.lessonsSwitch.mode === "off") throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
-    const { companyId, role } = await membershipOf(caller);
-    if (!switchCovers(options.lessonsSwitch, companyId)) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
-    let lessons: LessonsApiCompany | undefined;
-    try { lessons = await options.lessonsOf(companyId); } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
-    if (lessons === undefined) throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
-    // The lessons handed back must be the member company's own: anything else is a wiring fault, refused before any read.
-    if (lessons.companyId !== companyId) throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE);
-    // A script token neither reads nor changes lessons here: the lists are for team members, on their own screens, a page at a time.
-    if (caller.scriptToken !== undefined) throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
-
-    let project: string;
-    try { project = decodeURIComponent(rawProject!); } catch { throw notFound(NO_SUCH_PROJECT); }
-    if (!AgentXNameSchema.safeParse(project).success) throw notFound(NO_SUCH_PROJECT);
-    const personId = caller.personId;
-    let onRoster: boolean;
-    let exists: boolean;
-    try {
-      [exists, onRoster] = await Promise.all([lessons.projectExists(project), options.people.onProjectRoster(companyId, project, personId)]);
-    } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
-    if (!exists) throw notFound(NO_SUCH_PROJECT);
-
-    const runtime = lessons.runtime;
-    const deps = runtime.routes;
-    const who = { orgId: companyId, developerId: personId };
-    const where = { workspaceId: companyId, project };
-
-    if (route === "weekly") {
-      if (!onRoster) throw notFound(NO_SUCH_PROJECT);
-      try {
-        const digest = await buildLessonsDigest(deps, who, project);
-        return { project, weekly: { needLook: digest.weekly?.needLook ?? [], picks: digest.weekly?.picks ?? [] } };
-      } catch (error) {
-        if (error instanceof AgentXError) throw error;
-        throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE);
-      }
-    }
-
-    /** Who may inspect replay or change the project's lessons settings: company owner/admin or project maintainer. */
-    const mayChange = async (): Promise<boolean> => {
-      if (role === "owner" || role === "admin") return true;
-      try { return (await options.projectRole(companyId, project, personId)) === "maintainer"; } catch (error) { rethrowMembershipReadFailure(error); return false; }
-    };
-
-    if (route === "task" || route === "not-helpful") {
-      let taskId: string;
-      try { taskId = decodeURIComponent(rawTask!); } catch { throw agentXError("TASK_NOT_FOUND", NO_SUCH_TASK); }
-      if (!TASK_ID.test(taskId)) throw agentXError("TASK_NOT_FOUND", NO_SUCH_TASK);
-      const task = await lessons.readTask(taskId).catch(() => { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); });
-      // A task of another company or project, or one the person may not read (not on the roster and not its own person), is the same "no such task".
-      // A person off the roster learns nothing about the project from a task id (the same "No such project." as a project that does not exist), not even from a task they started: a person removed from the project keeps no hold on it.
-      if (!onRoster) throw notFound(NO_SUCH_PROJECT);
-      if (task === undefined || task.companyId !== companyId || task.project !== project) throw agentXError("TASK_NOT_FOUND", NO_SUCH_TASK);
-      if (route === "task") {
-        const wikiUse = onRoster ? await options.wikiTaskUse?.(companyId, project, taskId) : undefined;
-        return { project, taskId, ...(await buildLoadedLessons(deps, who, project, taskId)), ...(wikiUse === undefined ? {} : { wikiUse }) };
-      }
-      // Not helpful: the one-tap thumbs-down of a person on the project, for a lesson this task was given (the library checks it was, and that they can read it). One mark per person per lesson;
-      // a lesson live on trial is retired by it, any other lesson gets a "wrong here" mark that asks a person to decide.
-      bodyOf(EmptyBody, request.body, "not helpful takes no fields");
-      let lessonId: string;
-      try { lessonId = decodeURIComponent(rawTaskLesson!); } catch { throw notFound(NO_SUCH_LESSON); }
-      if (!LESSON_ID.test(lessonId) || !onRoster) throw notFound(NO_SUCH_LESSON);
-      const viewer = await deps.directory.identity(companyId, personId);
-      const marked = await recordFeedback({ ...runtime.counters, access: runtime.access }, { ...where, taskId, lessonId, userId: personId, viewer, kind: "thumbs_down", projectMember: true });
-      if (!marked.ok) {
-        if (marked.code === "repeat") throw agentXError("IDEMPOTENCY_CONFLICT", "You already marked this lesson.");
-        throw notFound(NO_SUCH_LESSON);
-      }
-      return { project, taskId, lessonId, marked: "not_helpful" };
-    }
-    if (route === "replay") {
-      if (caller.scriptToken !== undefined) throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
-      // The measure read's rule (DEC 254zzz34): on the project's roster like every lesson read, then a maintainer, company admin or owner.
-      if (!onRoster) throw notFound(NO_SUCH_PROJECT);
-      if (!(await mayChange())) throw agentXError("FORBIDDEN", MEASURE_NEEDS_ADMIN);
-      const params = Object.fromEntries(request.query?.entries() ?? []);
-      if (Object.keys(params).some((name) => name !== "tasks") || (request.query?.getAll("tasks").length ?? 0) > 1) throw agentXError("CONFIG_INVALID", "replay takes tasks (1 to 50), once");
-      const rawTasks = request.query?.get("tasks") ?? undefined;
-      if (rawTasks !== undefined && !/^(?:[1-9]|[1-4][0-9]|50)$/u.test(rawTasks)) throw agentXError("CONFIG_INVALID", "replay takes tasks (1 to 50), once");
-      try { return { project, ...(await lessons.replay(project, rawTasks === undefined ? 30 : Number(rawTasks))) }; }
-      catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
-    }
-
-    if (!onRoster) throw notFound(NO_SUCH_PROJECT);
-
-    if (graduation !== null) return await answerGraduation(request, graduation, { companyId, project, personId, lessons, skills: options.skillsOf?.(companyId), now: options.now, log }, caller);
-
-    // Rovara skills (L4-AK3). Reads need the roster; every write is a person who decides (the library asks the approver directory now), never a script token (refused above), and is audited by the library before it is made.
-    if (route === "skills" || route === "skill" || route.startsWith("skill-")) {
-      const skillDeps: SkillDeps = skillDepsOf(runtime, { companyId, now: options.now, log });
-      let skillName: string | undefined;
-      if (rawSkill !== undefined) skillName = rawSkill;
-      if (route === "skills") {
-        const byYou = (approvers: readonly string[]) => approvers.some((id) => id.normalize("NFC").trim().toLowerCase() === personId.normalize("NFC").trim().toLowerCase());
-        // L4-JA: whether this person may decide skills (what every skill write asks the approver directory), so the screen shows the buttons only to them. Code still refuses anyone else.
-        const canDecide = await mayDecideSkills(skillDeps, where, personId);
-        // `?name=<skill>` (L4-JA): that one skill with the text of its newest version (the text a person approves) and, when it reads back exactly, the form to start an edit from. No other query is taken.
-        const queryNames = request.query?.getAll("name") ?? [];
-        if ([...(request.query?.keys() ?? [])].some((key) => key !== "name") || queryNames.length > 1 || (queryNames[0] !== undefined && !ROVARA_SKILL_NAME.test(queryNames[0]))) throw agentXError("CONFIG_INVALID", "skills takes name (one skill's name), once");
-        if (queryNames[0] !== undefined) {
-          let detail: Awaited<ReturnType<typeof readSkill>>;
-          try { detail = await readSkill(runtime, where, queryNames[0]); } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
-          if (detail === undefined) throw notFound("That skill is no longer there.");
-          const { approvers, ...rest } = detail;
-          return { project, canDecide, skills: [{ ...rest, approvedByYou: byYou(approvers) }] };
-        }
-        let skills: Awaited<ReturnType<typeof listSkills>>;
-        try { skills = await listSkills(runtime, where); } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
-        return { project, canDecide, skills: skills.map(({ approvers, ...rest }) => ({ ...rest, approvedByYou: byYou(approvers) })) };
-      }
-      if (route === "skill") {
-        const body = bodyOf(SkillDraftBody, request.body, "a skill draft takes an optional name (lowercase letters, digits and hyphens)");
-        let lessonId: string;
-        try { lessonId = decodeURIComponent(rawLesson!); } catch { throw notFound(NO_SUCH_LESSON); }
-        if (!LESSON_ID.test(lessonId)) throw notFound(NO_SUCH_LESSON);
-        const made = await draftSkillFromLesson(skillDeps, where, { lessonId, by: personId, name: body.name });
-        if (!made.ok) throw skillRefusalOf(made.code);
-        log("skill_drafted", { companyId });
-        return { project, name: made.name, version: made.version, ...(made.note === undefined ? {} : { note: made.note }) };
-      }
-      if (skillName === undefined) throw notFound(ROUTE_NOT_FOUND);
-      if (route === "skill-edit") {
-        const body = bodyOf(SkillEditBody, request.body, "a skill edit takes expectedVersion, description, when, steps (1 to 12), and optionally doneWhen and why");
-        const done = await editSkill(skillDeps, where, { name: skillName, by: personId, expectedVersion: body.expectedVersion, form: { description: body.description, when: body.when, steps: body.steps, doneWhen: body.doneWhen, why: body.why } });
-        if (!done.ok) throw skillRefusalOf(done.code);
-        return { project, name: skillName, version: done.version, ...(done.note === undefined ? {} : { note: done.note }) };
-      }
-      if (route === "skill-approve") {
-        const body = bodyOf(SkillApproveBody, request.body, "an approval takes the version you read");
-        const done = await approveSkill(skillDeps, where, { name: skillName, version: body.version, by: personId });
-        if (!done.ok) throw skillRefusalOf(done.code);
-        return { project, name: skillName, version: body.version, approvals: done.approvals, live: done.live };
-      }
-      bodyOf(EmptyBody, request.body, "retiring a skill takes no fields");
-      const retired = await retireSkill(skillDeps, where, { name: skillName, by: personId });
-      if (!retired.ok) throw skillRefusalOf(retired.code);
-      return { project, name: skillName, retired: true };
-    }
-
-    if (route === "list") {
-      const query = PageQuery.safeParse(Object.fromEntries(request.query?.entries() ?? []));
-      if (!query.success || [...(request.query?.keys() ?? [])].length !== new Set(request.query?.keys() ?? []).size) throw agentXError("CONFIG_INVALID", "list takes list (proposed, approved or retired), since, limit (1 to 50) and cursor, once each");
-      const after = query.data.cursor === undefined ? undefined : decodeCursor(query.data.cursor, query.data.list);
-      const page = await buildLessonsPage(deps, who, project, { list: query.data.list, limit: query.data.limit ?? PAGE_DEFAULT, ...(after === undefined ? {} : { after }), ...(query.data.since === undefined ? {} : { since: query.data.since }) });
-      // "Used in N tasks": the distinct tasks each shown lesson was given to (its use rows, this company and project only). A lesson that could not be counted has no `usedInTasks`, and the page says so (`usedInIncomplete`).
-      // A proposed lesson has never been given to a task, so the proposed list is not counted (no `usedInTasks`, and the page is not incomplete for it).
-      const used = query.data.list === "proposed" ? { counts: new Map<string, { tasks: number; more?: true }>(), incomplete: false } : await countLessonUses(runtime.documents, { companyId, project, lessonIds: page.lessons.map((one) => one.id), now: options.now() });
-      const lessonsShown = page.lessons.map((one) => { const count = used.counts.get(one.id); return count === undefined ? one : { ...one, usedInTasks: count.tasks, ...(count.more === true ? { usedInTasksMore: true as const } : {}) }; });
-      return { ...page, lessons: lessonsShown, ...(used.incomplete ? { usedInIncomplete: true } : {}), ...(page.next === undefined ? {} : { next: encodeLessonCursor(page.next) }) };
-    }
-
-    if (route === "measure") {
-      // Phase 0 (measure only, `lessons/measure.ts`): numbers about loads and merges, ids never shown. For the people who run the project's learning, never a script token.
-      if (caller.scriptToken !== undefined) throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
-      if (!(await mayChange())) throw agentXError("FORBIDDEN", MEASURE_NEEDS_ADMIN);
-      try { return await readLessonMeasure(runtime.documents, { companyId, project, now: options.now() }); } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
-    }
-
-    // Lead 4 L4-LP3W: the approved lessons by code area (anyone on the project reads, like the approved list).
-    if (route === "areas") {
-      const query = AreasQuery.safeParse(Object.fromEntries(request.query?.entries() ?? []));
-      if (!query.success || [...(request.query?.keys() ?? [])].length !== new Set(request.query?.keys() ?? []).size) throw agentXError("CONFIG_INVALID", "areas takes repo (a name, or *), folder and whole=1, once each");
-      let selection: AreaSelection | undefined;
-      if (query.data.whole === "1") {
-        if (query.data.repo !== undefined || query.data.folder !== undefined) throw agentXError("CONFIG_INVALID", "whole=1 takes nothing else");
-        selection = { whole: true };
-      } else if (query.data.repo !== undefined) {
-        const folder = folderOfRequest(query.data.folder ?? "");
-        if (folder === undefined) throw agentXError("CONFIG_INVALID", "folder is not a plain folder path");
-        selection = { repo: query.data.repo === "*" ? null : query.data.repo, folder };
-      } else if (query.data.folder !== undefined) throw agentXError("CONFIG_INVALID", "folder needs repo");
-      return await buildLessonsByArea(deps, who, project, selection === undefined ? {} : { selection });
-    }
-
-    // Lead 4 L4-LP3W: "Where Rovara learns from" and its Pause.
-    if (route === "learning-sources") return await buildLearningSources(deps, who, project, { canPause: await mayChange() });
-    if (route === "learning-source") {
-      const sourceKey = SOURCE_KEY.safeParse(rawSource);
-      if (!sourceKey.success) throw notFound(ROUTE_NOT_FOUND);
-      const body = bodyOf(LearningSourcePauseBodySchema, request.body, "pause takes paused: true or false");
-      if (!(await mayChange())) throw agentXError("FORBIDDEN", SOURCE_NEEDS_ADMIN);
-      let outcome: Awaited<ReturnType<typeof setLearningSourcePause>>;
-      try { outcome = await setLearningSourcePause({ store: runtime.store, audit: runtime.audit, now: options.now, log: (event, fields) => log(event, fields) }, where, personId, sourceKey.data, body.paused); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "That could not be saved. Try again."); }
-      if (!outcome.ok) throw agentXError("AUDIT_UNAVAILABLE", NOT_RECORDED);
-      log("learning_source_set", { companyId, paused: outcome.paused });
-      return { project, key: sourceKey.data, paused: outcome.paused };
-    }
-
-    if (route === "tuning") {
-      // The tuning report (`lessons/tuning.ts`): suggested values for the settings phases 1 and 2 introduce, from the project's own measured rows; "not enough data yet (N of M loads)" until there are enough.
-      // Read only: an operator or admin applies a value; nothing here changes by itself. For the people who run the project's learning, never a script token.
-      if (caller.scriptToken !== undefined) throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS);
-      if (!(await mayChange())) throw agentXError("FORBIDDEN", TUNING_NEEDS_ADMIN);
-      try { return await readTuningReport(runtime.documents, { companyId, project, now: options.now() }); } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
-    }
-
-    if (route === "weekly-summary") {
-      if (method === "GET") {
-        let setting: Awaited<ReturnType<typeof resolveDigestSettingStrict>>;
-        try { setting = await resolveDigestSettingStrict(runtime.documents, companyId, project, digestPilotOf(options)); } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
-        return { project, on: setting.on, source: setting.source, canChange: await mayChange() };
-      }
-      const body = bodyOf(WeeklySummaryBody, request.body, "the weekly summary takes on: true or false");
-      if (!(await mayChange())) throw agentXError("FORBIDDEN", SUMMARY_NEEDS_ADMIN);
-      // The record first: no record, no change.
-      if (!(await requireAudit(runtime.audit, { action: "lesson.digest_switched", workspaceId: companyId, project, actor: personId, facts: { enabled: body.on } }))) throw agentXError("AUDIT_UNAVAILABLE", NOT_RECORDED);
-      try { await writeDigestSetting(runtime.documents, companyId, project, body.on, options.now()); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "That could not be saved. Try again."); }
-      log("weekly_summary_set", { companyId, on: body.on });
-      return { project, on: body.on, source: "chosen", canChange: true };
-    }
-
-    if (route === "mode" || route === "mode/trial-offer") {
-      const settings = await runtime.settings.read(companyId, project).catch(() => { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); });
-      const resolved = await resolveLearning(runtime.settings, companyId, project);
-      // No settings, or no mode stored, is the default (Suggest, DEC 226).
-      const stored = (settings as { mode?: unknown } | undefined)?.mode ?? DEFAULT_LEARNING_MODE;
-      const own: LessonApiMode = typeof stored === "string" && stored in FROM_STORED ? FROM_STORED[stored as LearningMode] : "off";
-      /**
-       * The earned-trust offer (DEC 231): only while the project's own mode and the mode in force are both Suggest (no company lock), accepting would really start trials and nothing more (Standard preset,
-       * no approval floor, required group or two-person rule, tier 0 not set to go live by itself: `trialWouldStart`), the offer is earned and nobody said "not now" lately. Undefined: no offer. Who may not
-       * change the mode is never offered it.
-       */
-      const offerDue = async (): Promise<TrialOfferTally | undefined> => {
-        if (own !== "suggest" || FROM_STORED[resolved.chosenMode] !== "suggest" || resolved.preset !== "standard") return undefined;
-        if (!trialWouldStart(settings ?? {}, resolved)) return undefined;
-        if (await trialOfferSnoozed(runtime.documents, companyId, project, options.now())) return undefined;
-        const tally = await tallyTrialOffer(runtime.store, where, options.now());
-        return tally !== undefined && trialOfferEarned(tally) ? tally : undefined;
-      };
-      if (route === "mode/trial-offer") {
-        const body = bodyOf(TrialOfferBody, request.body, "the decision is accept or not_now");
-        if (!(await mayChange())) throw agentXError("FORBIDDEN", MODE_NEEDS_ADMIN);
-        // Answered against the offer as it stands now: one that is no longer due (the mode changed, a lock came, a drop, someone answered) is not answered under the person.
-        const tally = await offerDue();
-        if (tally === undefined) throw agentXError("IDEMPOTENCY_CONFLICT", "There is no offer to answer now.");
-        if (body.decision === "not_now") {
-          // The record first: no record, no change.
-          if (!(await requireAudit(runtime.audit, { action: "lesson.trial_offer_answered", workspaceId: companyId, project, actor: personId, facts: { answer: "not_now", approvals: tally.approvals, drops: tally.drops } }))) throw agentXError("AUDIT_UNAVAILABLE", NOT_RECORDED);
-          try { await snoozeTrialOffer(runtime.documents, companyId, project, options.now()); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "That could not be saved. Try again."); }
-          log("trial_offer_not_now", { companyId });
-          return { project, decision: "not_now", mode: own };
-        }
-        // Accepting is a change of mode: ONE record (the mode change, marked as the offer's), before the write. The write holds only while the mode is still Suggest, so a mode someone changed since the
-        // offer was read is never written over (the person is told there is no offer now; the record then stands for an answer that changed nothing, the safe way round).
-        if (!(await requireAudit(runtime.audit, { action: "lesson.mode_changed", workspaceId: companyId, project, actor: personId, facts: { from: own, to: "auto", via: "trial_offer", approvals: tally.approvals, drops: tally.drops } }))) throw agentXError("AUDIT_UNAVAILABLE", NOT_RECORDED);
-        let written: boolean;
-        try { written = await writeLearningModeFromSuggest(runtime.documents, where, TO_STORED.auto, options.now()); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "The mode could not be saved. Try again."); }
-        if (!written) throw agentXError("IDEMPOTENCY_CONFLICT", "There is no offer to answer now.");
-        // Best effort: a project that goes back to Suggest later is not offered trial again at once.
-        await snoozeTrialOffer(runtime.documents, companyId, project, options.now()).catch(() => undefined);
-        log("trial_offer_accepted", { companyId });
-        const after = await resolveLearning(runtime.settings, companyId, project);
-        return { project, decision: "accept", mode: "auto", effective: FROM_STORED[after.chosenMode] };
-      }
-      if (method === "GET") {
-        const effective = FROM_STORED[resolved.chosenMode];
-        const canChange = await mayChange();
-        // The offer is extra: a tally that cannot be read is no offer, never a failed read of the mode.
-        const offer = canChange ? await offerDue().catch(() => undefined) : undefined;
-        return { project, mode: own, effective, lockedByCompany: effective !== own, canChange, ...(offer === undefined ? {} : { trialOffer: { approvals: offer.approvals, drops: offer.drops, since: offer.since } }) };
-      }
-      const body = bodyOf(ModeBody, request.body, "the mode is off, suggest or auto");
-      if (!(await mayChange())) throw agentXError("FORBIDDEN", MODE_NEEDS_ADMIN);
-      // The record first: no record, no change.
-      if (!(await requireAudit(runtime.audit, { action: "lesson.mode_changed", workspaceId: companyId, project, actor: personId, facts: { from: own, to: body.mode } }))) throw agentXError("AUDIT_UNAVAILABLE", NOT_RECORDED);
-      try { await writeLearningMode(runtime.documents, where, TO_STORED[body.mode], options.now()); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "The mode could not be saved. Try again."); }
-      log("mode_set", { companyId, mode: body.mode });
-      const after = await resolveLearning(runtime.settings, companyId, project);
-      return { project, mode: body.mode, effective: FROM_STORED[after.chosenMode], lockedByCompany: FROM_STORED[after.chosenMode] !== body.mode, canChange: true };
-    }
-
-    const retireAskKey = (lessonId: string) => ({ pk: companyScoped(companyId, `LESSON_RETIRE_ASK#${project}`), sk: lessonId });
-
-    if (route === "retire-requests") {
-      const eligibility = await deps.directory.eligibility(companyId, project).catch(() => undefined);
-      if (eligibility === undefined || !eligibility.complete || !idIn(eligibility.eligibleIds, personId)) throw agentXError("FORBIDDEN", "Only a maintainer of this project, or an admin, can see retire requests.");
-      const page = await runtime.documents.query({ pk: companyScoped(companyId, `LESSON_RETIRE_ASK#${project}`), limit: RETIRE_REQUESTS_MAX + 1 }).catch(() => { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); });
-      const viewer = await deps.directory.identity(companyId, personId);
-      const requests: Array<{ lessonId: string; title: string; status: string; by: string; at: number }> = [];
-      for (const row of page.items.slice(0, RETIRE_REQUESTS_MAX)) {
-        const asker = row["personId"];
-        if (typeof asker !== "string" || typeof row["sk"] !== "string") continue;
-        // An erased person's request is never shown (erase removes it too); a person whose standing cannot be read is left out.
-        const erased = await options.people.isErased(companyId, asker).catch(() => true);
-        if (erased) continue;
-        const name = await options.people.displayName(companyId, asker).catch(() => undefined);
-        const lesson = await runtime.store.get(where, row["sk"]);
-        if (lesson === undefined || lesson.status === "retired" || lesson.status === "rejected" || lesson.status === "expired") continue;
-        if ((await readVisible({ access: runtime.access, key: where, viewer, lessons: [lesson], where: "view" })).length !== 1) continue;
-        requests.push({ lessonId: lesson.id, title: lesson.title, status: lesson.status, by: name === undefined ? "a former member" : attributionNameOf(name), at: typeof row["at"] === "number" ? row["at"] : 0 });
-      }
-      requests.sort((a, b) => b.at - a.at || a.lessonId.localeCompare(b.lessonId));
-      return { project, requests, more: page.items.length > RETIRE_REQUESTS_MAX };
-    }
-
-    if (route === "decisions") {
-      const body = bodyOf(DecisionsBody, request.body, `decisions takes 1 to ${String(DECISIONS_MAX)} distinct lessons, each { lessonId, version, decision: keep, edit? } or { lessonId, version, decision: drop, reason }`);
-      // One at a time, in the order given; each answers for itself (a refusal of one never undoes or blocks another). Each is the same library call as the single routes, audited the same way.
-      const results: Array<{ lessonId: string; ok: true; status: string } | { lessonId: string; ok: false; code: string; message: string }> = [];
-      for (const decision of body.decisions) {
-        const one = { ...where, lessonId: decision.lessonId, approverId: personId, expectedVersion: decision.version };
-        // A fault on one lesson answers for that lesson only: the decisions already made are still reported.
-        try {
-        if (decision.decision === "keep") {
-          const result = await approveLesson(deps, { ...one, ...(decision.edit === undefined ? {} : { edit: decision.edit }) });
-          if (result.ok) { results.push({ lessonId: decision.lessonId, ok: true, status: result.status }); continue; }
-          const refused = refusalOf(result.code);
-          results.push({ lessonId: decision.lessonId, ok: false, code: refused.code, message: refused.message.slice(refused.code.length + 2) });
-        } else {
-          const result = await rejectLesson(deps, { ...one, reason: decision.reason });
-          if (result.ok) { results.push({ lessonId: decision.lessonId, ok: true, status: "rejected" }); continue; }
-          const refused = refusalOf(result.code);
-          results.push({ lessonId: decision.lessonId, ok: false, code: refused.code, message: refused.message.slice(refused.code.length + 2) });
-        }
-        } catch (error) {
-          log("decision_failed", { error: error instanceof Error ? error.name : "unknown" });
-          results.push({ lessonId: decision.lessonId, ok: false, code: "RUNTIME_UNAVAILABLE", message: UNAVAILABLE });
-        }
-      }
-      return { project, results };
-    }
-
-    // The writes on one lesson.
-    let lessonId: string;
-    try { lessonId = decodeURIComponent(rawLesson!); } catch { throw notFound(NO_SUCH_LESSON); }
-    if (!LESSON_ID.test(lessonId)) throw notFound(NO_SUCH_LESSON);
-
-    if (action === "approve") {
-      const body = bodyOf(ApproveBody, request.body, "approve takes the version you read");
-      const result = await approveLesson(deps, { ...where, lessonId, approverId: personId, expectedVersion: body.version, ...(body.edit === undefined ? {} : { edit: body.edit }) });
-      if (!result.ok) throw refusalOf(result.code);
-      return { project, lessonId, status: result.status, version: result.lesson.version, needs: result.needs };
-    }
-    if (action === "reject") {
-      const body = bodyOf(RejectBody, request.body, `reject takes the version you read and a reason: ${REJECT_REASONS.join(", ")}`);
-      const result = await rejectLesson(deps, { ...where, lessonId, approverId: personId, reason: body.reason, expectedVersion: body.version });
-      if (!result.ok) throw refusalOf(result.code);
-      return { project, lessonId, status: "rejected" };
-    }
-    if (action === "retire") {
-      const body = bodyOf(RetireBody, request.body, `retire takes a reason: ${RETIRE_REASONS.join(", ")}`);
-      const result = await retireByPerson(deps, { ...where, lessonId, actorId: personId, reason: body.reason });
-      if (!result.ok) throw refusalOf(result.code);
-      // The request (if any) is answered: best effort, it no longer shows once the lesson is retired either way.
-      await runtime.documents.delete({ key: retireAskKey(lessonId) }).catch(() => undefined);
-      return { project, lessonId, status: "retired" };
-    }
-    if (action === "keep") {
-      // The answer to "Keep it?": the people who decide (read live) renew a lesson a question stands on. Audited before the write by the library; a refusal is its fixed words.
-      bodyOf(EmptyBody, request.body, "keep takes no fields");
-      const result = await keepByPerson({ ...deps, evidence: runtime.evidence }, { ...where, lessonId, actorId: personId });
-      if (!result.ok) throw refusalOf(result.code);
-      return { project, lessonId, kept: true };
-    }
-    // A retire request: anyone on the project who can see the lesson asks; the people who decide answer it.
-    bodyOf(EmptyBody, request.body, "a retire request takes no fields");
-    const lesson = await runtime.store.get(where, lessonId);
-    const viewer = await deps.directory.identity(companyId, personId);
-    if (lesson === undefined || (lesson.status !== "active" && lesson.status !== "stale" && lesson.status !== "pending")
-      || (await readVisible({ access: runtime.access, key: where, viewer, lessons: [lesson], where: "view" })).length !== 1) throw notFound(NO_SUCH_LESSON);
-    if (!(await requireAudit(runtime.audit, { action: "lesson.retire_requested", workspaceId: companyId, project, lessonId, actor: personId, facts: { via: "api" } }))) throw agentXError("AUDIT_UNAVAILABLE", NOT_RECORDED);
-    const documents = runtime.documents;
-    const at = options.now();
-    await documents.put({ item: {
-      ...retireAskKey(lessonId), entityType: "LESSON_RETIRE_ASK", personId, via: "api", at,
-      ...(documents.ttlAttribute === undefined ? {} : { [documents.ttlAttribute]: Math.floor(at / 1000) + RETIRE_REQUEST_KEEP_SECONDS }),
-    // The first open request stands (a later asker does not replace it, so erasing the later asker never drops an earlier person's request).
-    }, condition: { op: "notExists", path: ["pk"] } }).catch(() => { throw agentXError("RUNTIME_UNAVAILABLE", "The request could not be saved. Try again."); });
-    return { project, lessonId, requested: true };
+    const parsed = parseLessonsRoute(request);
+    const ctx = await resolveRequestContext(options, membershipOf, log, caller, parsed.rawProject);
+    if (parsed.route === "weekly") return await handleWeekly(ctx);
+    if (parsed.route === "task" || parsed.route === "not-helpful") return await handleTaskRoute(ctx, request, parsed);
+    if (parsed.route === "replay") return await handleReplay(ctx, request);
+    if (!ctx.onRoster) throw notFound(NO_SUCH_PROJECT);
+    if (parsed.graduation !== null) return await answerGraduation(request, parsed.graduation, { companyId: ctx.companyId, project: ctx.project, personId: ctx.personId, lessons: ctx.lessons, skills: ctx.options.skillsOf?.(ctx.companyId), now: ctx.options.now, log: ctx.log }, ctx.caller);
+    return await dispatchRosterRoute(ctx, request, parsed);
   }
 
   return {
