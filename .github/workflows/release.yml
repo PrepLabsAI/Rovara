@@ -16,10 +16,103 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  test:
+  # #1559: check whether GitHub CI already passed on byte-identical code (scripts/release-ci-proof.ts), then build the workspace and synthesize the CDK stacks.
+  # `infra:synth` always runs even when the CI proof lets the workflow skip typecheck, lint and the test shards; when no proof is found, the build output is
+  # packed once and handed to `lint` and the 8 parallel test shards.
+  prepare:
     runs-on: blacksmith-4vcpu-ubuntu-2604
+    timeout-minutes: 15
+    permissions: { contents: read, checks: read }
+    outputs:
+      proven: ${{ steps.proof.outputs.proven }}
+      candidate: ${{ steps.proof.outputs.candidate }}
+    steps:
+      # Depth 2 keeps a merge commit and both of its parents so release-ci-proof.ts can match the PR head's tree as well as the merge commit's own tree.
+      - uses: actions/checkout@v5
+        with: { fetch-depth: 2, persist-credentials: false }
+      - uses: actions/setup-node@v5
+        with: { node-version-file: .node-version, cache: npm }
+      - name: Check CI proof
+        id: proof
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PROVEN=false
+          CANDIDATE=""
+          if node scripts/release-ci-proof.ts --repository "$GITHUB_REPOSITORY" --commit "$GITHUB_SHA" --ignore-linux-runtime --out "$RUNNER_TEMP/ci-proof.json"; then
+            PROVEN=true
+            CANDIDATE=$(jq -r '.candidate // ""' "$RUNNER_TEMP/ci-proof.json")
+            echo "Release checks path: proof reused (candidate commit $CANDIDATE); skipping typecheck, lint and tests (build and infra:synth still run)."
+          else
+            echo "Release checks path: full checks (no usable CI proof; running typecheck, lint, 8 test shards, build and infra:synth)."
+          fi
+          {
+            echo "proven=$PROVEN"
+            echo "candidate=$CANDIDATE"
+          } >> "$GITHUB_OUTPUT"
+      - run: npm ci
+      - run: npm run build
+      # Pack the built packages once for `lint` and the 8 test shards before `infra:synth` writes `cdk.out/`.
+      - name: Pack the build output
+        if: steps.proof.outputs.proven != 'true'
+        run: |
+          git ls-files --others --ignored --exclude-standard --directory | grep -v 'node_modules/' > "$RUNNER_TEMP/build-files.txt"
+          test -s "$RUNNER_TEMP/build-files.txt"
+          tar -czf "$RUNNER_TEMP/build-output.tgz" -T "$RUNNER_TEMP/build-files.txt"
+      - if: steps.proof.outputs.proven != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-output
+          path: ${{ runner.temp }}/build-output.tgz
+          retention-days: 1
+          if-no-files-found: error
+      - run: npm run infra:synth
+
+  typecheck:
+    needs: prepare
+    if: needs.prepare.outputs.proven != 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2604
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@v5
+        with: { node-version-file: .node-version, cache: npm }
+      - run: npm ci
+      - run: npm run typecheck && npm run typecheck:all
+
+  lint:
+    needs: prepare
+    if: needs.prepare.outputs.proven != 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2604
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@v5
+        with: { node-version-file: .node-version, cache: npm }
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-output
+          path: ${{ runner.temp }}/build-output
+      - name: Unpack the build output
+        run: tar -xzf "$RUNNER_TEMP/build-output/build-output.tgz"
+      - run: npm run lint
+
+  test-shards:
+    needs: prepare
+    if: needs.prepare.outputs.proven != 'true'
+    name: test (${{ matrix.shard }}/${{ strategy.job-total }})
+    runs-on: blacksmith-4vcpu-ubuntu-2604
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - uses: actions/checkout@v5
+        with: { persist-credentials: false }
       - uses: actions/setup-node@v5
         with: { node-version-file: .node-version, cache: npm }
       - run: npm ci
@@ -33,7 +126,33 @@ jobs:
           mkdir "$RUNNER_TEMP/gitleaks-bin"
           tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP/gitleaks-bin" gitleaks
           echo "$RUNNER_TEMP/gitleaks-bin" >> "$GITHUB_PATH"
-      - run: npm run typecheck && npm run typecheck:all && npm run lint && npm run build && npm test && npm run infra:synth
+      - uses: actions/download-artifact@v4
+        with:
+          name: build-output
+          path: ${{ runner.temp }}/build-output
+      - name: Unpack the build output
+        run: tar -xzf "$RUNNER_TEMP/build-output/build-output.tgz"
+      - name: Run test shard
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARD_TOTAL: ${{ strategy.job-total }}
+        run: npm test -- --shard="$SHARD/$SHARD_TOTAL"
+
+  # Gate job that `images` waits on: passes when `prepare` (build + infra:synth) succeeded and either CI proof was reused or all fallback checks passed.
+  test:
+    needs: [prepare, typecheck, lint, test-shards]
+    if: always() && !cancelled()
+    runs-on: blacksmith-4vcpu-ubuntu-2604
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@v5
+        with: { node-version-file: .node-version }
+      - name: Verify release test gate
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: node scripts/release-ci-proof.ts --gate
 
   images:
     needs: test

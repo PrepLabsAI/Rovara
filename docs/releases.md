@@ -59,8 +59,27 @@ directly for that environment name would have produced (FR-012).
    admins can push `v*` tags (the `release-tags` ruleset). A tag on a commit that is not on
    mainline stops the workflow before it publishes anything.
 2. That triggers the `Release` GitHub Actions workflow (`.github/workflows/release.yml`). It always
-   runs the test job first: typecheck, the stricter type check (`typecheck:all`), lint, build, the
-   full test suite, and `infra:synth`.
+   runs its verification gate before any publishing job:
+   - **prepare**: checks whether GitHub CI already passed on byte-identical code
+     (`scripts/release-ci-proof.ts`), builds the workspace (`npm run build`), and runs
+     `npm run infra:synth`. `infra:synth` always runs even when the other checks are skipped: it is
+     cheap, CI's affected mode may skip `release-check`, and the publishing jobs depend on it.
+   - **CI proof policy**: like the AWS release pipeline (`infra/lib/release-pipeline.ts`), the
+     release workflow accepts a passing `local` check run on a commit whose git tree matches the
+     tagged commit byte-for-byte, including affected-mode and reuse-mode merge-queue runs (every
+     commit on mainline enters through the merge queue after `local` passes). Because `release.yml`
+     does not run `linux-runtime`, it also accepts a full CI run (`ci-mode (full)` succeeded) whose
+     `local` failed solely because `linux-runtime` failed or timed out while `plan`, `quick`,
+     `typecheck`, `build`, `release-check`, and all eight `test (1/8)`-`test (8/8)` shards
+     succeeded in that check suite. Any failure to prove never fails the release; it falls back to
+     running the full checks.
+   - **Fallback checks** (only when no CI proof is found): `typecheck` (`npm run typecheck` and
+     `npm run typecheck:all`), `lint`, and `test-shards` (the full test suite in 8 parallel shards
+     using Vitest's duration sequencer and the same pinned `gitleaks` installation as `ci.yml`) run
+     in parallel against the build output packed by `prepare`.
+   - **test** (gate): verifies that `prepare` succeeded and either a valid CI proof was reused
+     (logging the candidate commit) or every fallback check succeeded, blocking `images` on any
+     failure.
 3. Nothing else happens unless the repository variable `AGENTX_PUBLISH_ENABLED` is exactly `true`.
    It is `true` since v0.1.0; see "Release setup" below.
 4. When publishing is enabled, more jobs run in order:

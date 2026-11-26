@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { createVerify, generateKeyPairSync } from "node:crypto";
-import { ciProof, githubAppInstallationToken, githubCheckRuns, latestGateRun, type CheckRun } from "../../scripts/release-ci-proof.js";
+import {
+  ciProof,
+  fullNonLinuxSuitePassed,
+  githubAppInstallationToken,
+  githubCheckRuns,
+  githubSuiteCheckRuns,
+  latestGateRun,
+  releaseGateVerdict,
+  REQUIRED_FULL_NON_LINUX_CHECKS,
+  type CheckRun,
+} from "../../scripts/release-ci-proof.js";
 
 // #1145: the release skips its own checks only when CI's gate passed on exactly the code it releases.
 const MERGE = "a".repeat(40), BASE = "b".repeat(40), HEAD = "c".repeat(40);
@@ -130,5 +140,150 @@ describe("the release's CI proof as the GitHub App", () => {
     await githubCheckRuns("o/r", fake, TOKEN)(HEAD);
     await githubCheckRuns("o/r", fake)(HEAD);
     expect(seen).toEqual([`Bearer ${TOKEN}`, "none"]);
+  });
+
+  it("reads check-suite runs with the token when supplied, and answers undefined on error", async () => {
+    const urls: string[] = [];
+    const auths: string[] = [];
+    const ok = githubSuiteCheckRuns("o/r", (async (url: string, init: RequestInit = {}) => {
+      urls.push(url);
+      auths.push((init.headers as Record<string, string>).authorization ?? "none");
+      return new Response(JSON.stringify({ check_runs: [run({ name: "plan" })] }), { status: 200 });
+    }) as typeof fetch, TOKEN);
+    expect(await ok(999)).toHaveLength(1);
+    expect(urls[0]).toBe("https://api.github.com/repos/o/r/check-suites/999/check-runs?per_page=100");
+    expect(auths[0]).toBe(`Bearer ${TOKEN}`);
+    expect(await githubSuiteCheckRuns("o/r", (async () => new Response("nope", { status: 500 })))(999)).toBeUndefined();
+  });
+});
+
+// #1559: release.yml does not run linux-runtime, so a full CI run whose `local` failed solely because linux-runtime failed/timed out still proves the commit.
+describe("ignoring linux-runtime-only failures on full CI runs (#1559)", () => {
+  function fullSuite(overrides: Record<string, Partial<CheckRun>> = {}, extras: CheckRun[] = []): CheckRun[] {
+    const base: CheckRun[] = [
+      ...REQUIRED_FULL_NON_LINUX_CHECKS.map((name, index) => run({ id: 100 + index, name, conclusion: "success" })),
+      run({ id: 200, name: "linux-runtime", conclusion: "failure" }),
+      run({ id: 201, name: "local", conclusion: "failure" }),
+      run({ id: 202, name: "port-guard", conclusion: "skipped" }),
+      run({ id: 203, name: "device-runtime", conclusion: "skipped" }),
+      run({ id: 204, name: "nightly-tests", conclusion: "skipped" }),
+      run({ id: 205, name: "live-aws", conclusion: "skipped" }),
+    ];
+    return [
+      ...base.map((entry) => (entry.name !== undefined && overrides[entry.name] !== undefined ? { ...entry, ...overrides[entry.name] } : entry)),
+      ...extras,
+    ];
+  }
+
+  it("accepts a full check suite where only linux-runtime failed (or timed out) and every required non-Linux check succeeded", () => {
+    expect(fullNonLinuxSuitePassed(fullSuite())).toBe(true);
+    expect(fullNonLinuxSuitePassed(fullSuite({ "linux-runtime": { conclusion: "timed_out" } }))).toBe(true);
+    // Quarantined device-runtime failure does not invalidate the suite.
+    expect(fullNonLinuxSuitePassed(fullSuite({ "device-runtime": { conclusion: "failure" } }))).toBe(true);
+  });
+
+  it("rejects when linux-runtime did not fail, when any required check failed or was skipped, or when another check failed", () => {
+    expect(fullNonLinuxSuitePassed(fullSuite({ "linux-runtime": { conclusion: "success" } }))).toBe(false);
+    expect(fullNonLinuxSuitePassed(fullSuite({ "ci-mode (full)": { conclusion: "skipped" } }))).toBe(false);
+    expect(fullNonLinuxSuitePassed(fullSuite({ "test (4/8)": { conclusion: "failure" } }))).toBe(false);
+    expect(fullNonLinuxSuitePassed(fullSuite({ quick: { conclusion: "failure" } }))).toBe(false);
+    expect(fullNonLinuxSuitePassed(fullSuite({ typecheck: { conclusion: "failure" } }))).toBe(false);
+    expect(fullNonLinuxSuitePassed(fullSuite({ "release-check": { conclusion: "skipped" } }))).toBe(false);
+    expect(fullNonLinuxSuitePassed(fullSuite({ "port-guard": { conclusion: "failure" } }))).toBe(false);
+    // Missing a shard (e.g. an affected run) is rejected.
+    expect(fullNonLinuxSuitePassed(fullSuite().filter((entry) => entry.name !== "test (8/8)"))).toBe(false);
+  });
+
+  it("uses the newest GitHub Actions run per check name and ignores checks from other apps", () => {
+    // Re-run of test (3/8) fixed an earlier failure.
+    expect(fullNonLinuxSuitePassed(fullSuite({ "test (3/8)": { id: 50, conclusion: "failure" } }, [run({ id: 500, name: "test (3/8)", conclusion: "success" })]))).toBe(true);
+    // A newer re-run of test (3/8) failed.
+    expect(fullNonLinuxSuitePassed(fullSuite({}, [run({ id: 500, name: "test (3/8)", conclusion: "failure" })]))).toBe(false);
+    // A forged success from another app does not replace a failing GitHub Actions check.
+    expect(fullNonLinuxSuitePassed(fullSuite({ "test (3/8)": { id: 50, conclusion: "failure" } }, [run({ id: 500, name: "test (3/8)", conclusion: "success", app: { slug: "other-app" } })]))).toBe(false);
+  });
+
+  it("proves a commit in ciProof when suiteCheckRuns is provided and local failed only on linux-runtime, and stays not-proven without suiteCheckRuns", async () => {
+    const git = gitOf(merge, { [MERGE]: [BASE, HEAD] });
+    const failedGate = run({ id: 10, conclusion: "failure", check_suite: { id: 777 } });
+    // Default (AWS pipeline): no suiteCheckRuns -> not proven.
+    expect((await ciProof({ repository: "o/r", commit: "HEAD", git, checkRuns: async () => [failedGate] })).proven).toBe(false);
+    // release.yml (--ignore-linux-runtime): inspects suite 777 -> proven.
+    const suitesAsked: number[] = [];
+    const proven = await ciProof({
+      repository: "o/r",
+      commit: "HEAD",
+      git,
+      checkRuns: async () => [failedGate],
+      suiteCheckRuns: async (id) => { suitesAsked.push(id); return fullSuite(); },
+    });
+    expect(proven).toMatchObject({ proven: true, candidate: HEAD });
+    expect(proven.reason).toContain("linux-runtime");
+    expect(suitesAsked).toEqual([777]);
+    // If suiteCheckRuns returns undefined (API error) or a suite with a real test failure -> not proven.
+    expect((await ciProof({ repository: "o/r", commit: "HEAD", git, checkRuns: async () => [failedGate], suiteCheckRuns: async () => undefined })).proven).toBe(false);
+    expect((await ciProof({ repository: "o/r", commit: "HEAD", git, checkRuns: async () => [failedGate], suiteCheckRuns: async () => fullSuite({ "test (2/8)": { conclusion: "failure" } }) })).proven).toBe(false);
+  });
+});
+
+describe("release workflow test gate verdict (#1559)", () => {
+  const needs = (input: Record<string, { result: string; outputs?: Record<string, string> }>) => JSON.stringify(input);
+
+  it("passes on proof reuse when prepare succeeded with a valid candidate SHA and fallback jobs were skipped", () => {
+    const verdict = releaseGateVerdict(needs({
+      prepare: { result: "success", outputs: { proven: "true", candidate: HEAD } },
+      typecheck: { result: "skipped" },
+      lint: { result: "skipped" },
+      "test-shards": { result: "skipped" },
+    }));
+    expect(verdict).toMatchObject({ ok: true, path: "proof" });
+    expect(verdict.reason).toContain(HEAD);
+  });
+
+  it("passes on full checks when prepare reported proven=false and every fallback job succeeded", () => {
+    const verdict = releaseGateVerdict(needs({
+      prepare: { result: "success", outputs: { proven: "false", candidate: "" } },
+      typecheck: { result: "success" },
+      lint: { result: "success" },
+      "test-shards": { result: "success" },
+    }));
+    expect(verdict).toMatchObject({ ok: true, path: "full" });
+  });
+
+  it("fails closed when prepare failed, a required fallback job failed or was skipped, proven output is invalid, or JSON is malformed", () => {
+    expect(releaseGateVerdict("not-json").ok).toBe(false);
+    expect(releaseGateVerdict("[]").ok).toBe(false);
+    expect(releaseGateVerdict(needs({
+      prepare: { result: "failure", outputs: { proven: "true", candidate: HEAD } },
+      typecheck: { result: "skipped" },
+      lint: { result: "skipped" },
+      "test-shards": { result: "skipped" },
+    })).ok).toBe(false);
+    expect(releaseGateVerdict(needs({
+      prepare: { result: "success", outputs: { proven: "true", candidate: "not-a-sha" } },
+      typecheck: { result: "skipped" },
+      lint: { result: "skipped" },
+      "test-shards": { result: "skipped" },
+    })).ok).toBe(false);
+    expect(releaseGateVerdict(needs({
+      prepare: { result: "success", outputs: { proven: "" } },
+      typecheck: { result: "success" },
+      lint: { result: "success" },
+      "test-shards": { result: "success" },
+    })).ok).toBe(false);
+    for (const badJob of ["typecheck", "lint", "test-shards"] as const) {
+      for (const badResult of ["failure", "skipped", "cancelled"]) {
+        const map = {
+          prepare: { result: "success", outputs: { proven: "false", candidate: "" } },
+          typecheck: { result: "success" },
+          lint: { result: "success" },
+          "test-shards": { result: "success" },
+          [badJob]: { result: badResult },
+        };
+        const verdict = releaseGateVerdict(needs(map));
+        expect(verdict.ok, `${badJob}=${badResult}`).toBe(false);
+        expect(verdict.reason).toContain(badJob);
+      }
+    }
   });
 });

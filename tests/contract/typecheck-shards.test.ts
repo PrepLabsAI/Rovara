@@ -176,7 +176,7 @@ describe("wiring", () => {
 
   it("keeps typecheck:all in the release workflow", async () => {
     const workflow = YAML.parse(await readFile(".github/workflows/release.yml", "utf8")) as Workflow;
-    const runs = workflow.jobs.test!.steps.map((step) => step.run ?? "").join("\n");
-    expect(runs).toContain("npm run typecheck && npm run typecheck:all && npm run lint");
+    const runs = workflow.jobs.typecheck!.steps.map((step) => step.run ?? "").join("\n");
+    expect(runs).toContain("npm run typecheck && npm run typecheck:all");
   });
 });
