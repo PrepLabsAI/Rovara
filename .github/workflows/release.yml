@@ -39,7 +39,7 @@ jobs:
     needs: test
     if: vars.AGENTX_PUBLISH_ENABLED == 'true'
     runs-on: blacksmith-4vcpu-ubuntu-2404-arm
-    # The emulated amd64 build of the worker is slower than a native one; bounded so a stuck build cannot hold the release open.
+    # The emulated amd64 build of the worker (only with AGENTX_PUBLISH_WORKER_AMD64) is slower than a native one; bounded so a stuck build cannot hold the release open.
     timeout-minutes: 90
     permissions: { contents: read, id-token: write }
     outputs:
@@ -95,14 +95,15 @@ jobs:
       # step as the linux-runtime job in ci.yml); production hosts (Amazon Linux 2023) have no such restriction.
       - if: vars.AGENTX_PUBLISH_EXECUTOR_IMAGE == 'true'
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || echo "no AppArmor userns restriction on this kernel"
-      # Register amd64 emulation before assuming the publish role, using a pinned binfmt image.
-      - uses: docker/setup-qemu-action@v3
+      # Register amd64 emulation before assuming the publish role, using a pinned binfmt image. Only when the worker's amd64 half is built (see the push step).
+      - if: vars.AGENTX_PUBLISH_WORKER_AMD64 == 'true'
+        uses: docker/setup-qemu-action@v3
         with: { platforms: amd64, image: tonistiigi/binfmt:qemu-v10.2.3@sha256:400a4873b838d1b89194d982c45e5fb3cda4593fbfd7e08a02e76b03b21166f0 }
       - uses: aws-actions/configure-aws-credentials@v5
         with: { role-to-assume: "${{ vars.AGENTX_PUBLISH_ROLE_ARN }}", aws-region: us-east-1 }
       - uses: aws-actions/amazon-ecr-login@v2
         with: { registry-type: public }
-      # The runner is arm64, so the worker's linux/amd64 half (DEC 254zm) is built under emulation: register amd64 only (arm64 is native here).
+      # The runner is arm64, so the worker's linux/amd64 half (DEC 254zm), when it is built, is built under emulation: register amd64 only (arm64 is native here).
       - name: Setup Blacksmith Builder
         uses: useblacksmith/setup-docker-builder@v1
       - id: push
@@ -117,20 +118,24 @@ jobs:
           VERSION: ${{ github.ref_name }}
           # The executor image needs its own ECR Public repository and publish-role access (docs/releases.md); off until an owner sets this to true.
           PUBLISH_EXECUTOR: ${{ vars.AGENTX_PUBLISH_EXECUTOR_IMAGE }}
+          # The worker's linux/amd64 half (DEC 254zm) is off until an owner sets this to true (#1563): built under QEMU it took over 20 minutes of `npm ci` and
+          # then lost its registry connection (v0.5.1), and no install runs it while ROVARA_MACHINE_SIZE_X86 is off. Off, the worker is one arm64 image, as up to 0.4.0.
+          PUBLISH_WORKER_AMD64: ${{ vars.AGENTX_PUBLISH_WORKER_AMD64 }}
         run: |
           VERSION="${VERSION#v}"
           # The executor goes first: its smoke test can fail, and a pushed tag is immutable, so a failure must stop the job before the worker or slack image is pushed.
           images="worker slack"
           if [ "$PUBLISH_EXECUTOR" = "true" ]; then images="executor $images"; fi
+          worker_platforms=linux/arm64; if [ "$PUBLISH_WORKER_AMD64" = "true" ]; then worker_platforms=linux/arm64,linux/amd64; fi
           for image in $images; do
             dockerfile=environments/base/Dockerfile
             [ "$image" = slack ] && dockerfile=environments/slack/Dockerfile
             [ "$image" = executor ] && dockerfile=environments/e2e-executor/Dockerfile
             repo="public.ecr.aws/$ALIAS/agentx-$image"
-            # The worker is a multi-architecture image (DEC 254zm): one index digest whose linux/arm64 image is what every install has always run and
-            # whose linux/amd64 image is what the x86 machine sizes pull. The Slack and executor images stay arm64 only.
+            # With AGENTX_PUBLISH_WORKER_AMD64, the worker is a multi-architecture image (DEC 254zm): one index digest whose linux/arm64 image is what every
+            # install has always run and whose linux/amd64 image is what the x86 machine sizes pull. Without it, arm64 only. The Slack and executor images stay arm64 only.
             case "$image" in
-              worker) platforms=linux/arm64,linux/amd64 ;;
+              worker) platforms=$worker_platforms ;;
               *) platforms=linux/arm64 ;;
             esac
             # --provenance=false --sbom=false: without them, buildx adds provenance/SBOM attestation
@@ -164,8 +169,9 @@ jobs:
               echo "::error::registry digest $registry_digest for $repo:$VERSION does not match the pushed digest $digest" >&2
               exit 1
             fi
-            if [ "$image" = worker ]; then
-              # The registry, not the build, says which platforms the worker digest serves: a release whose worker lacks either one must not ship.
+            if [ "$image" = worker ] && [ "$PUBLISH_WORKER_AMD64" = "true" ]; then
+              # The registry, not the build, says which platforms the worker digest serves: a two-platform release whose worker lacks either one must not ship.
+              # (An arm64-only worker is one image manifest, not an index, exactly as the releases before DEC 254zm.)
               served=$(docker buildx imagetools inspect --raw "$repo:$VERSION" | jq -r '[.manifests[]?.platform | select(. != null) | "\(.os)/\(.architecture)"] | sort | join(",")')
               if [ "$served" != "linux/amd64,linux/arm64" ]; then
                 echo "::error::the worker image $repo:$VERSION serves \"$served\", not linux/amd64 and linux/arm64" >&2
