@@ -18,3 +18,14 @@ Every mutant is a change to `adoptableCompanyLessRecord` or `adoptWrite` in pack
 | M12 | the adopted record's own session is not ended (`sessionsEndedAt` not set) | killed (1: its refresh token is refused after the adoption) |
 
 Red-first: with the production change stashed, 3 of the 5 tests of the new group fail (the owner's case with `identity_taken`, the transaction re-check, the exported check); the other two pass because the refusals they pin already hold.
+
+## Follow-up S1/S2/S3 (Opus review of 2f87ec2ae), measured on the head that carries them (49 tests, all green on the real tree; each mutant reverted, tree clean)
+
+| Mutant | Change | Result |
+|---|---|---|
+| S1 | the adoption keeps the `companyless` flag (not removed in the merge transaction) | killed (2: the owner's case, and the unlink-sets-the-flag-again test) |
+| S2a | `companylessSession` (developer-routes.ts) ignores `mergedInto` | killed (1: an adopted record's old session creates a company when its end was missed and the flag were still set) |
+| S2b | company join may give a record with `mergedInto` a legacy seat (company-membership.ts) | killed (1: with the flag gone, a refresh of the adopted record's old session wrote a built-in-company membership for the merged id; the owner's case asserts none) |
+| S3 | the adoption's company log row does not carry `adoptedId` | killed (1) |
+
+Finding while doing S1: removing `companyless` alone is NOT safe. A refresh of the adopted record's old session reached `company.join` as a legacy seat (`companyless` absent, no membership) and wrote a `joinedVia: legacy` membership for the merged id before the session was refused. The flag was what kept such records out of the legacy rule; `company-membership.ts` now also refuses the legacy seat for any record with `mergedInto` (J2's adopt write should keep that in mind: the plan's REMOVE of `companyless` needs this hardening).
