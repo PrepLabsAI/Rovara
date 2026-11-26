@@ -725,9 +725,10 @@ export async function taskPeopleRoleOf(deps: Pick<TaskPeopleDependencies, "docum
  * What a writer who is not on the task's People list is bound to when they act on it (a stored share's comment): the list's current revision (the access fence of the write, so a list that changes under them fails the write) and its
  * owners, or neither when the task has no list. A list that cannot be read throws, as every People read does.
  */
-export async function taskListBinding(deps: Pick<TaskPeopleDependencies, "documentClient" | "tableName">, task: Pick<DeveloperTaskRecord, "taskId">): Promise<{ peopleRevision?: number; ownerActorIds?: readonly string[] }> {
+export async function taskListBinding(deps: Pick<TaskPeopleDependencies, "documentClient" | "tableName">, task: Pick<DeveloperTaskRecord, "taskId">, developerId?: string): Promise<{ peopleRevision?: number; ownerActorIds?: readonly string[]; role?: StoredTaskRole }> {
   const people = await loadPeople(deps, task.taskId);
-  return people === undefined ? {} : { peopleRevision: people.revision, ownerActorIds: people.people.filter((person) => person.role === "owner").map((person) => taskOwnerKey(person.developerId, task.taskId)) };
+  const role = developerId === undefined ? undefined : people?.people.find((person) => person.developerId === developerId)?.role;
+  return people === undefined ? {} : { ...(role === undefined ? {} : { role }), peopleRevision: people.revision, ownerActorIds: people.people.filter((person) => person.role === "owner").map((person) => taskOwnerKey(person.developerId, task.taskId)) };
 }
 
 /** The no-checker exception is confined to the hosted creator's unchanged, sole-owner list. */

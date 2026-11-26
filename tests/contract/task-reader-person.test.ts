@@ -26,6 +26,8 @@ function layer(companyOf: Record<string, string>, options: { companies?: boolean
   for (const id of [OWNER, PERSON, GRANTED]) db.set({ pk: `DEVELOPER#${id}`, sk: "META", developerId: id, displayName: `Person ${id.slice(0, 1)}`, revoked: false });
   // GRANTED holds a project grant in the task's company; PERSON holds none anywhere.
   db.set({ pk: `ORG#${TASK_COMPANY}#MEMBER#${GRANTED}`, sk: "PROJECT#payments", entityType: "MEMBERSHIP", ownerKey: GRANTED, projectName: "payments", role: "developer" });
+  // A legacy grant row (no company layer keys a grant without the company): GRANTED holds one.
+  db.set({ pk: `MEMBER#${GRANTED}`, sk: "PROJECT#payments", entityType: "MEMBERSHIP", ownerKey: GRANTED, projectName: "payments", role: "developer" });
   const deps = {
     documentClient: { send: (command: unknown) => db.send(command as never) }, tableName: "state", now: () => 0, developer: { signInTableName: "signin" },
     ...(options.companies === false ? {} : { companies: { companyOf: async (id: string) => { const company = companyOf[id]; if (company === "throws") throw new Error("directory down"); return company; } } }),
@@ -48,8 +50,10 @@ describe("taskReaderPerson: the stored share's person now (rule 1)", () => {
     const revoked = layer({ [PERSON]: TASK_COMPANY });
     revoked.db.set({ ...revoked.db.get(`DEVELOPER#${PERSON}`, "META")!, revoked: true });
     expect(await revoked.person(PERSON)).toBeUndefined();
-    // No company layer at all (the one-company deployment): everyone registered is of the one company.
-    expect(await layer({}, { companies: false }).person(PERSON)).toMatchObject({ companyMember: true });
+    // NO company layer (COMPANY_SIGNIN off): "a member of the company" cannot be proved, so a share FAILS CLOSED to the old rule: only a person who holds the project grant counts (a core task can run on such an install, and its sign-ins may belong to several companies).
+    const bare = layer({}, { companies: false });
+    expect(await bare.person(PERSON)).toEqual({ name: "Person b", projectMember: false, companyMember: false });
+    expect(await bare.person(GRANTED)).toMatchObject({ projectMember: true, companyMember: true });
   });
 });
 

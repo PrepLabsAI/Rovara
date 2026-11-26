@@ -190,7 +190,7 @@ describe("the events timeline of a core task (the core's log and decisions)", ()
     for (const limit of ["0", "51", "x"]) expect((await h.dev(MAYA, "GET", `/v1/dev/tasks/${h.task.taskId}/events?limit=${limit}`)).body, limit).toEqual({ error: { code: "CONFIG_INVALID", message: "limit must be a whole number from 1 to 50" } });
   });
 
-  it("a reader the task is shared with reads them (no project grant is needed, DEC 254zzz577); a member with no part and another company's caller read no such task; a revoked sign-in reads nothing", async () => {
+  it("a reader the task is shared with reads them; with NO company layer (this harness) a share fails closed to the project grant, so off the project they read nothing; a member with no part and another company's caller read no such task; a revoked sign-in reads nothing", async () => {
     const h = await ruleWorld();
     await withHistory(h);
     const path = `/v1/dev/tasks/${h.task.taskId}/events`;
@@ -199,8 +199,10 @@ describe("the events timeline of a core task (the core's log and decisions)", ()
     const read = await h.dev(TESS, "GET", path);
     expect(read.status).toBe(200);
     expect(read.body).toEqual((await h.dev(MAYA, "GET", path)).body);
-    // Off the project: still a reader (rule 1: a share works with NO project access).
+    // No company layer: "a member of the company" cannot be proved, so the share fails closed to the old rule, the project grant (READ-RULE-SHARE-B rule 1 holds where the company layer is on: tests/contract/task-reader-person.test.ts).
     h.db.delete(`MEMBER#${TESS.developerId}`, "PROJECT#payments");
+    expect(await h.dev(TESS, "GET", path)).toEqual(await h.missing(TESS, "GET", "/events"));
+    grantProject(h.db, TESS);
     expect((await h.dev(TESS, "GET", path)).status).toBe(200);
     expect(await h.dev(OMAR, "GET", path)).toEqual(await h.missing(OMAR, "GET", "/events"));
     // A person whose sign-in was revoked is no one: no share reaches them.
@@ -279,7 +281,7 @@ describe("plan comments and People on a core task (the old routes' own functions
 });
 
 describe("DEC 254zzz44 (a): a reader the owner shared a core task with opens it (the old task read's reader rule)", () => {
-  it("reads the task while shared, with or without a project grant (DEC 254zzz577); never before sharing or after unsharing; a member with no part reads no such task", async () => {
+  it("reads the task while shared and (with no company layer, as here) still holding the project grant; never before sharing, after unsharing or off the project; a member with no part reads no such task", async () => {
     const h = await ruleWorld();
     const path = `/v1/dev/tasks/${h.task.taskId}`;
     const own = await h.dev(MAYA, "GET", path);
@@ -291,9 +293,9 @@ describe("DEC 254zzz44 (a): a reader the owner shared a core task with opens it 
     expect(money).toBeDefined();
     expect(shared).toEqual({ ...own, body: { ...own.body, task: readableTask } });
     expect(await h.dev(SAM, "GET", path)).toEqual(await h.missing(SAM, "GET", ""));
-    // Off the project: still a reader (a share needs no project grant); back on it: a reader; unshared (revoked): no longer.
+    // No company layer: the share fails closed to the project grant. Off the project: no longer a reader; back on it: a reader again; unshared (revoked): no longer.
     h.db.delete(`MEMBER#${TESS.developerId}`, "PROJECT#payments");
-    expect((await h.dev(TESS, "GET", path)).status).toBe(200);
+    expect(await h.dev(TESS, "GET", path)).toEqual(await h.missing(TESS, "GET", ""));
     grantProject(h.db, TESS);
     expect((await h.dev(TESS, "GET", path)).status).toBe(200);
     await h.dev(MAYA, "DELETE", `${path}/readers/${TESS.developerId}`);

@@ -1302,10 +1302,10 @@ export async function taskReaderPerson(deps: DeveloperRouteDependencies, develop
   const person = await getSignIn<Pick<DeveloperRecord, "revoked" | "displayName" | "slackUserId">>(deps, `DEVELOPER#${developerId}`);
   if (person === undefined || person.revoked === true) return undefined;
   const name = person.displayName ?? "Unknown";
-  // `companyMember`: a LIVE member of the TASK's company (READ-RULE-SHARE-B). Every answer below is given only after that was proved, except the two "not a member" returns, which say false.
-  const answer = async (held: boolean) => {
-    if (options?.ownTask !== true) return { name, projectMember: held, companyMember: true };
-    if (held) return { name, projectMember: held, companyMember: true, mayStart: true };
+  // `companyMember`: a LIVE member of the TASK's company (READ-RULE-SHARE-B). Every answer below is given only after that was proved, except the "not a member" returns, which say false, and the no-company-layer branch, which says the grant.
+  const answer = async (held: boolean, companyMember = true) => {
+    if (options?.ownTask !== true) return { name, projectMember: held, companyMember };
+    if (held) return { name, projectMember: held, companyMember, mayStart: true };
     try {
       // Channel access holds an OLD-engine task only: the one the engine stamp (`TASK_ENGINE#<id>`, written by the core's own start) is missing for. A core task's own person needs the grant, as its start
       // and every step do (core-engine-root.ts); no task id, a stamp that is there, or a stamp that cannot be read: grant only.
@@ -1317,7 +1317,9 @@ export async function taskReaderPerson(deps: DeveloperRouteDependencies, develop
   // DEC 254zzz80 / 254zzz98 (review L2): a reader of a task must be a LIVE member of the TASK's company, and their grant is read where that company keeps it (beside its
   // revision): never in the reader's own other company, so a share never says whether a person of another company holds a grant there. No live company: no grant.
   // With no company layer at all, nothing here is company-scoped: the legacy grant, byte for byte as before.
-  if ((deps.companies ?? deps.developer.companies) === undefined) return answer(await projectGrant(memberActions(deps), project, developerId, undefined) !== undefined);
+  // No company layer (COMPANY_SIGNIN is not "enabled"; the stack default is disabled) means no live company to prove, so a share FAILS CLOSED to the old rule: only a person who holds the project grant is a company member here (READ-RULE-SHARE-B, rule 1).
+  // A core task can still run on such an install (the core reads company membership from the sign-in table itself), and its sign-ins may belong to more than one company, so "registered" is never enough.
+  if ((deps.companies ?? deps.developer.companies) === undefined) { const held = await projectGrant(memberActions(deps), project, developerId, undefined) !== undefined; return answer(held, held); }
   let company: string | undefined;
   try { company = await liveNamedCompany(deps, developerId); } catch { return { name, projectMember: false, companyMember: false }; }
   const owning = taskCompany === undefined ? company : namedCompany(taskCompany);

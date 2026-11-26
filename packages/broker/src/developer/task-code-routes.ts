@@ -150,7 +150,7 @@ export async function createCorePlanComment(deps: RouteDeps, caller: DeveloperCa
  */
 async function commentAccessOf(deps: RouteDeps, caller: DeveloperCaller, task: TaskAccess["task"], sharedWith: (() => Promise<boolean>) | undefined): Promise<TaskAccess> {
   try {
-    return await resolveCoreTaskAccess(deps, caller, task, "comment");
+    return await resolveCoreTaskAccess(deps, caller, task, "commentWrite");
   } catch (error) {
     if (sharedWith === undefined || !(error instanceof AgentXError) || error.code !== "TASK_NOT_FOUND" || !(await sharedWith())) throw error;
     return await sharedCommenterAccess(deps, task, caller.developerId);

@@ -10,13 +10,15 @@ import { readerKey, requireOwnTask } from "../aws/task-readers.js";
 import { isCoreTaskThatExists } from "../aws/engine-boundary.js";
 
 export type { TaskRole } from "./task-people.js";
-export type TaskAction = "read" | "peopleRead" | "comment" | "suggest" | "decide" | "ask" | "peopleManage" | "takeOwnership" | "retry" | "publish" | "feedback" | "close" | "control";
+export type TaskAction = "read" | "peopleRead" | "comment" | "commentWrite" | "suggest" | "decide" | "ask" | "peopleManage" | "takeOwnership" | "retry" | "publish" | "feedback" | "close" | "control";
 
 export const TASK_ACTION_ROLES: Record<TaskAction, readonly TaskRole[]> = {
   read: ["owner", "commenter", "viewer"],
   peopleRead: ["owner", "commenter", "viewer"],
-  // READ-RULE-SHARE-B (owner DEC 254zzz577, rule 3): a People-list viewer ("Can view") comments too, as the stored share does; a viewer still never suggests, decides, asks or acts.
-  comment: ["owner", "commenter", "viewer"],
+  // `comment` is the Slack thread's "continue" (broker.ts slackTaskAccess): it keeps its roles.
+  comment: ["owner", "commenter"],
+  // READ-RULE-SHARE-B (owner DEC 254zzz577, rule 3): the plan-page comment WRITE. A People-list viewer ("Can view") writes one too, as the stored share does; a viewer still never suggests, decides, asks, continues a Slack thread or acts.
+  commentWrite: ["owner", "commenter", "viewer"],
   suggest: ["commenter"],
   decide: ["owner"],
   ask: ["owner", "commenter"],
@@ -90,7 +92,9 @@ export async function resolveCoreTaskAccess(deps: AccessDependencies, caller: De
  * still refuses the comment itself.
  */
 export async function sharedCommenterAccess(deps: AccessDependencies, task: DeveloperTaskRecord, developerId: string): Promise<TaskAccess> {
-  const binding = await taskListBinding(deps, task);
+  const binding = await taskListBinding(deps, task, developerId);
+  // REMOVAL WINS at the write too: the list read that supplies the fence's revision is the SAME read that says whether this person is denied, so a deny landing after the rule's decision cannot slip a comment through behind a fresh revision.
+  if (binding.role === "denied") throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
   return { task, role: "commenter", sharedRow: readerKey(task.taskId, developerId), ownerActorIds: binding.ownerActorIds ?? [taskOwnerKey(task.developerId, task.taskId)], ...(binding.peopleRevision === undefined ? {} : { peopleRevision: binding.peopleRevision }) };
 }
 

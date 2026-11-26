@@ -21,7 +21,7 @@ describe("resolveTaskAccess: the task's own person holds it only while they hold
       if (projectMember === "throws") fixture.deps.taskReaderPerson = async () => { throw new Error("grant store unavailable"); };
       else if (projectMember === "unavailable") delete (fixture.deps as { taskReaderPerson?: unknown }).taskReaderPerson;
       else fixture.deps.taskReaderPerson = async () => ({ name: "Priya", projectMember: false, companyMember: true });
-      for (const action of [undefined, "read", "decide", "retry", "close", "control", "publish", "feedback", "ask", "comment"] as const) {
+      for (const action of [undefined, "read", "decide", "retry", "close", "control", "publish", "feedback", "ask", "comment", "commentWrite"] as const) {
         const error = await refusal(resolveTaskAccess(fixture.deps, PRIYA, fixture.taskId, action));
         expect([String(projectMember), action, error.code]).toEqual([String(projectMember), action, "TASK_NOT_FOUND"]);
       }
@@ -75,7 +75,7 @@ describe("resolveTaskAccess", () => {
   it("the action table includes every C role and retained human action", () => {
     expect(TASK_ACTION_ROLES).toEqual({
       read: ["owner", "commenter", "viewer"], peopleRead: ["owner", "commenter", "viewer"],
-      comment: ["owner", "commenter", "viewer"], ask: ["owner", "commenter"], suggest: ["commenter"],
+      comment: ["owner", "commenter"], commentWrite: ["owner", "commenter", "viewer"], ask: ["owner", "commenter"], suggest: ["commenter"],
       decide: ["owner"], retry: ["owner"], publish: ["owner"], feedback: ["owner"], close: ["owner"], control: ["owner"], peopleManage: ["owner"],
       takeOwnership: ["owner", "commenter", "viewer"],
     });
@@ -85,8 +85,10 @@ describe("resolveTaskAccess", () => {
     expect(can("owner", "suggest")).toBe(false);
     expect(can("viewer", "read")).toBe(true);
     expect(can("viewer", "peopleRead")).toBe(true);
-    // READ-RULE-SHARE-B (DEC 254zzz577, rule 3): a People viewer ("Can view") comments, like the stored share; every other write stays out of a viewer's reach.
-    expect(can("viewer", "comment")).toBe(true);
+    // READ-RULE-SHARE-B (DEC 254zzz577, rule 3): a People viewer ("Can view") WRITES a plan comment, like the stored share (`commentWrite`); the Slack thread's "continue" (`comment`) keeps its roles, and every other action stays out of a viewer's reach.
+    expect(can("viewer", "commentWrite")).toBe(true);
+    expect(can("viewer", "comment")).toBe(false);
+    expect(can("commenter", "comment")).toBe(true);
     for (const action of ["suggest", "decide", "ask", "peopleManage", "retry", "publish", "feedback", "close", "control"] as const) expect(can("viewer", action), action).toBe(false);
   });
 
@@ -120,6 +122,9 @@ describe("resolveTaskAccess", () => {
     await expect(resolveTaskAccess(fixture.deps, SAM, fixture.taskId)).resolves.toMatchObject({ role: "viewer", peopleRevision: 4 });
     expect((await refusal(resolveTaskAccess(fixture.deps, OMAR, fixture.taskId))).code).toBe("TASK_NOT_FOUND");
 
+    // The two comment actions, pinned on a real People viewer: the plan-page comment write admits them; the Slack thread's "continue" (broker.ts slackTaskAccess "comment") does not.
+    await expect(resolveTaskAccess(fixture.deps, SAM, fixture.taskId, "commentWrite")).resolves.toMatchObject({ role: "viewer" });
+    expect((await refusal(resolveTaskAccess(fixture.deps, SAM, fixture.taskId, "comment"))).code).toBe("TASK_NOT_FOUND");
     fixture.close();
     await expect(resolveTaskAccess(fixture.deps, SAM, fixture.taskId, "read")).resolves.toMatchObject({ role: "viewer" });
     expect((await refusal(resolveTaskAccess(fixture.deps, PRIYA, fixture.taskId, "comment"))).code).toBe("TASK_NOT_FOUND");

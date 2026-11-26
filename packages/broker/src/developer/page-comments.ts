@@ -296,7 +296,7 @@ export async function createTaskComment(
   input: { requestId: string; document: CommentDocument; version: number; target: CommentTarget; parentId?: string; text: string; ask: boolean },
 ): Promise<{ comment: TaskComment; duplicate: boolean }> {
   const { task, caller } = actor;
-  if (!can(actor.role, "comment")) throw pageRefusal("not_allowed");
+  if (!can(actor.role, "commentWrite")) throw pageRefusal("not_allowed");
   const commentId = pageCommentId(caller.developerId, input.requestId);
   const existing = await getComment(deps, task.taskId, commentId);
   if (existing !== undefined) return { comment: existing, duplicate: true };
