@@ -29,7 +29,7 @@ describe("setup fallback command source edges", () => {
       })) }],
     } as unknown as SetupProposal;
     const result = await verifyProposalDetailed(async (_repo, _path, _commit, options) => (options.untilLine === undefined ? lines : lines.slice(0, options.untilLine)).join("\n"), proposal);
-    expect(result).toEqual({ items: { s: "unverified" }, final: true });
+    expect(result).toEqual({ items: { s: "unverified" }, final: true, unmatched: { s: "npm ci" } });
   });
 });
 
@@ -62,9 +62,9 @@ describe("Lead 4 fallback rulings", () => {
     { name: "a repeated multiline quote", body: ["run: npm ci", "next: npm test", "run:   npm ci", "next: npm test"], want: "verified" },
     { name: "a comment on the second line", body: ["run: npm ci", "# next: npm test"], quote: "run: npm ci\n# next: npm test", want: "unverified" },
     { name: "a partial command token", body: ["run: pnpm ci", "next: npm test"], quote: "run: pnpm ci\nnext: npm test", want: "unverified" },
-  ])("multiline fallback: $name", async ({ body, quote, want }) => {
+  ])("multiline fallback: $name", async ({ body, quote, want, name }) => {
     expect(await verifyProposalDetailed(readLines(source(...body)), proposalOf({ setup: [command(quote ?? "run: npm ci\nnext: npm test")] })))
-      .toEqual({ items: { s: want }, final: true });
+      .toEqual({ items: { s: want }, final: true, ...(name === "a partial command token" ? { unmatched: { s: "npm ci" } } : {}) });
   });
 
   it.each([false, true])("non-command items: the quote anywhere in the file holds, but a name cut out of a longer name in the file (widgets-old, api.example.com for example.com) does not (%s)", async (shared) => {

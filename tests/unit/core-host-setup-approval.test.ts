@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   change, orgProjectCatalogKey, projectMetaKey, projectRevisionKey, systemOwnerIdOf, type AuditEvent, type JsonValue, type OrgId, type OrgRole, type ProjectDefinition,
 } from "@agentx/contracts";
+import { confirmAuditDetails } from "../../packages/broker/src/core-host/setup-run-routes.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
@@ -52,7 +53,7 @@ async function register(world: FakeWorld, companyId: string, name: string): Prom
 }
 
 /** A candidate revision 2 waiting for a decision, its check on a workspace in `status` (READY: passed). */
-async function seedCandidate(world: FakeWorld, companyId: string, name: string, changes: Record<string, unknown>, status = "READY"): Promise<{ digest: string; workspaceId: string }> {
+async function seedCandidate(world: FakeWorld, companyId: string, name: string, changes: Record<string, unknown>, status = "READY", rowExtra: Record<string, unknown> = {}): Promise<{ digest: string; workspaceId: string }> {
   const definition = { ...project(name), revision: 2, ...changes };
   await world.store.put({ item: { ...projectRevisionKey(companyId, name, 2), entityType: "PROJECT", candidate: true, definition: JSON.parse(JSON.stringify(definition)) as JsonValue } });
   const workspaceId = randomUUID();
@@ -61,7 +62,7 @@ async function seedCandidate(world: FakeWorld, companyId: string, name: string, 
   const at = new Date(world.clock.now).toISOString();
   await world.store.put({ item: {
     ...setupApplyKey(companyId, name), entityType: "SETUP_APPLY", orgId: companyId, project: name, taskId: "", requestId: randomUUID(), by: "p-runner", digest, baseRevision: 1, candidateRevision: 2,
-    state: "checking", check: { workspaceId, revision: 2, startedAt: at, startedBy: "p-runner" }, reply: {}, createdAt: at,
+    state: "checking", check: { workspaceId, revision: 2, startedAt: at, startedBy: "p-runner" }, reply: {}, createdAt: at, ...rowExtra,
   } });
   return { digest, workspaceId };
 }
@@ -310,6 +311,40 @@ describe("hosted setup approval: confirm and discard", () => {
     expect(await world.store.get(projectRevisionKey(FAKE_COMPANY, "payments", 2))).toBeUndefined();
     const developer = person("p-dev", FAKE_COMPANY, "member", { payments: "developer" });
     expect((await call(post(`${RUN}/confirm`, { requestId: randomUUID(), expectedRevision: 1 }), developer)).status).toBe(403);
+  });
+
+  it("the approval card lists the commands used with no file evidence, and a candidate made before that was kept reads fine, at the same risk", async () => {
+    const { world, person, call } = await setupWorld();
+    const maintainer = person("p-maint", FAKE_COMPANY, "member", { payments: "administrator" });
+    await seedCandidate(world, FAKE_COMPANY, "payments", { setup: [command("python3", ["-m", "venv", ".venv"]), command(".venv/bin/pip", ["install", "-r", "requirements.txt"])] }, "READY", { usedWithoutMatch: [".venv/bin/pip install -r requirements.txt"] });
+    const marked = (await call(get(RUN), maintainer)).body["apply"] as Record<string, unknown>;
+    expect(marked["usedWithoutMatch"]).toEqual([".venv/bin/pip install -r requirements.txt"]);
+    expect(marked["setup"]).toEqual(["python3 -m venv .venv", ".venv/bin/pip install -r requirements.txt"]);
+    expect(marked).toMatchObject({ risk: "low", approver: "maintainer", canApprove: true });
+    await seedCandidate(world, FAKE_COMPANY, "payments", { setup: [command("python3", ["-m", "venv", ".venv"]), command(".venv/bin/pip", ["install", "-r", "requirements.txt"])] });
+    const old = (await call(get(RUN), maintainer)).body["apply"] as Record<string, unknown>;
+    expect(old).not.toHaveProperty("usedWithoutMatch");
+    expect(old).toMatchObject({ risk: "low", approver: "maintainer", canApprove: true });
+  });
+
+  it("the confirm's audit row says which ticked items the person used although they did not match the code (ids and count), and nothing extra when none", async () => {
+    const { person, call, audit } = await setupWorld();
+    const admin = person("p-admin", FAKE_COMPANY, "admin");
+    const plain = randomUUID();
+    const anyway = randomUUID();
+    await call(post(`${RUN}/confirm`, { requestId: plain, expectedRevision: 1, itemIds: ["a"] }), admin);
+    await call(post(`${RUN}/confirm`, { requestId: anyway, expectedRevision: 1, itemIds: ["a", "b"], useAnyway: ["b"] }), admin);
+    const rows = audit.filter((event) => event.action === "setup_run.confirm_requested");
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.details).not.toHaveProperty("useAnyway");
+    expect(rows[0]!.details).not.toHaveProperty("useAnywayCount");
+    expect(rows[1]!.details).toMatchObject({ requestId: anyway, useAnyway: JSON.stringify(["b"]), useAnywayCount: "1" });
+    const long = confirmAuditDetails({ useAnyway: Array.from({ length: 400 }, (_, i) => `item-${String(i)}`) });
+    expect(long["useAnywayCount"]).toBe("400");
+    expect(long["useAnyway"]!.length).toBeLessThanOrEqual(1_000);
+    expect(JSON.parse(long["useAnyway"]!)).toEqual(Array.from({ length: (JSON.parse(long["useAnyway"]!) as string[]).length }, (_, i) => `item-${String(i)}`));
+    expect(JSON.parse(confirmAuditDetails({ useAnyway: ["a,b", "c\"d"] })["useAnyway"]!)).toEqual(["a,b", "c\"d"]);
+    expect(confirmAuditDetails({})).toEqual({});
   });
 
   it("discards a waiting candidate for a maintainer (audited), freeing the project; a project user cannot", async () => {
