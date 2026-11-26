@@ -68,6 +68,12 @@
     "@modelcontextprotocol/sdk": {
       "@hono/node-server": "2.1.6"
     },
-    "minimatch": "^11.0.1"
+    "minimatch": "^11.0.1",
+    "@samfp/pi-memory": {
+      "@aws-sdk/credential-providers": {
+        ".": "3.1168.0",
+        "@aws-sdk/credential-provider-cognito-identity": "3.972.83"
+      }
+    }
   }
 }
