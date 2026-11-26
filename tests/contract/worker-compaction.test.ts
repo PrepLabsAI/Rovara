@@ -11,7 +11,7 @@ import type { ContextToolCatalog } from "../../packages/contracts/src/index.js";
 import { PLAN_FACTS_HEADING, approvedPlanFacts, type ConversationCompacted } from "../../packages/worker/src/compaction.js";
 import { createContextTools } from "../../packages/worker/src/context-sources/bridge.js";
 import { createSourceTextGuard } from "../../packages/worker/src/context-sources/text-guard.js";
-import { createDefaultPiSessionAdapter, createWorkspacePiSession, type PiSessionHandle } from "../../packages/worker/src/pi-session.js";
+import { createDefaultPiSessionAdapter, createWorkspacePiSession, type PiSessionHandle, type PiWorkflowMode } from "../../packages/worker/src/pi-session.js";
 import { createTaskUsageTelemetry, statsSince } from "../../packages/worker/src/usage.js";
 import { FAUX_MODEL } from "../support/faux-model.js";
 import type { fauxModelRuntime } from "../support/faux-model.js";
@@ -53,7 +53,7 @@ afterEach(async () => {
 type Script = Parameters<Awaited<ReturnType<typeof fauxModelRuntime>>["faux"]["setResponses"]>[0];
 
 /** A session whose compaction keeps almost nothing recent (the mock above), so a short conversation has something to summarise. */
-async function world(script: Script, mode: "PLAN" | "UNDERSTAND" | "REVIEW" | "IMPLEMENT" | "SETUP" | "WIKI") {
+async function world(script: Script, mode: PiWorkflowMode) {
   const rootPath = await mkdtemp(join(tmpdir(), "compact-root-"));
   cleanup.push(rootPath);
   const faux = fauxProvider({ provider: FAUX_MODEL.provider, models: [{ id: FAUX_MODEL.modelId }] });
@@ -283,7 +283,9 @@ describe("the worker compaction guard", () => {
     } finally { handle.dispose(); }
   });
 
-  it.each([ "SETUP", "WIKI"] as const)("supplies its own summary for every %s session", async (mode) => {
+  // Every workflow mode. The record is typed Record<PiWorkflowMode, true>, so a new mode fails to compile until it is listed here.
+  const EVERY_MODE: Record<PiWorkflowMode, true> = { PLAN: true, IMPLEMENT: true, REVIEW: true, UNDERSTAND: true, SETUP: true, WIKI: true };
+  it.each(Object.keys(EVERY_MODE) as PiWorkflowMode[])("supplies its own summary for every %s session", async (mode) => {
     const asked: string[] = [];
     const w = await world([fauxAssistantMessage("Hello."), fauxAssistantMessage("Again."), summaryCall(asked, "Worker summary."), summaryCall(asked, "Worker prefix.")], mode);
     const handle = await createWorkspacePiSession({ rootPath: w.rootPath, model: FAUX_MODEL, workflowMode: mode, localFileTools: true, extensionFactories: [w.probe] }, w.adapter);
