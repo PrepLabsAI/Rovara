@@ -244,10 +244,25 @@ export async function runChecks(
   }
 }
 
+/** SETUP-L9-SHELL: the round's test commands are one group (a shell line's `source .venv/bin/activate` is still in effect for the next); the round's own time budget is its limit. */
 async function runChecksRound(
   plan: CheckPlan,
   runners: CheckRunners,
   options: { budgetMs: number; signal: AbortSignal; now?: () => number; abortJoinMs?: number },
+): Promise<CheckRound> {
+  const session = plan.source === "project" ? newShellSession() : undefined;
+  try {
+    return await runChecksRoundIn(plan, runners, options, session);
+  } finally {
+    await closeShellSession(session);
+  }
+}
+
+async function runChecksRoundIn(
+  plan: CheckPlan,
+  runners: CheckRunners,
+  options: { budgetMs: number; signal: AbortSignal; now?: () => number; abortJoinMs?: number },
+  session: ShellSession | undefined,
 ): Promise<CheckRound> {
   const now = options.now ?? Date.now;
   const { signal } = options;
@@ -268,70 +283,64 @@ async function runChecksRound(
   }
   let resetFailed = false;
   let first = true;
-  // SETUP-L9-SHELL: the round's test commands are one group (a shell line's `source .venv/bin/activate` is still in effect for the next); the round's own time budget is its limit.
-  const session = plan.source === "project" ? newShellSession() : undefined;
-  try {
-    for (const check of plannedChecks(plan, runners, session)) {
-      const entry = (after: CheckOutcome, output: string, durationMs = 0, exitCode?: number | null): CheckEntry => ({
-        id: check.id,
-        label: check.label,
-        source: check.source,
-        before: check.before,
-        after,
-        class: classifyCheck(check.before, after),
-        output: storedCheckOutput(output),
-        durationMs: Math.max(0, Math.round(durationMs)),
-        ...(exitCode === undefined ? {} : { exitCode }),
-      });
-      if (signal.aborted) {
-        entries.push(entry("not_run", "AgentX stopped before this check ran."));
+  for (const check of plannedChecks(plan, runners, session)) {
+    const entry = (after: CheckOutcome, output: string, durationMs = 0, exitCode?: number | null): CheckEntry => ({
+      id: check.id,
+      label: check.label,
+      source: check.source,
+      before: check.before,
+      after,
+      class: classifyCheck(check.before, after),
+      output: storedCheckOutput(output),
+      durationMs: Math.max(0, Math.round(durationMs)),
+      ...(exitCode === undefined ? {} : { exitCode }),
+    });
+    if (signal.aborted) {
+      entries.push(entry("not_run", "AgentX stopped before this check ran."));
+      continue;
+    }
+    if (resetFailed) {
+      entries.push(entry("not_run", "AgentX did not run this check: the test services could not be put back between the checks."));
+      continue;
+    }
+    if (!first && runners.resetBetweenChecks !== undefined) {
+      const reset = await untilAborted(Promise.resolve().then(() => runners.resetBetweenChecks?.(signal)), signal, joinMs, runners.kind ?? "local").then(() => true, unlessUnconfirmed);
+      if (!reset) {
+        resetFailed = true;
+        entries.push(entry("not_run", signal.aborted ? "AgentX stopped before this check ran." : "AgentX did not run this check: the test services could not be put back between the checks."));
         continue;
-      }
-      if (resetFailed) {
-        entries.push(entry("not_run", "AgentX did not run this check: the test services could not be put back between the checks."));
-        continue;
-      }
-      if (!first && runners.resetBetweenChecks !== undefined) {
-        const reset = await untilAborted(Promise.resolve().then(() => runners.resetBetweenChecks?.(signal)), signal, joinMs, runners.kind ?? "local").then(() => true, unlessUnconfirmed);
-        if (!reset) {
-          resetFailed = true;
-          entries.push(entry("not_run", signal.aborted ? "AgentX stopped before this check ran." : "AgentX did not run this check: the test services could not be put back between the checks."));
-          continue;
-        }
-      }
-      first = false;
-      const remaining = options.budgetMs - (now() - startedAt);
-      if (remaining < MIN_CHECK_START_MS) {
-        entries.push(entry("not_run", "AgentX did not run this check: the time budget for checks ran out."));
-        continue;
-      }
-      const capped = remaining < check.ownTimeoutMs;
-      const timeoutMs = capped ? remaining : check.ownTimeoutMs;
-      const began = now();
-      try {
-        runners.beginCheck?.(check.id);
-        const result = await untilAborted(check.run(timeoutMs, signal), signal, joinMs, runners.kind ?? "local");
-        const duration = now() - began;
-        if (result.timedOut) {
-          entries.push(capped
-            ? entry("not_run", `AgentX stopped this check when the time budget for checks ran out.\n${result.output}`, duration)
-            : entry("timed_out", result.output, duration));
-        } else {
-          entries.push(entry(result.exitCode === 0 ? "passed" : "failed", result.output, duration, result.exitCode));
-        }
-      } catch (error) {
-        // A stop that could not be confirmed is no "stopped check": the command may still be running, and the caller must not touch the tree.
-        if (error instanceof RunnerKillUnconfirmedError) throw error;
-        const duration = now() - began;
-        const message = error instanceof Error ? error.message : String(error);
-        if (signal.aborted) entries.push(entry("not_run", "AgentX stopped this check.", duration));
-        else if (error instanceof CheckNotRunError) entries.push(entry("not_run", message, duration));
-        // It could not run (its directory is gone, the container has no bash): a failure, as readiness counts it.
-        else entries.push(entry("failed", message, duration));
       }
     }
-  } finally {
-    await closeShellSession(session);
+    first = false;
+    const remaining = options.budgetMs - (now() - startedAt);
+    if (remaining < MIN_CHECK_START_MS) {
+      entries.push(entry("not_run", "AgentX did not run this check: the time budget for checks ran out."));
+      continue;
+    }
+    const capped = remaining < check.ownTimeoutMs;
+    const timeoutMs = capped ? remaining : check.ownTimeoutMs;
+    const began = now();
+    try {
+      runners.beginCheck?.(check.id);
+      const result = await untilAborted(check.run(timeoutMs, signal), signal, joinMs, runners.kind ?? "local");
+      const duration = now() - began;
+      if (result.timedOut) {
+        entries.push(capped
+          ? entry("not_run", `AgentX stopped this check when the time budget for checks ran out.\n${result.output}`, duration)
+          : entry("timed_out", result.output, duration));
+      } else {
+        entries.push(entry(result.exitCode === 0 ? "passed" : "failed", result.output, duration, result.exitCode));
+      }
+    } catch (error) {
+      // A stop that could not be confirmed is no "stopped check": the command may still be running, and the caller must not touch the tree.
+      if (error instanceof RunnerKillUnconfirmedError) throw error;
+      const duration = now() - began;
+      const message = error instanceof Error ? error.message : String(error);
+      if (signal.aborted) entries.push(entry("not_run", "AgentX stopped this check.", duration));
+      else if (error instanceof CheckNotRunError) entries.push(entry("not_run", message, duration));
+      // It could not run (its directory is gone, the container has no bash): a failure, as readiness counts it.
+      else entries.push(entry("failed", message, duration));
+    }
   }
   return { entries, stopped: signal.aborted };
 }

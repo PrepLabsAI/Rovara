@@ -33,6 +33,11 @@ const ASSIGNMENT_WORD = /^[A-Za-z_][A-Za-z0-9_]*=/u;
 
 interface LineReading { words: string[]; shell: boolean; unclosedQuote: boolean }
 
+/** What an unquoted character does to a line: a shell operator or expansion, or (at the start of a word) a comment or `~`. */
+const specialOutsideQuotes = (character: string, atWordStart: boolean): boolean => SHELL_SPECIAL.has(character) || (atWordStart && (character === "#" || character === "~"));
+/** Inside double quotes a shell still expands `$`, a back tick and a backslash; inside single quotes nothing. */
+const specialInDoubleQuotes = (character: string): boolean => character === "$" || character === "`" || character === "\\";
+
 /** Reads a line the way a POSIX shell splits it into words (quotes removed) and says whether it needs a shell to mean what it says. */
 function readLine(line: string): LineReading {
   const words: string[] = [];
@@ -42,28 +47,23 @@ function readLine(line: string): LineReading {
   let shell = false;
   let wordStart = true;
   for (const character of line.trim()) {
+    if (quote !== undefined && character === quote) { quote = undefined; continue; }
     if (quote !== undefined) {
-      if (character === quote) quote = undefined;
-      else {
-        current += character;
-        // Inside double quotes a shell still expands `$`, a back tick and a backslash; inside single quotes nothing.
-        if (quote === '"' && (character === "$" || character === "`" || character === "\\")) shell = true;
-      }
+      current += character;
+      shell ||= quote === '"' && specialInDoubleQuotes(character);
     } else if (character === '"' || character === "'") {
-      quote = character; started = true; wordStart = false;
+      [quote, started, wordStart] = [character, true, false];
     } else if (/\s/.test(character)) {
       if (started) { words.push(current); current = ""; started = false; }
       wordStart = true;
     } else {
-      // A comment starts at a word; `~` expands at the start of a word.
-      if (wordStart && (character === "#" || character === "~")) shell = true;
-      if (SHELL_SPECIAL.has(character)) shell = true;
+      shell ||= specialOutsideQuotes(character, wordStart);
       current += character; started = true; wordStart = false;
     }
   }
   if (started) words.push(current);
   const first = words[0];
-  if (first !== undefined && (SHELL_FIRST_WORDS.has(first) || ASSIGNMENT_WORD.test(first))) shell = true;
+  shell ||= first !== undefined && (SHELL_FIRST_WORDS.has(first) || ASSIGNMENT_WORD.test(first));
   return { words, shell, unclosedQuote: quote !== undefined };
 }
 
@@ -86,7 +86,7 @@ export function parseCommandLine(line: string, cwd: string, timeoutSeconds: numb
   if (words.length === 0) throw agentXError("CONFIG_INVALID", "the command is empty");
   if (shell) {
     // One line, so the person who approves it reads all of it.
-    if (/[\n\r\u0000]/u.test(text)) throw agentXError("CONFIG_INVALID", "a command is one line");
+    if (/[\n\r]/u.test(text) || text.includes("\0")) throw agentXError("CONFIG_INVALID", "a command is one line");
     return { cwd, executable: SHELL_PROGRAM, args: ["-c", text], timeoutSeconds };
   }
   const [executable, ...args] = words as [string, ...string[]];

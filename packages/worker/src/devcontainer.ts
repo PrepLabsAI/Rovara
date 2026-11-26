@@ -594,37 +594,50 @@ export async function runContainerCommand(
   if (left !== undefined && left <= 0) return groupLimitResult(session);
   const lineTimeoutMs = command.timeoutSeconds * 1_000;
   const timeoutMs = left === undefined ? lineTimeoutMs : Math.min(lineTimeoutMs, left);
-  // SETUP-L9-SHELL: a SHELL line (`bash -c <line>`, see contracts/project-commands.ts) is run by the session's shell. So is every other command once a shell line has run in the session, so it sees what the shell lines left
-  // (the activated virtual environment, the directory, the variables). A group of programs alone runs exactly as it always did: `exec` of the program and its arguments, no shell reads them again.
-  const line = shellLineOf(command);
-  const inShell = line !== undefined || session?.stateful === true;
-  if (session !== undefined) session.exec = exec;
+  const plan = shellPlan(command, session);
   const run = await runInContainerGroup(exec, {
     groupFilePrefix: "agentx-command",
-    body: inShell ? 'eval "$1"' : 'exec "$@"',
+    body: plan.body,
     cwd,
-    args: inShell ? [SHELL_SESSION_SCRIPT, session?.stateFile ?? "", line ?? formatCommandLine(command)] : [command.executable, ...command.args],
+    args: plan.args,
     timeoutMs,
-    // The command's own variables (#54) reach the command only, never the TERM and KILL execs.
-    ...(command.env !== undefined || options.defaultEnvironment !== undefined ? { env: { ...options.defaultEnvironment, ...command.env } } : {}),
-    ...(options.unsetEnvironment === undefined ? {} : { unsetEnvironment: options.unsetEnvironment }),
-    ...(options.pathSuffix === undefined ? {} : { pathSuffix: options.pathSuffix }),
-    ...(pathPrefix.length === 0 ? {} : { pathPrefix }),
+    ...commandEnvironmentOptions(command, options, pathPrefix),
     ...(signal !== undefined ? { signal } : {}),
   });
-  if (line !== undefined && session !== undefined) session.stateful = true;
+  // A shell line has run (or tried to): from now on every line of the session runs in its shell, and the state file is the session's to remove.
+  if (plan.line !== undefined && session !== undefined) { session.stateful = true; session.exec = exec; }
   const { result } = run;
   // An abort whose stop could not be confirmed: the command may still be running in the container, which mounts the workspace.
   if (run.killUnconfirmed) throw new RunnerKillUnconfirmedError({ kind: options.target ?? "devcontainer" });
-  const groupLimited = left !== undefined && timeoutMs < lineTimeoutMs && (run.timedOut || result.timedOut === true);
+  const timedOut = run.timedOut || result.timedOut === true;
   return {
     exitCode: result.exitCode ?? -1,
     stdout: result.stdout,
     stderr: withStopFailures(result.stderr, run.stopFailures),
     ...(result.signal !== undefined ? { signal: result.signal } : {}),
-    ...(run.timedOut || result.timedOut === true ? { timedOut: true } : {}),
-    ...(groupLimited ? { stoppedBy: "group_limit" as const } : {}),
+    ...(timedOut ? { timedOut: true } : {}),
+    ...(timedOut && timeoutMs < lineTimeoutMs ? { stoppedBy: "group_limit" as const } : {}),
   };
+}
+
+/** What a command starts with: its own variables (#54, which reach the command only, never the TERM and KILL execs), the container's defaults, what is unset, and the PATH folders. */
+function commandEnvironmentOptions(command: ProjectCommand, options: ContainerCommandOptions, pathPrefix: readonly string[]): Partial<ContainerGroupCommand> {
+  return {
+    ...(command.env !== undefined || options.defaultEnvironment !== undefined ? { env: { ...options.defaultEnvironment, ...command.env } } : {}),
+    ...(options.unsetEnvironment === undefined ? {} : { unsetEnvironment: options.unsetEnvironment }),
+    ...(options.pathSuffix === undefined ? {} : { pathSuffix: options.pathSuffix }),
+    ...(pathPrefix.length === 0 ? {} : { pathPrefix }),
+  };
+}
+
+/**
+ * SETUP-L9-SHELL: how a command is started. A SHELL line (`bash -c <line>`, contracts/project-commands.ts) is run by the session's shell. So is every other command once a shell line has run in the session, so it sees what the
+ * shell lines left (the activated virtual environment, the directory, the variables). A group of programs alone runs exactly as it always did: `exec` of the program and its arguments, no shell reads them again.
+ */
+function shellPlan(command: ProjectCommand, session: ShellSession | undefined): { line: string | undefined; body: string; args: string[] } {
+  const line = shellLineOf(command);
+  if (line === undefined && session?.stateful !== true) return { line, body: 'exec "$@"', args: [command.executable, ...command.args] };
+  return { line, body: 'eval "$1"', args: [SHELL_SESSION_SCRIPT, session?.stateFile ?? "", line ?? formatCommandLine(command)] };
 }
 
 /** What a line that was never started returns when its group's time had already run out. */

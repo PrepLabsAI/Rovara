@@ -339,7 +339,8 @@ describe("what the approval shows", () => {
     await store.put({ item: { ...projectRevisionKey(orgId, "payments", 2), entityType: "PROJECT", candidate: true, definition: definition(2, [parseOne("bash", ["-c", "make test && x"]), parseOne("sh", ["-c", long])]) as never } });
     await store.put({ item: { ...setupApplyKey(orgId, "payments"), entityType: "SETUP_APPLY", orgId, project: "payments", taskId: randomUUID(), requestId: "r", by: OWNER, digest: "a".repeat(64), baseRevision: 1, candidateRevision: 2, state: "checking", check: { workspaceId: randomUUID(), revision: 2, startedAt: "2026-11-10T12:00:00.000Z", startedBy: OWNER }, reply: {}, createdAt: "2026-11-10T12:00:00.000Z" } });
     const read = await readSetupApply({ flow: { store, now: () => new Date("2026-11-10T12:01:00Z"), companyId: orgId } as never, store, companyId: orgId, now: () => 0 }, "payments");
-    expect(read!.readiness[0]).toBe("bash -c 'make test && x'");
+    // A shell line (`bash -c <line>`, SETUP-L9-SHELL) is shown as the line a shell runs.
+    expect(read!.readiness[0]).toBe("make test && x");
     expect(read!.readiness[1]!.length).toBeGreaterThan(600);
     expect(read!.readiness[1]).toContain("x".repeat(SETUP_COMMAND_SHOWN_MAX - 5));
   });

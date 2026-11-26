@@ -224,7 +224,7 @@ export function mergeAgentFindings(detected: EnvironmentDraft, findings: AgentFi
     () => MAX_CHECKS - repo.checks.length,
     1_800,
   );
-  if (leftOut > 0) notes.push(`${String(leftOut)} command${leftOut === 1 ? "" : "s"} from the setup run ${leftOut === 1 ? "was" : "were"} left out: not one program, downloads and runs code, flagged, did not work, repeats a detected step, or over a limit.`);
+  if (leftOut > 0) notes.push(`${String(leftOut)} command${leftOut === 1 ? "" : "s"} from the setup run ${leftOut === 1 ? "was" : "were"} left out: not a readable line, downloads and runs code, flagged, did not work, repeats a detected step, or over a limit.`);
 
   return { draft: { ...detected, environment, valueSources: valueSources.slice(0, 400), notes }, replacements, notes };
 }
