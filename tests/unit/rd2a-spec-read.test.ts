@@ -385,6 +385,31 @@ describe("GET /v1/dev/tasks/{id}/spec", () => {
       expect(JSON.stringify(reasons)).not.toMatch(/migrations|session\.ts/u);
     });
 
+    // READ-RULE-SHARE-B / Opus S4: the work items' own words name paths too (`planWorkPaths` mines them), so they are source code like a claim's citation.
+    it("the work items' titles and descriptions name no path for a reader without source code, and keep their other words, their ids and their order; a reader with source code is served them as written", async () => {
+      const items = [
+        { id: randomUUID(), title: "Edit src/auth/session.ts", description: "Add the expiry check to src/auth/session.ts and its test tests/unit/session.test.ts, then update README.md.", repository: "demo", dependsOn: [] as string[] },
+      ];
+      items.push({ id: randomUUID(), title: "Wire the setting", description: "Read the value in the handler; no file is named here.", repository: "demo", dependsOn: [items[0]!.id] });
+      const breakdown = () => planDocument({ workBreakdown: { schemaVersion: 1, taskId: randomUUID(), version: 1, items } });
+      const itemsOf = (spec: SpecBody): Array<{ id: string; title: string; description: string }> => ((layerOf(spec, "steps")!["content"] as { workBreakdown: { items: Array<{ id: string; title: string; description: string }> } }).workBreakdown.items);
+      const proving = await world();
+      const owner = proving.person(OWNER_ID, FAKE_COMPANY);
+      const quick = await proving.taskOf(owner, "QUICK");
+      await proving.write(quick, "plan", breakdown(), { stage: "waiting" });
+      expect(itemsOf(await proving.spec(owner, quick))[0]).toMatchObject({ title: "Edit src/auth/session.ts", description: expect.stringContaining("tests/unit/session.test.ts") as unknown });
+      const laptop = await world({ proves: false });
+      const own = laptop.person(OWNER_ID, FAKE_COMPANY);
+      const task = await laptop.taskOf(own, "QUICK");
+      await laptop.write(task, "plan", breakdown(), { stage: "waiting" });
+      const body = (await laptop.read(own, task))!.body;
+      for (const hidden of ["src/auth/session.ts", "tests/unit/session.test.ts", "README.md"]) expect(body, hidden).not.toContain(hidden);
+      const served = itemsOf((JSON.parse(body) as { spec: SpecBody }).spec);
+      expect(served.map((item) => item.id)).toEqual(items.map((item) => item.id));
+      expect(served[0]).toMatchObject({ title: "Edit (a file)", description: "Add the expiry check to (a file) and its test (a file), then update (a file)." });
+      expect(served[1]).toMatchObject({ title: "Wire the setting", description: "Read the value in the handler; no file is named here." });
+    });
+
     it("the spec of a share-admitted reader can never carry the places: a person admitted with no live grant proved (decision.sourceCode false) is served the plan's words only", async () => {
       const task = await (async () => { const w = await world({ proves: false }); const o = w.person(OWNER_ID, FAKE_COMPANY); const id = await w.taskOf(o, "QUICK"); await w.write(id, "plan", cited(), { stage: "waiting" }); return { w, o, id, record: await w.record(id) }; })();
       const reads = { store: task.w.fake.store, read: async (key: string, max: number) => { const bytes = await task.w.blobs.get(key, max); return bytes === undefined ? undefined : new TextDecoder().decode(bytes); } };

@@ -7,16 +7,19 @@ import type { DeveloperCaller } from "../aws/developer-routes.js";
 import type { DeveloperTaskRouteDependencies } from "../aws/developer-tasks.js";
 import { resolveTaskPeopleAccess, taskListBinding, type TaskRole } from "./task-people.js";
 import { taskKey, taskOwnerKey, type DeveloperTaskRecord } from "./task-records.js";
-import { requireOwnTask } from "../aws/task-readers.js";
+import { readerKey, requireOwnTask } from "../aws/task-readers.js";
 import { isCoreTaskThatExists } from "../aws/engine-boundary.js";
 
 export type { TaskRole } from "./task-people.js";
-export type TaskAction = "read" | "peopleRead" | "comment" | "suggest" | "decide" | "ask" | "peopleManage" | "takeOwnership" | "retry" | "publish" | "feedback" | "close" | "control";
+export type TaskAction = "read" | "peopleRead" | "comment" | "commentWrite" | "suggest" | "decide" | "ask" | "peopleManage" | "takeOwnership" | "retry" | "publish" | "feedback" | "close" | "control";
 
 export const TASK_ACTION_ROLES: Record<TaskAction, readonly TaskRole[]> = {
   read: ["owner", "commenter", "viewer"],
   peopleRead: ["owner", "commenter", "viewer"],
+  // `comment` is the Slack thread's "continue" (broker.ts slackTaskAccess): it keeps its roles.
   comment: ["owner", "commenter"],
+  // READ-RULE-SHARE-B (owner DEC 254zzz577, rule 3): the plan-page comment WRITE. A People-list viewer ("Can view") writes one too, as the stored share does; a viewer still never suggests, decides, asks, continues a Slack thread or acts.
+  commentWrite: ["owner", "commenter", "viewer"],
   suggest: ["commenter"],
   decide: ["owner"],
   ask: ["owner", "commenter"],
@@ -41,6 +44,11 @@ export interface TaskAccess {
   ownerActorIds: readonly string[];
   /** The person is not on the task's People list: they read only because the task is shared into a Slack channel they are in (a commenter). The read rule decides what that grants (`CHANNEL_SHARE_PARTS`). */
   viaChannelShare?: true;
+  /**
+   * The stored share row ("Can view", spec 067) this access came from, when it did (`sharedCommenterAccess`): the comment's transaction checks that row still holds (a share revoked between the decision and the write
+   * writes nothing: the write is tied to the row, READ-RULE-SHARE-B / Opus S5). Absent for every access that does not come from a stored share.
+   */
+  sharedRow?: { pk: string; sk: string };
 }
 
 const TASK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -84,9 +92,11 @@ export async function resolveCoreTaskAccess(deps: AccessDependencies, caller: De
  * list's revision and owners where the task has a list. The CALLER proves the share (the one read rule's decision says `shared` for this person on this task); nothing here decides who is a share, and a task that is closed
  * still refuses the comment itself.
  */
-export async function sharedCommenterAccess(deps: AccessDependencies, task: DeveloperTaskRecord): Promise<TaskAccess> {
-  const binding = await taskListBinding(deps, task);
-  return { task, role: "commenter", ownerActorIds: binding.ownerActorIds ?? [taskOwnerKey(task.developerId, task.taskId)], ...(binding.peopleRevision === undefined ? {} : { peopleRevision: binding.peopleRevision }) };
+export async function sharedCommenterAccess(deps: AccessDependencies, task: DeveloperTaskRecord, developerId: string): Promise<TaskAccess> {
+  const binding = await taskListBinding(deps, task, developerId);
+  // REMOVAL WINS at the write too: the list read that supplies the fence's revision is the SAME read that says whether this person is denied, so a deny landing after the rule's decision cannot slip a comment through behind a fresh revision.
+  if (binding.role === "denied") throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
+  return { task, role: "commenter", sharedRow: readerKey(task.taskId, developerId), ownerActorIds: binding.ownerActorIds ?? [taskOwnerKey(task.developerId, task.taskId)], ...(binding.peopleRevision === undefined ? {} : { peopleRevision: binding.peopleRevision }) };
 }
 
 /** The person reads only because the task is shared into a Slack channel they are in (the People list does not name them). */

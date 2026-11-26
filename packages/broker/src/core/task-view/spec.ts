@@ -14,7 +14,7 @@ import { redactedPlan } from "../../aws/task-plan-document.js";
 import { loadWorkflowDocument } from "../../developer/plan-document-reader.js";
 import { planIsTooBig } from "../../developer/plan-one-screen.js";
 import { currentDocumentType, waitingDocumentDigest } from "../decisions/workflow-subject.js";
-import { planFiles } from "../decisions/plan-facts.js";
+import { planFiles, withoutPathsInText } from "../decisions/plan-facts.js";
 import { riskTierOf } from "../decisions/risk-tier.js";
 import type { TaskRecord } from "../task-flow/records.js";
 
@@ -101,7 +101,7 @@ function openQuestionsOf(workflow: WorkflowSnapshot): Decision[] {
 
 /**
  * A plan's PATHS are source code (the read rule's decision, `decision.sourceCode`, the same as the changes read's): the places a claim cites (path, lines and the exact line of code it anchors on). Without the proof they are not served:
- * a code citation keeps only its own note and says it is withheld; the plan's own words (claims, work items, risks, decisions) stay as written.
+ * a code citation keeps only its own note and says it is withheld; the work items' titles and descriptions say "(a file)" where a path stood (Opus S4); the plan's other words (claims, risks, decisions) stay as written.
  */
 function claimsWithoutPaths(claims: readonly PlanClaim[]): PlanClaim[] {
   return claims.map((claim): PlanClaim => {
@@ -110,7 +110,11 @@ function claimsWithoutPaths(claims: readonly PlanClaim[]): PlanClaim[] {
     return { ...rest, ...(shown === undefined ? {} : { evidence: shown as unknown as NonNullable<PlanClaim["evidence"]> }), ...(children === undefined ? {} : { children: claimsWithoutPaths(children) }) };
   });
 }
-const planWithoutPaths = (plan: PlanDocument): PlanDocument => ({ ...plan, claims: claimsWithoutPaths(plan.claims) });
+/** The work items' own words name paths too (`planWorkPaths` reads them from there): without the proof, the title and the description say "(a file)" where a path stood (Opus S4). The items' ids, repository and order stay. */
+function workBreakdownWithoutPaths(breakdown: NonNullable<PlanDocument["workBreakdown"]>): NonNullable<PlanDocument["workBreakdown"]> {
+  return { ...breakdown, items: breakdown.items.map((item) => ({ ...item, title: withoutPathsInText(item.title), description: withoutPathsInText(item.description) })) };
+}
+const planWithoutPaths = (plan: PlanDocument): PlanDocument => ({ ...plan, claims: claimsWithoutPaths(plan.claims), ...(plan.workBreakdown === undefined ? {} : { workBreakdown: workBreakdownWithoutPaths(plan.workBreakdown) }) });
 
 /** The tier's sentences name up to two files after a colon ("Changes infrastructure, IAM or data files: a.tf, b.tf and 3 more."): without the proof the sentence stands and the files do not. */
 const PATH_SENTENCES = [/^(Changes infrastructure, IAM or data files): .*\.$/u, /^(Touches sensitive paths): .*\.$/u, /^(Touches infrastructure, IAM or data): .*\.$/u];

@@ -89,7 +89,7 @@ export function pageTask(options: { path?: "QUICK" | "FULL"; reviewPhase?: "REQU
     channelMember: vi.fn(async (slackUserId: string) => members.has(slackUserId)),
     projectChannelIds: async () => [CHANNEL],
     // The task's own person still holds the project (the stored person's live grant, `holdsOwnTask`): a test that removes them overrides this.
-    taskReaderPerson: vi.fn(async () => ({ name: "Task owner", projectMember: true })),
+    taskReaderPerson: vi.fn(async () => ({ name: "Task owner", projectMember: true, companyMember: true })),
     now: () => now,
     log: vi.fn(),
   };
