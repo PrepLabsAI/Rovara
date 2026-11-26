@@ -21,7 +21,7 @@ const TASK_ID = randomUUID();
 const task = { taskId: TASK_ID, pk: `DEVTASK#${TASK_ID}`, sk: "META", developerId: OWNER, project: "payments", companyId: TASK_COMPANY } as unknown as DeveloperTaskRecord;
 
 /** The host's own read of a person now, over a real company reader and real sign-in and grant rows. */
-function layer(companyOf: Record<string, string | "throws">, options: { companies?: boolean } = {}) {
+function layer(companyOf: Record<string, string>, options: { companies?: boolean } = {}) {
   const db = new FakeDynamoDb();
   for (const id of [OWNER, PERSON, GRANTED]) db.set({ pk: `DEVELOPER#${id}`, sk: "META", developerId: id, displayName: `Person ${id.slice(0, 1)}`, revoked: false });
   // GRANTED holds a project grant in the task's company; PERSON holds none anywhere.
@@ -98,8 +98,8 @@ describe("readerShare: the share is a company member's, and removal wins (rules 
   it("no way to read the person (the deployment's seam is absent) is no share", async () => {
     const w = sharing(async () => member());
     w.share(PERSON);
-    const { taskReaderPerson: _removed, ...bare } = w.deps;
-    void _removed;
+    const bare: TaskReaderDependencies & { taskReaderPerson?: unknown } = { ...w.deps };
+    delete bare.taskReaderPerson;
     expect(await readerShare(bare, task, PERSON)).toBeUndefined();
   });
 });
@@ -112,7 +112,7 @@ describe("grantTaskReader: the owner shares with a company member, a project gra
     expect(w.db.get(`DEVTASK#${TASK_ID}`, `READER#${PERSON}`)).toMatchObject({ role: "viewer", grantedBy: OWNER });
     const before = JSON.stringify(w.db.find(() => true));
     for (const target of [GRANTED, "d".repeat(64)]) {
-      const refused = await grantTaskReader(w.deps, task as never, OWNER, target, request()).catch((error: unknown) => error as AgentXError);
+      const refused = (await grantTaskReader(w.deps, task as never, OWNER, target, request()).catch((error: unknown) => error)) as AgentXError;
       expect([refused.code, refused.message], target.slice(0, 1)).toEqual(["CONFIG_INVALID", "CONFIG_INVALID: that person isn't a member of your company; add them to the company first"]);
     }
     expect(JSON.stringify(w.db.find(() => true)), "nothing written for a refusal").toBe(before);

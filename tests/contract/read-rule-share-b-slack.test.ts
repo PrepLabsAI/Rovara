@@ -84,7 +84,7 @@ describe("the Slack channel share needs the install's own workspace (rule 1)", (
       const identity = { documentClient: db, tableName: "state", slackTeamId: TEAM, now: () => START, uuid: () => TASK_ID,
         trustedCaller: { developerId: GUEST, amr: "slack" as const, slackUserId: GUEST_SLACK, name: "Guest" }, taskPersonProof: proofWith(teamId),
         developerRecord: async () => undefined, projectChannelIds: async () => [CHANNEL], targetProjectAccess: async () => "channel" as const };
-      return { ...base, documentClient: db, checkTaskPerson: async (current: DeveloperTaskRecord, id: string) => id === OWNER ? (await base.checkTaskPerson(current, id)) : checkTaskPersonIdentity(identity, current, id) };
+      return { ...base, documentClient: db, checkTaskPerson: async (current: DeveloperTaskRecord, id: string) => id === OWNER ? (await base.checkTaskPerson!(current, id)) : checkTaskPersonIdentity(identity, current, id) };
     };
     await expect(resolveTaskPeopleAccess(withProof(TEAM), taskOf(TEAM), GUEST)).resolves.toMatchObject({ role: "commenter", implicit: true });
     await expect(resolveTaskPeopleAccess(withProof(FOREIGN_TEAM), taskOf(TEAM), GUEST)).rejects.toMatchObject({ code: "TASK_ACCESS_DENIED" });

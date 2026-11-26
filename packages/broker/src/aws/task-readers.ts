@@ -60,7 +60,7 @@ interface ReaderRecord {
 }
 
 const DEVELOPER_ID = /^[a-f0-9]{64}$/u;
-const readerKey = (taskId: string, developerId: string) => ({ pk: `DEVTASK#${taskId}`, sk: `READER#${developerId}` });
+export const readerKey = (taskId: string, developerId: string) => ({ pk: `DEVTASK#${taskId}`, sk: `READER#${developerId}` });
 
 // No company is in scope on this path (a task record and the caller carry none; the AWS broker serves one company here), so the fallback sink is a company-less console line:
 // it is one entry of the company-log inventory (tests/fixtures/company-log-sites.json), like the other AWS-path loggers.

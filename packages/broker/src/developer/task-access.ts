@@ -6,7 +6,7 @@ import type { DeveloperCaller } from "../aws/developer-routes.js";
 import type { DeveloperTaskRouteDependencies } from "../aws/developer-tasks.js";
 import { resolveTaskPeopleAccess, taskListBinding, type TaskRole } from "./task-people.js";
 import { taskKey, taskOwnerKey, type DeveloperTaskRecord } from "./task-records.js";
-import { requireOwnTask } from "../aws/task-readers.js";
+import { readerKey, requireOwnTask } from "../aws/task-readers.js";
 import { isCoreTaskThatExists } from "../aws/engine-boundary.js";
 
 export type { TaskRole } from "./task-people.js";
@@ -91,7 +91,7 @@ export async function resolveCoreTaskAccess(deps: AccessDependencies, caller: De
  */
 export async function sharedCommenterAccess(deps: AccessDependencies, task: DeveloperTaskRecord, developerId: string): Promise<TaskAccess> {
   const binding = await taskListBinding(deps, task);
-  return { task, role: "commenter", sharedRow: { pk: taskKey(task.taskId).pk, sk: `READER#${developerId}` }, ownerActorIds: binding.ownerActorIds ?? [taskOwnerKey(task.developerId, task.taskId)], ...(binding.peopleRevision === undefined ? {} : { peopleRevision: binding.peopleRevision }) };
+  return { task, role: "commenter", sharedRow: readerKey(task.taskId, developerId), ownerActorIds: binding.ownerActorIds ?? [taskOwnerKey(task.developerId, task.taskId)], ...(binding.peopleRevision === undefined ? {} : { peopleRevision: binding.peopleRevision }) };
 }
 
 /** The person reads only because the task is shared into a Slack channel they are in (the People list does not name them). */
