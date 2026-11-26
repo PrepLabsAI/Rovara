@@ -1,6 +1,6 @@
-# Mutants for SETUP-L9-SHELL (run 2026-11-25; each: edit, the relevant vitest files with --maxWorkers=1, revert; vitest reads src directly, so no tsc -b between runs)
+# Mutants for SETUP-L9-SHELL (run 2026-11-25; each: edit, the relevant vitest files with --maxWorkers=1, revert; worker and broker sources are read directly, but `@agentx/contracts` loads from its DIST, so a mutant that touches contracts is built with `tsc -b packages/contracts` before the test run and rebuilt after the revert: #12, #13, #15, #18, #19 were run that way, and #12, #13, #15, #16 were re-run that way after the Opus review)
 Tests: S = tests/unit/setup-l9-shell-session.test.ts, P = tests/integration/setup-l9-shell-prepare.test.ts, C = tests/contract/setup-l9-shell-lines.test.ts.
-Result: 18 mutants (#3 in three forms; #11-#16 added after the Sonnet pre-review), 18 killed, 0 survivors at the end (#7, and #11 and #15 as first written, survived: see below). #7 first SURVIVED (the quoted line gives the same output as `exec`), so S "a group of programs alone runs exactly as before" now also checks the wrapper sent is the `exec "$@"` one and the session script was never sent; it then kills.
+Result: 21 mutants (#3 in three forms; #11-#16 added after the Sonnet pre-review), 21 killed, 0 survivors at the end (#7, and #11 and #15 as first written, survived: see below). #7 first SURVIVED (the quoted line gives the same output as `exec`), so S "a group of programs alone runs exactly as before" now also checks the wrapper sent is the `exec "$@"` one and the session script was never sent; it then kills.
 
 | # | Mutant | Killed by |
 |---|--------|-----------|
@@ -22,3 +22,6 @@ Result: 18 mutants (#3 in three forms; #11-#16 added after the Sonnet pre-review
 | 14 | SHOULD 4: the group time cap applied to every group, not only a group with a shell line | S "a group's time is a limit too" (its `toBeUndefined` for a group of programs) |
 | 15 | SHOULD 5: a stored `bash -c <line>` (2 args) read as a shell line (first written wrongly: it survived because `line` stayed undefined; rewritten to read the last argument) | C "a command stored by hand as `bash -c` ... stays what it is", S "a command stored before shell lines existed ... runs as the program it is" |
 | 16 | SHOULD 6: setup risk ignores a shell line's inline `NAME=value` / `export NAME=value` | C "setup risk reads a shell line's inline environment like a command's env" |
+| 17 | Opus S1: `{ set +x +v; } 2>/dev/null` removed from the TOP of the session script (a starting environment with SHELLOPTS=xtrace) | S "a shell that starts with xtrace already on (SHELLOPTS in the environment) does not make the session code print the environment" |
+| 18 | Opus S1: SHELLOPTS, BASHOPTS, PS4, BASH_XTRACEFD no longer reserved command-env names | C "a project command's env may not name the variables that turn a shell's trace on or redirect it" |
+| 19 | Opus S2: U+2028/2029, non-ASCII spaces and Hangul fillers allowed again in a command | C "refuses a hidden character in a shell line" and "the proposal reader leaves out a command with such a character too" |
