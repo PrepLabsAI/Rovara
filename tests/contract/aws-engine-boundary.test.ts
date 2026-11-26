@@ -352,7 +352,7 @@ describe("the owner's answers on the AWS developer route `POST /v1/dev/tasks/{id
     await asked(world, app, task.taskId);
     await publish(world, db, task.taskId);
     expect((await dev(MAYA, "GET", "/v1/dev/tasks?detail=1")).status, "control").toBe(200);
-    const money = coreTasks.taskMoney!; const readable = coreTasks.taskReadable!;
+    const money = coreTasks.taskMoney!.bind(coreTasks); const readable = coreTasks.taskReadable!.bind(coreTasks);
     coreTasks.taskMoney = async () => { throw membershipReadFailed(); };
     expect(await dev(MAYA, "GET", "/v1/dev/tasks?detail=1")).toMatchObject({ status: 503, body: { error: { code: "RUNTIME_UNAVAILABLE" } } });
     coreTasks.taskMoney = async () => { throw new Error("some other failure"); };
