@@ -10,10 +10,12 @@
 //   - A share admits a person to the task, and then `SHARED_PARTS` says per read whether that part is shown to that role; a part that is not shown answers TASK_PART_NOT_SHOWN with the
 //     words below (never the missing task's answer for a person the page shows the task to).
 //   - `money` and `sourceCode` are part of the decision, so a handler cannot show either by accident.
-//   - OWNER DECISION 254zzz577 (READ-RULE-SHARE-B), three rules on top of the share cells below. (1) A share (the stored share, the Slack channel share) works for a person with NO project access, but ONLY a SAME-COMPANY person: the
-//     company is checked first for every read, the stored share's seam proves a live member of the TASK's company (not a project grant), and the channel share needs the Slack proof of the install's own workspace (a Slack Connect
-//     or foreign-workspace person is refused). (2) REMOVAL WINS: a person the task's People list names `denied` (a deny, or a removal) is never admitted by a share of either kind (the stored share's seam refuses them; the
-//     People rule, which the channel share goes through, refuses them). (3) Both "Can view" kinds are the same: the People list's viewer and the stored share read the whole page (the plan and the proof included) and can comment.
+//   - OWNER DECISION 254zzz577 (READ-RULE-SHARE-B), three rules on top of the share cells below. (1) The STORED share works for a person with NO project grant, but ONLY a SAME-COMPANY person: the company is checked first for every read, and the
+//     stored share's seam proves a live member of the TASK's company (not a project grant; where no company layer is wired it falls back to the project grant). The Slack CHANNEL share is NOT widened by this lane: it holds no individual grant, but its
+//     person must still reach the project through one of its bound channels (the identity proof's `targetProjectAccess`), so a person with no project access at all is refused; it also needs the Slack proof of the install's own workspace (a
+//     Slack Connect or foreign-workspace person is refused). Whether the channel share should work with no project access at all is an owner question and an identity-proof change. (2) REMOVAL WINS: a person the task's People list names `denied`
+//     (a deny, or a removal) is never admitted by a share of either kind (the stored share's seam refuses them; the People rule, which the channel share goes through, refuses them). (3) The stored share and the People list's viewer ("Can view")
+//     read the same page (the plan and the proof included) and can comment; a People viewer is still admitted only through the identity proof, which needs a project grant.
 //   - OWNER DECISION 254zzz558 (option A): a person a task is SHARED with (the stored share, "Can view"; or the Slack channel it is shared into) reads the WHOLE task page, the code changes included, and can comment; a person with no
 //     share is refused as before. So the share cells below are all "shown", and `ADMITTED_BY` lets both kinds of share into every part of the page: the task read, the events, the timeline, the question box (answers), the spec, the checks and their files, the code changes, the diff, the plan, the proof and the comments.
 import { AgentXError, agentXError, type OrgRole, type Principal } from "@agentx/contracts";
