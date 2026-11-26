@@ -87,6 +87,21 @@ describe("plan comment parity on core", () => {
     expect(JSON.stringify(revoked.h.db.find((item) => item.entityType === "TASK_COMMENT")), "no comment row").toBe("[]");
   });
 
+  // Opus M1 (RD-2), kept alive after the viewer joined the People rule's comment cell: ONLY a decision of mode `shared` (the stored share) turns the People rule's refusal into the commenter role; a decision of any other mode (a person the rule reads for another reason) does not.
+  it("a rule decision of any mode but `shared` never gives a person the commenter role when the People rule refused them", async () => {
+    const h = corePage();
+    const routes = createCoreTaskRuleRoutes(() => h.deps);
+    const path = `/v1/dev/tasks/${h.taskId}/comments`;
+    const before = h.rows();
+    for (const mode of ["page", "reader", "owner"] as const) {
+      const answer = await routes.route({ request: { method: "POST", path, headers: {}, body: JSON.stringify({ requestId: `req-${mode}`, document: "plan", text: "Not allowed", anchor: "claim:2.1" }) }, path,
+        person: { developerId: "8".repeat(64), name: "Nobody" }, companyId: COMPANY, task: h.row(), store: { query: async () => ({ items: [] }) },
+        authorize: async () => ({ task: h.row(), mode } as unknown as TaskReadDecision) }).catch((error: unknown) => ({ statusCode: 404, body: JSON.stringify({ error: { code: (error as { code?: string }).code } }) }));
+      expect([answer.statusCode, (JSON.parse(answer.body) as { error: { code: string } }).error.code], mode).toEqual([404, "TASK_NOT_FOUND"]);
+    }
+    expect(h.rows()).toBe(before);
+  });
+
   it("a missing or corrupt current artifact refuses a new root without writing", async () => {
     const h = corePage();
     h.objects.clear();

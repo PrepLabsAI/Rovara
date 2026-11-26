@@ -75,6 +75,21 @@ describe("the Slack channel share needs the install's own workspace (rule 1)", (
     }
   });
 
+  it("the install's own team is compared on the proof itself, not only on the directory's eligibility: a proof that says ok for a user of another team is refused (and the same proof for the install's team is the control)", async () => {
+    const world: World = { users: { [OWNER_SLACK]: native(OWNER_SLACK), [GUEST_SLACK]: native(GUEST_SLACK) }, members: [OWNER_SLACK, GUEST_SLACK], installTeam: TEAM };
+    const { deps: base } = peopleDeps(world, taskOf(TEAM), GUEST, GUEST_SLACK, [ownerEntry]);
+    const proofWith = (teamId: string) => async (request: { slackUserId: string; channelIds: readonly string[] }) => ({ ok: true as const, user: { id: request.slackUserId, teamId, name: "Guest" }, memberOf: [CHANNEL] });
+    const withProof = (teamId: string) => {
+      const { db } = peopleDeps(world, taskOf(TEAM), GUEST, GUEST_SLACK, [ownerEntry]);
+      const identity = { documentClient: db, tableName: "state", slackTeamId: TEAM, now: () => START, uuid: () => TASK_ID,
+        trustedCaller: { developerId: GUEST, amr: "slack" as const, slackUserId: GUEST_SLACK, name: "Guest" }, taskPersonProof: proofWith(teamId),
+        developerRecord: async () => undefined, projectChannelIds: async () => [CHANNEL], targetProjectAccess: async () => "channel" as const };
+      return { ...base, documentClient: db, checkTaskPerson: async (current: DeveloperTaskRecord, id: string) => id === OWNER ? (await base.checkTaskPerson(current, id)) : checkTaskPersonIdentity(identity, current, id) };
+    };
+    await expect(resolveTaskPeopleAccess(withProof(TEAM), taskOf(TEAM), GUEST)).resolves.toMatchObject({ role: "commenter", implicit: true });
+    await expect(resolveTaskPeopleAccess(withProof(FOREIGN_TEAM), taskOf(TEAM), GUEST)).rejects.toMatchObject({ code: "TASK_ACCESS_DENIED" });
+  });
+
   it("a task shared into a FOREIGN workspace's channel gives its members nothing here, even a person of the install's own workspace", async () => {
     const world: World = { users: { [OWNER_SLACK]: native(OWNER_SLACK), [MEMBER_SLACK]: native(MEMBER_SLACK) }, members: [OWNER_SLACK, MEMBER_SLACK], installTeam: TEAM };
     const { deps } = peopleDeps(world, taskOf(FOREIGN_TEAM), MEMBER, MEMBER_SLACK, [ownerEntry]);
