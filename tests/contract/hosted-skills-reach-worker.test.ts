@@ -423,7 +423,7 @@ describe("the skills' read has a share of its own (time, reads, bytes) and can n
     for (const fail of [() => { throw new Error("skills store down"); }, async () => { throw new Error("skills store down"); }]) {
       const w = await world();
       const original = w.store.get.bind(w.store);
-      vi.spyOn(w.store, "get").mockImplementation(async (key) => { if (isSkillKey(key)) return fail() as never; return original(key); });
+      vi.spyOn(w.store, "get").mockImplementation(async (key) => { if (isSkillKey(key)) return fail(); return original(key); });
       const answer = await w.learned({ workspaceId: WS, operationId: randomUUID(), workflowMode: "IMPLEMENT", features: WORKER_FEATURES });
       expect(answer.rovaraSkills).toBeUndefined();
       expect(lessonIds(answer)).toEqual(["les_aaaa1111"]);

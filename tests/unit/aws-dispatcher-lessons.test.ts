@@ -79,13 +79,13 @@ describe("read-only dispatcher lessons", () => {
     // SKILLS-TO-WORKERS (DEC 254zzz577 a): the company's runtime still has the reader, because published skills reach plan and build steps whatever the lessons switch says.
     expect(uncovered).toMatchObject({ modelAccess: null });
     expect(typeof uncovered?.learned).toBe("function");
-    expect(await uncovered!.learned!({ ...request, workflowMode: "PLAN" } as typeof request)).toEqual({});
+    expect(await uncovered!.learned!({ ...request, workflowMode: "PLAN" })).toEqual({});
     expect(typeof uncovered?.standingInstructions?.forOperation).toBe("function");
     for (const raw of [undefined, "off"]) {
       const off = hostedDispatcherFlow(raw === undefined ? {} : { ROVARA_CORE_LESSONS: raw }, w.options);
       expect(off).toMatchObject({ modelAccess: null });
       expect(typeof off?.learned).toBe("function");
-      expect(await off!.learned!({ ...request, workflowMode: "PLAN" } as typeof request)).toEqual({});
+      expect(await off!.learned!({ ...request, workflowMode: "PLAN" })).toEqual({});
       expect(typeof off?.standingInstructions?.forOperation).toBe("function");
       expect(await off!.standingInstructions!.forOperation({ project: "p", mode: "PLAN" })).toBeUndefined();
     }
