@@ -66,7 +66,7 @@ env:
 jobs:
   images:
     if: vars.AGENTX_ENABLE_RELEASE_TEST == 'true'
-    runs-on: ubuntu-24.04-arm
+    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     outputs:
       worker: ${{ steps.push.outputs.worker }}
       slack: ${{ steps.push.outputs.slack }}
@@ -77,7 +77,8 @@ jobs:
         with: { role-to-assume: "${{ vars.AGENTX_RELEASE_TEST_ROLE_ARN }}", aws-region: "${{ env.AWS_REGION }}" }
       - id: login
         uses: aws-actions/amazon-ecr-login@v2
-      - uses: docker/setup-buildx-action@v3
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
       - id: push
         shell: bash
         env:
@@ -93,7 +94,7 @@ jobs:
 
   lane:
     needs: images
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2604
     strategy:
       fail-fast: false
       # One environment in the account at a time (the Elastic IP quota).
@@ -194,7 +195,7 @@ jobs:
     # After both lanes, whether they passed or not, so the installs run one after another.
     needs: [images, lane]
     if: ${{ !cancelled() && needs.images.result == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2604
     env:
       AGENTX_ENV: rt${{ github.run_number }}x
       WORKER: ${{ needs.images.outputs.worker }}
@@ -259,7 +260,7 @@ jobs:
     # A last sweep, whatever happened above: every environment this run could have made.
     needs: [lane, export]
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2604
     steps:
       - if: vars.AGENTX_ENABLE_RELEASE_TEST == 'true'
         uses: actions/checkout@v5

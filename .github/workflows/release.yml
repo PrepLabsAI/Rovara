@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2604
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -28,7 +28,7 @@ jobs:
   images:
     needs: test
     if: vars.AGENTX_PUBLISH_ENABLED == 'true'
-    runs-on: ubuntu-24.04-arm
+    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     # The emulated amd64 build of the worker is slower than a native one; bounded so a stuck build cannot hold the release open.
     timeout-minutes: 90
     permissions: { contents: read, id-token: write }
@@ -93,7 +93,8 @@ jobs:
       - uses: aws-actions/amazon-ecr-login@v2
         with: { registry-type: public }
       # The runner is arm64, so the worker's linux/amd64 half (DEC 254zm) is built under emulation: register amd64 only (arm64 is native here).
-      - uses: docker/setup-buildx-action@v3
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@v1
       - id: push
         # Without an explicit shell, GitHub Actions runs a Linux run: step's script as plain
         # `bash -e {0}`, not `bash --noprofile --norc -eo pipefail {0}`: a failing
@@ -167,7 +168,7 @@ jobs:
   release:
     needs: images
     if: vars.AGENTX_PUBLISH_ENABLED == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2604
     permissions: { contents: write }
     steps:
       - uses: actions/checkout@v5
@@ -197,7 +198,7 @@ jobs:
   npm:
     needs: release
     if: vars.AGENTX_PUBLISH_ENABLED == 'true'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2604
     permissions: { contents: read, id-token: write }
     steps:
       - uses: actions/checkout@v5
@@ -235,7 +236,7 @@ jobs:
   installer:
     needs: npm
     if: vars.AGENTX_PUBLISH_ENABLED == 'true' && vars.AGENTX_INSTALLER_BUCKET != ''
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2604
     permissions: { contents: read, id-token: write }
     steps:
       - uses: actions/checkout@v5

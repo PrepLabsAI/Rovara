@@ -63,7 +63,7 @@ describe("the device executor image", () => {
 
 describe("the CI job that runs the emulator", () => {
   it("runs on x86-64 Linux (the emulator image is x86-64 only) planned like linux-runtime (only when the device area changes, always in a FULL run), with its own time limit, read-only permissions, and the one gate does NOT wait for it yet (informational until its first real run has been read)", () => {
-    expect(job["runs-on"]).toBe("ubuntu-latest");
+    expect(job["runs-on"]).toBe("blacksmith-4vcpu-ubuntu-2604");
     expect(job.needs).toBe("plan");
     expect(job.if).toBe("needs.plan.outputs.device == 'true'");
     expect(job["timeout-minutes"]).toBeGreaterThan(0);

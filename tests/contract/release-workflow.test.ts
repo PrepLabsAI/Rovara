@@ -88,12 +88,12 @@ describe("release workflow", () => {
   it("builds the images with buildx (the worker for arm64 and amd64, see worker-image-platforms.test.ts), pushes one digest per image, and cross-checks the registry digest before publishing", async () => {
     const wf = await workflow();
     const steps = wf.jobs.images!.steps;
-    const buildxIndex = steps.findIndex((s) => s.uses?.startsWith("docker/setup-buildx-action"));
+    const buildxIndex = steps.findIndex((s) => s.uses?.startsWith("useblacksmith/setup-docker-builder"));
     expect(buildxIndex).toBeGreaterThanOrEqual(0);
     const push = steps.map((s) => s.run ?? "").join("\n");
     const buildIndex = push.indexOf("docker buildx build");
     expect(buildIndex).toBeGreaterThanOrEqual(0);
-    // setup-buildx-action must run as an earlier *step* than the one containing the build.
+    // The buildx builder (useblacksmith/setup-docker-builder) must be set up as an earlier *step* than the one containing the build.
     const pushStepIndex = steps.findIndex((s) => (s.run ?? "").includes("docker buildx build"));
     expect(buildxIndex).toBeLessThan(pushStepIndex);
 
@@ -155,7 +155,7 @@ describe("release workflow", () => {
     for (const found of [nodeIndex, npmIndex, sysctlIndex]) { expect(found).toBeGreaterThanOrEqual(0); expect(found).toBeLessThan(awsIndex); expect(steps[found]!.if).toBe("vars.AGENTX_PUBLISH_EXECUTOR_IMAGE == 'true'"); }
     expect(nodeIndex).toBeLessThan(npmIndex);
     expect(awsIndex).toBeLessThan(pushIndex);
-    expect(wf.jobs.images!["runs-on"]).toBe("ubuntu-24.04-arm");
+    expect(wf.jobs.images!["runs-on"]).toBe("blacksmith-4vcpu-ubuntu-2404-arm");
     // The executor branch: build into the local Docker, smoke through the shared script, then push that image; it never builds with --push.
     const push = text(steps[pushIndex]!);
     const branch = push.slice(push.indexOf('if [ "$image" = executor ]; then'), push.indexOf("else\n"));
