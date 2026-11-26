@@ -7,7 +7,7 @@ import type { DeveloperTaskRouteDependencies } from "../aws/developer-tasks.js";
 import { resolveTaskPeopleAccess, taskListBinding, type TaskRole } from "./task-people.js";
 import { taskKey, taskOwnerKey, type DeveloperTaskRecord } from "./task-records.js";
 import { requireOwnTask } from "../aws/task-readers.js";
-import { ownerOfExistingTask } from "../aws/engine-boundary.js";
+import { isCoreTaskThatExists } from "../aws/engine-boundary.js";
 
 export type { TaskRole } from "./task-people.js";
 export type TaskAction = "read" | "peopleRead" | "comment" | "suggest" | "decide" | "ask" | "peopleManage" | "takeOwnership" | "retry" | "publish" | "feedback" | "close" | "control";
@@ -64,23 +64,10 @@ export async function resolveTaskAccess(deps: AccessDependencies, caller: Develo
   const task = response.Item;
   if (task === undefined) throw notFound();
   // Lane E2: a task the core owns is never acted on through the workflow's access (engine-boundary.ts); it reads exactly like a missing one.
-  if (await ownerOfExistingTask(deps, taskId) === "core") throw notFound();
+  if (await isCoreTaskThatExists(deps, taskId)) throw notFound();
   return await taskAccessOfRecord(deps, caller, task, action, taskId);
 }
 
-/** Existing review-page reads use the core's own authenticated GET before reusing the page's role projection. Writes keep resolveTaskAccess's engine boundary. */
-export async function resolveTaskReadAccess(deps: AccessDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskAccess> {
-  if (!TASK_ID.test(taskId)) throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
-  if (await ownerOfExistingTask(deps, taskId) !== "core") return resolveTaskAccess(deps, caller, taskId, "read");
-  const answer = await deps.coreTasks?.route({ method: "GET", path: `/v1/dev/tasks/${taskId}`, headers: {} }, caller);
-  if (answer?.statusCode !== 200) throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
-  const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: taskKey(taskId), ConsistentRead: true })) as { Item?: DeveloperTaskRecord };
-  if (response.Item === undefined) throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
-  // A core task's page access never reads the old cached channel membership (the legacy branch of `taskAccessOfRecord` is for the workflow engine's tasks): the person is the one the core read, with no Slack identity.
-  const { slackUserId: _slack, ...core } = caller;
-  void _slack;
-  return resolveCoreTaskAccess(deps, core, response.Item, "read");
-}
 
 /**
  * Core task web routes (Cloud #188 item 3): the very same rule as `resolveTaskAccess`, for a core task's record that the CORE has already read and checked against the caller's live company (aws/core-task-rule-routes.ts).
@@ -175,14 +162,3 @@ export function taskOpen(task: DeveloperTaskRecord): boolean {
   return task.closedAt === undefined && task.workflow?.stage !== "CLOSED" && task.workflow?.stage !== "MERGED";
 }
 
-/** What a reader may do on the page now, for the page view. */
-export function pageAccess(access: TaskAccess): { role: TaskRole; canComment: boolean; canSuggest: boolean; canDecide: boolean; canAsk: boolean } {
-  const open = taskOpen(access.task);
-  return {
-    role: access.role,
-    canComment: open && can(access.role, "comment"),
-    canSuggest: open && can(access.role, "suggest"),
-    canDecide: open && can(access.role, "decide"),
-    canAsk: open && can(access.role, "ask"),
-  };
-}

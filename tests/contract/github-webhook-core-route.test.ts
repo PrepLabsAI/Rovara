@@ -3,7 +3,7 @@ import { createHmac } from "node:crypto";
 import { beforeAll, expect, it } from "vitest";
 import { prHeadKey, projectRevisionKey } from "@agentx/contracts";
 import { GithubInstallationBindings } from "../../packages/broker/src/aws/github-credentials.js";
-import { stampItem } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { coreTaskMarkItem } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { recoveryRowKey, taskRecordKey } from "../../packages/broker/src/core/merge/store.js";
 import { githubWorkflowPullRequestKey } from "../../packages/broker/src/developer/task-records.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -24,7 +24,7 @@ async function world() {
   await bindings.backfill(async () => []);
   await bindings.claim(ORG, 77, "acct-a", "operator");
   db.set({ ...taskRecordKey(TASK), companyId: ORG, project: "demo", startingRevision: 1, workflow: { stage: "WAIT_FOR_MERGE", pullRequests: [{ repositoryId: "demo", number: 7, url: URL, candidateDigest: DIGEST }] } });
-  db.set(stampItem(ORG, TASK, { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "fixture", stampedAt: "2026-11-22T00:00:00.000Z" }).item);
+  db.set(coreTaskMarkItem(ORG, TASK, { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "fixture", stampedAt: "2026-11-22T00:00:00.000Z" }).item);
   db.set({ ...githubWorkflowPullRequestKey("example/demo", 7), entityType: "GITHUB_WORKFLOW_PR", repositoryFullName: "example/demo", repositoryId: "demo", number: 7, url: URL, taskId: TASK, workspaceId: "workspace", candidateDigest: DIGEST });
   db.set({ ...projectRevisionKey(ORG, "demo", 1), definition: { repositories: [{ name: "demo", url: "https://github.com/example/demo.git" }] } });
   db.set({ ...prHeadKey(ORG, "example/demo", SHA), entityType: "PR_HEAD", orgId: ORG, taskId: TASK, repositoryId: "demo", number: 7 });

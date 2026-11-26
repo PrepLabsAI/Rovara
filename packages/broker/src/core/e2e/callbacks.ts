@@ -24,7 +24,7 @@ const SHA256 = z.string().regex(/^[a-f0-9]{64}$/);
 /** A checks operation: the coding-run fields are not read, the admission it was started with is. */
 export interface ChecksOperation extends UploadOperation { workflowE2EAdmission?: E2EWorkflowAdmissionRef | undefined }
 
-/** What the round kinds' records say of a round, as far as the admission read needs. The kinds of record are the round code's; this is only the shape read. */
+/** What the round kinds' records say of a round, as far as the admission read needs it. The kinds of record are the round code's; this is only the shape read. */
 export interface StartedRoundRecord {
   state: string;
   operationId?: string | undefined;
@@ -32,7 +32,6 @@ export interface StartedRoundRecord {
   admissionSha256?: string | undefined;
   baseCommitSha?: string | undefined;
   attempt?: number | undefined;
-  planArtifactSha256?: string | undefined;
 }
 
 /** The task as far as the admission read needs it. */
@@ -41,16 +40,12 @@ export interface RoundTask {
   workspaceId: string;
   closedAt?: string | undefined;
   workflow?: { stage?: string; state?: string; revision?: number; candidate?: { digest?: string } | undefined; e2e?: { currentRoundId?: string | undefined; currentGroupRunIds?: readonly string[] | undefined } | undefined } | undefined;
-  /** The plan a planning run is holding back while its grounding round runs. */
-  planGrounding?: { artifactSha256?: unknown } | undefined;
 }
 
 /** Where the round records are read from. Each answers undefined when there is none. */
 export interface RoundRecordReaders {
   task(taskId: string): Promise<RoundTask | undefined>;
   baseline(task: RoundTask): Promise<StartedRoundRecord | undefined>;
-  replay(taskId: string, key: { sourceRoundId: string; attempt: number }): Promise<StartedRoundRecord | undefined>;
-  grounding(key: { taskId: string; planArtifactSha256: string; attempt: number }): Promise<StartedRoundRecord | undefined>;
 }
 
 /** The permitted states of the callback: a running checks operation that was given an admission. */
@@ -61,11 +56,21 @@ function requireChecksOperation(operation: ChecksOperation, what: string): E2EWo
   return operation.workflowE2EAdmission;
 }
 
+/** What a worker is told when the round it holds is an audit replay or a grounding round, kinds nothing starts or records any more (the words a lapsed round always got). */
+const RETIRED_ROUND_WORDS = { replay: "the replay round is no longer the one that was started", grounding: "the grounding round is no longer the one that was started" } as const;
+
+/** Refuses a round of a retired kind (an audit replay or a grounding round) in fixed words, before anything is read or written. */
+function refuseRetiredRound(reference: E2EWorkflowAdmissionRef): void {
+  if (reference.purpose === "replay") throw agentXError("STALE_FENCE", RETIRED_ROUND_WORDS.replay);
+  if (reference.purpose === "grounding") throw agentXError("STALE_FENCE", RETIRED_ROUND_WORDS.grounding);
+}
+
 const readBodySchema = z.object({ stage: z.literal("read"), offset: z.number().int().nonnegative(), sha256: SHA256 }).strict();
 
 /**
  * One 64 KiB piece of the admission the checks operation was started with. The read is refused unless the round it names is the one that is current for its kind: the workflow's own round
- * (the task is verifying exactly this candidate), or the started record of a baseline, replay or grounding round for this operation, with the task still open.
+ * (the task is verifying exactly this candidate), or the started record of a baseline round for this operation, with the task still open. A replay or grounding round is no longer started
+ * by anything and nothing records it: a worker still holding one is refused, whatever record an older release left behind (those records are never read).
  */
 export async function readE2EAdmissionChunk(stores: UploadStores, readers: RoundRecordReaders, operation: ChecksOperation, rawBody: unknown): Promise<Record<string, JsonValue>> {
   const reference = requireChecksOperation(operation, "E2E admission reads");
@@ -73,24 +78,13 @@ export async function readE2EAdmissionChunk(stores: UploadStores, readers: Round
   if (body.sha256 !== reference.admissionRef.sha256 || body.offset % WORKFLOW_E2E_TRANSFER_CHUNK_BYTES !== 0 || body.offset >= reference.admissionRef.byteLength) {
     throw agentXError("CALLBACK_FORBIDDEN", "E2E admission read is outside its immutable reference");
   }
+  // Fixed words, before anything is read: the refusal does not depend on what is stored, and nothing a caller names widens what a worker may read.
+  refuseRetiredRound(reference);
   const task = await readers.task(reference.taskId);
   const startedFor = (record: StartedRoundRecord | undefined, extra: boolean): boolean => record !== undefined && record.state === "STARTED" && record.operationId === operation.id
     && record.roundId === reference.roundId && record.admissionSha256 === reference.admissionRef.sha256 && extra;
   const open = task !== undefined && task.taskId === reference.taskId && task.workspaceId === operation.workspaceId && task.closedAt === undefined;
-  if (reference.purpose === "replay") {
-    // An audit replay is not the workflow's round (the workflow has moved past its checks): it is read on what the replay's own record says.
-    const record = task === undefined || reference.sourceRoundId === undefined || reference.attempt === undefined ? undefined : await readers.replay(task.taskId, { sourceRoundId: reference.sourceRoundId, attempt: reference.attempt });
-    if (!open || !startedFor(record, true)) throw agentXError("STALE_FENCE", "the replay round is no longer the one that was started");
-  } else if (reference.purpose === "grounding") {
-    // A grounding round is not the workflow's round either (the task holds its plan back, in PLAN): it is read on what the grounding record says, for this plan, base commit and attempt, while
-    // the task still holds that plan.
-    const record = task === undefined || reference.planArtifactSha256 === undefined || reference.attempt === undefined ? undefined
-      : await readers.grounding({ taskId: task.taskId, planArtifactSha256: reference.planArtifactSha256, attempt: reference.attempt });
-    const held = task?.planGrounding?.artifactSha256;
-    if (!open || !startedFor(record, record?.baseCommitSha === reference.baseCommitSha && record?.attempt === reference.attempt && record?.planArtifactSha256 === reference.planArtifactSha256 && held === reference.planArtifactSha256)) {
-      throw agentXError("STALE_FENCE", "the grounding round is no longer the one that was started");
-    }
-  } else if (reference.purpose === "baseline") {
+  if (reference.purpose === "baseline") {
     // A baseline round is not the workflow's current round: it is read on what the baseline's own record says, for this plan, base commit and attempt.
     const record = task === undefined ? undefined : await readers.baseline(task);
     if (!open || !startedFor(record, record?.baseCommitSha === reference.baseCommitSha && record?.attempt === reference.attempt)) throw agentXError("STALE_FENCE", "the baseline round is no longer the one that was started");
@@ -198,6 +192,8 @@ export async function handleE2EEvidenceUpload(stores: UploadStores, operation: C
 
 async function evidenceUploadStep(stores: UploadStores, operation: ChecksOperation, rawBody: unknown, staged: string[]): Promise<Record<string, JsonValue>> {
   const admissionRef = requireChecksOperation(operation, "E2E evidence uploads");
+  // The same refusal as the admission read: a retired round takes no evidence, so it leaves no upload row, staging chunk or evidence object.
+  refuseRetiredRound(admissionRef);
   const body = parseUploadBody(evidenceBodySchema, rawBody, "E2E evidence upload");
   // A chunk of an application upload continues a row whose init was judged against the decoded admission and carries its digest (which must still be the operation's): it does not read, hash and
   // parse a multi-megabyte admission again for each 64 KiB. Anything else takes the full path below.

@@ -7,9 +7,7 @@ import { planCheckSummary } from "../../packages/broker/src/developer/plan-check
 import { structuredExtraLines, workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
 import { renderPlanDocument } from "../../packages/broker/src/aws/plan-page/render-plan.js";
 import { readTaskPlanDocument } from "../../packages/broker/src/aws/task-plan-document.js";
-import { getTaskDocumentView } from "../../packages/broker/src/aws/developer-tasks.js";
-import { createTaskWeb, type TaskDocumentView } from "../../packages/broker/src/aws/task-web.js";
-import { PRIYA, pageTask } from "../support/page-tasks.js";
+import { pageTask } from "../support/page-tasks.js";
 import { planDocument } from "../support/plan-documents.js";
 
 const SHA = "a".repeat(64);
@@ -149,35 +147,7 @@ describe("what the self-check found, on the card", () => {
 
 });
 
-describe("what the self-check found, on the task page", () => {
-
-  it("reaches the rendered task page from the loaded document view", async () => {
-    const view = {
-      taskId: "11111111-1111-4111-8111-111111111111", title: "Retry payments", status: "Waiting for your approval", nextStep: "Approve or request changes.", path: "QUICK", stage: "Coding plan", role: "owner",
-      documents: [{ kind: "coding plan", version: 1, approved: false, current: true, format: "structured", plan: backwardsPlan(), selfCheck: readPlanSelfCheck(json({ findings: [uncovered] }), SHA) }],
-      checks: [], findings: [], pullRequests: [], history: [], revision: 7,
-    } as unknown as TaskDocumentView;
-    const web = createTaskWeb({ authenticateSession: async () => ({ developerId: "d".repeat(64), sessionId: "s", amr: "slack", name: "Maya" }), getTaskDocumentView: async () => view });
-    const answer = await web({ method: "GET", path: `/review/${view.taskId}/task`, headers: { cookie: "__Host-agentx_review_session=11111111-1111-4111-8111-111111111111" }, requestId: "r" },
-      new URL(`https://agentx.example.test/review/${view.taskId}/task`));
-    expect(answer.statusCode).toBe(200);
-    expect(answer.body.replaceAll("&#39;", "'")).toContain(uncovered.ownerSentence);
-  });
-});
-
 describe("the loaded task page and the full-plan route read the record beside the stored document", () => {
-  it("attaches the record to each coding plan version of the page, and fails closed to 'not checked' without one", async () => {
-    const fixture = pageTask();
-    const first = fixture.addVersion("plan", backwardsPlan());
-    fixture.objects.set(first.objectKey.replace(/\.json$/u, ".quality.json"), JSON.stringify(record({ artifactId: first.id, artifactSha256: first.sha256, findings: [uncovered] })));
-    const second = fixture.addVersion("plan", backwardsPlan({ title: "Second try" }));
-    const view = await getTaskDocumentView(fixture.deps, PRIYA, fixture.taskId);
-    const plans = view.documents.filter((document) => document.kind === "coding plan" && document.format === "structured") as Array<{ version: number; selfCheck?: { checked: boolean; sentences: string[] } }>;
-    expect(plans.find((entry) => entry.version === first.version)!.selfCheck).toMatchObject({ checked: true, sentences: [uncovered.ownerSentence] });
-    // The second version has no record: not checked.
-    expect(second.version).toBe(2);
-    expect(plans.find((entry) => entry.version === 2)!.selfCheck).toEqual({ checked: false, sentences: [NOT_CHECKED_SENTENCE], tried: {}, notTried: {} });
-  });
 
   it("returns the same lines from the full-plan route, with the dry run's classes against the checks", async () => {
     const fixture = pageTask();

@@ -120,7 +120,6 @@ export const asksForPlanQuality = (prompt: string): boolean => prompt.includes(P
 
 const CHECKS_MEMBER = "checks?: { checks: { label: string; cwd: string; executable: string; args: string[]; timeoutSeconds?: number; proves: string[] }[]; none_reason: string | null }; // the checks to run, described below; proves lists the claim IDs each check proves";
 
-const KIND_NAMES: Record<PlanDocumentKind, string> = { requirements: "requirements", design: "design", plan: "coding plan" };
 
 /** At most this many retired claim IDs are named in a planning prompt. */
 const RETIRED_CLAIM_IDS_MAX = 50;
@@ -279,10 +278,6 @@ export const SETUP_CHANGES_INSTRUCTION = [
   "A maintainer approves this list with the plan, and it applies to this task only; after the pull request merges, a maintainer is asked to update the project's setup. The coding agent never writes a mock or a fixture: do not plan to add or change one that is not in this list. Leave `setupChanges` out when the task changes no setup.",
 ].join(" ");
 
-/** The document name a prompt uses for a kind: "requirements", "design" or "coding plan". */
-export function planDocumentKindName(kind: PlanDocumentKind): string {
-  return KIND_NAMES[kind];
-}
 
 /**
  * Added to coding-plan prompts (a Quick plan, a Full implementation plan): how to find the checks that exercise this

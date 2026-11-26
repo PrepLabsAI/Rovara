@@ -17,7 +17,7 @@ beforeAll(loadSlackBroker);
 afterEach(() => { vi.restoreAllMocks(); });
 
 type Kind = "prepare" | "publish" | "maintain";
-function legacyWorld(options: { kind?: Kind; status?: string; workspaceStatus?: string } = {}) {
+function legacyWorld(options: { kind?: Kind; status?: string; workspaceStatus?: string; expectedTreeSha?: string } = {}) {
   const kind = options.kind ?? "prepare";
   const minted = vi.fn(async () => ({ username: "x-access-token", password: TOKEN }));
   const grants = new RepositoryGrantService(Buffer.alloc(32, 3), minted);
@@ -26,7 +26,7 @@ function legacyWorld(options: { kind?: Kind; status?: string; workspaceStatus?: 
     rootPath: "/mnt/workspace", status: options.workspaceStatus ?? "BUSY", fence: 2, activeOperationId: OPERATION, createdAt: NOW, updatedAt: NOW });
   const base = { pk: `WORKSPACE#${WORKSPACE}`, sk: `OPERATION#${OPERATION}`, id: OPERATION, workspaceId: WORKSPACE, kind, status: options.status ?? "RUNNING", fence: 2 };
   const operation = kind === "maintain" ? { ...base, maintenance: { action: "append", repository: "web", repositoryUrl: URL_OF_REPOSITORY, pullRequestNumber: 7, headBranch: "rovara/fix", baseBranch: "main", expectedHeadCommit: "a".repeat(40) } }
-    : kind === "publish" ? { ...base, publication: { repository: "web", repositoryUrl: URL_OF_REPOSITORY, headBranch: "rovara/change", baseBranch: "main", title: "t", body: "b", draft: true } } : base;
+    : kind === "publish" ? { ...base, publication: { repository: "web", repositoryUrl: URL_OF_REPOSITORY, headBranch: "rovara/change", baseBranch: "main", title: "t", body: "b", draft: true, ...(options.expectedTreeSha === undefined ? {} : { expectedTreeSha: options.expectedTreeSha }) } } : base;
   db.set(operation);
   db.set({ pk: `WORKSPACE#${WORKSPACE}`, sk: `PULL_REQUEST#web#${"7".padStart(12, "0")}`, expectedHeadCommit: "a".repeat(40) });
   const logged: Array<Record<string, unknown>> = [];
@@ -191,6 +191,15 @@ describe("legacy Git exchange: a push with no candidate to check needs its autho
     expect(await w.post(w.grantFor(), "push")).toEqual({ status: 409, code: "CALLBACK_FORBIDDEN" });
     w.db.set({ pk: "DEVTASK#task-1", sk: "META", taskId: "task-1", workspaceId: WORKSPACE, workflow: { stage: "PULL_REQUEST", state: "RUNNING", candidate: { digest: "c".repeat(64) } } });
     expect((await w.post(w.grantFor(), "push")).status).toBe(200);
+  });
+  // D1 pre-review MUST-1: a publication of the retired old workflow engine (it records `expectedTreeSha`) gets no credential at all, clone or push, while a publish without one does.
+  it.each(["clone", "push"] as const)("a publish that carries expectedTreeSha gets no %s credential", async (access) => {
+    const w = legacyWorld({ kind: "publish", expectedTreeSha: "e".repeat(40) });
+    expect(await w.post(w.grantFor(), access)).toEqual({ status: 409, code: "CALLBACK_FORBIDDEN" });
+    expect(w.minted).not.toHaveBeenCalled();
+    expect(w.lines("repository.credential_refused")[0]).toMatchObject({ reason: "authority" });
+    const plain = legacyWorld({ kind: "publish" });
+    expect((await plain.post(plain.grantFor(), access)).status).toBe(200);
   });
   it("a publish without a candidate is refused once its task was closed", async () => {
     const w = legacyWorld({ kind: "publish" });

@@ -33,17 +33,4 @@ describe("core/plan", () => {
     expect(files.size).toBeGreaterThan(entries.length);
     expect(sdk).toEqual([]);
   });
-
-  it("the moved helpers are still exported where the hosted product reads them", async () => {
-    const answers = await import("../../packages/broker/src/developer/owner-answers.js");
-    const keys = await import("../../packages/broker/src/developer/plan-evidence-jobs.js");
-    const shared = await import("../../packages/broker/src/aws/broker-shared.js");
-    expect(typeof answers.ownerAnswersSentence).toBe("function");
-    expect(typeof answers.planOwnerAnswers).toBe("function");
-    expect(typeof keys.planEvidenceSources).toBe("function");
-    expect(typeof keys.planCitesCode).toBe("function");
-    expect(typeof shared.planDocumentInstructions).toBe("function");
-    expect(typeof shared.planChecksInstructions).toBe("function");
-    expect(typeof shared.PLAN_PHASE_LIMITS).toBe("string");
-  });
 });

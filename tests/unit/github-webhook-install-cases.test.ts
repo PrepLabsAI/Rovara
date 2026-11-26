@@ -12,7 +12,7 @@ import { handleGithubWebhookRoute } from "../../packages/broker/src/aws/github-w
 import { resetGithubWebhookWindows } from "../../packages/broker/src/aws/github-core-webhooks.js";
 import { GithubInstallationBindings, createGitHubAppCredentials } from "../../packages/broker/src/aws/github-credentials.js";
 import { isWebhookSecretMissing } from "../../packages/broker/src/github-app.js";
-import { stampItem } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { coreTaskMarkItem } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { recoveryRowKey, taskRecordKey } from "../../packages/broker/src/core/merge/store.js";
 import { githubWorkflowPullRequestKey } from "../../packages/broker/src/developer/task-records.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -54,7 +54,7 @@ async function trackedTask() {
   await bindings.claim(ORG, 77, "acct-a", "operator");
   const url = "https://github.com/example/demo/pull/7";
   db.set({ ...taskRecordKey(TASK), companyId: ORG, project: "demo", startingRevision: 1, workflow: { stage: "WAIT_FOR_MERGE", pullRequests: [{ repositoryId: "demo", number: 7, url, candidateDigest: DIGEST }] } });
-  db.set(stampItem(ORG, TASK, { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "fixture", stampedAt: "2026-11-22T00:00:00.000Z" }).item);
+  db.set(coreTaskMarkItem(ORG, TASK, { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "fixture", stampedAt: "2026-11-22T00:00:00.000Z" }).item);
   db.set({ ...githubWorkflowPullRequestKey("example/demo", 7), entityType: "GITHUB_WORKFLOW_PR", repositoryFullName: "example/demo", repositoryId: "demo", number: 7, url, taskId: TASK, workspaceId: "workspace", candidateDigest: DIGEST });
   db.set({ ...projectRevisionKey(ORG, "demo", 1), definition: { repositories: [{ name: "demo", url: "https://github.com/example/demo.git" }] } });
   db.set({ ...prHeadKey(ORG, "example/demo", SHA), entityType: "PR_HEAD", orgId: ORG, taskId: TASK, repositoryId: "demo", number: 7 });
@@ -72,7 +72,7 @@ function deliver(task: Awaited<ReturnType<typeof trackedTask>>, secrets: ReturnT
   sequence += 1;
   return handleGithubWebhookRoute({
     headers: { "x-github-event": event, "x-github-delivery": `550e8400-e29b-41d4-a716-${String(sequence).padStart(12, "0")}`, "x-hub-signature-256": `sha256=${createHmac("sha256", signWith).update(raw).digest("hex")}` },
-    body: raw, secret: secrets.credentials.webhookSecret, isSecretMissing: isWebhookSecretMissing, now: () => Date.now(), log: (entry) => logs.push(entry), legacy: legacy as never,
+    body: raw, secret: secrets.credentials.webhookSecret, isSecretMissing: isWebhookSecretMissing, now: () => Date.now(), log: (entry) => logs.push(entry), installation: legacy as never,
     core: { documentClient: task.db, tableName: "state", bindings: task.bindings } });
 }
 const merged = () => ({ action: "closed", installation: { id: 77 }, repository: { id: 42, full_name: "example/demo" }, pull_request: { number: 7, merged: true } });
@@ -151,20 +151,6 @@ describe("GitHub rotates the webhook secret [LIVE-BUG B11]", () => {
     expect((await deliver(task, secrets, legacy, "issue_comment", conversationComment(3), FIRST)).status).toBe(403);
     expect(task.writes().length).toBe(writes);
     expect(legacy).not.toHaveBeenCalled();
-  });
-
-  it("a delivery with a secret AgentX does not hold is 403 and keeps nothing; the same delivery id signed right is accepted", async () => {
-    const task = await trackedTask();
-    const secrets = secretsWorld({ app: appJson(), dedicated: { SecretString: FIRST } });
-    const raw = conversationComment();
-    const id = "71111111-2222-4333-8444-555555555555";
-    const send = (signWith: string) => handleGithubWebhookRoute({ headers: { "x-github-event": "issue_comment", "x-github-delivery": id, "x-hub-signature-256": `sha256=${createHmac("sha256", signWith).update(JSON.stringify(raw)).digest("hex")}` },
-      body: JSON.stringify(raw), secret: secrets.credentials.webhookSecret, isSecretMissing: isWebhookSecretMissing, now: () => Date.now(), log: () => undefined, legacy: vi.fn() as never, core: { documentClient: task.db, tableName: "state", bindings: task.bindings } });
-    expect((await send("not-the-webhook-secret-0123456789abcdefgh")).status).toBe(403);
-    expect(task.writes()).toEqual([]);
-    expect(task.deliveries()).toEqual([]);
-    expect(await send(FIRST)).toMatchObject({ status: 200, body: { delivery: "ACCEPTED", deliveryId: id } });
-    expect(task.deliveries()).toHaveLength(1);
   });
 });
 

@@ -6,7 +6,7 @@ import { teamRecordPk, type DocumentStore, type OrgId, type StoredDocument } fro
 import { createBrokerCoreRoot, type BrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-root.js";
 import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
 import { createTeamRecord } from "../../packages/broker/src/team-record/record.js";
-import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { taskKey, taskPointerKey, workspaceKey, operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { createFakeWorld, FAKE_COMPANY, type FakeWorld } from "../support/core-host-fakes.js";
 import type * as TeamRecordModule from "../../packages/broker/src/core-host/team-record.js";
@@ -103,7 +103,7 @@ export async function coreContextWorld(options: { teamOff?: boolean; teamCompany
     await put({ ...taskPointerKey(companyId, workspaceId), taskId });
     await put({ ...taskKey(taskId), taskId, companyId, developerId, project: "payments", workspaceId });
     await put({ ...operationKey(companyId, workspaceId, operationId), id: operationId, workspaceId, companyId, fence: 1, status: "RUNNING", workflowMode: "PLAN" });
-    await put({ ...engineStampKey(taskId), coreEngine: { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "on", stampedAt: new Date(world.clock.now).toISOString() } });
+    await put({ ...coreTaskMarkKey(taskId), coreEngine: { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "on", stampedAt: new Date(world.clock.now).toISOString() } });
     const record = createTeamRecord({ store: world.store, companyId, now: () => world.clock.now });
     await record.put({ project: "payments", taskId, authorId: developerId, kind: "decision", text: `shared query ${marker}`, sourceRef: sameSource, occurredAt: new Date(world.clock.now).toISOString() });
     // Identical raw record ids across companies, even though the writer normally hashes the company into them.

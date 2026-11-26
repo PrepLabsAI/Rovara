@@ -10,20 +10,19 @@ import { LambdaClient } from "@aws-sdk/client-lambda";
 import { invokeCoreOutbox, outboxCompanyOf, streamFailures, type StreamBatchResponse } from "./core-outbox-stream.js";
 import { chatGptFallbackText } from "../chatgpt/fallback-notice.js";
 import { developerIdForSlackUser } from "./admin-actions.js";
-import { createHash } from "node:crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { ChangeMessageVisibilityCommand, SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { INDEX_EXPIRY_ATTRIBUTE, isPlanUnreadableBlockReason, NUDGE_WINDOW_MS, sameJsonContent, AdminChangePendingRecordSchema, planClaimCount, planSummaryLines, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, WorkflowFeedbackReviewReportSchema, adminChangeKey, describeWorkflowCheckChanges, redactText, workflowCheckCommandText, workflowFeedbackCheckChanges, indexExpiresAt, lastAssistantResponse, sharedTaskKey, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, workflowPublicationRetryable, taskGraphDigest, type PendingChange, type PlanClaim, type PlanDocument, type WorkflowArtifact, type WorkflowCheck, type WorkflowCanvasLineage, type WorkflowSnapshot } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, isPlanUnreadableBlockReason, NUDGE_WINDOW_MS, sameJsonContent, AdminChangePendingRecordSchema, planClaimCount, planSummaryLines, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, adminChangeKey, indexExpiresAt, lastAssistantResponse, sharedTaskKey, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, workflowPublicationRetryable, taskGraphDigest, type PendingChange, type PlanClaim, type PlanDocument, type WorkflowArtifact, type WorkflowCanvasLineage, type WorkflowSnapshot } from "@agentx/contracts";
 import { adminChangeExpiredMessage, adminChangeMessage, adminChangeOutcomeMessage } from "../developer/change-messages.js";
 import { loadWorkflowDocument } from "../developer/plan-artifacts.js";
 import { PLAN_UNREADABLE_CATEGORIES, planCheckSummary, planUnreadableCategory } from "../developer/plan-check-summary.js";
 import { SELF_CHECK_NOT_APPLICABLE, loadPlanSelfCheck, planRevisionsUsed, type PlanSelfCheckView } from "../developer/plan-self-check.js";
 import { readStream, type Notice, type StreamRecord } from "../developer/notifications.js";
 import { CANCELLED_REPLY, CLOSED_REPLY, READY_REPLY, STOPPED_REPLY, endedReply, modeReply, pullRequestReply, setupFailedReply, startMessage } from "../developer/share-messages.js";
-import { answeredWorkflowCard, cleanLine, documentSummaryLines, feedbackReviewFailedMessage, planReviewLink, slackSectionTexts, slackText, workflowDocumentType, workflowMessage, workflowMessageKey, type WorkflowMessageContext } from "../developer/workflow-messages.js";
+import { answeredWorkflowCard, cleanLine, documentSummaryLines, planReviewLink, slackSectionTexts, slackText, workflowDocumentType, workflowMessage, workflowMessageKey, type WorkflowMessageContext } from "../developer/workflow-messages.js";
 import { AUTOFIX_CARD_HOLD_MS, AutoFixAskSchema, autoFixCardLines } from "../developer/autofix-messages.js";
 import { deriveTaskStatus, failureCategory, plannerRepliesKey, taskKey, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type OperationFacts, type TaskShare } from "../developer/task-records.js";
 import { isConditional } from "./broker-shared.js";
@@ -135,9 +134,8 @@ async function deliverPeopleNotification(deps: NotifierDependencies, notice: Not
     ExpressionAttributeNames: { "#status": "status" },
     ExpressionAttributeValues: { ":sending": "SENDING", ":expected": row.status, ":attempt": attempt, ":previous": row.attempts, ":until": deps.now() + 30_000 },
   }));
-  const base = deps.reviewUrlBase;
-  const taskUrl = base === undefined ? undefined : new URL(`/review/${notice.taskId}/task`, base).href;
-  const text = `You now have the ${row.role} role on an AgentX task.${taskUrl === undefined ? "" : ` ${taskUrl}`}`;
+  // D1-2: Code's own task page is deleted (DEC 254zzz511), so this notice names no page to open.
+  const text = `You now have the ${row.role} role on an AgentX task.`;
   try {
     const posted = await deps.post({ ...taskScope(deps, await noticeTask(deps, notice)), channel: row.slackUserId, text });
     try {
@@ -167,13 +165,6 @@ export const ADMIN_CHANGE_EXPIRY_GRACE_MS = 5_000;
 /** SQS's longest per-message delay. */
 const MAX_DELAY_SECONDS = 900;
 
-/** The most reviewer questions a PR feedback card shows; the rest are on the details page. */
-const FEEDBACK_QUESTIONS_SHOWN = 3;
-/** Each question's visible length on the card, so three fit in a brief message. */
-const FEEDBACK_QUESTION_MAX = 280;
-/** Each check label's visible length in a card's "Updates checks" line (a label is at most 80 characters). */
-const FEEDBACK_CHECK_LABEL_MAX = 100;
-
 /**
  * One line of the reviewer's words (made inert by cleanLine) at most `limit` characters long once escaped: an escaped
  * character (`&amp;`, `&lt;`) takes several, so the line is cut shorter until its escaped form fits.
@@ -187,106 +178,6 @@ function escapedLine(text: string, limit: number): string {
   }
   return line;
 }
-
-/**
- * The card for a complete PR feedback review. When the reviewer left findings to the owner, the card asks their
- * questions (the reviewer's own words, made inert) and its Request changes button becomes the owner's answer, which
- * approves the fix it describes. Approve shows only when something is recommended; Dismiss always shows.
- */
-export function feedbackReviewSlackMessage(input: {
-  taskId: string;
-  revision: number;
-  reviewDigest: string;
-  proposalDigest: string;
-  bundleDigests: string[];
-  totalComments: number;
-  recommendedFindingIds: string[];
-  highestPriority: "MUST_FIX" | "SHOULD_FIX" | "OPTIONAL" | undefined;
-  /** Each finding left to the owner and its question (its proposal's summary, or its rationale), as the reviewer wrote it. */
-  ownerQuestions?: ReadonlyArray<{ findingId: string; question: string }>;
-  /**
-   * The checks each recommended fix changes (labels as the plan and the reviewer wrote them, and every added check's
-   * command): Approve covers them, so the card shows each added command exactly, inert and in code style.
-   */
-  checkChanges?: ReadonlyArray<{ obsolete: readonly string[]; added: ReadonlyArray<{ label: string; command: { cwd: string; executable: string; args: readonly string[] } }> }>;
-  detailUrl: string;
-}): { text: string; blocks: unknown[] } {
-  const url = new URL(input.detailUrl);
-  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
-    throw new Error("feedback review link is not a secure AgentX URL");
-  }
-  const priority = input.highestPriority === "MUST_FIX" ? "must fix" : input.highestPriority === "SHOULD_FIX" ? "should fix"
-    : input.highestPriority === "OPTIONAL" ? "optional" : "none recommended";
-  const recommendationSummary = input.recommendedFindingIds.length === 0
-    ? "No fixes are recommended."
-    : `${input.recommendedFindingIds.length} ${input.recommendedFindingIds.length === 1 ? "recommendation" : "recommendations"}.`;
-  const questions = (input.ownerQuestions ?? []).filter(({ question }) => question.trim().length > 0);
-  // The answer is bound to exactly the questions the card shows; the others are answered from the details page.
-  const shownQuestions = questions.slice(0, FEEDBACK_QUESTIONS_SHOWN);
-  const recommended = input.recommendedFindingIds.length;
-  const details = `<${slackText(url.href)}|Open details>.`;
-  const comments = `${input.totalComments} ${input.totalComments === 1 ? "comment" : "comments"}`;
-  // Labels and commands are the plan's and the reviewer's words: each is made inert. A corrected check's command is at
-  // most 300 plain characters with no backtick, so it is shown in full, its spacing kept, in exact code style (a backtick
-  // is still replaced, so none can close it).
-  const code = (text: string) => `\`${slackText(redactText(text)).replaceAll("`", "'")}\``;
-  const label = (text: string) => `\`${escapedLine(text.replaceAll("`", "'"), FEEDBACK_CHECK_LABEL_MAX)}\``;
-  const checkLines = recommended === 0 || input.checkChanges === undefined ? [] : describeWorkflowCheckChanges(input.checkChanges.map((finding) => ({
-    obsolete: finding.obsolete.map(label),
-    added: finding.added.map((check) => ({ label: label(check.label),
-      command: code(workflowCheckCommandText(check.command, Number.POSITIVE_INFINITY)), cwd: code(check.command.cwd) })),
-  })));
-  // The text before the check lines and after them: each check line is its own section, so no split lands inside one.
-  let before: string;
-  let after = "";
-  if (questions.length === 0) {
-    before = checkLines.length === 0
-      ? `PR feedback is ready: ${comments}; ${recommendationSummary} Highest priority: ${priority}. ${details}`
-      : `PR feedback is ready: ${comments}; ${recommendationSummary} Highest priority: ${priority}.`;
-    if (checkLines.length > 0) after = details;
-  } else {
-    const hidden = questions.length - shownQuestions.length;
-    const more = hidden === 0 ? [] : [`(${hidden} more ${hidden === 1 ? "question is" : "questions are"} on the details page; your answer here covers only the ones shown.)`];
-    const several = shownQuestions.length > 1;
-    const scope = recommended === 0 ? ""
-      : ` Your answer covers only the ${several ? "questions" : "question"}. Approve ${recommended} recommended makes only the recommended ${recommended === 1 ? "fix" : "fixes"} and leaves the ${several ? "questions" : "question"} open.`;
-    before = `PR feedback is ready: ${comments}${recommended === 0 ? "" : `; ${recommendationSummary} Highest priority: ${priority}`}.`;
-    after = [
-      "The reviewer needs your answer before changing any code:",
-      ...shownQuestions.map(({ question }) => `> ${escapedLine(question, FEEDBACK_QUESTION_MAX)}`), ...more,
-      `Answer with instructions and I'll make that change.${scope} ${details}`,
-    ].join("\n");
-  }
-  const text = [before, ...checkLines, after].filter((part) => part.length > 0).join("\n");
-  const bundleSetDigest = createHash("sha256").update(JSON.stringify(input.bundleDigests), "utf8").digest("hex");
-  const card = { taskId: input.taskId, expectedRevision: input.revision, reviewDigest: input.reviewDigest, proposalDigest: input.proposalDigest, bundleSetDigest };
-  const binding = JSON.stringify({ ...card, selection: "RECOMMENDED" });
-  const elements: Array<Record<string, unknown>> = [
-    ...(recommended > 0 ? [{ type: "button", action_id: "agentx_feedback_review_recommended", style: "primary",
-      text: { type: "plain_text", text: `Approve ${recommended} recommended` }, value: binding }] : []),
-    questions.length === 0
-      ? { type: "button", action_id: "agentx_feedback_review_changes", text: { type: "plain_text", text: "Request changes" }, value: binding }
-      : { type: "button", action_id: "agentx_feedback_review_changes", ...(recommended === 0 ? { style: "primary" } : {}),
-        text: { type: "plain_text", text: "Answer with instructions" },
-        value: JSON.stringify({ ...card, selection: "ANSWER", findingIds: shownQuestions.map(({ findingId }) => findingId) }) },
-    { type: "button", action_id: "agentx_feedback_review_dismiss", text: { type: "plain_text", text: "Dismiss" }, value: binding },
-  ];
-  // Escaping can make the reviewer's words several times longer than they look, so long text is split across sections;
-  // each check line is a section of its own (a line is at most a few hundred characters), never split.
-  // A check line is verbatim, so Slack never links a URL or turns @channel or @here in it into a mention; the text around
-  // it is not, because it carries the details link.
-  const plain = (parts: string[]) => parts.map((section) => ({ text: section, verbatim: false }));
-  const sections = checkLines.length === 0 ? plain(slackSectionTexts(text))
-    : [...plain(slackSectionTexts(before)), ...checkLines.map((line) => ({ text: line, verbatim: true })), ...(after.length === 0 ? [] : plain(slackSectionTexts(after)))];
-  return {
-    text,
-    blocks: [
-      ...sections.map((section) => ({ type: "section", text: { type: "mrkdwn", text: section.text, ...(section.verbatim ? { verbatim: true } : {}) } })),
-      { type: "actions", elements },
-    ],
-  };
-}
-
 /** #217: the queue delay for a notice the notifier scheduled: until its `notBefore`, within SQS's 15 minutes. */
 export function noticeDelaySeconds(notice: Notice, now: number): number {
   if (notice.notBefore === undefined) return 0;
@@ -634,20 +525,10 @@ interface Reply {
   approval?: WorkflowArtifact;
 }
 
-/** The trusted AgentX task page, when the notifier knows its base and it is a plain https origin. */
+/** D1-2: Code's own task page is deleted (DEC 254zzz511); no notice links to it, so no message sends anyone to a page that answers 404. */
 function taskPageUrl(deps: NotifierDependencies, taskId: string): string | undefined {
-  return taskPageUrlFromBase(deps.reviewUrlBase, taskId);
-}
-
-function taskPageUrlFromBase(reviewUrlBase: string | undefined, taskId: string): string | undefined {
-  if (reviewUrlBase === undefined) return undefined;
-  try {
-    const base = new URL(reviewUrlBase);
-    if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash) return undefined;
-    return new URL(`/review/${encodeURIComponent(taskId)}/task`, base).href;
-  } catch {
-    return undefined;
-  }
+  void deps; void taskId;
+  return undefined;
 }
 
 /** Slack's answers that mean this workspace cannot create a Canvas at all: the task page is linked instead. */
@@ -967,57 +848,13 @@ async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord &
   }
 }
 
-async function feedbackReviewNotification(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, notice: Notice) {
-  const workflow = task.workflow;
-  const review = workflow?.feedbackReview;
-  const reviewRef = review?.reviewRef;
-  if (notice.kind !== "github_feedback" || review?.status !== "PENDING" || reviewRef === undefined || reviewRef.sha256 !== notice.feedbackReviewDigest) return undefined;
-  if (reviewRef.status !== "COMPLETE") {
-    // Said from the report's own reference: its stored reason is AgentX's words only, and is shown in plain words.
-    const opened = workflow!.pullRequests ?? [];
-    return feedbackReviewFailedMessage({ taskId: task.taskId, revision: workflow!.revision, reviewDigest: reviewRef.sha256, status: reviewRef.status, blockReason: reviewRef.blockReason,
-      pullRequests: review.bundleRefs.map((bundle) => ({ number: bundle.number,
-        url: opened.find((pullRequest) => pullRequest.repositoryId === bundle.repositoryId && pullRequest.number === bundle.number)?.url ?? "" })) });
-  }
-  if (reviewRef.status !== "COMPLETE") return undefined;
-  if (deps.readArtifact === undefined || deps.reviewUrlBase === undefined) throw new Error("feedback review notice is not configured");
-  const bytes = await deps.readArtifact(reviewRef.objectKey);
-  if (createHash("sha256").update(bytes, "utf8").digest("hex") !== reviewRef.sha256) throw new Error("feedback review artifact integrity check failed");
-  const report = WorkflowFeedbackReviewReportSchema.parse(JSON.parse(bytes));
-  if (report.taskId !== task.taskId || report.status !== "COMPLETE" || report.proposalDigest !== reviewRef.proposalDigest
-    || JSON.stringify(report.bundleDigests) !== JSON.stringify(review.bundleRefs.map(bundle => bundle.sha256))) {
-    throw new Error("feedback review artifact binding failed");
-  }
-  const base = new URL(deps.reviewUrlBase);
-  if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash) throw new Error("feedback review base URL is invalid");
-  const findings = report.findings;
-  const highestPriority = findings.some(finding => finding.recommended && finding.priority === "MUST_FIX") ? "MUST_FIX"
-    : findings.some(finding => finding.recommended && finding.priority === "SHOULD_FIX") ? "SHOULD_FIX"
-      : findings.some(finding => finding.recommended && finding.priority === "OPTIONAL") ? "OPTIONAL" : undefined;
-  return feedbackReviewSlackMessage({
-    taskId: task.taskId, revision: workflow!.revision, reviewDigest: reviewRef.sha256, proposalDigest: reviewRef.proposalDigest,
-    bundleDigests: review.bundleRefs.map(bundle => bundle.sha256),
-    totalComments: review.bundleRefs.reduce((total, bundle) => total + bundle.comments.length, 0),
-    recommendedFindingIds: findings.filter(finding => finding.recommended).map(finding => finding.id), highestPriority,
-    // The reviewer is told to put its question and options in the proposal's summary; its rationale stands in when it gave none.
-    ownerQuestions: findings.filter(finding => finding.proposedDisposition === "OWNER_DECISION")
-      .map(finding => ({ findingId: finding.id, question: finding.fixProposal?.summary ?? finding.rationale })),
-    checkChanges: feedbackCardCheckChanges(workflow!.checkPolicy, findings.filter(finding => finding.recommended)),
-    detailUrl: new URL(`/review/${encodeURIComponent(task.taskId)}`, base).href,
-  });
-}
-
 /**
- * The check changes a card says for its recommended fixes: exactly what Approve applies for them together
- * (workflowFeedbackCheckChanges, which the approval uses too), split by the finding each change comes from.
+ * D1-2: the old workflow's PR feedback review card (its Approve and Request changes buttons are retired, and its detail page `/review/<task>` is deleted, DEC 254zzz511). Nothing writes a
+ * `github_feedback` notice any more; one already waiting is dropped, so no person is sent to a page that answers 404. (The core's own feedback cards are the core's.)
  */
-export function feedbackCardCheckChanges(
-  policy: Parameters<typeof workflowFeedbackCheckChanges>[0],
-  findings: Parameters<typeof workflowFeedbackCheckChanges>[1],
-): Array<{ obsolete: string[]; added: Array<{ label: string; command: WorkflowCheck["command"] }> }> {
-  return workflowFeedbackCheckChanges(policy, findings).byFinding.map(entry => ({
-    obsolete: entry.obsolete.map(check => check.label), added: entry.added.map(check => ({ label: check.label, command: check.command })),
-  }));
+async function feedbackReviewNotification(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, notice: Notice) {
+  void deps; void task; void notice;
+  return undefined;
 }
 
 type Outcome = "posted" | "recorded" | "not_shared" | "before_share" | "after_close" | "delivered" | "no_thread" | "stale" | "scheduled" | "skipped";
@@ -1958,7 +1795,7 @@ export function createAwsNotifierHandler(workspaces?: SlackCallerWorkspaces) {
     peopleChangesEnabled: process.env.AGENTX_TASK_PEOPLE_CHANGES_ENABLED === "true",
     workflowE2EBlocks: async (task, operations) => {
       void operations;
-      return workflowE2ENotifierBlocks({ task, taskPageUrl: taskPageUrlFromBase(reviewUrlBase, task.taskId),
+      return workflowE2ENotifierBlocks({ task, taskPageUrl: undefined,
         readPrivateObject: async (key, maxBytes) => {
           if (maxBytes > 262_144 || !/^private\/[^/]+\/[^/]+\/workflow-e2e-display\/[a-f0-9]{64}\.json$/u.test(key)) return undefined;
           const response = await s3.send(new GetObjectCommand({ Bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), Key: key }));

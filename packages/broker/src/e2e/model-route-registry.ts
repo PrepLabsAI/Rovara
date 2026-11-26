@@ -1,6 +1,6 @@
 import { GetCommand, TransactWriteCommand, UpdateCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import {
-  E2EModelRouteDefinitionSchema, E2E_AGENT_RECOMMENDED_MODELS, E2E_MODEL_DRIVING_TEST_MARKER, E2E_MODEL_ROUTE_NOT_TESTED, E2E_AGENT_UNAVAILABLE_REASONS, E2E_HARD_LIMITS, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_MODEL_ROUTE_CHANGED_REAPPROVE, INDEX_EXPIRY_ATTRIBUTE, KEYED_MODEL_PROVIDERS, MODEL_PROVIDERS, WORKER_SETTING_PARAMETERS, e2eAgentScopeSentence, indexExpiresAt, e2eModelRouteRevision, isKeyedModelProvider, type E2EModelRouteDefinition, type ModelProvider, type OrgId,
+  E2EModelRouteDefinitionSchema, E2E_AGENT_RECOMMENDED_MODELS, E2E_MODEL_DRIVING_TEST_MARKER, E2E_AGENT_UNAVAILABLE_REASONS, E2E_HARD_LIMITS, E2E_DEFAULT_MODEL_ROUTE_ID, E2E_MODEL_ROUTE_CHANGED_REAPPROVE, INDEX_EXPIRY_ATTRIBUTE, KEYED_MODEL_PROVIDERS, MODEL_PROVIDERS, WORKER_SETTING_PARAMETERS, e2eAgentScopeSentence, indexExpiresAt, e2eModelRouteRevision, isKeyedModelProvider, type E2EModelRouteDefinition, type ModelProvider, type OrgId,
 } from "@agentx/contracts";
 import { deriveE2EAgentRoute, e2eAgentRouteDefinitionDigest, type E2EAgentInstallation, type DerivedE2EAgentRoute } from "@agentx/model-runtime/e2e-route-derive";
 import type { E2EDayBudget, E2EDayLimits, E2EDayReservation } from "@agentx/model-runtime";
@@ -190,7 +190,6 @@ async function drivingTestOf(store: E2EModelRouteStore, routeId: string, definit
   if (item === undefined || item["test"] !== E2E_MODEL_DRIVING_TEST_MARKER || item["routeId"] !== routeId || item["definitionDigest"] !== definitionDigest) return null;
   return { passedAt: typeof item["recordedAt"] === "string" ? item["recordedAt"] : null };
 }
-const hasDrivingTest = async (store: E2EModelRouteStore, routeId: string, definitionDigest: string): Promise<boolean> => (await drivingTestOf(store, routeId, definitionDigest)) !== null;
 
 export type PlannedE2EAgentRoute =
   | { status: "available"; definition: E2EModelRouteDefinition; definitionDigest: string; revision: string; revisionNumber: number; unchanged: boolean;
@@ -266,31 +265,6 @@ export async function approveE2EAgentRoute(store: E2EModelRouteStore, installati
     }
   }
   throw new E2EModelRouteError(E2E_MODEL_ROUTE_CHANGED_REAPPROVE, "the AI navigation settings were being changed while the setup was approved; propose the setup again");
-}
-
-export type E2EAgentRouteCheck =
-  | { ok: true; routeId: string; routeRevision: string }
-  | { ok: false; code: typeof E2E_MODEL_ROUTE_CHANGED_REAPPROVE | typeof E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved | typeof E2E_MODEL_ROUTE_NOT_TESTED; detail: string };
-
-/**
- * Dispatch's check (and planning's): derives the route from the installation again and compares it with what the registry holds and what the project's policy pinned.
- * Any change of provider, model, secret ARN or OpenRouter policy gives `model-route-changed-reapprove`; a route the installation can no longer make, or none ever approved,
- * is `agent-route-not-approved`; a route whose driving test has not passed for its digest is `model-route-not-tested`. Reads by key only.
- */
-export async function checkE2EAgentRouteCurrent(store: E2EModelRouteStore, installation: E2EAgentInstallation, policyRevision: string | null): Promise<E2EAgentRouteCheck> {
-  const latest = await readE2EModelRouteLatest(store);
-  if (latest === null) return { ok: false, code: "agent-route-not-approved", detail: "no AI navigation route has been approved for this installation" };
-  if (policyRevision === null) return { ok: false, code: "agent-route-not-approved", detail: "the project's setup was approved without AI navigation" };
-  const derived = deriveE2EAgentRoute(installation, latest.revisionNumber);
-  if (derived.status === "unavailable") return { ok: false, code: "agent-route-not-approved", detail: derived.detail };
-  if (e2eAgentRouteDefinitionDigest(derived.definition) !== latest.definitionDigest) {
-    return { ok: false, code: E2E_MODEL_ROUTE_CHANGED_REAPPROVE, detail: "The AI navigation settings changed; approve the checks again" };
-  }
-  if (!(await hasDrivingTest(store, latest.routeId, latest.definitionDigest))) {
-    return { ok: false, code: E2E_MODEL_ROUTE_NOT_TESTED, detail: "The driving test has not passed for the AI navigation route this project's setup approved; run the driving test, then approve the checks again" };
-  }
-  if (policyRevision !== latest.revision) return { ok: false, code: E2E_MODEL_ROUTE_CHANGED_REAPPROVE, detail: "The AI navigation settings changed since this project's setup was approved; approve the checks again" };
-  return { ok: true, routeId: latest.routeId, routeRevision: latest.revision };
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -377,22 +351,4 @@ export function createBrokerE2EDayBudget(options: BrokerE2EDayBudgetOptions): E2
       };
     },
   };
-}
-
-/**
- * Dispatch's precheck for a group that uses the model: whether the project's day has room for the group's worst case (`need`) under the day caps. A read by key; the
- * per-call reservations above are what actually hold the caps. False gives UNKNOWN `model-route-budget-exhausted` before the run starts.
- */
-export async function e2eDayBudgetRoom(
-  options: E2EModelRouteStore & { orgId: OrgId; projectName: string; now: number },
-  need: { inputTokens: number; calls: number },
-  limits: E2EDayLimits,
-): Promise<boolean> {
-  const day = utcDay(options.now);
-  const response = await options.documentClient.send(new GetCommand({ TableName: options.tableName, Key: e2eModelBudgetKey(options.orgId, options.projectName, day), ConsistentRead: true }));
-  const item = response.Item as { inputTokens?: unknown; calls?: unknown } | undefined;
-  const earlier = await legacyDayUsage(options, options.orgId, options.projectName, day);
-  const usedTokens = (typeof item?.inputTokens === "number" ? item.inputTokens : 0) + earlier.inputTokens;
-  const usedCalls = (typeof item?.calls === "number" ? item.calls : 0) + earlier.calls;
-  return usedTokens + need.inputTokens <= limits.maxInputTokens && usedCalls + need.calls <= limits.maxCalls;
 }

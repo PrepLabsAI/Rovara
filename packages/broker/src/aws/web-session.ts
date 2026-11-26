@@ -42,14 +42,6 @@ export function escapeHtml(value: unknown): string {
   return safeText(value).replace(/[&<>"']/g, (character) => entities[character] ?? character);
 }
 
-/** A GitHub link only when it is plain https on github.com with no credentials in it. */
-export function canonicalGithubUrl(input: unknown): string | undefined {
-  if (typeof input !== "string") return undefined;
-  try {
-    const url = new URL(input);
-    return url.protocol === "https:" && url.hostname === "github.com" && url.username === "" && url.password === "" ? url.toString() : undefined;
-  } catch { return undefined; }
-}
 
 export function parseCookie(headers: Record<string, string | undefined>, name: string): string | undefined {
   for (const part of (headers.cookie ?? "").split(";")) {
@@ -64,13 +56,7 @@ export function signInLocation(returnPath: string): string {
   return `/v1/auth/browser/authorize?return_to=${encodeURIComponent(returnPath)}`;
 }
 
-/** Session callback response helper. The ID is a random, revocable DeveloperIdentity session ID. */
-export function reviewSessionCookie(sessionId: string): string {
-  if (!/^[0-9a-f-]{36}$/i.test(sessionId)) throw new Error("invalid review session ID");
-  return `${SESSION_COOKIE}=${sessionId}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_MAX_AGE_SECONDS}`;
-}
 
-export function reviewSessionCookieName(): string { return SESSION_COOKIE; }
 
 /** A CSRF token as AgentX issues it: 32 to 64 URL-safe characters. */
 export function isCsrfToken(value: string | undefined): value is string {

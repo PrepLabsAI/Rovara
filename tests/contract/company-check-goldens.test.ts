@@ -5,6 +5,8 @@ import { companyRouteHarness, TASK, PERSON, TIME } from "../support/company-rout
 
 export const GOLDEN_CASES = ["task-found", "task-missing", "empty-list", "paged-list", "project-grant", "project-channel", "project-none"] as const;
 
+// D1-2 (DEC 254zzz502): the harness's tasks carry the core's mark (only a marked task is listed), and a core task's row is listed as its index row says, so the `stale-updatedAt` golden of the checked mode
+// now shows the index row's own updatedAt (12:00); the retired workflow list recomputed it from the task view (13:00). The other five goldens are unchanged.
 it.each(["project", "status", "stale-updatedAt"] as const)("filtered implicit-company golden: %s", async (filter) => {
   for (const enabled of [false, true]) {
     const h = companyRouteHarness();

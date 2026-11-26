@@ -21,7 +21,7 @@ import type { WorkflowE2EReadinessMarker } from "./broker-shared.js";
 import type { ExtraItems } from "./developer-task-actions.js";
 import type { DurableOutboxRecord, RuntimeBinding } from "./lambda.js";
 import type { PlanQualityContext } from "../developer/plan-quality.js";
-import { ownerOfWorkspace } from "./engine-boundary.js";
+import { isCoreWorkspace } from "./engine-boundary.js";
 import { NOT_ON_THE_CORE_YET } from "../core-host/dev-routes.js";
 
 /** The State table, as the broker and the reconciler reach it. */
@@ -144,7 +144,7 @@ export async function requireOperation(
   operationId: string,
 ): Promise<OperationRecord> {
   // Lane E2: an operation of a core task's workspace is the core's, never read here (engine-boundary.ts). A failed engine read is an error, never the workflow.
-  if (await ownerOfWorkspace(dependencies, workspaceId) === "core") throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
+  if (await isCoreWorkspace(dependencies, workspaceId)) throw agentXError("NOT_FOUND", NOT_ON_THE_CORE_YET);
   const operation = await getItem<OperationRecord>(dependencies, operationKey(workspaceId, operationId));
   if (!operation) throw agentXError("NOT_FOUND", "operation not found");
   return operation;

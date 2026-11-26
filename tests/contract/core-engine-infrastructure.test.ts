@@ -649,6 +649,8 @@ describe("L1a broker environment derivation", () => {
     // LESSONS-PORT-FIX (DEC 254zzz473): the dispatcher's DEVELOPER_SIGNIN_TABLE_NAME variable and its DispatcherLessonsPeople policy are asserted and taken out first (withoutDispatcherLessonsPeople), so every pin below holds as recorded.
     // CODE-PUBLIC-URL (2026-11-24): the PublicApiUrl parameter, condition, URL-base Fn::Ifs and packed host are asserted and taken out too (withoutPublicApiUrl, after the two above), so every pin below holds as recorded.
     // F1 L1a-1: the two deleted invitation switches are put back first too (withTaskPeopleInvitationSwitches, Rule D, tests/support/task-people-invitations-template.ts), so every pin below holds as recorded.
+    // D1-2 (declared change set, D1-PLAN section 8): the legacy template lost the three recovery Schedules (GithubWebhookRecovery, WorkflowMergeRecovery, WorkflowDispatchRecovery), the two Scheduler roles and
+    // their two DefaultPolicies; every digest below is re-pinned from the received value for exactly that removal (the ladder's steps are unchanged; the removed resources were in every older state too).
     // RETAIN (arch ruling 2026-11-24): Retain on the control plane's five keys, channel state table and adapter secret is asserted and put back to Delete first (withoutRetainPolicies, innermost), so they hold too.
     // WORKER-DELIVERY-IDENTITY (2026-11-25): the instance state-change handler, its rule and the dispatcher's one Describe statement are asserted and taken out first (withoutMachineGone, innermost), so every pin holds as recorded.
     const machineless = () => withoutMachineGone(structuredClone(legacy.toJSON()));
@@ -657,28 +659,29 @@ describe("L1a broker environment derivation", () => {
     const beforeFirstGateway = withoutLinearWebhookRoute(withoutWebhookSecretLane(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(relayless())), { named: false }) as Json & { Outputs: Record<string, unknown> }), stuckStoppingInstall()))));
     expect(beforeFirstGateway.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
     delete beforeFirstGateway.Outputs.ModelRunPriceVersion;
-    expect(digest(beforeFirstGateway), "legacy without the first-gateway output retains the upstream member-check pin").toBe("fef96cf61a67a412e6d99ef4bf9567f05dd1a518d02471de8dede006a78bbc1e");
+    expect(digest(beforeFirstGateway), "legacy without the first-gateway output retains the upstream member-check pin").toBe("1250b639d05a893991c1e8820d725a7a014f97818144dd49cbc0be0e5598cc93");
     const beforeMemberCheck = withoutBrokerMemberConditionCheck(beforeFirstGateway);
-    expect(digest(beforeMemberCheck), "legacy without the first-gateway output and broker member check").toBe("e08e8a557cfcd0f1815bbfdc23a162704e0d0995d9d04b073b2b6feb30e44a09");
+    expect(digest(beforeMemberCheck), "legacy without the first-gateway output and broker member check").toBe("0b4ea671233e2f4a4f21254fa5e5f785f26e6f95377d18c0245694f0361f57ea");
     // Rule D proof: removing exactly the two capability routes retains the switch-removal pin.
     const withoutCapabilityRoutes = structuredClone(beforeMemberCheck);
     delete withoutCapabilityRoutes.Resources.ContextToolsListRoute;
     delete withoutCapabilityRoutes.Resources.DesignReviewPacketRoute;
-    expect(digest(withoutCapabilityRoutes), "legacy with the two capability routes taken out").toBe("b304960b2db5e8cd2ccdb7cc84fc45b58f13e8eff4e8e6810cde809f190fc82b");
-    expect(digest(withoutLinearWebhookRoute(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(relayless())), { named: false })), stuckStoppingInstall()))))).toBe("50f67718e9973dd22b4699e0155c3e29fd34c86016f3ce28e7c531517b43668c");
+    expect(digest(withoutCapabilityRoutes), "legacy with the two capability routes taken out").toBe("81f41c9b9da65f4416c9a22c73870f7dd6b721574f7e8bf8ecdbaf04368dab2f");
+    expect(digest(withoutLinearWebhookRoute(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(relayless())), { named: false })), stuckStoppingInstall()))))).toBe("f91a001d03bb896f7418aba232ccf00273d44b26ff8745a3e1b7d17893c62827");
     // RETAIN (Rule D, arch ruling 2026-11-24): every pin above was taken with the nine policies put back (withoutRetainPolicies, innermost); the same template with them in (Retain on the five keys, the channel table and
     // the adapter secret) has its own pin.
-    expect(digest(withoutLinearWebhookRoute(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(relayless()), { named: false })), stuckStoppingInstall()))))).toBe("1dc517571d37ee73d023698fc668b384827e553a058e7241c3b95bdda97b64e3");
+    expect(digest(withoutLinearWebhookRoute(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(relayless()), { named: false })), stuckStoppingInstall()))))).toBe("2e9f16807eb45eee69dda14706e3ffb746c19e7a3d52b3c84af86231c979a6bc");
     // CODE-PUBLIC-URL (Rule D, 2026-11-24): the same template with exactly the PublicApiUrl additions in (and the RETAIN policies in) has its own pin; with them taken out the pin above holds.
     // LINEAR-WEBHOOKS + guard (Rule D, rebased onto the public-URL pin): the same template with the Linear route, its throttle and its alarm in has its own pin; with exactly those taken out the pin after it (3175a57d...) holds.
     // CORE-RUN-STOP-RELAY (G1, 2026-11-25): the same template with the packed `rl=on` on the broker and the dispatcher in has its own pin; Rule D: with exactly that taken out (withoutCoreOutboxStreamRelay) the pin after it (6694babb...) holds.
     // F1 L1a-1 (2026-11-25): that full-template pin is re-pinned for exactly the deletion of the two dead invitation parameters and their two packed broker settings (tu, tv). Rule D: with exactly those put back
     // (withTaskPeopleInvitationSwitches) the pin recorded before holds (the first line below), and with the relay taken out too the pin after it (6694babb...) holds.
     const withRelay = withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutDispatcherLessonsPeople(withoutCanarySession(machineless()))), stuckStoppingInstall()));
-    expect(digest(withRelay), "legacy with the outbox stream relay setting, without the two deleted invitation switches").toBe("32a056531c8cb8c21aaea8f22289489d317cb7f1965906c3a96a7411701de126");
-    expect(digest(withTaskPeopleInvitationSwitches(structuredClone(withRelay))), "legacy with the outbox stream relay setting and the switches put back").toBe("177bca4c6b9eb5b7291f114c5253a536a8c038aeedbf2743bcc084b79189ee1c");
-    expect(digest(withTaskPeopleInvitationSwitches(withoutCoreOutboxStreamRelay(structuredClone(withRelay)))), "legacy minus only the outbox stream relay setting").toBe("6694babb0383fdcefffed780d3da49ae296a9706ce9b4d8db102f467aa602d8f");
-    expect(digest(withoutLinearWebhookRoute(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutDispatcherLessonsPeople(relayless())), stuckStoppingInstall()))))).toBe("3175a57d79eae0299da08518af571baed1e639d1daf44eae307e94037bc8faa8");
+    // D1-2 (declared change set, D1-PLAN section 8, rebased onto train 90): every pin below moved for exactly the removal of the three recovery Schedules, the two Scheduler roles and their policies (and, in the named template, the PlanEvidence function, its log group, role and policy); the removed resources were in every older state these pins describe.
+    expect(digest(withRelay), "legacy with the outbox stream relay setting, without the two deleted invitation switches").toBe("95118007012afb422645f9d06e6d3a9909ddcd831187e5ade2e4fa8a4f21fc66");
+    expect(digest(withTaskPeopleInvitationSwitches(structuredClone(withRelay))), "legacy with the outbox stream relay setting and the switches put back").toBe("1fdaf3120dc364ed70bd9cc7a78dac8d5e5f21aaa058eb7fa0e4af81e94b5609");
+    expect(digest(withTaskPeopleInvitationSwitches(withoutCoreOutboxStreamRelay(structuredClone(withRelay)))), "legacy minus only the outbox stream relay setting").toBe("3c5e673fa2189574d99ee0e5f031ddaee263c20a53d2e7547d7e1f3ce428a85d");
+    expect(digest(withoutLinearWebhookRoute(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutDispatcherLessonsPeople(relayless())), stuckStoppingInstall()))))).toBe("d914ae5f33473df4bad336e381a4f857f8afcee1a158e7ff2e2c50174f3fe47a");
   });
 });
 import { createHash } from "node:crypto";

@@ -16,9 +16,9 @@ import { INDEX_EXPIRY_ATTRIBUTE, type DocumentKey, type DocumentStore, type Stor
 
 /** The kinds the core writes with an expiry that the deployed broker also writes, each decided. Reviewed 2026-11-15 against code/next. */
 export const CORE_EXPIRY_COLLISIONS: Readonly<Record<string, "keep" | "strip">> = Object.freeze({
-  // The deployed broker writes these with an expiry too (aws/broker-shared.ts dispatch rows, connections/request-marks.ts, aws/channel-links.ts, services/callbacks.ts,
-  // aws/workflow-e2e-{baseline,grounding,replay}.ts).
-  WORKFLOW_DISPATCH: "keep", AGENT_REQUEST: "keep", CHANNEL_LINK_CODE: "keep", OPERATION_EVENT: "keep", WORKFLOW_E2E_BASELINE: "keep", WORKFLOW_E2E_GROUNDING: "keep", WORKFLOW_E2E_REPLAY: "keep",
+  // The deployed broker writes these with an expiry too (connections/request-marks.ts, aws/channel-links.ts, services/callbacks.ts). D1-2: the old workflow's dispatch rows and E2E baseline,
+  // grounding and replay records (aws/broker-shared.ts, aws/workflow-e2e-*.ts) are no longer written by the deployed broker, so those kinds are not collisions any more (they were all `keep`, the default).
+  AGENT_REQUEST: "keep", CHANNEL_LINK_CODE: "keep", OPERATION_EVENT: "keep",
   // Separate key families (KEPT_ON_SEPARATE_KEYS): the core's items are `CHANNEL_THREAD#<session>` (core/channel/threads.ts), the deployed broker's `SLACK_THREAD#...`
   // (aws/channel-conversation.ts), so a core expiry never lands on a deployed item.
   CHANNEL_THREAD: "keep",

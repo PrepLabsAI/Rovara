@@ -544,7 +544,7 @@ the bundle's permission boundary), records the `access` step as done, and goes o
 environment. The CLI keeps its own copy at `agentx/<env>/callback-signing-key` and passes the value to the
 control-plane stack as the `NoEcho` `CallbackSigningKey` parameter, never printed. The stack makes a second secret
 from that parameter, `agentx/<env>/callback-key` (retained on a stack delete, like the Slack secret), and gives the broker, the eval batch tick, the
-sessions reconciler and (while the core switch is not off) the dispatcher only that secret's name, as
+sessions reconciler and (where the core is wired) the dispatcher only that secret's name, as
 `CALLBACK_SIGNING_KEY_SECRET_ID`. Each reads it with GetSecretValue on exactly that secret when it starts, keeps it in memory
 for the container's life, and refuses to serve or sign without it. An upgrade passes the parameter's previous value
 (`UsePreviousValue`), so the existing key carries into the new secret without anyone reading or printing it. The templates

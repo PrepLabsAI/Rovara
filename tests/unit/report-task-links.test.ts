@@ -52,26 +52,27 @@ describe("the task page reference in the contract", () => {
 });
 
 describe("GET report tasks: task page references", () => {
-  it("every row, open, closed, merged and settled, carries the page of its own task and no other", async () => {
+  // D1-2 review M3: Code's own task page is deleted (DEC 254zzz511), so no row points to it; the field stays in the contract (an older Code, and Cloud's mirror), and a row without it draws its title as plain text.
+  it("no row, open, closed, merged and settled, carries a task page reference (the page is gone), and each still reads", async () => {
     const w = world();
     const open = await w.seed({ n: 1, startedAt: day(3) });
     const closed = await w.seed({ n: 2, startedAt: day(4), closedAt: day(5) });
     const done = await w.seed({ n: 3, startedAt: day(6), workflow: merged(day(7)) });
     const first = await w.read(A);
-    expect(first.tasks.map((r) => [r.taskId, r.taskPage])).toEqual([[open, `/review/${open}/task`], [closed, `/review/${closed}/task`], [done, `/review/${done}/task`]]);
+    expect(first.tasks.map((r) => [r.taskId, r.taskPage])).toEqual([[open, undefined], [closed, undefined], [done, undefined]]);
     // the merged task settled: the second read serves it from its own stored row and still names it
     expect(await w.read(A)).toEqual(first);
     for (const r of first.tasks) expect(ReportTaskRowSchema.safeParse(r).success).toBe(true);
   });
 
-  it("a stored row whose task id is not a task id gets no page and is not shown (unreadable)", async () => {
+  it("a stored row whose task id is not a task id is not shown (unreadable)", async () => {
     const w = world();
     const taskId = await w.seed({ n: 1, startedAt: day(3) });
     const stored = (await w.store.get(reportTaskKey(A, day(3), taskId)))!;
     await w.store.put({ item: { ...stored, taskId: "../../x", sk: `TASK#${day(3)}#../../x` } });
     const page = await w.read(A, { from: day(1), to: day(30) });
-    // the planted row is counted unreadable and never shown; the real row still reads with its own page
-    expect(page.tasks.map((r) => [r.taskId, r.taskPage])).toEqual([[taskId, `/review/${taskId}/task`]]);
+    // the planted row is counted unreadable and never shown; the real row still reads
+    expect(page.tasks.map((r) => [r.taskId, r.taskPage])).toEqual([[taskId, undefined]]);
     expect(page.unreadable).toBe(1);
     expect(JSON.stringify(page)).not.toContain("../../x");
   });

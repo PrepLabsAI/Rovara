@@ -2,17 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it, vi } from "vitest";
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
-import {
-  changeTaskPeople,
-  getTaskPeople,
-  takeTaskOwnership,
-  getTaskPeopleCapabilities,
-  getTaskPeoplePresentation,
-  taskAccessFence,
-  resolveTaskPeopleAccess,
-  type TaskPeopleDependencies,
-  type TaskPersonCheck,
-} from "../../packages/broker/src/developer/task-people.js";
+import { changeTaskPeople, getTaskPeople, takeTaskOwnership, getTaskPeopleCapabilities, taskAccessFence, resolveTaskPeopleAccess, type TaskPeopleDependencies, type TaskPersonCheck } from "../../packages/broker/src/developer/task-people.js";
 import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
 import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
 import { confirmTaskPeopleProposal, getTaskPeopleProposal, getTaskPeopleProposalMetadata, proposeTaskPeopleRole, submitSlackTaskPeopleRole } from "../../packages/broker/src/developer/task-people-effects.js";
@@ -264,29 +254,6 @@ describe("task people", () => {
       await expect(resolveTaskPeopleAccess(deps, record, developerId)).rejects.toMatchObject({ code: "TASK_ACCESS_DENIED" });
       expect(db.get(`DEVTASK#${TASK_ID}`, "PEOPLE")).toMatchObject({ revision: 2, orphaned: true, people: [{ role: "denied" }] });
     }
-  });
-
-  it("reads immutable task-local presentation names through matching PERSON and PERSON_SUBJECT records", async () => {
-    const h = harness({ enabled: false });
-    const personId = "22222222-2222-4222-8222-222222222222";
-    h.seedPerson(B, personId);
-    await expect(getTaskPeoplePresentation(h.deps, TASK_ID)).resolves.toEqual([{ personId, developerId: B, name: MEMBER.name }]);
-    h.db.set({ ...(h.db.get(`DEVTASK#${TASK_ID}`, `PERSON_SUBJECT#${B}`)!), personId: "33333333-3333-4333-8333-333333333333" });
-    await expect(getTaskPeoplePresentation(h.deps, TASK_ID)).rejects.toMatchObject({ code: "TASK_ACCESS_DENIED" });
-  });
-
-  it("retains more than 100 valid immutable historical identities for presentation", async () => {
-    const h = harness({ enabled: false });
-    for (let index = 0; index < 101; index += 1) {
-      const slackUserId = `U0HIST${String(index).padStart(3, "0")}`;
-      const developerId = developerIdForSlackUser(slackUserId);
-      const personId = randomUUID();
-      const createdAt = new Date(START + index).toISOString();
-      h.db.set({ pk: `DEVTASK#${TASK_ID}`, sk: `PERSON#${personId}`, schemaVersion: 1, personId, developerId, slackUserId,
-        name: `Former person ${index}`, method: "slack", issuer: "https://slack.com", subject: slackUserId, createdAt });
-      h.db.set({ pk: `DEVTASK#${TASK_ID}`, sk: `PERSON_SUBJECT#${developerId}`, schemaVersion: 1, personId, developerId, createdAt });
-    }
-    await expect(getTaskPeoplePresentation(h.deps, TASK_ID)).resolves.toHaveLength(101);
   });
 
   it("keeps a cold People read visibly unavailable while changes are disabled and writes nothing", async () => {

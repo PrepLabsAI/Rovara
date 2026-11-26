@@ -3,7 +3,6 @@ import { expect, it, vi } from "vitest";
 import * as hostApp from "../../packages/broker/src/core-host/app.js";
 import * as codeModules from "../../packages/broker/src/core-host/code-modules.js";
 import type { CodeModuleDeps } from "../../packages/broker/src/core-host/code-modules.js";
-import { CORE_ENGINE_ON } from "../../packages/broker/src/core-host/flags.js";
 import { createBrokerCoreRoot } from "../../packages/broker/src/aws/core-engine-root.js";
 import { toDocument } from "../../packages/broker/src/core/task-flow/records.js";
 import { runUsageKey } from "../../packages/broker/src/core/cost/run-usage.js";
@@ -27,7 +26,7 @@ it.each([true, false])("the root close hook rejects failed run-usage recording, 
     const task = await taskOf(h);
     await world.store.put({ item: toDocument(task) });
     // Exercise the hook the real composition root supplies, without running unrelated hosted services.
-    const runtime = app.mock.calls[0]![0].runtime(registry, task.companyId, CORE_ENGINE_ON);
+    const runtime = app.mock.calls[0]![0].runtime(registry, task.companyId);
     const close = runtime.flowOptions!.onTaskClosed!;
     const transact = world.store.transact.bind(world.store);
     const failure = isError ? new Error("run usage write unavailable") : "run usage write unavailable";

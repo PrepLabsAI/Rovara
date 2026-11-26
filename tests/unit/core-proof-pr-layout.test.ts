@@ -2,11 +2,8 @@
 // first items, markers or closing line, nothing a model, person or repository wrote can change the layout, lesson titles stay out of a public repository, and the block can always be found and rewritten whatever layout wrote it.
 import { describe, expect, it } from "vitest";
 import { secondReviewFromLines, usedDrawerLines } from "../../packages/broker/src/core/proof/pull-request-layout.js";
-import { withStatusLines } from "../../packages/broker/src/developer/pull-request-feedback-section.js";
 import { exceptionsScenario, greenScenario, largestScenario } from "../support/pr-body-scenarios.js";
 
-const START = "<!-- rovara:checks-and-reviews -->";
-const END = "<!-- /rovara:checks-and-reviews -->";
 const summaries = (body: string): string[] => [...body.matchAll(/<summary>(.*?)<\/summary>/gu)].map((match) => match[1]!);
 
 describe("T1: a drawer never holds the only copy of bad news", () => {
@@ -32,14 +29,6 @@ describe("what a public repository shows of lessons", () => {
     expect(usedDrawerLines({ ...used, entries }, 0).join("\n")).not.toContain("Money is stored");
     expect(usedDrawerLines({ count: 0, taskUrl: used.taskUrl, entries: [] }, 10)).toEqual([]);
     expect(usedDrawerLines(undefined, 10)).toEqual([]);
-  });
-});
-
-describe("the block can always be found and rewritten", () => {
-  it("a rewrite after a fix gives a block of the same shape, so rewriting twice is the same as once", () => {
-    const body = greenScenario("clean").body;
-    const block = body.slice(body.indexOf(START) + START.length + 1, body.indexOf(END)).split("\n");
-    expect(withStatusLines(body, block.slice(0, -1))).toBeUndefined();
   });
 });
 

@@ -206,13 +206,13 @@ describe("broker membership condition-check grant", () => {
     const before = withoutLinearWebhookGuard(withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withTaskPeopleInvitationSwitches(withoutCoreOutboxStreamRelay(structuredClone(namedRaw)))), { named: true }), { env: "staging" }), stuckStoppingInstall("staging"))))));
     // The providers branch also adds this exact capability output. Keep a measured
     // combined pin, then remove only the asserted output to retain the upstream pin.
-    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("c15528809bc3dac1d2d2caf3cce7776a14d387dbf10b607732ae86ac28b468af");
+    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("9fdd7b336dca146329bc6ad7a216a473838741ccfbcc751854ee0b903c43a304");
     // RETAIN (arch ruling 2026-11-24, Rule D): with exactly the nine policies put back (withoutRetainPolicies) the pins recorded before it hold.
-    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(before), "named")).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("23e7a69839d8b913eb1c601b320f5ba05c6416f324a22b6abede4901020ebee6");
+    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(before), "named")).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("a4f7a53b5948ffa22830123a79c7df656e2411842410e35a1ede6d47e2d8ff63");
     expect(before.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
     delete before.Outputs.ModelRunPriceVersion;
-    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("676178f11842d08c2207a07a41e4faf872d2f4763f23aaa66e3ecc1b3018c22e");
-    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(before), "named")).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("e051a59b71fd9cd8188851b57c0dc738b10fb98acc33a4225639f33336669466");
+    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("4bfeb05e88b9c5fd84cad9e9cd48bd723a7f4f198dc3920a5612f3e86c555633");
+    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(before), "named")).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("739b8bc713c314e7b33f952a686f00976df3a5c30ed941643535a428ece9622e");
     const afterTuples = accessTuples(namedRaw);
     const beforeTuples = accessTuples(before);
     const broker = "role:BrokerServiceRole";
@@ -833,15 +833,16 @@ describe("task-token key and membership IAM", () => {
     // is configured. Pin the complete new template AND prove this exact output is its only delta.
     expect(remainder.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
     // F1 L1a-1 (2026-11-25): re-pinned for exactly the deletion of the two dead invitation parameters and their two packed broker settings (tu, tv). Rule D: with them put back (`text`, next line) the pin recorded before holds.
-    expect(createHash("sha256").update(JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("c94d1038a5827e483d68f6164315cab1de5fa3e8d22bbeedf6c0ba9d35746e4a");
-    expect(createHash("sha256").update(text).digest("hex")).toBe("185703cb9f7d43c6b9bf301e25dfc84923d7dbf3135f9115fd53d278dbd7f0ac");
+    // D1-2 (declared change set, D1-PLAN section 8, rebased onto train 90): every pin below moved for exactly the removal of the three recovery Schedules, the two Scheduler roles and their policies (and, in the named template, the PlanEvidence function, its log group, role and policy); the removed resources were in every older state these pins describe.
+    expect(createHash("sha256").update(JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("3d5bb591d5e28fcd40d85cf284d3e0799922209275ebcc92cb1572f83d524399");
+    expect(createHash("sha256").update(text).digest("hex")).toBe("61857cd305f7a80d59d1f1f14dffa4bab687fa3c54886b803ac7db0e449518e1");
     // RETAIN (Rule D): with exactly the policies put back the recorded pins hold (six of the seven: this chain takes the task token key out with the core engine).
-    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(withSwitches), "named", { expectSeven: 6 })).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("9d3f6f734b745c5d93a2d5a4fb79505c9c91a9bab4e5d9ecdbe1f0cb9070eac5");
+    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(withSwitches), "named", { expectSeven: 6 })).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("fac6a7a83cd1aa38b0737536b44cc3ad6ad4d3239605c9a1adcb2f75be7e8a19");
     const beforeFirstGateway = structuredClone(withSwitches);
     delete beforeFirstGateway.Outputs.ModelRunPriceVersion;
     const beforeText = JSON.stringify(beforeFirstGateway).replace(/[a-f0-9]{64}/g, "<asset-hash>");
-    expect(createHash("sha256").update(beforeText).digest("hex")).toBe("f0cf92b1219ee72d2c095476d1826b9c6baa41f3a4d0a2d16470a966848c2f07");
-    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(beforeFirstGateway), "named", { expectSeven: 6 })).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("f555abd801f394036cebef13b345e8025c88fb38bec7272a7aab3abf0649577d");
+    expect(createHash("sha256").update(beforeText).digest("hex")).toBe("96d6ef1cb54f6f1a608633dac51913bed93abb2bcd56a8ad38d07d64da0aa73e");
+    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(beforeFirstGateway), "named", { expectSeven: 6 })).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("39ebfe483a69a647afbcea5c68856f2134c9aa017b072b005d647c99be96e98c");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {
@@ -1183,8 +1184,6 @@ const beforeTuples: AccessTuple[] = [
   ["role:BrokerServiceRole","Allow","kms:Sign","key:DeveloperSignInTaskTokenKey","{}"],
   ["role:BrokerServiceRole","Allow","lambda:InvokeFunction","function:DeveloperSignInFunction:*","{}"],
   ["role:BrokerServiceRole","Allow","lambda:InvokeFunction","function:DeveloperSignInFunction","{}"],
-  ["role:BrokerServiceRole","Allow","lambda:InvokeFunction","function:PlanEvidence:*","{}"],
-  ["role:BrokerServiceRole","Allow","lambda:InvokeFunction","function:PlanEvidence","{}"],
   ["role:BrokerServiceRole","Allow","s3:Abort*","bucket:Artifacts","{}"],
   ["role:BrokerServiceRole","Allow","s3:Abort*","bucket:Artifacts/*","{}"],
   ["role:BrokerServiceRole","Allow","s3:DeleteObject*","bucket:Artifacts","{}"],
@@ -1424,8 +1423,6 @@ const beforeTuples: AccessTuple[] = [
   ["role:external:{\"Fn::Select\":[3,{\"Fn::Split\":[\"/\",{\"Ref\":\"Ec2WorkerInstanceRoleArn\"}]}]}","Allow","secretsmanager:GetSecretValue","parameter:AnthropicSecretArn","{}"],
   ["role:external:{\"Fn::Select\":[3,{\"Fn::Split\":[\"/\",{\"Ref\":\"Ec2WorkerInstanceRoleArn\"}]}]}","Allow","secretsmanager:GetSecretValue","parameter:OpenAISecretArn","{}"],
   ["role:external:{\"Fn::Select\":[3,{\"Fn::Split\":[\"/\",{\"Ref\":\"Ec2WorkerInstanceRoleArn\"}]}]}","Allow","secretsmanager:GetSecretValue","parameter:OpenRouterSecretArn","{}"],
-  ["role:GithubWebhookRecoveryRole","Allow","lambda:InvokeFunction","function:Broker:*","{}"],
-  ["role:GithubWebhookRecoveryRole","Allow","lambda:InvokeFunction","function:Broker","{}"],
   ["role:OutboxPublisherServiceRole","Allow","dynamodb:BatchGetItem","table:State","{}"],
   ["role:OutboxPublisherServiceRole","Allow","dynamodb:BatchGetItem","table:State/index/*","{}"],
   ["role:OutboxPublisherServiceRole","Allow","dynamodb:BatchWriteItem","table:State","{}"],
@@ -1459,15 +1456,6 @@ const beforeTuples: AccessTuple[] = [
   ["role:OutboxPublisherServiceRole","Allow","sqs:SendMessage","queue:DispatchQueue","{}"],
   ["role:OutboxPublisherServiceRole","Allow","xray:PutTelemetryRecords","*","{}"],
   ["role:OutboxPublisherServiceRole","Allow","xray:PutTraceSegments","*","{}"],
-  ["role:PlanEvidenceServiceRole","Allow","dynamodb:DeleteItem","table:State","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"PLAN_EVIDENCE\"]}}"],
-  ["role:PlanEvidenceServiceRole","Allow","dynamodb:GetItem","table:State","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"DEVTASK#*\",\"PLAN_EVIDENCE\",\"PROJECT#*\"]}}"],
-  ["role:PlanEvidenceServiceRole","Allow","dynamodb:PutItem","table:State","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"DEVTASK#*\"]}}"],
-  ["role:PlanEvidenceServiceRole","Allow","dynamodb:UpdateItem","table:State","{\"ForAllValues:StringLike\":{\"dynamodb:LeadingKeys\":[\"PLAN_EVIDENCE\"]}}"],
-  ["role:PlanEvidenceServiceRole","Allow","s3:GetObject","bucket:Artifacts/private/*","{}"],
-  ["role:PlanEvidenceServiceRole","Allow","s3:PutObject","bucket:Artifacts/private/*/plan-documents/*.evidence.*.json","{}"],
-  ["role:PlanEvidenceServiceRole","Allow","secretsmanager:GetSecretValue","parameter:GitHubAppPrivateKeySecretArn","{}"],
-  ["role:PlanEvidenceServiceRole","Allow","xray:PutTelemetryRecords","*","{}"],
-  ["role:PlanEvidenceServiceRole","Allow","xray:PutTraceSegments","*","{}"],
   ["role:SchedulerRoleForTarget490aa1","Allow","lambda:InvokeFunction","function:EvalBatchTick:*","{}"],
   ["role:SchedulerRoleForTarget490aa1","Allow","lambda:InvokeFunction","function:EvalBatchTick","{}"],
   ["role:SchedulerRoleForTarget9cef70","Allow","lambda:InvokeFunction","function:SessionsReaper:*","{}"],
@@ -1737,8 +1725,6 @@ const beforeTuples: AccessTuple[] = [
   ["role:SlackOrchestratorTaskRole","Allow","sqs:ReceiveMessage","queue:ChannelApiRequests","{}"],
   ["role:SlackOrchestratorTaskRole","Allow","sqs:ReceiveMessage","queue:SlackRequestQueue","{}"],
   ["role:SlackOrchestratorTaskRole","Allow","sqs:SendMessage","queue:ChannelApiEvents","{}"],
-  ["role:WorkflowDispatchRecoveryRole","Allow","lambda:InvokeFunction","function:Broker:*","{}"],
-  ["role:WorkflowDispatchRecoveryRole","Allow","lambda:InvokeFunction","function:Broker","{}"],
 ];
 
 function matchesConditions(text: string, context: Record<string, string[]>): boolean {
@@ -1769,8 +1755,8 @@ const BROKER_ARN_ESTIMATE = 144;
 // DEC 254zzz29/254zzz32: +84 for ORG#<id>#SIGNIN_ISSUER (+45) and ORG#<id>#EMAIL#* (+39) in BrokerCompanyImportReads' GetItem keys (6736 before). DefaultPolicy unchanged.
 // DEC 254zzz284: +328 in the existing second inline policy; DefaultPolicy reserve unchanged.
 // BROKER-CODEBUILD-START: BrokerCodeBuildStart (7148 before): the broker's third role policy (the conditional StartBuild Allow and the StartBuildBatch Deny), counted here with every other inline document. The DefaultPolicy estimate drops (StartBuild leaves it).
-const BROKER_RESOLVED_INLINE_SIZE = 8465; // All inline documents after realistic ARN expansion.
-const BROKER_INLINE_ESTIMATE = 7430; // This replaces the R3R4 pin. BROKER-CODEBUILD-START: was 7453; StartBuild left the DefaultPolicy (-23).
+const BROKER_RESOLVED_INLINE_SIZE = 8235; // All inline documents after realistic ARN expansion. D1-2: was 8465; the broker no longer invokes the PlanEvidence function (-230).
+const BROKER_INLINE_ESTIMATE = 7136; // D1-2: was 7430; the PlanEvidence invoke statements are gone (-294). This replaces the R3R4 pin. BROKER-CODEBUILD-START: was 7453; StartBuild left the DefaultPolicy (-23).
 const BROKER_INLINE_TARGET = 8500;
 const RESERVED = {
   r2: 600, // State stream reads and callback-key read; EC2 belongs to the dispatcher.

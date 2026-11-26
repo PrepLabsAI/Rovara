@@ -3,7 +3,7 @@ import { propagatePrFeedbackDecisions } from "../core-host/pr-feedback-routes.js
 import { AsyncLocalStorage } from "node:async_hooks";
 // Deployed job composition. No provider or policy store lives here.
 import { OrgIdSchema, POLICY_ORIGINS, policyDataObject, createDefaultPolicySource, DEFAULT_CODE_SETTINGS, type OrgId, type AdapterRegistry, type PolicySource, type DocumentStore, type StoredDocument } from "@agentx/contracts";
-import { CI_MODE_UNREADABLE_WORDS, checkedCiReporting, type CiReporting } from "../core-host/switch-blockers.js";
+import { CI_MODE_UNREADABLE_WORDS, checkedCiReporting, type CiReporting } from "../core-host/core-wiring-guard.js";
 
 import type { CoreService } from "../core-host/core-runtime.js";
 import type { TaskFlow } from "../core/task-flow/flow.js";

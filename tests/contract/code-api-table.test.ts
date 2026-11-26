@@ -14,9 +14,10 @@ describe("the one route table", () => {
   it("holds the rows it held in dev-route-scopes.ts, in the same order", () => {
     // R1 + L1 6.2b (Code API 1.3): the three waiting-ticket rows moved from /v1/dev/projects/{project}/intake* to /v1/app/projects/{project}/intake* (179/108 became 176/111).
     // RD-2.0 (Code API 1.5): four rows for the task page's new reads (spec, checks, changes, timeline) after the proof index (176 became 180).
+    // D1-2 (owner DEC 254zzz519): the unconnected `POST /v1/dev/tasks/{taskId}/merge` row is deleted (180 became 179). No other row moved; the digest below is the one of this table without that row.
     // RD-2d: one app row for the file behind a link of the checks read, GET /v1/app/tasks/{taskId}/evidence/{sha}, after the merge rows (111 became 112). It carries only its scope: no schema, no version bump.
-    expect([DEV_ROUTES.length, APP_ROUTES.length]).toEqual([180, 112]);
-    expect(digest(DEV_ROUTES.map(keyOf))).toBe("7041723dc483e5627c885115dbe6c5b6a2dc3d8c6b9b4c6e482d4c25fcd0c699");
+    expect([DEV_ROUTES.length, APP_ROUTES.length]).toEqual([179, 112]);
+    expect(digest(DEV_ROUTES.map(keyOf))).toBe("50d4111fb426355a956f2101b7045cd11f4605e86aea6322d2b6f522b9d5a720");
     expect(digest(APP_ROUTES.map(keyOf))).toBe("eb8d562ca509716ec37d2d6594a3f4ef86fde68633cd8a047a1bc559a7f065c4");
   });
 

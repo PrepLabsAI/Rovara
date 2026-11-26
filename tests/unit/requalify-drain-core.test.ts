@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { companyScoped } from "@agentx/contracts";
 import { requalifyDrainStatus } from "../../packages/broker/src/e2e/requalify-hold.js";
-import { CORE_IN_USE_PARTITION } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { CORE_IN_USE_PARTITION } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { DRAIN_FIXTURE_NOW as NOW, drainIamClient, type DrainRequest } from "../support/drain-iam-client.js";
 
 const TABLE = "state";

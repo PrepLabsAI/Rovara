@@ -1,19 +1,17 @@
 // Engine host (lane E2): the core's timers as schedules. On a laptop Code runs these from `setInterval` in one process (relay and dispatch every 2 s, merge tracking every 5 s); a deployed
 // install runs each from an EventBridge schedule (1-minute minimum, accepted latency) or from the State table's stream reader.
 //
-// One table names every job: its area (it runs only for companies whose switch covers the area), how it is triggered, and what it calls. A new job is one row.
+// One table names every job: how it is triggered, and what it calls. It runs for every company the root serves. A new job is one row.
 //
 // Per-company isolation: each company runs in its own try/catch, so one company's failure never skips the others, and the order rotates by run so a time budget never defers the same tail
 // companies every time.
 import { CORE_JOB_EVENT_SOURCE, UPKEEP_NIGHT_JOB } from "@agentx/contracts";
 import type { CoreRuntime, CoreServiceName } from "./core-runtime.js";
-import type { CoreArea } from "./flags.js";
 
 export type JobTrigger = { kind: "schedule"; rate: string } | { kind: "stream"; on: "outbox-insert" };
 
 export interface CoreJob {
   name: string;
-  area: CoreArea;
   trigger: JobTrigger;
   /** What a scheduled run leaves of its function's time for its own end, when this job needs less than `JOB_EXIT_MARGIN_MS`. */
   exitMarginMs?: number;
@@ -28,30 +26,30 @@ const service = (name: CoreServiceName) => async (runtime: CoreRuntime, budgetMs
 
 export const CORE_JOBS: readonly CoreJob[] = [
   // The outbox relay. The stream reader runs it on an outbox insert; the schedule is the backstop for a missed insert.
-  { name: "outbox-relay", area: "flow", trigger: { kind: "stream", on: "outbox-insert" }, run: async (runtime) => ({ ...(await runtime.flow.relayOnce()) }) },
-  { name: "outbox-relay-backstop", area: "flow", trigger: { kind: "schedule", rate: "rate(1 minute)" }, run: async (runtime) => ({ ...(await runtime.flow.relayOnce()) }) },
+  { name: "outbox-relay", trigger: { kind: "stream", on: "outbox-insert" }, run: async (runtime) => ({ ...(await runtime.flow.relayOnce()) }) },
+  { name: "outbox-relay-backstop", trigger: { kind: "schedule", rate: "rate(1 minute)" }, run: async (runtime) => ({ ...(await runtime.flow.relayOnce()) }) },
   // The recovery sweep over due workflow dispatch rows (laptop: every 2 s).
-  { name: "dispatch-sweep", area: "flow", trigger: { kind: "schedule", rate: "rate(1 minute)" }, run: async (runtime) => ({ ...(await runtime.flow.sweepOnce()) }) },
+  { name: "dispatch-sweep", trigger: { kind: "schedule", rate: "rate(1 minute)" }, run: async (runtime) => ({ ...(await runtime.flow.sweepOnce()) }) },
   // The run-lost watchdog: an operation whose worker machine is lost or unhealthy past the grace period ends INTERRUPTED (the laptop runs it with the sweep).
-  { name: "run-watch", area: "flow", trigger: { kind: "schedule", rate: "rate(1 minute)" }, run: async (runtime) => ({ ...(await runtime.flow.sweepRunsOnce()) }) },
+  { name: "run-watch", trigger: { kind: "schedule", rate: "rate(1 minute)" }, run: async (runtime) => ({ ...(await runtime.flow.sweepRunsOnce()) }) },
   // Merge tracking's sweep. Its own exit margin (10 s of the 30 s function) gives the sweep a 20 s pass: reads, then its settle writes.
-  { name: "merge-tracking", area: "merge", trigger: { kind: "schedule", rate: "rate(1 minute)" }, exitMarginMs: 10_000, run: service("merge-tracking") },
-  { name: "session-sweep", area: "flow", trigger: { kind: "schedule", rate: "rate(5 minutes)" }, run: service("session-sweep") },
-  { name: "notify-deliver", area: "flow", trigger: { kind: "schedule", rate: "rate(5 minutes)" }, run: service("notify-deliver") },
+  { name: "merge-tracking", trigger: { kind: "schedule", rate: "rate(1 minute)" }, exitMarginMs: 10_000, run: service("merge-tracking") },
+  { name: "session-sweep", trigger: { kind: "schedule", rate: "rate(5 minutes)" }, run: service("session-sweep") },
+  { name: "notify-deliver", trigger: { kind: "schedule", rate: "rate(5 minutes)" }, run: service("notify-deliver") },
   // A hold whose caller died is closed by the admission adapter's own sweep, on a schedule.
-  { name: "admission-hold-sweep", area: "flow", trigger: { kind: "schedule", rate: "rate(15 minutes)" }, run: service("admission-hold-sweep") },
+  { name: "admission-hold-sweep", trigger: { kind: "schedule", rate: "rate(15 minutes)" }, run: service("admission-hold-sweep") },
   // With automations off, the runs already started are stopped at a safe point (optional service). Does nothing while they are on.
-  { name: "automation-stop", area: "flow", trigger: { kind: "schedule", rate: "rate(1 minute)" }, run: service("automation-stop") },
+  { name: "automation-stop", trigger: { kind: "schedule", rate: "rate(1 minute)" }, run: service("automation-stop") },
   // Owed person erases: learning first, then the bounded evidence walk, in this runtime's company.
-  { name: "person-erase-resume", area: "flow", trigger: { kind: "schedule", rate: "rate(15 minutes)" }, run: service("person-erase-resume") },
+  { name: "person-erase-resume", trigger: { kind: "schedule", rate: "rate(15 minutes)" }, run: service("person-erase-resume") },
   // Lessons (optional service, wired only where `ROVARA_CORE_LESSONS` covers the company): milestones due, the shared reflection queue, and once a day the upkeep (`lessons.ts`).
-  { name: "lessons", area: "flow", trigger: { kind: "schedule", rate: "rate(5 minutes)" }, run: service("lessons") },
+  { name: "lessons", trigger: { kind: "schedule", rate: "rate(5 minutes)" }, run: service("lessons") },
   // The after-merge watcher's pass (optional service, M7 slice 2): windows that ended close, a report that could not be sent goes out again, and the deploy read backs up a deployment event that never came. The service is the
   // one `createAfterMergeService` makes for this company (`core/after-merge/service.ts`); it does nothing for a project whose own `afterMergeWatch` setting is off, and a runtime that wires none skips this job.
-  { name: "after-merge", area: "flow", trigger: { kind: "schedule", rate: "rate(1 minute)" }, run: service("after-merge") },
+  { name: "after-merge", trigger: { kind: "schedule", rate: "rate(1 minute)" }, run: service("after-merge") },
   // L4-P1 (owner DEC 254zzl 6): the upkeep night. Each hour it starts the projects that are due (their hash hour inside 07:00-11:00 UTC, upkeep on, not claimed today) through the system starter. Optional service: wired only
   // where the company's `ROVARA_CORE_SYSTEM_RUNS` flag covers it, so a runtime without one skips this job (`service_not_wired`) and the schedule is enabled only with that flag (infra/lib/core-engine.ts).
-  { name: UPKEEP_NIGHT_JOB, area: "flow", trigger: { kind: "schedule", rate: "rate(1 hour)" }, run: service("upkeep") },
+  { name: UPKEEP_NIGHT_JOB, trigger: { kind: "schedule", rate: "rate(1 hour)" }, run: service("upkeep") },
 ];
 
 /** The `source` of the event a core job schedule sends to the broker: `{ source: "agentx.core-job", job: <name> }`. */

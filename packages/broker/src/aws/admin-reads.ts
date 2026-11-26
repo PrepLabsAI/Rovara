@@ -50,7 +50,7 @@ import { adminIdentityReader, type AdminMeDependencies } from "./admin-me.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
 import { taskKey, taskPointerKey } from "../developer/task-records.js";
 import { listLimitParam, validTime, workspaceProjectReader, type TurnRecordSource } from "./turns.js";
-import { ownerOfExistingTask } from "./engine-boundary.js";
+import { isCoreTaskThatExists } from "./engine-boundary.js";
 
 export interface AdminReadDependencies {
   companies?: CompanyMembershipReader;
@@ -578,7 +578,7 @@ export async function workspaceOwner(deps: AdminReadDependencies, workspace: Wor
   const pointer = await getStateItem(deps, taskPointerKey(workspace.id));
   if (typeof pointer?.taskId === "string") {
     // Lane E2: a core task's record is not read here (engine-boundary.ts); its row names the task only.
-    if (await ownerOfExistingTask(deps, pointer.taskId) === "core") return { origin: "ai_tool", owner: { taskId: pointer.taskId } };
+    if (await isCoreTaskThatExists(deps, pointer.taskId)) return { origin: "ai_tool", owner: { taskId: pointer.taskId } };
     const task = await getStateItem(deps, taskKey(pointer.taskId));
     return { origin: "ai_tool", owner: { taskId: pointer.taskId, ...(typeof task?.developerId === "string" && /^[a-f0-9]{64}$/.test(task.developerId) ? { developerId: task.developerId } : {}), ...(typeof task?.developerName === "string" ? { developerName: displayName(task.developerName) } : {}) } };
   }

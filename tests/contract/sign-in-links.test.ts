@@ -3,6 +3,7 @@
 // fake Slack and GitHub, two companies over one wire-level table.
 import { createHash } from "node:crypto";
 import { decodeJwt } from "jose";
+import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { describe, expect, it } from "vitest";
 import { Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
@@ -163,6 +164,10 @@ describe("connecting a second sign-in (DEC 254w)", () => {
     w.db.set({ pk: `DEVTASK#${taskId}`, sk: "META", entityType: "DEVELOPER_TASK", taskId, developerId: owner, provider: "slack", developerName: "Link Me", client: "slack", project: "p", title: "from Slack",
       workspaceId: "w", ownerKey: owner, conversationId: "c", startingRevision: 1, shared: false, createdAt: at, updatedAt: at, companyId: X });
     w.db.set({ pk: `DEVELOPER#${owner}`, sk: `TASK#${at}#${taskId}`, entityType: "DEVELOPER_TASK_INDEX", taskId, title: "from Slack", project: "p", status: "CLOSED", shared: false, createdAt: at, updatedAt: at });
+    // DEC 254zzz502 (D1-2): a task with no core mark is the retired old workflow's and is not listed ...
+    expect(((await w.api("GET", "/v1/dev/tasks", github)).body.tasks as unknown[])).toEqual([]);
+    // ... and a task the core started (it carries the mark) is, to the linked person's GitHub session.
+    w.db.set({ ...coreTaskMarkKey(taskId), entityType: "TASK_ENGINE", orgId: X, taskId, coreEngine: { engine: "core", areas: { merge: "core", build: "core", flow: "core" }, flags: "cc=on", stampedAt: at } });
     const listed = await w.api("GET", "/v1/dev/tasks", github);
     expect(listed.status).toBe(200);
     expect((listed.body.tasks as Array<{ taskId: string }>).map((task) => task.taskId)).toEqual([taskId]);

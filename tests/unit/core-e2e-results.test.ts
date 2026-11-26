@@ -73,7 +73,8 @@ describe("core application results", () => {
     expect(read?.scenarioResults?.baseline?.scenarios).toHaveLength(5);
     expect(read?.scenarioResults?.scenarios[1]).toMatchObject({ kind: "web", accountLabel: "orders-viewer", failedAssertion: { expected: "403", actual: "401" } });
     expect(read?.presentation.shared.e2e.status).toBe("FAILED");
-    expect(read?.presentation.pageHtml).toContain(`/review/${w.t.taskId}/task/api/e2e/artifacts/${SHOT_SHA}`);
+    // D1-2: the page API that served the artifact is deleted; a row links to no removed route.
+    expect(read?.presentation.pageHtml).not.toContain("/review/");
     expect(await w.service.artifact(w.t, SHOT_SHA)).toEqual({ contentType: "image/jpeg", bytes: new Uint8Array(SHOT) });
     expect(await w.service.artifact(w.t, d("0"))).toBeUndefined();
     expect(read?.scenarioResults?.baseline).toEqual(w.baseline);

@@ -1,6 +1,6 @@
 import { workspaceKeys } from "../task-flow/workspace-location.js";
 // The verification of the browser and API checks (E2E): what a finished round's stored evidence proves, decided by the broker alone. Cloud's `workflow-e2e-verification.ts` (the part that
-// judges evidence and settles the baseline, replay and grounding rounds) on the document store and object storage. Everything a round is compared with is the broker's own: the stored
+// judges evidence and settles the baseline round) on the document store and object storage. Everything a round is compared with is the broker's own: the stored
 // admission, the operation's reference and fence, the content-addressed evidence it accepted, and the receipt time it recorded for each group's upload. Whether the owner and the code
 // are still the ones the round was admitted under is the `E2EAuthority` seam's answer; Code's default fails closed, so no round passes where nothing can say.
 import { createHash } from "node:crypto";
@@ -11,14 +11,11 @@ import {
 } from "@agentx/contracts";
 import { selectE2EExecutionPlan } from "@agentx/contracts/e2e-execution-plan";
 import { compileE2EScenarios, collectE2EActualCliRun, qualifyE2ECollection, e2eSnapshotSourceDigest, parseE2EFirstPartyCapture, e2ePrivateTransferMaxBytes, decodeE2EApplicationExecutionAdmission } from "@agentx/verifier";
-import { groundingPlanDigest } from "../../e2e/application-admission.js";
 import { applicationEvidenceLimits, modelRouteForAdmission, verifyApplicationE2EEvidence, type ApplicationEvidenceVerification } from "../../e2e/application-evidence.js";
 import type { OperationRecord, TaskRecord } from "../task-flow/records.js";
 import type { E2EAuthority, E2EVerificationDeps, E2EVerificationDiagnostic, VerifiedCandidate } from "./authority.js";
 import { WORKFLOW_E2E_ADMISSION_MAX_BYTES } from "./artifacts.js";
 import { markWorkflowE2EBaselineUnavailable, readWorkflowE2EBaselineRecord, recordWorkflowE2EBaseline, verifyBaselineEvidence, type BaselineUnavailableReason, type SkippedAiScenarios } from "./baseline.js";
-import { markWorkflowE2EReplayUnavailable, readWorkflowE2EReplayRecord, recordWorkflowE2EReplay, verifyReplayEvidence, type ReplayUnavailableReason } from "./replay.js";
-import { markWorkflowE2EGroundingUnavailable, readWorkflowE2EGroundingRecord, recordWorkflowE2EGrounding, verifyGroundingEvidence, type GroundingRecord, type GroundingUnavailableReason } from "./grounding.js";
 
 type DeveloperTaskRecord = TaskRecord;
 type CandidateManifest = VerifiedCandidate;
@@ -419,103 +416,17 @@ async function verifyBaselineRound(deps: E2EVerificationDeps, operation: Operati
   aggregate: loaded.aggregate, groupEvidence: loaded.groupEvidence, receivedAt: loaded.receivedAt, terminalStatus: "SUCCEEDED", ...(skippedAiScenarios === undefined ? {} : { skippedAiScenarios }) });
 }
 
-/**
- * The audit replay's own completion. When its operation ends, this settles the replay's record, and does nothing else: no workflow transition, no `qualifiedRound` or
- * `failedRound`, no send-back, no publication, no task page. An operation that did not succeed leaves the record saying the replay could not be run; one that succeeded is verified exactly
- * as a candidate's evidence is read (`loadApplicationEvidenceInputs`, then the verifier for the purpose it was signed with), and only that verification is recorded, conditionally, on the
- * source round, attempt, operation, round and admission the record started. It never throws: whatever goes wrong here, the replay is a record that stays STARTED and is read as not run
- * once its time is up.
- */
-export async function settleReplayRound(deps: E2EVerificationDeps, operation: OperationRecord, status: OperationStatus): Promise<void> {
-  const reference = operation.workflowE2EAdmission;
-  if (operation.kind !== "task" || reference?.purpose !== "replay" || reference.sourceRoundId === undefined || reference.attempt === undefined) return;
-  try {
-    const task = await deps.readTask(reference.taskId);
-    if (task === undefined || task.workspaceId !== operation.workspaceId) return;
-    const round = { sourceRoundId: reference.sourceRoundId, attempt: reference.attempt };
-    const record = await readWorkflowE2EReplayRecord(deps.state, task.taskId, round);
-    if (record === undefined || record.state !== "STARTED" || record.operationId !== operation.id) return;
-    const unavailable = (reason: ReplayUnavailableReason) => markWorkflowE2EReplayUnavailable(deps.state, task.taskId ? task : task, round, reason, { from: ["STARTED"], operationId: operation.id });
-    if (status !== "SUCCEEDED") { await unavailable(status === "CANCELLED" ? "stopped" : "run-failed"); return; }
-    const verified = await verifyReplayRound(deps, operation, reference);
-    if (verified === undefined) { await unavailable("unverified"); return; }
-    await recordWorkflowE2EReplay(deps.state, task, { verified, expected: { ...round, operationId: operation.id, roundId: reference.roundId, admissionSha256: reference.admissionRef.sha256 } });
-  } catch (error) {
-    console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_replay_settle_failed", taskId: reference.taskId, operationId: operation.id, errorName: error instanceof Error ? error.name : "unknown" }));
-  }
-}
-
-/** The broker's own verification of a finished replay round's evidence, or undefined when the admission or the evidence cannot be read or verify to nothing. */
-async function verifyReplayRound(deps: E2EVerificationDeps, operation: OperationRecord, reference: E2EWorkflowAdmissionRef) {
-  const admissionText = await readText(deps.objects, reference.admissionRef.key, WORKFLOW_E2E_ADMISSION_MAX_BYTES);
-  if (admissionText === undefined) return undefined;
-  const admissionBytes = Buffer.from(admissionText, "utf8");
-  if (createHash("sha256").update(admissionBytes).digest("hex") !== reference.admissionRef.sha256 || admissionBytes.byteLength !== reference.admissionRef.byteLength) return undefined;
-  let admission: E2EApplicationExecutionAdmission;
-  try { admission = decodeE2EApplicationExecutionAdmission(admissionBytes); } catch { return undefined; }
-  if (admission.replay === undefined) return undefined;
-  const loaded = await loadApplicationEvidenceInputs(deps, operation, reference, admission);
-  if ("unavailable" in loaded) return undefined;
-  return verifyReplayEvidence({ admissionBytes, subject: { taskId: reference.taskId, operationId: operation.id, operationFence: operation.fence, workflowRevision: reference.workflowRevision,
-    candidateDigest: reference.candidateDigest, roundId: reference.roundId, groupRunIds: reference.groupRunIds, admissionSha256: reference.admissionRef.sha256 },
-  aggregate: loaded.aggregate, groupEvidence: loaded.groupEvidence, receivedAt: loaded.receivedAt, terminalStatus: "SUCCEEDED", replay: admission.replay });
-}
-
-/**
- * The grounding round's own completion. When its operation ends, this settles the grounding record, and does nothing else: no workflow transition, no `qualifiedRound` or `failedRound`,
- * no send-back, no publication, no model spend. An operation that did not succeed leaves the record saying the plan could not be checked on the current app (a fixed reason); one that
- * succeeded is verified exactly as a candidate's evidence is read (`loadApplicationEvidenceInputs`, then the verifier for the purpose it was signed with, bound to the plan digest and base
- * commit recomputed from the record), and only that verification is recorded, conditionally, on the plan artifact, base commit, attempt, operation, round and admission the record started.
- * It never throws: whatever goes wrong here, the record stays STARTED and is read as not run once its time is up. Whoever holds the plan's card back reads the record afterwards.
- */
-export async function settleGroundingRound(deps: E2EVerificationDeps, operation: OperationRecord, status: OperationStatus): Promise<void> {
-  const reference = operation.workflowE2EAdmission;
-  if (operation.kind !== "task" || reference?.purpose !== "grounding" || reference.baseCommitSha === undefined || reference.attempt === undefined || reference.planArtifactSha256 === undefined) return;
-  try {
-    const task = await deps.readTask(reference.taskId);
-    if (task === undefined || task.workspaceId !== operation.workspaceId) return;
-    const ref = { taskId: task.taskId, planArtifactSha256: reference.planArtifactSha256, attempt: reference.attempt };
-    const record = await readWorkflowE2EGroundingRecord(deps.state, ref);
-    if (record === undefined || record.state !== "STARTED" || record.operationId !== operation.id) return;
-    const unavailable = (reason: GroundingUnavailableReason) => markWorkflowE2EGroundingUnavailable(deps.state, ref, reason, { from: ["STARTED"], operationId: operation.id });
-    if (status !== "SUCCEEDED") { await unavailable(status === "CANCELLED" ? "stopped" : "run-failed"); return; }
-    const verified = await verifyGroundingRound(deps, operation, reference, record);
-    if (verified === undefined) { await unavailable("unverified"); return; }
-    await recordWorkflowE2EGrounding({ ...deps.state, objects: deps.objects }, task, ref,
-      { verified, expected: { operationId: operation.id, roundId: reference.roundId, admissionSha256: reference.admissionRef.sha256, baseCommitSha: reference.baseCommitSha } });
-  } catch (error) {
-    console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_grounding_settle_failed", taskId: reference.taskId, operationId: operation.id, errorName: error instanceof Error ? error.name : "unknown" }));
-  }
-}
-
-/** The broker's own verification of a finished grounding round's evidence, or undefined when the admission or the evidence cannot be read or verify to no rows. */
-async function verifyGroundingRound(deps: E2EVerificationDeps, operation: OperationRecord, reference: E2EWorkflowAdmissionRef, record: GroundingRecord) {
-  const admissionText = await readText(deps.objects, reference.admissionRef.key, WORKFLOW_E2E_ADMISSION_MAX_BYTES);
-  if (admissionText === undefined || reference.baseCommitSha === undefined || reference.attempt === undefined) return undefined;
-  const admissionBytes = Buffer.from(admissionText, "utf8");
-  if (createHash("sha256").update(admissionBytes).digest("hex") !== reference.admissionRef.sha256 || admissionBytes.byteLength !== reference.admissionRef.byteLength) return undefined;
-  let admission: E2EApplicationExecutionAdmission;
-  try { admission = decodeE2EApplicationExecutionAdmission(admissionBytes); } catch { return undefined; }
-  const loaded = await loadApplicationEvidenceInputs(deps, operation, reference, admission);
-  if ("unavailable" in loaded) return undefined;
-  const planDigest = groundingPlanDigest({ taskId: reference.taskId, artifactId: record.planArtifactId, artifactSha256: record.planArtifactSha256, workflowRevision: reference.workflowRevision,
-    baseCommitSha: reference.baseCommitSha, attempt: reference.attempt });
-  return verifyGroundingEvidence({ admissionBytes, subject: { taskId: reference.taskId, operationId: operation.id, operationFence: operation.fence, workflowRevision: reference.workflowRevision,
-    candidateDigest: reference.candidateDigest, roundId: reference.roundId, groupRunIds: reference.groupRunIds, admissionSha256: reference.admissionRef.sha256 },
-  aggregate: loaded.aggregate, groupEvidence: loaded.groupEvidence, receivedAt: loaded.receivedAt, terminalStatus: "SUCCEEDED", grounding: { planDigest, baseCommitSha: reference.baseCommitSha } });
-}
-
-
-/** A round that is not the candidate's: the unchanged code (baseline), an audit replay, or the check of a plan against the current app (grounding). None of them can pass or fail a candidate. */
+/** A round that is not the candidate's: the unchanged code (baseline), or an audit replay or a grounding check, which nothing starts any more but which an older release may have left running. None of them can pass or fail a candidate. */
 export const isNonCandidateRound = (reference: { purpose?: "baseline" | "replay" | "grounding" | undefined } | undefined): boolean =>
   reference?.purpose === "baseline" || reference?.purpose === "grounding" || reference?.purpose === "replay";
 
-/** Settles the record of a baseline, replay or grounding round whose operation ended; any other operation is not this function's. Never throws. */
+/**
+ * Settles the record of a baseline round whose operation ended; any other operation is not this function's. Never throws. An operation of a retired kind (an audit replay or a grounding round)
+ * is answered as handled with nothing recorded: there is no record to settle any more, and it must never fall through to the candidate's completion.
+ */
 export async function settleNonCandidateRound(deps: E2EVerificationDeps, operation: OperationRecord, status: OperationStatus): Promise<boolean> {
   const purpose = operation.workflowE2EAdmission?.purpose;
   if (purpose === "baseline") await settleBaselineRound(deps, operation, status);
-  else if (purpose === "replay") await settleReplayRound(deps, operation, status);
-  else if (purpose === "grounding") await settleGroundingRound(deps, operation, status);
-  else return false;
+  else if (purpose !== "replay" && purpose !== "grounding") return false;
   return true;
 }

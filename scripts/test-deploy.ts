@@ -287,7 +287,6 @@ interface LambdaSpec {
 export const CONTROL_PLANE_LAMBDAS = {
   broker: { logicalId: "BrokerE1355FD6", entry: "packages/broker/src/aws/broker-handler.ts", loadsLater: ["packages/broker/src/aws/broker.ts"] },
   dispatcher: { logicalId: "DispatcherD4A12972", entry: "packages/broker/src/aws/dispatcher.ts" },
-  "plan-evidence": { logicalId: "PlanEvidence3615C4CB", entry: "packages/broker/src/aws/plan-evidence-handler.ts" },
   "outbox-publisher": { logicalId: "OutboxPublisherD572F72E", entry: "packages/broker/src/aws/outbox-publisher.ts" },
   "slack-ingress": { logicalId: "SlackIngress5C88FFA0", entry: "packages/broker/src/aws/slack-ingress.ts" },
   "eval-batch-tick": { logicalId: "EvalBatchTickA4585B04", entry: "packages/broker/src/aws/eval-batch-tick.ts" },

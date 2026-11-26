@@ -4,8 +4,8 @@
 // a list, so a new point or a second adapter is one more entry, and a test can build the same registry over fakes.
 //
 // Rules held here:
-//  - Build once per function container (cold start), never per request, and only when the switch serves (app.ts). With the switch off nothing is built.
-//  - Every point the switched areas need must be filled, or the registry is refused with the list of what is missing (never a half-wired core).
+//  - Build once per function container (cold start), never per request, and only when the root first needs it (app.ts).
+//  - Every point each area needs must be filled, or the registry is refused with the list of what is missing (never a half-wired core).
 //  - Points that decide money, authority and audit never take Code's laptop default on a deployed install (`NEVER_DEFAULT`): the registry is refused instead, so a deployed core cannot run with
 //    the laptop's allow-all admission or sole-owner people by accident.
 //  - An optional `storage` wrapper is applied before anything else sees the store (a deployment's retention rule, if it keeps one).
@@ -39,7 +39,7 @@ export function coreAdapter<P extends PluginPoint>(module: CoreAdapterModule<P>)
   return module;
 }
 
-/** The points each switched area needs filled (the core's own `createTaskFlowFromRegistry`, build step and merge tracking read these). */
+/** The points each area needs filled (the core's own `createTaskFlowFromRegistry`, build step and merge tracking read these). */
 export const POINTS_BY_AREA: Readonly<Record<CoreArea, readonly PluginPoint[]>> = {
   flow: ["storage", "queue", "worker-machines", "admission", "audit-sink", "approvers", "identity", "metering"],
   build: ["storage", "queue", "worker-machines", "object-storage", "code-host", "check-runner", "model-keys", "secrets"],
@@ -59,7 +59,7 @@ export class CoreRegistryError extends Error {
 export interface BuildRegistryOptions {
   modules: readonly CoreAdapterModule[];
   context: CoreAdapterContext;
-  /** The areas this install may switch on: their points must be filled. */
+  /** The areas this install serves (every area): their points must be filled. */
   areas: readonly CoreArea[];
   /** Wraps the `storage` adapter before anything else sees it (a deployment's retention rule). Absent: the store as built. */
   wrapStorage?: (store: DocumentStore) => DocumentStore;
