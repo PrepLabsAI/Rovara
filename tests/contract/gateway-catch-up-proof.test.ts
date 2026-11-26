@@ -72,14 +72,14 @@ describe("gateway catch-up proof", () => {
   it("fails on one changed byte in a copied source file", async () => {
     const tree = plantTree();
     edit(tree, "packages/model-gateway/src/server.ts", (text) => `${text} `);
-    expect(await failures(tree)).toEqual(["exact: packages/model-gateway/src/server.ts differs from Cloud at afb494e75"]);
+    expect(await failures(tree)).toEqual(["exact: packages/model-gateway/src/server.ts differs from Cloud at 771e1701e"]);
   });
 
   it("fails on one changed byte in a copied test, a fixture, the image files and the base tsconfig", async () => {
     for (const path of ["tests/unit/model-gateway-cut-call-actual.test.ts", "tests/fixtures/model-gateway/pi-ai-1.5.2-multiturn.json", "environments/model-gateway/Dockerfile", "environments/model-gateway/toolchain/package-lock.json", "tsconfig.base.json", "packages/model-gateway/tsconfig.json"]) {
       const tree = plantTree();
       edit(tree, path, (text) => `${text}\n`);
-      expect(await failures(tree), path).toEqual([`exact: ${path} differs from Cloud at afb494e75`]);
+      expect(await failures(tree), path).toEqual([`exact: ${path} differs from Cloud at 771e1701e`]);
     }
   });
 
@@ -185,6 +185,6 @@ describe("gateway catch-up proof", () => {
     edit(tree, "packages/model-gateway/src/server.ts", (text) => text.replace("a", "b"));
     const broken = spawnSync(process.execPath, [script, "check", "--root", tree], { cwd: repo, encoding: "utf8" });
     expect(broken.status).toBe(1);
-    expect(broken.stdout).toContain("FAIL exact: packages/model-gateway/src/server.ts differs from Cloud at afb494e75");
+    expect(broken.stdout).toContain("FAIL exact: packages/model-gateway/src/server.ts differs from Cloud at 771e1701e");
   });
 });
