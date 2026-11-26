@@ -390,7 +390,7 @@ tracking) the conversation of each thread through the code host's optional `comm
 
 ## Proof (lane L12)
 
-When a run's checks are recorded for a candidate (a coding run's check report, or a rerun of the checks), the broker keeps the **evidence** of that run (`local/app/evidence.ts`, Cloud's `keepEvidenceAfterChecks`): the worker's `evidence-raw.json` (a rerun of the checks
+When a run's checks are recorded for a candidate (a coding run's check report, or a rerun of the checks), the broker keeps the **evidence** of that run (`core-host/app/evidence.ts`, Cloud's `keepEvidenceAfterChecks`): the worker's `evidence-raw.json` (a rerun of the checks
 asks for it; a coding run saves none, and the pack then says "test details were not captured"), the synthetic-data guard over everything, then one **pack** per task and candidate, plus the output tails, in the `object-storage` point. Objects there are write-once: the
 tails are content-addressed, and the pack is the one object a re-check of the same code replaces (the documented `overwrite` opt-in). Keeping evidence is informational: a fault or a slow store (6 s at most) only means there is none. The local **proof page**
 (`/proof/<task>`, linked from the plan page) lists the recorded checks, the reviews, the risk the broker judged and the pack's test counts and "not tested" list, in the broker's words; with no pack it says so.

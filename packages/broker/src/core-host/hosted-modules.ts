@@ -22,7 +22,7 @@
 //               decides nothing for a person) refuses every proof.
 //
 // Not here: `model-keys` (lane L2b). It stays empty, so the registry refuses the switch by name.
-import auditSinkPlugin from "@agentx/local-adapters/audit-sink";
+import auditSinkPlugin from "../plugins/audit-sink/document/module.js";
 import { bedrockProfileListPrice, listPricesPerMillion, rateQuoteUsageMicros } from "@agentx/model-runtime/catalog";
 import {
   CORE_OUTBOX_STREAM_RELAY_VARIABLE, IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, change, when,

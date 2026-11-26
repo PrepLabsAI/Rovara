@@ -9,7 +9,7 @@ import type { TestEnvDeps } from "../../core/test-env/deps.js";
 import { baseFlakyTests } from "../../core/test-env/base-flaky.js";
 import { flakyRerunEnabled } from "../../core/test-env/switch.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
-import { operationArtifactActions } from "./evidence.js";
+import { operationArtifactActions } from "../../core-host/app/evidence.js";
 
 export function createLocalFlakyChecks(options: { flow: Pick<TaskFlowDeps, "store" | "companyId">; blobs: ObjectStorage; testEnv: TestEnvDeps; env: NodeJS.ProcessEnv }): NonNullable<TaskFlowDeps["flakyChecks"]> {
   return async (input) => {

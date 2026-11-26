@@ -13,8 +13,8 @@ import type { HostedLessonPeople } from "../../packages/broker/src/lessons/hoste
 import { slackThreadSource } from "../../packages/broker/src/lessons/slack-wiring.js";
 import { readSlackOptOut, writeSlackOptOut } from "../../packages/broker/src/lessons/slack-switch.js";
 import { InMemoryLessonStore } from "../../packages/broker/src/lessons/store.js";
-import { createLocalLessonSources } from "../../packages/broker/src/local/app/lessons-sources.js";
-import type { LessonRepositories } from "../../packages/broker/src/local/app/lessons-repos.js";
+import { createLocalLessonSources } from "../../packages/broker/src/core-host/app/lessons-sources.js";
+import type { LessonRepositories } from "../../packages/broker/src/core-host/app/lessons-repos.js";
 import { FAKE_CHANNEL_CAPABILITIES, FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 

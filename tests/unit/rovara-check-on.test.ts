@@ -9,7 +9,7 @@ import { createLocalSecretStore } from "../../packages/broker/src/ports/index.js
 import { createHostedBrokerCoreServices, createBrokerCoreServices } from "../../packages/broker/src/aws/core-job-services.js";
 import { companyScopedGitHubProvider } from "../../packages/broker/src/aws/core-code-host.js";
 import { SUMMARY_CHECK_PERMISSION_RETRY_MS, summaryCheckKey, syncSummaryCheck, type SummaryCheckPass } from "../../packages/broker/src/core/merge/index.js";
-import { createLocalMilestones, createLocalTracking } from "../../packages/broker/src/local/app/tracking.js";
+import { createLocalMilestones, createLocalTracking } from "../../packages/broker/src/core-host/app/tracking.js";
 import { githubCodeHost } from "../../packages/broker/src/plugins/code-host/github/index.js";
 import { GitHubAppCredentialProvider } from "../../packages/broker/src/plugins/code-host/github/client.js";
 import { githubTokenCodeHost } from "../../packages/broker/src/plugins/code-host/github/token-code-host.js";

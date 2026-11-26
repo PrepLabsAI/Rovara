@@ -10,7 +10,7 @@ import { FakeSecretsManager } from "../support/ports/aws-fakes.js";
 import { createCompanySecretStore } from "../../packages/testing/src/isolation/secret-ledger.js";
 import { createMemberSecretReader, memberBoundConnectionSecrets } from "../../packages/broker/src/connections/company-secrets.js";
 import { LocalSecretError } from "../../packages/broker/src/ports/secret-error.js";
-import { createLocalConnectionSecrets } from "../../packages/broker/src/connections/local-secrets.js";
+import { createLocalConnectionSecrets } from "../../packages/broker/src/local/connection-secrets.js";
 import { createLocalSecretStore } from "../../packages/broker/src/ports/secret-stores.js";
 import { InMemoryConnectionSecrets } from "../support/connection-fakes.js";
 const A = "org_aaaaaaaaaaaaaaaaaaaa", B = "org_bbbbbbbbbbbbbbbbbbbb";

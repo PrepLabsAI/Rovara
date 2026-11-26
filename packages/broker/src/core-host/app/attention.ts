@@ -5,7 +5,7 @@ import {
   CI_FIX_ROUNDS_MAX, CI_STATE_WORDS, blockReasonSentence, CONFLICT_ROUNDS_MAX, WORKFLOW_BLOCK_REASONS, redactText, workflowFixRounds,
   type MergeTrackingItem, type TaskStatus, type WorkflowSnapshot,
 } from "@agentx/contracts";
-import type { AttentionView } from "../../core/local-pages/views.js";
+import type { AttentionView } from "../../core/page-views.js";
 import { readyToMerge, type ProjectCiMode } from "../../core/merge/merge-tracking.js";
 import { growthOwedOf } from "../../core/merge/grown-owed.js";
 import { readMergeTracking } from "../../core/merge/store.js";

@@ -4,8 +4,8 @@
 //     current ones, never the caller's);
 //   - the raw page-session secret and the owner's sign-in secret are refused as proofs (neither has the `p1.` shape, and `registerCodeDefaults` no longer falls back to the sign-in check).
 import type { ApprovalRequest } from "@agentx/contracts";
-import type { LocalPageSessions } from "../local-pages/guard.js";
-import { decisionRequestIdOf } from "./approval-gate.js";
+import type { LocalPageSessions } from "../core/local-pages/guard.js";
+import { decisionRequestIdOf } from "../core/decisions/approval-gate.js";
 
 /** `verifySession` for `createLocalOwnerApprovers` / `registerCodeDefaults({ approvers: { verifySession } })`, over the pages' sessions. */
 export function localSessionProofVerifier(sessions: Pick<LocalPageSessions, "verifyProof">): (token: string, request: ApprovalRequest) => boolean {

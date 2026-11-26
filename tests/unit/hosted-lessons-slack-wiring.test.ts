@@ -1,6 +1,6 @@
 // Lead 4 L4-HW8 (2): on a deployed install the lessons' Slack source reads a task's own thread through the signed webhook command path that already exists (the built-in Slack adapter's commands route,
 // aws/channel-commands.ts -> aws/slack-adapter.ts), company-scoped and `thread_messages` only. Here the adapter's REAL command route runs over one fake Slack, and the reader and the capture are the real ones
-// (core/channel/thread-replies.ts, local/app/lessons-sources.ts); only the deployment's secret store, workspace bindings and network are fakes.
+// (core/channel/thread-replies.ts, core-host/app/lessons-sources.ts); only the deployment's secret store, workspace bindings and network are fakes.
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { GetSecretValueCommand } from "@aws-sdk/client-secrets-manager";
@@ -13,8 +13,8 @@ import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import type { HostedLessonPeople } from "../../packages/broker/src/lessons/hosted-people.js";
 import { slackThreadSource } from "../../packages/broker/src/lessons/slack-wiring.js";
 import { InMemoryLessonStore } from "../../packages/broker/src/lessons/store.js";
-import { createLocalLessonSources } from "../../packages/broker/src/local/app/lessons-sources.js";
-import type { LessonRepositories } from "../../packages/broker/src/local/app/lessons-repos.js";
+import { createLocalLessonSources } from "../../packages/broker/src/core-host/app/lessons-sources.js";
+import type { LessonRepositories } from "../../packages/broker/src/core-host/app/lessons-repos.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 
 const A = OrgIdSchema.parse("org_aaaaaaaaaaaaaaaaaaaa");

@@ -52,7 +52,7 @@ import { createHostedIdentity } from "../../packages/broker/src/core-host/hosted
 import { approvalProofKeyOf, createHostedApprovers } from "../../packages/broker/src/core-host/hosted-approvers.js";
 import { FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
 import { createNoticeService, createSessionService } from "../../packages/broker/src/services/index.js";
-import { createTaskFactsSource } from "../../packages/broker/src/local/app/facts.js";
+import { createTaskFactsSource } from "../../packages/broker/src/core-host/app/facts.js";
 import { recordTaskThread } from "../../packages/broker/src/core/channel/threads.js";
 import { createFakeWorld, FAKE_COMPANY, type FakeWorld, type FakeWorldOptions } from "./core-host-fakes.js";
 import { createPriceTableMetering } from "../../packages/broker/src/ports/policy-defaults.js";

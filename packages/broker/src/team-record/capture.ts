@@ -1,6 +1,6 @@
 // What a finished task adds to the Team record, and the Team record as the context sources' `TeamRecordSearch` (the "search team knowledge" tool a planning, review or understanding step can call).
 //
-// Capture reads the task through the same subject source lessons use (`local/app/lessons-sources.ts`, hosted form), so the same rules apply: only a task of this company with a workflow, words of a person
+// Capture reads the task through the same subject source lessons use (`core-host/app/lessons-sources.ts`, hosted form), so the same rules apply: only a task of this company with a workflow, words of a person
 // who is not erased, each person's standing read now. On top of that, ONLY a member's words are kept: an outsider's comment, an agent's plan or findings, a check's text are never written. A send-back is
 // read through the outcome rows (who sent it back and why). No model call is made.
 //

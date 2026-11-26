@@ -1,4 +1,4 @@
-// Audit gap 11b (2026-11-18): a project's ticket-sharing settings on the hosted core (core-host/ticket-updates-routes.ts), the laptop's intake/updates route (local/app/intake.ts) with the hosted rule:
+// Audit gap 11b (2026-11-18): a project's ticket-sharing settings on the hosted core (core-host/ticket-updates-routes.ts), the laptop's intake/updates route (core-host/app/intake.ts) with the hosted rule:
 //   GET /v1/app/projects/{project}/intake/updates -> { settings, canEdit, access }; PUT { requestId, settings } -> the same view.
 // Rules under test: the laptop's defaults and answer shape; a company owner or admin, or the project's administrator, changes; any role on the project reads (canEdit false); everyone else, another company's
 // project, a project the person has no role on, a missing one and a malformed name get the SAME 404; a reader's change is 403; the audit record is written BEFORE the row; one request id is one act;

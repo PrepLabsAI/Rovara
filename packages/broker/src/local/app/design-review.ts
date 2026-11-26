@@ -33,7 +33,7 @@ import { PLAN_RETENTION, artifactKey } from "./callbacks.js";
 import { codeHostForRecord } from "../../plugins/routing.js";
 import type { ContextSourcesRuntime } from "../../context-sources/runtime.js";
 import { contextToolsDependencies } from "./context-tools.js";
-import { localPacketSources } from "./design-review-sources.js";
+import { localPacketSources } from "../../core-host/app/design-review-sources.js";
 import { readVerifiedText } from "./documents.js";
 
 /**

@@ -7,7 +7,7 @@ import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { createLocalChat } from "../../packages/broker/src/local/app/chat.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { intakePortsOf } from "../../packages/broker/src/core/intake/wiring.js";
-import { createSessionStartExtras } from "../../packages/broker/src/local/app/session-start.js";
+import { createSessionStartExtras } from "../../packages/broker/src/core-host/app/session-start.js";
 import { createLocalSetupAgent } from "../../packages/broker/src/local/app/setup-agent.js";
 const request = () => ({ project: "payments", instructions: "Build it", requestId: newRequestId(), client: "nightly" });
 it("a forged origin in the HTTP body creates no task", async () => {

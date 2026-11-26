@@ -4,7 +4,7 @@ import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { afterEach, expect, it } from "vitest";
 import { orgProjectCatalogKey, projectMetaKey, projectRevisionKey, type StoredDocument } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { registerProject } from "../../packages/broker/src/local/app/projects.js";
+import { registerProject } from "../../packages/broker/src/core-host/app/projects.js";
 import { retireProjectIncarnation } from "../../packages/broker/src/core/project-incarnation.js";
 const company = "org_aaaaaaaaaaaaaaaaaaaa", key = projectMetaKey(company, "web");
 const definition = { name: "web", revision: 1, repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "github-app" }], setup: [], readiness: [], orchestratorInstructions: "Delegate work." };

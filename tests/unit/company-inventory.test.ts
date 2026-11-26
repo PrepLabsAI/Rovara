@@ -235,9 +235,9 @@ it("pins S3 migration text and every catalog constructor caller, including all w
     "packages/broker/src/core/setup-agent/apply.ts": [0, 2], // core-only approval: condition + fenced latestRevision update
     "packages/broker/src/core/project-incarnation.ts": [0, 1], // retention reads the existing catalogue witness; no catalogue writer
     "packages/broker/src/core/task-flow/project-source.ts": [0, 1],
-    "packages/broker/src/local/app/lessons-repos.ts": [0, 1],
+    "packages/broker/src/core-host/app/lessons-repos.ts": [0, 1],
     "packages/broker/src/local/app/lessons.ts": [0, 1],
-    "packages/broker/src/local/app/projects.ts": [0, 3], // local-only company writer + read (no AWS legacy transaction)
+    "packages/broker/src/core-host/app/projects.ts": [0, 3], // local-only company writer + read (no AWS legacy transaction)
   };
   const found: Record<string, number[]> = {};
   for (const input of companySources().filter(s => s.path.startsWith("packages/broker/src/"))) {

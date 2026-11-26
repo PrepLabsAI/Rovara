@@ -16,14 +16,13 @@
 // Both reads are for tools OUTSIDE Rovara, so they carry the owner's limits (2026-11-17): at most 10 units and 2 KB an answer, 300 reads a day per person (a fixed refusal after that), no bulk mode (`all` is refused), one audit
 // record per answer holding the unit ids and no text, and one admin notice a day when a person's tools were served more than 150 DISTINCT units.
 // The API token only reads. Authentication happens before this (the identity adapter vouches for the principal). Nothing here reads who is acting from a body.
-import { INDEX_EXPIRY_ATTRIBUTE, agentXError, change, companyScoped, indexExpiresAt, type DocumentStore } from "@agentx/contracts";
+import { agentXError } from "@agentx/contracts";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import type { TaskCaller, TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { readTask } from "../../core/task-flow/reads.js";
 import { LESSON_PAGE_MAX, buildLessonHistory, buildLessonsView, buildLoadedLessons } from "../../lessons/view.js";
-import type { LocalToolsCounter } from "../../lessons/local-tools.js";
 import { KNOWLEDGE_NO_SUCH_PROJECT, KNOWLEDGE_UNAVAILABLE, LOCAL_ALL_REFUSED, LOCAL_LESSONS_PER_MINUTE, createKnowledgeServer } from "../../lessons/knowledge-serve.js";
-import { knowledgeLimits, type KnowledgeLimits } from "../../lessons/knowledge-limits.js";
+import { knowledgeReadStores } from "../../lessons/knowledge-read-stores.js";
 import type { NoticeService } from "../../services/notices.js";
 import { readLocalToolsState } from "../../lessons/local-tools-setting.js";
 import { peopleOf, type Lesson } from "../../lessons/types.js";
@@ -42,34 +41,8 @@ const UNAVAILABLE = KNOWLEDGE_UNAVAILABLE;
 /** At most this many people's names are looked up in one call: over it, nothing is returned. */
 const MAX_NAME_LOOKUPS = 300;
 
-/** The day's counter row: fixed numbers per person, project and day, expired by the store's index retention. Best effort: a failure to count never blocks or changes the answer. */
-export function localLessonsDayCounter(store: DocumentStore, now: () => number): LocalToolsCounter {
-  return {
-    async count(event) {
-      const day = new Date(now()).toISOString().slice(0, 10);
-      const refused = event.refusal === undefined ? undefined : `refused_${event.refusal.replace(/[^a-z_]/gu, "").slice(0, 40)}`;
-      await store.update({
-        key: { pk: companyScoped(event.orgId, "LESSON_LOCAL_DAY"), sk: `${event.project}#${event.developerId}#${day}` },
-        ops: [
-          change.set("entityType", "LESSON_LOCAL_DAY"), change.set("day", day), change.set(INDEX_EXPIRY_ATTRIBUTE, indexExpiresAt(new Date(now()).toISOString())),
-          change.add("calls", 1), change.add("lessonsReturned", event.lessons), ...(refused === undefined ? [] : [change.add(refused, 1)]),
-        ],
-      });
-    },
-  };
-}
 /** What a local tool is told when its body asks for every lesson at once (`all`): the one implementation's fixed sentence (`lessons/knowledge-serve.ts`). */
 export { LOCAL_ALL_REFUSED };
-/**
- * The per-person day limits and the day counter of team knowledge read outside Rovara, over one company's store. The store's expiry attribute is named HERE, where it is allowed (the TTL guard test lists this file), and
- * handed to the limits; the hosted twin (`core-host/knowledge-api.ts`) builds its own from this, so neither names the attribute itself.
- */
-export function knowledgeReadStores(store: DocumentStore, now: () => number): { limits: KnowledgeLimits; counter: LocalToolsCounter } {
-  return {
-    counter: localLessonsDayCounter(store, now),
-    limits: knowledgeLimits({ store, now, expiry: { attribute: INDEX_EXPIRY_ATTRIBUTE, expiresAt: (atMs) => indexExpiresAt(new Date(atMs).toISOString()) } }),
-  };
-}
 export const DECIDE_ON_THE_PAGE = "A lesson is approved on its page, by you. Run `rovara open lessons` to open it; an assistant cannot approve for you.";
 export const CHANGE_ON_THE_PAGE = "This is changed on the lessons page, by you. Run `rovara open lessons` to open it; the API token can only read.";
 

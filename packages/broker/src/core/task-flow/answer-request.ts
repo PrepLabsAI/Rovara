@@ -1,5 +1,5 @@
 // The owner's answers to Understand's questions on a core task, for a host that serves them (the deployed developer route `POST /v1/dev/tasks/{id}/answers`). The workflow takes the answers
-// and Understand runs again with them (the same move as the laptop's session route, `local/app/answers.ts`); this adds the host's checks, in one place.
+// and Understand runs again with them (the same move as the laptop's session route, `core-host/app/answers.ts`); this adds the host's checks, in one place.
 //
 // Who may answer (D5: only owners answer the agent): the task's owner by the company's owner rule (`TaskAccess.ownerActing`: on a deployed install the person the task runs for, or a People
 // owner where the task has People). A company owner or administrator who is not the task's owner may not; nor may a People commenter or viewer.

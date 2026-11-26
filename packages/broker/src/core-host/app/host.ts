@@ -10,7 +10,7 @@ import { cancelTask } from "../../core/task-flow/cancel.js";
 import { prepareTaskCloseAcceptance } from "../../core/task-flow/close-acceptance.js";
 import { closeTask } from "../../core/task-flow/close.js";
 import { readTask } from "../../core/task-flow/reads.js";
-import { retryBlockedStep } from "./retry.js";
+import { retryBlockedStep } from "../../core/task-flow/retry.js";
 
 /** A person may message a session this many times an hour (a token bucket), and a task keeps this many messages: a live message can mean paid model work. */
 export const MESSAGES_PER_HOUR = 20;

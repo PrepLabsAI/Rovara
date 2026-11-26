@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createLocalPagesServer, type LocalPagesServer } from "../../packages/broker/src/core/local-pages/index.js";
 import type { LocalPageData } from "../../packages/broker/src/core/local-pages/views.js";
 import { createLocalPageData } from "../../packages/broker/src/local/app/page-data.js";
-import { createLocalEvidence } from "../../packages/broker/src/local/app/evidence.js";
+import { createLocalEvidence } from "../../packages/broker/src/core-host/app/evidence.js";
 import { createDocumentEvidenceBlobStore } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { keepEvidence } from "../../packages/broker/src/core/proof/evidence-keep.js";

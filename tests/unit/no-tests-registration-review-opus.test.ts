@@ -3,7 +3,7 @@
 import { expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID, projectRevisionKey } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { registerProject } from "../../packages/broker/src/local/app/projects.js";
+import { registerProject } from "../../packages/broker/src/core-host/app/projects.js";
 
 const definition = { name: "demo", revision: 1, repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "github-app" }], setup: [], readiness: [], orchestratorInstructions: "Delegate work." };
 const FACT = { at: "2026-11-24T00:00:00.000Z", looked: ["makefile"] };

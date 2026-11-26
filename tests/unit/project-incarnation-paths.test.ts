@@ -2,10 +2,10 @@ import { expect, it } from "vitest";
 import { orgProjectCatalogKey, projectMetaKey, projectRevisionKey, type StoredDocument } from "@agentx/contracts";
 import { projectIncarnationSettlement } from "../../packages/broker/src/core/project-incarnation.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { registerProject } from "../../packages/broker/src/local/app/projects.js";
+import { registerProject } from "../../packages/broker/src/core-host/app/projects.js";
 import { createStoreProjectSource } from "../../packages/broker/src/core/task-flow/project-source.js";
 import { COMPANY_PURGE_COOLING_OFF_MS, requestCompanyPurge, runCompanyPurge } from "../../packages/broker/src/core/company/purge.js";
-import { DocumentAuditSink } from "../../packages/local-adapters/src/document-audit-sink.js";
+import { DocumentAuditSink } from "../../packages/broker/src/plugins/audit-sink/document/sink.js";
 
 const company = "org_aaaaaaaaaaaaaaaaaaaa";
 const project = "web";

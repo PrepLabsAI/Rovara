@@ -310,7 +310,7 @@ adapter only FETCHES a comment (`CodeHost.comments`: text, author, times, the ch
 
 ### Audit trail and "audit before add" (lane P6, item L2)
 
-**The audit record commits with the change.** `rovara up` registers `DocumentAuditSink` (`packages/local-adapters/src/document-audit-sink.ts`, plug-in `@agentx/local-adapters/audit-sink`) as the `audit-sink` default. `stage(event)` returns ONE `put`
+**The audit record commits with the change.** `rovara up` and the hosted product register `DocumentAuditSink` (`packages/broker/src/plugins/audit-sink/document/sink.ts`, plug-in `@agentx/broker/plugins/audit-sink-document`; the event rules are `packages/contracts/src/ports/audit-event.ts`) as the `audit-sink` default. `stage(event)` returns ONE `put`
 step for the caller's own `DocumentStore.transact`: an `AUDIT#` row (key: the company and the event id) in the same store as the change (state.db). So a change that is refused, lost to a competing writer (a losing approval, a lost merge claim),
 or interrupted before its transaction commits leaves **no** row, and a change that commits always leaves one; the rule "audit before add" holds because the record and the add are one atomic step. The step's condition is "absent, or the same
 facts" (who, what, on what, with which details; the time is not part of it): a retry of a committed event is harmless, and an event id reused for **different** facts makes the step fail, so the caller's transaction is refused rather than the
@@ -456,7 +456,7 @@ Schema for each read-only tool) and `check(input)`. **This is a new interface (d
 
 A connection's key or token is not in its record. The record keeps whether a secret was saved and the id of the version its own save wrote; the value is under the name
 `agentx/<env>/org-connectors/<company>/<id>` (the hosted product's name, so a later switch moves no data), written and removed through `ConnectionSecrets` (`connections/org-secrets.ts`: `read`, `put`,
-`scheduleDelete`). Code's adapter (`connections/local-secrets.ts`) keeps one file per saved version in `<state folder>/connection-secrets/<company>/` (folder `0700`, files `0600`, written without following a link,
+`scheduleDelete`). Code's adapter (`local/connection-secrets.ts`) keeps one file per saved version in `<state folder>/connection-secrets/<company>/` (folder `0700`, files `0600`, written without following a link,
 at most 16 KiB) and **reads them back through the `secrets` socket** as `{ "file": "<absolute path>" }`, so that socket's file rules apply (no link in the path, a plain file that is yours, not readable by others, small).
 A save writes its version first, and the record's commit decides which save won: a version no record names is never read. The newest two versions are kept; older ones are removed; removing a connection removes all.
 A `secrets` plug-in that does not know `{ "file" }` makes saved connections read as "no key" until it does (a configured plug-in is the source of truth for reads).

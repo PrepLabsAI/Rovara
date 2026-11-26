@@ -6,7 +6,7 @@ import {
   FeatureChoicesResponseSchema, PlanFeatureSchema, TASK_FEATURE_NOT_FOUND, orgProjectCatalogKey, projectRevisionKey,
   type JsonValue, type ProjectDefinition,
 } from "@agentx/contracts";
-import { DocumentAuditSink } from "@agentx/local-adapters";
+import { DocumentAuditSink } from "../../packages/broker/src/plugins/audit-sink/document/sink.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";

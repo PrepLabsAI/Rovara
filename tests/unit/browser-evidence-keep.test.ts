@@ -10,8 +10,8 @@ import { createDocumentEvidenceBlobStore } from "../../packages/broker/src/core/
 import { evidenceArtifactKey, readEvidenceArtifact } from "../../packages/broker/src/core/proof/evidence-artifacts.js";
 import { evidencePackKey, keepEvidence, loadEvidencePack, loadEvidenceRead, type KeepEvidenceDeps } from "../../packages/broker/src/core/proof/evidence-keep.js";
 import { eraseTaskEvidence } from "../../packages/broker/src/core/proof/evidence-erase.js";
-import { createLocalEvidence } from "../../packages/broker/src/local/app/evidence.js";
-import { proofReportOf } from "../../packages/broker/src/local/app/proof-report.js";
+import { createLocalEvidence } from "../../packages/broker/src/core-host/app/evidence.js";
+import { proofReportOf } from "../../packages/broker/src/core-host/app/proof-report.js";
 import { scanTextForTests } from "../support/evidence-scan.js";
 
 import { createWorkflowSnapshot } from "../../packages/contracts/src/task-workflow-node.js";

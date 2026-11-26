@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { WIKI_FLAG_SCAN_MAX, WIKI_QUOTE_MAX, wikiPartition, type OrgId, type StoredDocument, type WikiPageWrite, type WikiStore } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { DocumentAuditSink } from "../../packages/local-adapters/src/document-audit-sink.js";
+import { DocumentAuditSink } from "../../packages/broker/src/plugins/audit-sink/document/sink.js";
 import { WIKI_FORMER_MEMBER, createWikiStore, storedQuote } from "../../packages/broker/src/core/wiki/store.js";
 import { COMPANY_PURGE_COOLING_OFF_MS, requestCompanyPurge, runCompanyPurge, type CompanyPurgeDeps } from "../../packages/broker/src/core/company/purge.js";
 

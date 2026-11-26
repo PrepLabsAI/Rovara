@@ -12,7 +12,7 @@ import {
 import { withStartFence, withStartFenceExtras } from "../../packages/broker/src/core/task-flow/start-fence.js";
 import { withStartFence as runtimeWithStartFence } from "../../packages/broker/src/core-host/core-runtime.js";
 import { createLocalChat } from "../../packages/broker/src/local/app/chat.js";
-import { createSessionStartExtras } from "../../packages/broker/src/local/app/session-start.js";
+import { createSessionStartExtras } from "../../packages/broker/src/core-host/app/session-start.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { createHarness } from "../support/task-flow-harness.js";
 

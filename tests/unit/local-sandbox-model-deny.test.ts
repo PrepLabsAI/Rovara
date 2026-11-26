@@ -20,7 +20,7 @@ import { SANDBOX_DENY_LEAVES_OUT, SANDBOX_PINNED_MODEL_HOSTS, laptopSandboxDenyL
 import { DockerWorkerMachines, SANDBOX_MODEL_HOSTS_ENV } from "../../packages/broker/src/local/docker-worker-machines.js";
 import { createEphemeralInvokeSigner } from "../../packages/broker/src/local/invoke-signer.js";
 import { startLocalRuntime, parsePluginConfigText, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
-import { createLocalEvidence, MODEL_HOSTS_ALLOWED_ITEM } from "../../packages/broker/src/local/app/evidence.js";
+import { createLocalEvidence, MODEL_HOSTS_ALLOWED_ITEM } from "../../packages/broker/src/core-host/app/evidence.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { keepEvidence, loadEvidencePack } from "../../packages/broker/src/core/proof/evidence-keep.js";
 import { createDocumentEvidenceBlobStore, createDocumentObjectStorage } from "../../packages/broker/src/core/proof/evidence-blob-store.js";

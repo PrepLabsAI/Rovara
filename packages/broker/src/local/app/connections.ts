@@ -3,7 +3,7 @@
 // Who may do what (owner decision 66):
 //  - ADDING a connection, ticking a tool, approving a server and confirming a source are the owner's acts on the Connections and Sources pages, in a page session opened in the last few minutes.
 //    The API token (which an AI tool may hold) reads and nothing more: `routes` answers a write with the page message.
-//  - A secret is write-only. The page posts it, the store keeps it as a file only the owner can read (`connections/local-secrets.ts`), and it comes back through the `secrets` socket at the moment it is
+//  - A secret is write-only. The page posts it, the store keeps it as a file only the owner can read (`local/connection-secrets.ts`), and it comes back through the `secrets` socket at the moment it is
 //    used. No record, answer, audit event or log line holds it.
 //  - What a source returns is data: `context-sources/routes.ts` frames, cuts and cleans it before a model sees it, and the worker frames it again (worker/src/context-sources).
 import { createHash } from "node:crypto";
@@ -20,7 +20,7 @@ import { developerIdOf } from "../../core/sessions/create.js";
 import type { TaskCaller, TaskFlowDeps } from "../../core/task-flow/deps.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import { checkEndpointUrl, dnsResolveHost } from "../../connections/endpoint-check.js";
-import { createLocalConnectionSecrets } from "../../connections/local-secrets.js";
+import { createLocalConnectionSecrets } from "../connection-secrets.js";
 import { readRequestMark, type RequestMark } from "../../connections/request-marks.js";
 import { OrgConnectionStore, type OrgConnectionDeps, type OrgConnectionRecord } from "../../connections/store.js";
 import { documentContextSourceStore } from "../../context-sources/store.js";
@@ -30,7 +30,7 @@ import { confirmSource, discoverSourceTools, proposeSource, rejectSource, server
 import type { TaskEndRegistrar } from "../../context-sources/quotes.js";
 import { connectionChecksFromRegistry } from "../../monitoring/native-adapters.js";
 import { createRegistrySecretStore } from "../../ports/secret-stores.js";
-import { listProjects } from "./projects.js";
+import { listProjects } from "../../core-host/app/projects.js";
 
 /** The environment name that prefixes every secret name on a laptop. */
 export const LOCAL_SECRET_ENV = "local";

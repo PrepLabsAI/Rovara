@@ -10,7 +10,7 @@ import { localOwnerMembers } from "../../core/sessions/access.js";
 import { developerIdOf } from "../../core/sessions/create.js";
 import type { ApprovalOffer, LocalActionResult, SetupHostAskView, SetupItemView, SetupPageView } from "../../core/local-pages/views.js";
 import { codeHostForRecord } from "../../plugins/routing.js";
-import { listProjects } from "./projects.js";
+import { listProjects } from "../../core-host/app/projects.js";
 import { startTask } from "../../core/task-flow/start.js";
 import type { TaskCaller, TaskStartCaller, TaskFlowDeps } from "../../core/task-flow/deps.js";
 import { carriesOverField } from "../../core/setup-agent/carry-over.js";
@@ -35,7 +35,7 @@ import { log as logTaskFlow } from "../../core/task-flow/support.js";
 export function setupDecisionSubjects(flow: TaskFlowDeps, sandboxDenied?: (project: string) => readonly string[]): DecisionSubject[] {
   return [createSetupHostSubject({ store: flow.store, ...(sandboxDenied === undefined ? {} : { sandboxDenied }) }), createSetupProposalSubject({ flow }), createEvalSpendSubject({ store: flow.store, companyId: flow.companyId })];
 }
-import { createSessionControlHost } from "./host.js";
+import { createSessionControlHost } from "../../core-host/app/host.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 
 /** DEC 254zzz495 (N3): what the page's waiting-setup view adds when the candidate has no test command: that fact and where the run looked (fixed words). Nothing otherwise. */

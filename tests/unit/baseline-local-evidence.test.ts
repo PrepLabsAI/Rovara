@@ -5,7 +5,7 @@ import { BaselineRowSchema, projectRevisionKey, type CheckEntry } from "../../pa
 import { workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createDocumentObjectStorage } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
-import { createLocalEvidence } from "../../packages/broker/src/local/app/evidence.js";
+import { createLocalEvidence } from "../../packages/broker/src/core-host/app/evidence.js";
 import { mintTrustedBaselineRun, recordBaselineRow } from "../../packages/broker/src/core/test-env/baseline-cache.js";
 
 const ORG = `org_${"a".repeat(20)}`;

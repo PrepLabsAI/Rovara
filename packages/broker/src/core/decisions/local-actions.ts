@@ -4,7 +4,7 @@
 // What L8 assumes beyond this stays with the task flow and is NOT here: the reads of `LocalPageData` (pending list, plan and design pages, lessons, proof report), `LocalPageActions.addComment` and
 // `lessonAction`, and `PrCommandWorld.pendingFor`, `lesson` and `stop` (they need the task index, page comments, lessons and the pull request to task map: lanes L6a, L7a/b and L11).
 import { spendUnreadableWords, type ApprovalProof } from "@agentx/contracts";
-import type { ApprovalOffer, LocalActionResult } from "../local-pages/views.js";
+import type { ApprovalOffer, LocalActionResult } from "../page-views.js";
 import type { DecisionAttempt, DecisionGate, GateRefusalReason, GateResult } from "./approval-gate.js";
 import { WORKFLOW_DOCUMENT_KIND } from "./workflow-subject.js";
 

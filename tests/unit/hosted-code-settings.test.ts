@@ -1,6 +1,6 @@
 // L4-HW3b: the hosted broker reads each project's own merge rules (the record the developer API's code-settings route saves) for the How we work page and for merge tracking, instead of
 // no settings (the page was not served) and Code's defaults (merge tracking). The root, registry and runtime are real; the deployment adapters are the fake world's and the State table is a
-// map of items. Laptop: its rules stay fixed (`fixedCodeSettings`, local/app/app.ts:395-398 and local/app/tracking.ts:34), checked at the end.
+// map of items. Laptop: its rules stay fixed (`fixedCodeSettings`, local/app/app.ts:395-398 and core-host/app/tracking.ts:34), checked at the end.
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";

@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { EVIDENCE_RENDER_LIMITS, type EvidencePack } from "../../packages/contracts/src/index.js";
 import { createCandidateManifest } from "../../packages/contracts/src/task-workflow-node.js";
 import { renderProof, type PageContext } from "../../packages/broker/src/core/local-pages/pages.js";
-import { failuresOf, proofReportOf } from "../../packages/broker/src/local/app/proof-report.js";
+import { failuresOf, proofReportOf } from "../../packages/broker/src/core-host/app/proof-report.js";
 import { v1Pack } from "../support/evidence-v2-fixtures.js";
 
 const SHA = "a".repeat(40);

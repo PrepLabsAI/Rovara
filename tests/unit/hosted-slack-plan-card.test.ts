@@ -19,7 +19,7 @@ import { recordTaskThread } from "../../packages/broker/src/core/channel/threads
 import { projectPageUrl, sessionPageUrl } from "../../packages/broker/src/core/decisions/open-path.js";
 import { PENDING_PK, deliverAttention } from "../../packages/broker/src/core/notify/index.js";
 import { createTaskSessionItems, developerIdOf, refreshSessionSummary, taskSessionId } from "../../packages/broker/src/core/sessions/index.js";
-import { createTaskFactsSource } from "../../packages/broker/src/local/app/facts.js";
+import { createTaskFactsSource } from "../../packages/broker/src/core-host/app/facts.js";
 import { driftTaskKey, recheckRowKey, setupBrokenWarningMessage, type RecheckState } from "../../packages/broker/src/core/setup-agent/recheck.js";
 import { taskKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { ticketMomentsOnChange } from "../../packages/broker/src/core/ticket-updates/moments.js";

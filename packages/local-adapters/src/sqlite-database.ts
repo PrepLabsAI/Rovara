@@ -50,11 +50,8 @@ function asFailure(error: unknown): SqliteFailure {
   return new SqliteFailure(message, extended & 0xff, { cause: error });
 }
 
-/** Text that SQLite would change on the way in: an unpaired surrogate becomes U+FFFD, and a NUL cuts the text short when it is read back. */
-export function storableText(value: string): boolean {
-  return !UNPAIRED_SURROGATE.test(value) && !value.includes("\u0000");
-}
-const UNPAIRED_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+/** Text that SQLite would change on the way in: an unpaired surrogate becomes U+FFFD, and a NUL cuts the text short when it is read back. One rule with the audit trail's (`@agentx/contracts`). */
+export { storableText } from "@agentx/contracts";
 
 const STATEMENT_CACHE_LIMIT = 256;
 

@@ -16,7 +16,7 @@ import {
 } from "../../core/wiki-build/controls.js";
 import { resnapshotWikiBuild, type WikiBuildDeps, type WikiBuildStarter } from "../../core/wiki-build/run.js";
 import type { WikiBuildStarterInput } from "../../core-host/wiki-build-routes.js";
-import { createSessionControlHost } from "./host.js";
+import { createSessionControlHost } from "../../core-host/app/host.js";
 import type { LocalWikiMap } from "./wiki-map.js";
 
 const ROUTE = /^\/v1\/app\/projects\/([A-Za-z0-9][A-Za-z0-9_.-]{0,127})\/wiki-build(?:\/(continue|stop|refresh|agents|delete))?$/u;

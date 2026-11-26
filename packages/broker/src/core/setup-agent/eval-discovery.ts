@@ -21,7 +21,7 @@ import {
   EVAL_WRAPPER_REPORT_PATH, agentXError, canonicalJson, change, evalCommandFingerprintOf, evalOutputNeedsWrapper, evalWrapperCommandOf, evalWrapperFor, evalJudgePinOf, evalPlanDigest, evalQuestionHash, evalSetHashOf, evalSettingsFingerprintOf, when,
   type DocumentStore, type EvalPlanBody, type OrgId, type Principal, type SetupEvalDiscoveryReport, type StoredDocument,
 } from "@agentx/contracts";
-import type { SetupEvalDiscoveryView } from "../local-pages/views.js";
+import type { SetupEvalDiscoveryView } from "../page-views.js";
 import { listEvalWrapperFiles, needsOf, recordEvalWrapperTest, wrapperFileFor } from "./eval-wrapper.js";
 import type { SessionMembers } from "../sessions/access.js";
 import { developerIdOf } from "../sessions/create.js";

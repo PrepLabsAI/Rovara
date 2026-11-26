@@ -14,7 +14,7 @@ import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defa
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
-import { createSessionStartExtras } from "../../packages/broker/src/local/app/session-start.js";
+import { createSessionStartExtras } from "../../packages/broker/src/core-host/app/session-start.js";
 import { developerIdOf, taskSessionId } from "../../packages/broker/src/core/sessions/create.js";
 import type { SessionMembers, SessionProjectRole } from "../../packages/broker/src/core/sessions/access.js";
 

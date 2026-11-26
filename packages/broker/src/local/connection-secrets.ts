@@ -8,8 +8,8 @@ import { randomBytes } from "node:crypto";
 import { readdir, realpath, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { agentXError, type SecretStore } from "@agentx/contracts";
-import { ensurePrivateDirectory, writeOwnerFile } from "../local/state-directory.js";
-import { secretNameBelongsTo, admitSecretName, type ConnectionSecrets } from "./org-secrets.js";
+import { ensurePrivateDirectory, writeOwnerFile } from "./state-directory.js";
+import { secretNameBelongsTo, admitSecretName, type ConnectionSecrets } from "../connections/org-secrets.js";
 
 const VERSION = /^\d{13}-[0-9a-f]{8}$/;
 /** The most bytes of one secret: a token or a small JSON of a few keys. */

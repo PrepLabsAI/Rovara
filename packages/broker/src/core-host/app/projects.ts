@@ -4,7 +4,7 @@ import {
   ProjectDefinitionSchema, agentXError, canonicalJson, noAutomatedTestsOf, orgProjectCatalogKey, projectMetaKey, projectRevisionKey, projectPk, when,
   type DocumentStore, type JsonValue, type NoAutomatedTests, type OrgId, type ProjectDefinition,
 } from "@agentx/contracts";
-import { isPlainRepositoryUrl } from "../github-access.js";
+import { isPlainRepositoryUrl } from "../../plugins/code-host/github/token-access.js";
 import { createStoreProjectSource } from "../../core/task-flow/project-source.js";
 import { planLocalProjectIncarnation, projectMetaSnapshot, projectIncarnationRegistration } from "../../core/project-incarnation.js";
 import { waitingSetupApply } from "../../core/setup-agent/apply.js";

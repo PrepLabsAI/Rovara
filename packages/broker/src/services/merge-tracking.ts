@@ -9,7 +9,7 @@ import { collectTrackedFeedback } from "../core/pr-feedback/service.js";
 //   people     who a person is on the code host (a reader the host passes)   timeline    the session's event log
 //   links      the reverse link the publish step wrote                       repository  the repository the project pins, on the code host its record names (the registry's `code-host` point)
 //
-// Nothing here knows who the people are or what the settings say: a host with one owner passes `soleOwnerPeople` and `fixedCodeSettings()` (the laptop does, `local/app/tracking.ts`); a host with members passes readers
+// Nothing here knows who the people are or what the settings say: a host with one owner passes `soleOwnerPeople` and `fixedCodeSettings()` (the laptop does, `core-host/app/tracking.ts`); a host with members passes readers
 // over its own identity and settings. The service reads the due tracking rows (`WORKFLOW_MERGE_RECOVERY`, `kind: "tracking"`, written by the publish step) when its `sweep` is called; the host decides what calls it (a timer, a
 // webhook that calls `wake`, a schedule).
 //

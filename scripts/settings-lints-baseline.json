@@ -109,7 +109,7 @@
     "packages/broker/src/lessons/policy.ts": 2,
     "packages/broker/src/lessons/switch.ts": 3,
     "packages/broker/src/local/app/app.ts": 9,
-    "packages/broker/src/local/app/evidence.ts": 1,
+    "packages/broker/src/core-host/app/evidence.ts": 1,
     "packages/broker/src/local/app/setup-agent.ts": 1,
     "packages/broker/src/local/app/test-environment.ts": 1,
     "packages/broker/src/local/docker-runner.ts": 1,

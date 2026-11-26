@@ -1,4 +1,4 @@
-// Audit gap 11b (2026-11-18): a project's ticket-sharing settings (Linear ticket updates) on the hosted core, the laptop handler's own route (local/app/intake.ts) and answers, served AS the signed-in person:
+// Audit gap 11b (2026-11-18): a project's ticket-sharing settings (Linear ticket updates) on the hosted core, the laptop handler's own route (core-host/app/intake.ts) and answers, served AS the signed-in person:
 //
 //   GET /v1/app/projects/{project}/intake/updates   { settings, canEdit, access }: any role on the project reads it (contracts/ticket-updates.ts `TicketUpdatesViewSchema`)
 //   PUT /v1/app/projects/{project}/intake/updates   { requestId, settings } (`TicketUpdatesPutBodySchema`): a live company owner or admin, or the project's administrator, replaces them; answers the view

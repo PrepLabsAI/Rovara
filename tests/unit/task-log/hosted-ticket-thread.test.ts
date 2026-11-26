@@ -8,7 +8,7 @@ import { hostedTaskShared, hostedTicketUpdates, hostedTrackerFor } from "../../.
 import { ticketSessionStartExtras } from "../../../packages/broker/src/aws/hosted-intake.js";
 import { claimIntakeItem, markIntakeStarted } from "../../../packages/broker/src/core/intake/store.js";
 import { bindSessionSurface } from "../../../packages/broker/src/core/sessions/bindings.js";
-import { createSessionStartExtras } from "../../../packages/broker/src/local/app/session-start.js";
+import { createSessionStartExtras } from "../../../packages/broker/src/core-host/app/session-start.js";
 import { originTicketOf, saveTicketUpdates, ticketStartedShared, THREAD_ROOT_EDIT_GAP_MS } from "../../../packages/broker/src/core/ticket-updates/index.js";
 import { answerEntriesOf, appendTaskLog, createTaskLogHooks, questionEntriesOf, readTaskLog } from "../../../packages/broker/src/core/task-log/index.js";
 import { MemoryDocumentStore } from "../../../packages/broker/src/ports/memory-document-store.js";

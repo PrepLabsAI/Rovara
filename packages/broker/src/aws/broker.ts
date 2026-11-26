@@ -7794,7 +7794,7 @@ function buildBrokerHandler(callbackSigningKey: string) {
       }),
     }),
     // L4-HW3b: the project's own merge rules (the record the developer API's code-settings route saves), not Code's defaults: for how we work (every company's runtime) and for the merge
-    // tracker (this company's only). A project with none saved reads the defaults, as before. The laptop's rules are fixed instead (local/app/app.ts:395 and local/app/tracking.ts:34).
+    // tracker (this company's only). A project with none saved reads the defaults, as before. The laptop's rules are fixed instead (local/app/app.ts:395 and core-host/app/tracking.ts:34).
     codeSettings: codeSettingsReader({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }),
     // `taskPeople` (the task People list the merge requesters are read from, aws/hosted-merge-people.ts) is REQUIRED by the job services: a root built without it throws.
     services: (companyId, flow, registry, wiring) => createHostedBrokerCoreServices({ companyId, flow, registry, ciMode: wiring.ciMode!,

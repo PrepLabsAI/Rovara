@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { projectBrowserEvidenceRecipeKey, type BrowserEvidenceRecipe } from "@agentx/contracts";
-import { createLocalConnectionSecrets } from "../../packages/broker/src/connections/local-secrets.js";
+import { createLocalConnectionSecrets } from "../../packages/broker/src/local/connection-secrets.js";
 import { createLocalSecretStore } from "../../packages/broker/src/ports/secret-stores.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { SIGN_IN_WORDS, browserEvidenceSignInSecretName, createBrowserEvidenceSignIn } from "../../packages/broker/src/core/proof/browser-evidence-sign-in.js";

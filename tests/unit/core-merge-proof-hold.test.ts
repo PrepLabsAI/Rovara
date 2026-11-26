@@ -2,7 +2,7 @@
 // tracking pass and the real `markReadyAnyway` over the in-memory store and the fake host.
 import { describe, expect, it, vi } from "vitest";
 import { type ProofHoldFacts, type ProofHoldMode, type TestProof, type TestProofItem } from "../../packages/contracts/src/index.js";
-import { attentionOf } from "../../packages/broker/src/local/app/attention.js";
+import { attentionOf } from "../../packages/broker/src/core-host/app/attention.js";
 import {
   OVERRIDE_REASON_MAX, judgeProofHold, markReadyAnyway, plainReason, proofHoldKey, proofOverrideKey, readProofHold, readProofHoldHistory, trackPullRequest, type LiveRoles, type MarkReadyInput, type ProofHoldSource,
 } from "../../packages/broker/src/core/merge/index.js";

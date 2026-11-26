@@ -16,7 +16,7 @@ import { randomUUID } from "node:crypto";
 import { GetCommand, QueryCommand, TransactWriteCommand, type TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import { OrgIdSchema, OrgRoleSchema, agentDirectoryKey, agentKey, chainDirectoryKey, chainKey, companyScoped, type AuditEvent, type OrgId, type OrgRole } from "@agentx/contracts";
-import { DocumentAuditSink } from "@agentx/local-adapters";
+import { DocumentAuditSink } from "../plugins/audit-sink/document/sink.js";
 import { revokeProjectAccess } from "./admin-actions.js";
 import { ownPartitionRow, recordInCompany } from "./company-check.js";
 import { isProjectUnreadable } from "../core/project-left-out.js";

@@ -18,7 +18,7 @@ import { recordTaskThread } from "../../packages/broker/src/core/channel/threads
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { createCoreHostApp, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import type { DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
-import { MESSAGE_RATE_LIMITED, MESSAGES_PER_HOUR } from "../../packages/broker/src/local/app/host.js";
+import { MESSAGE_RATE_LIMITED, MESSAGES_PER_HOUR } from "../../packages/broker/src/core-host/app/host.js";
 import { addChatThreadInput, answersFromReply, cleanedReplyText, type ChatThreadInput } from "../../packages/broker/src/core-host/chat-thread-input.js";
 import { THREAD_INPUT_WORDS } from "../../packages/broker/src/aws/slack-thread-input-words.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";

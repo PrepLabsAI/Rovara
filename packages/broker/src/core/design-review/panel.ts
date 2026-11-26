@@ -1,7 +1,7 @@
 // Design review stage: what the owner's plan page shows of a design review, from the stored review alone. Pure: a workflow in, a view out. Fixed words are Rovara's; a finding's text, a question and its options are model
 // words (the page shows them as untrusted text, and the contract has already cleaned them to one plain line). Nothing here is believed by the broker: the tier, the blockers and the coverage are worked out by code from codes and counts.
 import { designWaitOf, type WorkflowSnapshot } from "@agentx/contracts";
-import type { DesignReviewPanelView } from "../local-pages/views.js";
+import type { DesignReviewPanelView } from "../page-views.js";
 import { designChoiceLabel, designChoicesOf } from "./choice-subject.js";
 import { designCardFactsOf } from "./card-source.js";
 import { designNotRunLine } from "./not-run.js";

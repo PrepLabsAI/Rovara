@@ -1,7 +1,7 @@
 // Fixtures for the company reads (lanes AU and EV): two companies, audit rows written by Code's own audit sink, and work events written by the
 // work-event writer, in one store. Hostile rows (the wrong company, no company, a bad company, rubbish) are planted by hand.
 import { IMPLICIT_COMPANY_ID, companyScoped, workEventId, workEventKey, type DocumentStore, type WorkEventInput, type WorkEventKind } from "@agentx/contracts";
-import { DocumentAuditSink } from "../../packages/local-adapters/src/document-audit-sink.js";
+import { DocumentAuditSink } from "../../packages/broker/src/plugins/audit-sink/document/sink.js";
 import { workEventRow } from "../../packages/broker/src/core/work-events/work-events.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 

@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   CHECKS_BROKEN_LEGACY_REASON, CHECKS_NOT_PASSED_LEGACY_REASON, CHECKS_NOT_PASSED_REASON, WORKFLOW_BLOCK_REASONS, blockReasonSentence,
 } from "../../packages/contracts/src/index.js";
-import { attentionOf } from "../../packages/broker/src/local/app/attention.js";
+import { attentionOf } from "../../packages/broker/src/core-host/app/attention.js";
 import { plainBlockReason } from "../../packages/broker/src/developer/workflow-messages.js";
 import { nextFor } from "../../packages/mcp/src/tools.js";
 import { ORG, mergeWorld } from "../support/merge-world.js";

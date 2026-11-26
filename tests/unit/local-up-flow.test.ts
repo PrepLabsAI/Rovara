@@ -15,7 +15,7 @@ import { createWikiStore } from "../../packages/broker/src/core/wiki/store.js";
 import { createWikiForStep, setWikiAgentSwitch } from "../../packages/broker/src/core/wiki/agent-context.js";
 import { bindSessionSurface } from "../../packages/broker/src/core/sessions/bindings.js";
 import { developerIdOf, taskSessionId } from "../../packages/broker/src/core/sessions/create.js";
-import { createSessionControlHost } from "../../packages/broker/src/local/app/host.js";
+import { createSessionControlHost } from "../../packages/broker/src/core-host/app/host.js";
 import { planDocument } from "../support/plan-documents.js";
 import { maximal as knowledgeFixture } from "./knowledge-wiring/fixtures.js";
 import { listSessions, readSessionEvents, sessionSnapshot } from "../../packages/broker/src/core/sessions/read.js";
@@ -33,7 +33,7 @@ import { modelProxyWorkerUrl } from "../../packages/broker/src/local/docker-work
 import { OPENS_PER_MINUTE } from "../../packages/broker/src/local/app/routes.js";
 import { assertGithubCloneAccess } from "../../packages/broker/src/local/github-access.js";
 import { DOCUMENT_CHANGED } from "../../packages/broker/src/local/app/documents.js";
-import { MESSAGES_PER_HOUR, MESSAGE_RATE_LIMITED } from "../../packages/broker/src/local/app/host.js";
+import { MESSAGES_PER_HOUR, MESSAGE_RATE_LIMITED } from "../../packages/broker/src/core-host/app/host.js";
 import { registerConnectionsCommand, registerModelsCommand, registerDiagnosisCommand, registerOpenCommand, registerSecondReviewCommand } from "../../packages/cli/src/up/cli.js";
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
 import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
@@ -52,7 +52,7 @@ import { readTask, workspaceOperations } from "../../packages/broker/src/core/ta
 import { shortDigest } from "../../packages/broker/src/core/pr-commands/comment-checks.js";
 import { approvalOfferOf } from "../../packages/broker/src/local/app/page-data.js";
 import { verifiedChangedFiles } from "../../packages/broker/src/core/build-step/changed-files.js";
-import { readyToMerge } from "../../packages/broker/src/local/app/attention.js";
+import { readyToMerge } from "../../packages/broker/src/core-host/app/attention.js";
 import { retryBlockedStep } from "../../packages/broker/src/local/app/retry.js";
 import { recordedHeadOf } from "../../packages/broker/src/core/build-step/head-check.js";
 import { WORKFLOW_DOCUMENT_KIND } from "../../packages/broker/src/core/decisions/workflow-subject.js";

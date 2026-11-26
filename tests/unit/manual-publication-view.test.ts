@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { developerTaskView } from "../../packages/broker/src/local/app/task-view.js";
+import { developerTaskView } from "../../packages/broker/src/core-host/app/task-view.js";
 import { taskViewOf } from "../../packages/broker/src/core/task-flow/reads.js";
 import { workspaceKeys } from "../../packages/broker/src/core/task-flow/workspace-location.js";
 import { seed, taskOf } from "../support/task-actions-world.js";

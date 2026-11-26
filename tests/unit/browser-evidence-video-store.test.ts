@@ -11,7 +11,7 @@ import { createDocumentEvidenceBlobStore, type EvidenceBlobStore } from "../../p
 import { evidenceArtifactKey, readEvidenceArtifact } from "../../packages/broker/src/core/proof/evidence-artifacts.js";
 import { storeBrowserEvidence } from "../../packages/broker/src/core/proof/browser-evidence-store.js";
 import { evidencePackKey, keepEvidence, loadEvidenceRead, type KeepEvidenceDeps } from "../../packages/broker/src/core/proof/evidence-keep.js";
-import { createLocalEvidence } from "../../packages/broker/src/local/app/evidence.js";
+import { createLocalEvidence } from "../../packages/broker/src/core-host/app/evidence.js";
 import { scanTextForTests } from "../support/evidence-scan.js";
 
 const DIGEST = "c".repeat(64);

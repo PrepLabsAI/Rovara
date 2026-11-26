@@ -25,7 +25,7 @@ import { createKnowledgeServer, knowledgeOffAnswer, type KnowledgeTool } from ".
 import type { HostedLessonPeople } from "../lessons/hosted-people.js";
 import { peopleOf, type Lesson } from "../lessons/types.js";
 import type { ScopeKey } from "../lessons/store.js";
-import { knowledgeReadStores } from "../local/app/lessons-routes.js";
+import { knowledgeReadStores } from "../lessons/knowledge-read-stores.js";
 import { switchCovers, type CoreSwitch } from "./flags.js";
 import type { LessonsApiCompany } from "./lessons-api.js";
 import { rethrowMembershipReadFailure } from "../core/membership-read.js";

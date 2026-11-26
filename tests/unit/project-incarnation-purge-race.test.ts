@@ -1,9 +1,9 @@
 import { expect, it } from "vitest";
 import { projectMetaKey, projectRevisionKey } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { registerProject } from "../../packages/broker/src/local/app/projects.js";
+import { registerProject } from "../../packages/broker/src/core-host/app/projects.js";
 import { COMPANY_PURGE_COOLING_OFF_MS, requestCompanyPurge, runCompanyPurge } from "../../packages/broker/src/core/company/purge.js";
-import { DocumentAuditSink } from "../../packages/local-adapters/src/document-audit-sink.js";
+import { DocumentAuditSink } from "../../packages/broker/src/plugins/audit-sink/document/sink.js";
 it("purge cannot delete a replacement's content while its identity remains live", async () => {
   const companyId = "org_aaaaaaaaaaaaaaaaaaaa", project = "web", store = new MemoryDocumentStore();
   const key = projectMetaKey(companyId, project), revisionKey = projectRevisionKey(companyId, project, 1);

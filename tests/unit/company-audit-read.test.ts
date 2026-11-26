@@ -2,7 +2,7 @@
 // action, a bounded page at a time. Every row is checked against the company; the read never writes; nothing but the record's facts leaves.
 import { describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID, companyScoped, type AuditEvent, type AuditSink } from "@agentx/contracts";
-import { DocumentAuditSink } from "../../packages/local-adapters/src/document-audit-sink.js";
+import { DocumentAuditSink } from "../../packages/broker/src/plugins/audit-sink/document/sink.js";
 import { COMPANY_AUDIT_SCAN_MAX, auditViaCaller, readCompanyAudit } from "../../packages/broker/src/core/audit-read/index.js";
 import { COMPANY_A, COMPANY_B, countingReadOnly, newStore, plantAuditRow, seedAudit } from "../support/company-reads-fixtures.js";
 
