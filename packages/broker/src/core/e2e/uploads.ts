@@ -74,7 +74,7 @@ export async function readCandidateSourceExport(stores: Pick<UploadStores, "obje
 /** The code of a committed source this install's object storage could not hold, as the coding run's row records it. */
 export const SOURCE_TOO_LARGE_CODE = "too-large";
 /** What the owner reads when the checks need the code and it was too big to keep: one fixed sentence, never built from the upload. */
-export const SOURCE_TOO_LARGE_BLOCK_REASON = "The code is too big to keep for the browser and API checks on this install's object storage. Name the folder object storage (see docs/local.md) and Retry.";
+export const SOURCE_TOO_LARGE_BLOCK_REASON = "The code is too big to keep for the browser and API checks on this install's object storage. An administrator can give the install S3 object storage (the `object-storage-s3` plug-in); then Retry.";
 const SOURCE_TOO_LARGE_ANSWER = { accepted: false, reason: SOURCE_TOO_LARGE_CODE } as const;
 
 const forbiddenMode = (what: string): never => { throw agentXError("CALLBACK_FORBIDDEN", what); };

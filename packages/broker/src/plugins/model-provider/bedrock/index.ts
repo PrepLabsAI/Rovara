@@ -1,7 +1,7 @@
 // Port lane P5 (item K2): Amazon Bedrock as a normal model provider. Nothing here is hard-wired to the machine's role: Bedrock is a `model-provider` plug-in whose sign-in is
 // AWS Signature Version 4, with the credential from an identity the owner NAMED (a profile, or a role to assume), or from the default chain only when the owner opted in (review M1).
 // Claude goes through the messages format on bedrock-runtime's `/anthropic` path; open models go through chat completions on `/openai/v1`. Both paths and the capability rows come from the
-// research (MODEL-PROVIDER-FORMATS-RESEARCH.md, 2026-11-09) and are not yet tried against a live account (docs/local.md, open checks): they are plain data a deployment can correct in a module.
+// research (MODEL-PROVIDER-FORMATS-RESEARCH.md, 2026-11-09) and are not yet tried against a live account: they are plain data a deployment can correct in a module.
 import { SecretValue, type ModelFormatCapabilities, type ModelProviderAdapter, type ModelProviderPrices } from "@agentx/contracts";
 import { createAwsCredentialSource, type AwsCredentialLoaders, type AwsIdentity } from "./credentials.js";
 

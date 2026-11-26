@@ -11,7 +11,7 @@ docs/*
 !docs/ordered-work.md
 !docs/porting.md
 !docs/ports.md
-!docs/local.md
+!docs/policy-hook.md
 !docs/core-settings.md
 !docs/constitution.md
 !docs/specs/
