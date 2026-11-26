@@ -1154,15 +1154,16 @@ async function readClientProject(deps: DeveloperRouteDependencies, developerId: 
 /**
  * DEC 253z: is this live session one with no company? Only the install-level web app with full access, the install's own OIDC sign-in, a session
  * that names no company, NO membership row for the person at all (a removed member's row stays, so they stay refused), and a sign-in record the
- * no-company sign-in wrote (never a legacy person's). Read live, on the sign-in table; any doubt is no.
+ * no-company sign-in wrote (never a legacy person's) that points at no person (`mergedInto`). Read live, on the sign-in table; any doubt is no.
  */
 async function companylessSession(deps: DeveloperRouteDependencies, client: SignInClientRecord, session: SessionRecord): Promise<boolean> {
   if (deps.companies === undefined || client.installLevel !== true || client.fullAccess !== true || client.webApp !== true || (session.amr !== "oidc" && session.amr !== "slack" && session.amr !== "github") || session.companyId !== undefined) return false;
   try {
     const membership = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: membershipKey(session.developerId), ConsistentRead: true })) as { Item?: unknown };
     if (membership.Item !== undefined) return false;
-    const developer = await getSignIn<{ revoked?: unknown; companyless?: unknown }>(deps, `DEVELOPER#${session.developerId}`);
-    return developer?.revoked === false && developer.companyless === true;
+    const developer = await getSignIn<{ revoked?: unknown; companyless?: unknown; mergedInto?: unknown }>(deps, `DEVELOPER#${session.developerId}`);
+    // SLACK-LINK-L2: a record that points at a person (connected, adopted or linked again) is never a person with no company, whatever else it says.
+    return developer?.revoked === false && developer.companyless === true && developer.mergedInto === undefined;
   } catch { return false; }
 }
 

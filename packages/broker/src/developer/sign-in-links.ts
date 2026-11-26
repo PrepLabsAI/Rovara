@@ -146,13 +146,13 @@ export async function adoptableCompanyLessRecord(input: { read: RecordReader; li
 
 /**
  * The adoption itself: the existing merge (`mergedInto`) of the unused record toward the signed-in person, in place, as `relinkWrite` does for a kept one (its own session from the sign-in that
- * made it ends; it carries no email, as a linked record never does). Conditioned on exactly what `adoptableCompanyLessRecord` read: still nobody's, on, company-less, never connected,
+ * made it ends; it carries no email, as a linked record never does, and no `companyless` flag: it is a person's linked sign-in now, and an unlink sets the flag again, DEC 254zzz33). Conditioned on exactly what `adoptableCompanyLessRecord` read: still nobody's, on, company-less, never connected,
  * signed in once (the same first-sign-in time, and no later one), its name not chosen.
  */
 function adoptWrite(tableName: string, linkedId: string, personId: string, adopted: AdoptableRecord, identity: Proved, at: string): Write {
   const slackUserId = identity.method === "slack" ? identity.slackUserId : undefined;
   const set = ["mergedInto = :person", "linkedAt = :at", "linkedBy = :person", "sessionsEndedAt = :at", ...(slackUserId === undefined ? [] : ["slackUserId = :su"]), ...(identity.slackTeamId === undefined ? [] : ["slackTeamId = :team"])];
-  const remove = ["firstSignInMark", "email", "slackTeamName", ...(slackUserId === undefined ? ["slackUserId"] : []), ...(identity.slackTeamId === undefined ? ["slackTeamId"] : [])];
+  const remove = ["companyless", "firstSignInMark", "email", "slackTeamName", ...(slackUserId === undefined ? ["slackUserId"] : []), ...(identity.slackTeamId === undefined ? ["slackTeamId"] : [])];
   return { Update: { TableName: tableName, Key: { pk: `DEVELOPER#${linkedId}`, sk: "META" },
     UpdateExpression: `SET ${set.join(", ")} REMOVE ${remove.join(", ")}`,
     ConditionExpression: "attribute_exists(pk) AND revoked = :false AND companyless = :true AND provider = :method AND firstSignInAt = :first AND lastSignInAt = :first AND attribute_not_exists(displayNameChosen) AND attribute_not_exists(mergedInto) "

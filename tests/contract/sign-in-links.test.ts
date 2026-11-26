@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { buildAgentXApp } from "../../infra/lib/app.js";
-import { AgentXError, SIGN_IN_LINK_TEXT, SLACK_OIDC_ISSUER, type WorkspaceInstance } from "@agentx/contracts";
+import { AgentXError, newCompanyInviteCode, SIGN_IN_LINK_TEXT, SLACK_OIDC_ISSUER, type WorkspaceInstance } from "@agentx/contracts";
 import { membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import type { DeveloperTaskActions } from "../../packages/broker/src/aws/developer-task-actions.js";
 import { routeDeveloperRequest } from "../../packages/broker/src/aws/developer-routes.js";
@@ -725,7 +725,9 @@ describe("adopting an unused company-less record (SLACK-LINK-L2)", () => {
     const w = world();
     const { github, alone } = await slackFirst(w);
     expect(await w.link(github, "slack", { slack: "U0LINKME1", team: TEAM })).toEqual({ status: 200, body: { method: "slack" } });
-    expect(record(w)).toMatchObject({ provider: "slack", mergedInto: P, revoked: false, linkedBy: P, companyless: true });
+    expect(record(w)).toMatchObject({ provider: "slack", mergedInto: P, revoked: false, linkedBy: P });
+    // It is a person's linked sign-in now: no company-less flag (an unlink sets it again, below).
+    expect(record(w)).not.toHaveProperty("companyless");
     expect(record(w)).not.toHaveProperty("email");
     expect(record(w).sessionsEndedAt).toEqual(expect.any(String));
     expect(w.db.find((row) => row.pk === `DEVELOPER#${SLACK()}`)).toHaveLength(1);
@@ -739,6 +741,32 @@ describe("adopting an unused company-less record (SLACK-LINK-L2)", () => {
     const slack = await w.signIn("U0LINKME1", { slackTeam: TEAM });
     expect(decodeJwt(slack.access!).sub).toBe(P);
     expect((await w.access(slack.access)).body).toMatchObject({ developerId: P, companyId: X, companyRole: "member" });
+  });
+
+  it("an unlink of the adopted sign-in sets the company-less flag again, as for any kept record", async () => {
+    const w = world();
+    const { github } = await slackFirst(w);
+    expect((await w.link(github, "slack", { slack: "U0LINKME1", team: TEAM })).status).toBe(200);
+    expect(record(w)).not.toHaveProperty("companyless");
+    w.tick(1_000);
+    expect((await w.api("DELETE", "/v1/dev/me/sign-ins/slack", github)).status).toBe(200);
+    expect(record(w)).toMatchObject({ companyless: true, unlinkedFrom: P, unlinkedCompany: X });
+    expect(record(w)).not.toHaveProperty("mergedInto");
+  });
+
+  it("an adopted record's old session can never create a company, even if its end (sessionsEndedAt) were missed and the flag were still set", async () => {
+    const w = world();
+    const { github, alone } = await slackFirst(w);
+    const code = newCompanyInviteCode();
+    await w.operator({ kind: "company-invite-create", codeHash: code.codeHash, expiresInHours: 24 });
+    expect((await w.link(github, "slack", { slack: "U0LINKME1", team: TEAM })).status).toBe(200);
+    // Worst case: the adoption's own guards both missed (the session is not ended, the flag is back).
+    w.db.set({ ...without(record(w), "sessionsEndedAt"), companyless: true });
+    expect(record(w)).toMatchObject({ mergedInto: P, companyless: true });
+    const created = await w.call("POST", "/v1/dev/company", alone.access, { name: "Orphan", inviteCode: code.code });
+    expect(created.status).not.toBe(200);
+    expect(w.db.find((row) => row.entityType === "COMPANY_MEMBERSHIP" && row.personId === SLACK())).toEqual([]);
+    expect((await w.access(alone.access)).status).not.toBe(200);
   });
 
   it("a record that is used, a member, merged, turned off, not company-less or another method's stays taken, and nothing changes", async () => {
