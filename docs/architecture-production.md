@@ -46,7 +46,7 @@ defaulting to `.devcontainer/devcontainer.json`). Only EC2 workers run one; regi
 on any other deployment mode. On an EC2 worker:
 
 - The worker container gets the host's Docker socket and runs the devcontainer CLI, so the
-  devcontainer and any Compose services it declares run on the instance's own Docker.
+  devcontainer runs on the instance's own Docker. A devcontainer that sets `dockerComposeFile` is refused by the worker's config check, so no Compose services run.
 - The whole workspace volume is mounted into the devcontainer at `/mnt/workspace`, the same path as
   on the host and in the worker, so a path means the same file to the agent's file tools and to a
   command in the container.
