@@ -40,3 +40,9 @@ const CHECK_REPORT_LEADS = { passed: "Checks passed.", failed: "Checks failed.",
 
 /** A check report as a chat message: its status as a lead, unless the text opens with its own result (the two would disagree). */
 export const checkReportWords = (report: { status: keyof typeof CHECK_REPORT_LEADS; text: string }): string => (opensWithTestResult(report.text) ? report.text : `${CHECK_REPORT_LEADS[report.status]} ${report.text}`);
+
+/** The result a pass is said with when its checks skipped tests (the pull request's heading for a task with no Testing view): "Not tested" when every test was skipped, "Passed, N tests skipped" for some; undefined when nothing was skipped. */
+export function skippedResultOf(facts: { skipped: number; allSkipped: boolean } | undefined): { kind: "checks_passed" | "checks_not_tested"; words: string } | undefined {
+  if (facts?.allSkipped === true) return { kind: "checks_not_tested", words: TEST_RESULT_WORDS.allSkipped };
+  return facts !== undefined && Number.isInteger(facts.skipped) && facts.skipped > 0 ? { kind: "checks_passed", words: TEST_RESULT_WORDS.passedWithSkips(facts.skipped) } : undefined;
+}

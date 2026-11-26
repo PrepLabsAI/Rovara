@@ -61,9 +61,10 @@ describe("the Check says the description's words", () => {
 describe("TEST-RESULT-HONESTY: the heading of a task without a Testing view says what the checks skipped", () => {
   const withSkips = (items: Array<{ kind: "check" | "not_selected"; id: string; text: string; reason: string }>) => {
     const scenario = SCENARIOS.find((entry) => entry.name === "green-clean")!.build();
-    const context = scenario.inputs.context as any;
-    const evidence = context.proof.evidence;
-    const noView = { ...context, testing: undefined, proof: { ...context.proof, evidence: { ...evidence, pack: { ...evidence.pack, notTested: [...evidence.pack.notTested, ...items] } } } };
+    const context = scenario.inputs.context;
+    const proof = context.proof!;
+    const evidence = proof.evidence!;
+    const noView = { ...context, testing: undefined, proof: { ...proof, evidence: { ...evidence, pack: { ...evidence.pack, notTested: [...evidence.pack.notTested, ...items] } } } };
     return workflowPullRequestCheckVerdict(SCENARIO_TASK, scenario.inputs.workflow, SCENARIO_PLAN_TEXT(), noView, scenario.inputs.proofLines)!;
   };
   it("no skip items: the fixed words", () => {

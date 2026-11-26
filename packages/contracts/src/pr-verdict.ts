@@ -19,7 +19,7 @@
 //   V8  "No flag" is never "no weakening": a "could not compare" line is an item. Nothing is printed as "none".
 //   V9  Free text a repository, a person or a model wrote goes through `inertEvidenceText` (redacted, one line, no tag, link, mention or issue key, `<` and `&` as entities). A line the caller says is already inert (`lines`)
 //       is still made structural-safe here: control characters out, no `<` (so nothing can close a drawer or open a comment), cut. Summary lines of drawers hold fixed words and counts only.
-import { TEST_RESULT_WORDS } from "./check-result-notes.js";
+import { TEST_RESULT_WORDS, skippedResultOf } from "./check-result-notes.js";
 import { inertEvidenceText } from "./evidence-inert.js";
 import type { EvidenceDependency } from "./evidence.js";
 import { EVIDENCE_FALLBACK_REASON_WORDS, EVIDENCE_TIERS } from "./evidence.js";
@@ -216,8 +216,8 @@ function resultOf(input: PrVerdictInput): { kind: VerdictResultKind; words: stri
   if (input.reviewOnly !== undefined) return { kind: "review_only", words: VERDICT_RESULT_WORDS.review_only };
   const kind: VerdictResultKind = input.checks.length === 0 ? "no_checks" : fromRows === "code_failed" ? "checks_failed" : fromRows === "blocked_by_environment" ? "checks_could_not_run" : fromRows === "partially_verified" ? "checks_incomplete" : "checks_passed";
   // TEST-RESULT-HONESTY: a pass is never "Checks passed" when the checks said they skipped tests: the heading uses the same words as the reply (`TEST_RESULT_WORDS`).
-  if (kind === "checks_passed" && input.testResult?.allSkipped === true) return { kind: "checks_not_tested", words: VERDICT_RESULT_WORDS.checks_not_tested };
-  if (kind === "checks_passed" && whole(input.testResult?.skipped) > 0) return { kind, words: TEST_RESULT_WORDS.passedWithSkips(whole(input.testResult?.skipped)) };
+  const said = kind === "checks_passed" ? skippedResultOf(input.testResult) : undefined;
+  if (said !== undefined) return said;
   return { kind, words: VERDICT_RESULT_WORDS[kind as keyof typeof VERDICT_RESULT_WORDS] };
 }
 
