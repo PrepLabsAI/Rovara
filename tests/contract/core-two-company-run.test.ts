@@ -14,7 +14,7 @@ import { createCoreDispatchHost } from "../../packages/broker/src/aws/worker-mac
 import { workspaceCompanyReader } from "../../packages/broker/src/aws/worker-machines/workspace-company.js";
 import { taskKey, workspaceKey, operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { startTask } from "../../packages/broker/src/core/task-flow/start.js";
-import { coreInUseKey } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { coreInUseKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { createFakeWorld } from "../support/core-host-fakes.js";
 import { DocumentLessonStore } from "../../packages/broker/src/lessons/document-store.js";
 import { lessonRecord } from "../unit/lessons/lesson-helpers.js";
@@ -303,8 +303,6 @@ it("runs two companies through start, dispatch, callbacks, broker model access, 
   expect(query.mock.calls.filter(([input]) => input.pk === "WORKFLOW_MERGE_RECOVERY")).toHaveLength(1);
   expect(await h.w.store.get(recoveryRowKey(foreignId))).toEqual(foreignRow);
   for (const companyId of [A, B]) expect(query.mock.calls.find(([input]) => input.pk === companyScoped(companyId, "TIER_CHECKS_DUE"))?.[0].filter).toEqual({ op: "eq", path: ["companyId"], value: companyId });
-  // #1275: no switch, so C's new tasks start on the core too.
-  expect(h.root.app.engineForNewTask(C)).toBe("core");
 });
 
 it("refuses the entire company's runtime when the gateway has no task signer", async () => {

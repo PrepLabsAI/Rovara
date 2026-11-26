@@ -11,7 +11,7 @@ import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/
 import { createPriceTableMetering, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { FakeHostModel } from "@agentx/broker/fakes";
-import { CoreRegistryError, buildCoreRegistry, createCoreHostApp, engineStampKey, stampOf, type CoreAdapterModule } from "../../packages/broker/src/core-host/index.js";
+import { CoreRegistryError, buildCoreRegistry, createCoreHostApp, coreTaskMarkKey, coreTaskMarkOf, type CoreAdapterModule } from "../../packages/broker/src/core-host/index.js";
 import { CORE_EXPIRY_COLLISIONS, KEPT_FOR_GOOD_ON_AWS, KEPT_ON_SEPARATE_KEYS, appliesCodeRetention, codeRetentionStore, retentionFor, withCodeRetention } from "../../packages/broker/src/core-host/retention.js";
 import { COMPANY_SECRET_PATHS, CORE_DISPATCH_QUEUE, OWED_POINTS, codeAdapterModules, owedPoints, stateTableIndexes, type CodeModuleDeps } from "../../packages/broker/src/core-host/code-modules.js";
 import { FakeDynamoDb } from "../support/ports/dynamodb-fake.js";
@@ -88,7 +88,7 @@ describe("Code's AWS adapter modules", () => {
     const runtime = await app.runtimeFor(FAKE_COMPANY);
     const owner = { principal: localOwnerPrincipal({ companyId: FAKE_COMPANY }), origin: "app" as const, client: "test" };
     const { task } = await runtime.flow.start(owner, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
-    expect(stampOf(await store.get(engineStampKey(task.taskId)))).toMatchObject({ engine: "core" });
+    expect(coreTaskMarkOf(await store.get(coreTaskMarkKey(task.taskId)))).toMatchObject({ engine: "core" });
     expect((await runtime.flow.list(owner)).tasks.map((row) => row.taskId)).toEqual([task.taskId]);
     // Idempotent start: the same request id answers the same task, never a second one.
     const requestId = randomUUID();
@@ -195,7 +195,10 @@ describe("Code's retention for core writes", () => {
     // A `keep` is the dangerous side: the deployed broker must expire that kind itself.
     for (const [kind, action] of Object.entries(CORE_EXPIRY_COLLISIONS)) if (action === "keep" && !KEPT_ON_SEPARATE_KEYS.has(kind)) expect(deployed.expiring.has(kind), kind).toBe(true);
     // The scan sees the forms it must: a digit in a kind, a `change.set` of it, an UpdateExpression value.
-    for (const kind of ["WORKFLOW_E2E_BASELINE", "TASK_RATE", "CHANNEL_THREAD"]) expect(collisions, kind).toContain(kind);
+    for (const kind of ["TASK_RATE", "CHANNEL_THREAD"]) expect(collisions, kind).toContain(kind);
+    // D1-2: WORKFLOW_E2E_BASELINE (a digit in the kind) is now written only by the core, so it is seen as a core expiring kind and no longer a collision.
+    expect(core.expiring.has("WORKFLOW_E2E_BASELINE")).toBe(true);
+    expect(collisions).not.toContain("WORKFLOW_E2E_BASELINE");
   });
 
   it("keeps the core's own expiries and strips only the kinds decided as strip", () => {

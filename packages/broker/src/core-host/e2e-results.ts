@@ -5,7 +5,7 @@ import { renderE2ENotifierSlackBlocks, renderE2EMcpProjection, renderE2EPageHtml
 export function applicationResultsPresentation(taskId: string, shared: E2ESharedView, results?: E2EScenarioResults): NonNullable<DeveloperTaskView["e2ePresentation"]> {
   const base = renderE2EPageHtml(shared);
   const candidates = results === undefined ? [] : [results, ...(results.baseline === undefined ? [] : [{ scenarios: results.scenarios }])];
-  const section = candidates.map((candidate) => renderE2EScenarioRowsHtml(candidate, { artifactPath: (sha256) => `/review/${taskId}/task/api/e2e/artifacts/${sha256}` }))
+  const section = candidates.map((candidate) => renderE2EScenarioRowsHtml(candidate, {}))
     .find((html) => base.length + html.length <= 65_536) ?? "";
   return { shared, pageHtml: `${base}${section}`, slackBlocks: [...(results === undefined ? [] : renderE2EScenarioSlackBlocks(results)), ...renderE2ESlackBlocks(shared)].slice(0, 16), mcp: renderE2EMcpProjection(shared) };
 }

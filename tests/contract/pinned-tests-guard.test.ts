@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import { countRunnableTests, validatePinnedGitHistory, validatePinnedHistory, validatePinnedTests } from "../support/pinned-tests.js";
+import { APPROVED_FLOOR_DROPS, countRunnableTests, validatePinnedGitHistory, validatePinnedHistory, validatePinnedTests } from "../support/pinned-tests.js";
 
 const header = 'import { it, test, describe } from "vitest";\n';
 const body = header + 'it("kept", () => { expect(true).toBe(true); });';
@@ -177,6 +177,26 @@ describe("pinned test guard", () => {
   it("cannot hide a deletion by dropping a registry row or lowering its floor", () => {
     expect(validatePinnedHistory(registry([{ ...pin, path: "tests/new.test.ts" }]), registry())).toEqual([`${path}: historical pin removed; retain it with replaced-by when moving`]);
     expect(validatePinnedHistory(registry(), registry([{ ...pin, minimumTests: 2 }]))).toEqual([`${path}: minimum lowered from 2 to 1`]);
+  });
+
+  // One-time exception (DEC 254zzz555); delete with APPROVED_FLOOR_DROPS in the next train.
+  it("lists exactly the two owner-approved floor drops, accepts only those, and refuses any other or deeper drop", () => {
+    expect(APPROVED_FLOOR_DROPS).toEqual([
+      { path: "tests/contract/task-people.test.ts", from: 36, to: 34, decision: "DEC 254zzz555" },
+      { path: "tests/unit/github-webhook-install-cases.test.ts", from: 6, to: 5, decision: "DEC 254zzz555" },
+    ]);
+    expect(Object.isFrozen(APPROVED_FLOOR_DROPS)).toBe(true);
+    const at = (file: string, minimumTests: number) => registry([{ ...pin, path: file, minimumTests }]);
+    // the approved drops pass, exactly
+    expect(validatePinnedHistory(at("tests/contract/task-people.test.ts", 34), at("tests/contract/task-people.test.ts", 36))).toEqual([]);
+    expect(validatePinnedHistory(at("tests/unit/github-webhook-install-cases.test.ts", 5), at("tests/unit/github-webhook-install-cases.test.ts", 6))).toEqual([]);
+    // a deeper drop, a drop from another held floor, a drop that was not approved, and another path are refused
+    expect(validatePinnedHistory(at("tests/contract/task-people.test.ts", 33), at("tests/contract/task-people.test.ts", 36))).toEqual(["tests/contract/task-people.test.ts: minimum lowered from 36 to 33"]);
+    expect(validatePinnedHistory(at("tests/contract/task-people.test.ts", 33), at("tests/contract/task-people.test.ts", 34))).toEqual(["tests/contract/task-people.test.ts: minimum lowered from 34 to 33"]);
+    expect(validatePinnedHistory(at("tests/contract/task-people.test.ts", 35), at("tests/contract/task-people.test.ts", 36))).toEqual(["tests/contract/task-people.test.ts: minimum lowered from 36 to 35"]);
+    expect(validatePinnedHistory(at("tests/unit/github-webhook-install-cases.test.ts", 4), at("tests/unit/github-webhook-install-cases.test.ts", 6))).toEqual(["tests/unit/github-webhook-install-cases.test.ts: minimum lowered from 6 to 4"]);
+    expect(validatePinnedHistory(at("tests/contract/aws-engine-boundary.test.ts", 25), at("tests/contract/aws-engine-boundary.test.ts", 26))).toEqual(["tests/contract/aws-engine-boundary.test.ts: minimum lowered from 26 to 25"]);
+    expect(validatePinnedHistory(at(path, 34), at(path, 36))).toEqual([`${path}: minimum lowered from 36 to 34`]);
   });
 
   it("allows a historical pin to move explicitly and its floor to grow", () => {

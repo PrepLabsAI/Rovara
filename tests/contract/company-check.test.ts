@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { agentXError, IMPLICIT_COMPANY_ID } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { companyMembershipFromDynamo, companyMembershipFromStore, readTaskLegacyProject } from "../../packages/broker/src/aws/company-check.js";
 import { companyRouteHarness, COMPANY_CHECKED_ROUTES, PERSON, TASK, TIME } from "../support/company-route-harness.js";
@@ -33,7 +33,7 @@ it("membership adapters validate the approved stand-in shape at runtime", async 
   }
 });
 
-import { boundedCompanyReads, COMPANY_READ_LIMITS } from "../../packages/broker/src/aws/company-check.js";
+import { boundedCompanyReads } from "../../packages/broker/src/aws/company-check.js";
 
 it("rejects invalid runtime readers and invalid member keys without leaking input", async () => {
   const h = companyRouteHarness();
@@ -57,41 +57,9 @@ it("membership adapters sanitize read failures before exposing them to a caller"
 });
 
 
-it("paginates an ordinary fifty-task list with forty operations each", async () => {
-  const h = companyRouteHarness();
-  h.project(); // the person holds a grant on the tasks' project: their own list shows a task only while they do
-  const ids = Array.from({ length: 50 }, (_, i) => `00000000-0000-4000-8000-${String(i).padStart(12, "0")}`);
-  for (const id of ids) h.db.set({ ...h.task(id), workspaceId: `ws-${id}` });
-  h.deps.companies = { companyOf: async () => IMPLICIT_COMPANY_ID };
-  h.deps.tasks!.operations = async () => Array.from({ length: 40 }, (_, i) => ({ id: String(i), kind: "task", status: "SUCCEEDED", createdAt: TIME, fence: i }) as never);
-  const first = await h.read("/v1/dev/tasks?limit=50");
-  expect(first.statusCode).toBe(200);
-  const page = bodyOf(first.body);
-  expect(page.tasks.length).toBeGreaterThan(0); expect(page.tasks.length).toBeLessThan(50);
-  expect(page.nextCursor).toEqual(expect.any(String));
-  const second = await h.read(`/v1/dev/tasks?limit=50&cursor=${page.nextCursor!}`);
-  expect(second.statusCode).toBe(200);
-  const rest = bodyOf(second.body);
-  expect(rest.nextCursor).toBeUndefined();
-  expect([...page.tasks, ...rest.tasks].map((task) => task.taskId).sort()).toEqual(ids);
-});
-
-it("refuses an individually oversized task and hard byte failures with fixed words", async () => {
-  for (const mode of ["single", "bytes", "unrelated"] as const) {
-    const h = companyRouteHarness(); h.project(); h.task(); // the person holds a grant on the tasks' project (their list shows a task only while they do)
-    const newer = h.task("22222222-2222-4222-8222-222222222222"); h.db.set({ ...newer, workspaceId: "newer" });
-    h.deps.companies = { companyOf: async () => IMPLICIT_COMPANY_ID };
-    h.deps.tasks!.operations = async (workspaceId) => {
-      if (mode !== "single" && workspaceId === "newer") return [];
-      if (mode === "unrelated") throw agentXError("CONFIG_INVALID", "company read limit exceeded");
-      return Array.from({ length: mode === "single" ? 2_001 : 1 }, () => ({ canary: mode === "bytes" ? "x".repeat(COMPANY_READ_LIMITS.bytes + 1) : COMPANY_A.canary })) as never;
-    };
-    const result = await h.read("/v1/dev/tasks");
-    expect(result.statusCode).toBe(400);
-    expect(bodyOf(result.body).error).toEqual({ code: "CONFIG_INVALID", message: "company read limit exceeded" });
-    expect(result.body).not.toContain(COMPANY_A.canary);
-  }
-});
+// D1-2 (DEC 254zzz502): "paginates an ordinary fifty-task list with forty operations each" and "refuses an individually oversized task and hard byte failures with fixed words" drove the retired
+// workflow list, whose rows each read their task view and workspace operations through the company budget. A core task's row reads its mark and its task only, so those budgets are exercised
+// where they are now reached: tests/unit/list-old-tasks-company-mode.test.ts (the 512-command, 8 MB and 10 s limits end a page with a cursor through the route's whole-call check).
 
 it("starts no further reads after the item budget and counts the crossing response bytes", async () => {
   const send = vi.fn(async () => ({ Items: Array.from({ length: 2_001 }, () => ({})) }));

@@ -237,14 +237,6 @@ async function allPeople(deps: TaskPeopleDependencies, taskId: string): Promise<
   return found;
 }
 
-/** Immutable task-local identity names for page history and pending proposal presentation. No current actor is substituted. */
-export async function getTaskPeoplePresentation(
-  deps: TaskPeopleDependencies,
-  taskId: string,
-): Promise<ReadonlyArray<{ personId: string; developerId: string; name: string }>> {
-  if (!TASK_ID.test(taskId)) return denied();
-  return (await allPeople(deps, taskId)).map(({ personId, identity }) => ({ personId, developerId: identity.developerId, name: identity.name }));
-}
 
 async function checkedFresh(deps: Pick<TaskPeopleDependencies, "checkTaskPerson">, task: DeveloperTaskRecord, developerId: string,
   admission?: TaskPeopleDisplayAdmission): Promise<TaskPersonCheck> {
@@ -720,6 +712,15 @@ export async function resolveTaskPeopleAccess(
 export async function taskOwnerDevelopers(deps: Pick<TaskPeopleDependencies, "documentClient" | "tableName">, taskId: string): Promise<string[] | undefined> {
   const people = await loadPeople(deps, taskId);
   return people?.people.filter((person) => person.role === "owner").map((person) => person.developerId);
+}
+
+/**
+ * What a writer who is not on the task's People list is bound to when they act on it (a stored share's comment): the list's current revision (the access fence of the write, so a list that changes under them fails the write) and its
+ * owners, or neither when the task has no list. A list that cannot be read throws, as every People read does.
+ */
+export async function taskListBinding(deps: Pick<TaskPeopleDependencies, "documentClient" | "tableName">, task: Pick<DeveloperTaskRecord, "taskId">): Promise<{ peopleRevision?: number; ownerActorIds?: readonly string[] }> {
+  const people = await loadPeople(deps, task.taskId);
+  return people === undefined ? {} : { peopleRevision: people.revision, ownerActorIds: people.people.filter((person) => person.role === "owner").map((person) => taskOwnerKey(person.developerId, task.taskId)) };
 }
 
 /** The no-checker exception is confined to the hosted creator's unchanged, sole-owner list. */

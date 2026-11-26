@@ -3,7 +3,7 @@ import { createHash, createSign } from "node:crypto";
 import { z } from "zod";
 import { PULL_REQUEST_BODY_MAX_CHARS, agentXError, createCandidateManifest, isSafeE2ESourcePath, type AgentXError, type ClientRepositoriesResponse, type E2ESourceSnapshot } from "@agentx/contracts";
 import type { RepositoryAccess, RepositoryCredential } from "./repository-access.js";
-import type { GithubMergeReadBudget } from "./aws/workflow-merge-recovery.js";
+import type { ReadBudget as GithubMergeReadBudget } from "@agentx/contracts"; // the port's read allowance (D1: it was declared in the old merge recovery sweep, now gone)
 
 // Spec 065b: what installedRepositories reads of GitHub's answers.
 const InstallationsSchema = z.array(z.object({

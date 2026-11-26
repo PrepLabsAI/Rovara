@@ -155,6 +155,14 @@ describe("the status model's words (the legacy column) and the switch that moved
     expect(defaultTaskDisplay(facts(at("WAIT_FOR_MERGE", "WAITING")), "running").nextOthers).toBe("The pull request is in review.");
     expect(defaultTaskDisplay(facts({ ...at("IMPLEMENT", "RUNNING"), budgetPaused: true }), "running")).toMatchObject({ reason: "it reached its spending limit" });
   });
+
+  it("says only that the checks follow once the pull request is open (a fix round), and keeps the first-round words before it", () => {
+    expect(defaultTaskDisplay(facts(at("IMPLEMENT", "RUNNING")), "running")).toEqual({ state: "building", ...STATUS_LINES.building });
+    expect(defaultTaskDisplay(facts(at("IMPLEMENT", "RUNNING", { pullRequests: [] })), "running").next).toBe("Checks and a pull request follow.");
+    const afterPullRequest = defaultTaskDisplay(facts(at("IMPLEMENT", "RUNNING", { pullRequests: [{ number: 1 }] })), "running");
+    expect(afterPullRequest).toEqual({ state: "building", ...STATUS_LINES.buildingAfterPullRequest });
+    expect(afterPullRequest.next).toBe("Checks follow.");
+  });
 });
 
 describe("the file", () => {

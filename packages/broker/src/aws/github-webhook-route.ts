@@ -5,13 +5,15 @@
 //   3. the HMAC over the RAW body, constant time (the shared `verifyGithubWebhookSignature`), BEFORE anything is parsed, mapped or written;
 //   3b. an event outside the allow-list is decided only AFTER step 3: a valid signature on an event we do not handle is 202 {ignored: true} (GitHub also sends push, workflow_run and the like to a hook that
 //       subscribed to everything; a 403 there is a sustained 4xx that trips the alarm and can get the hook marked unhealthy); a bad signature stays 403 whatever the event, so no one can probe event handling unsigned;
-//   4. `ping` (only after a valid signature), the installation lifecycle events and the legacy pull request path (unchanged, they verify again with the secret that just verified);
-//   5. the core branch for a core-owned task (aws/github-core-webhooks.ts): reads, then the reservation and the wake.
+//   4. `ping` (only after a valid signature) and the installation lifecycle events (they verify again with the secret that just verified);
+//   5. the core branch for a core-owned task (aws/github-core-webhooks.ts): reads, then the reservation and the wake. Anything else that is signed and maps to no core task (D1: the old workflow engine's
+//      pull request path is gone) is 202 IGNORED with no read or write.
 //
 // A delivery that fails step 1 or 3 does no work and no write. Everything signed that maps to nothing is 202 (GitHub's delivery list stays clean); a bad signature stays 403 (the attack signal, alarmed).
 import { AgentXError } from "@agentx/contracts";
 import { verifyGithubWebhookSignature } from "../plugins/code-host/github/signature.js";
 import { GITHUB_CORE_EVENTS, isGithubCoreEvent, receiveCoreGithubWebhook, type GithubCoreWebhookInput } from "./github-core-webhooks.js";
+import { isGithubInstallationEvent } from "./github-lifecycle.js";
 import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError } from "./github-webhooks.js";
 
 /** The largest body the receiver reads (GitHub's own cap is 25 MB; a bigger event is simply not worth an HMAC). */
@@ -31,11 +33,11 @@ export interface GithubWebhookRouteInput {
   /** True for the loader's "this secret holds no usable key" refusal. */
   isSecretMissing: (error: unknown) => boolean;
   /** Present when the install has installation bindings: only then is there a core branch. */
-  core?: Pick<GithubCoreWebhookInput, "documentClient" | "tableName" | "bindings" | "perMinute" | "legacyUnscoped"> | undefined;
+  core?: Pick<GithubCoreWebhookInput, "documentClient" | "tableName" | "bindings" | "perMinute"> | undefined;
   now: () => number;
   log: (entry: Record<string, unknown>) => void;
-  /** The legacy handlers (the installation lifecycle and the old pull request path), called with the secret that verified. */
-  legacy: (secret: string) => Promise<{ status: "ACCEPTED" | "DUPLICATE" | "IN_PROGRESS"; deliveryId: string }>;
+  /** The installation lifecycle handler, called with the secret that verified. Present when the install has installation bindings. */
+  installation: ((secret: string) => Promise<{ status: "ACCEPTED"; deliveryId: string }>) | undefined;
 }
 
 export interface GithubWebhookRouteAnswer { status: number; body: unknown }
@@ -81,14 +83,13 @@ async function dispatch(input: GithubWebhookRouteInput, body: string, headers: R
   const event = headers["x-github-event"]!;
   const deliveryId = headers["x-github-delivery"]!;
   if (event === "ping") return { status: 200, body: { delivery: "PONG" } };
-  const legacy = async (): Promise<GithubWebhookRouteAnswer> => {
-    const result = await input.legacy(secret);
-    return { status: result.status === "IN_PROGRESS" ? 503 : 200, body: { delivery: result.status, deliveryId: result.deliveryId } };
-  };
-  if (input.core === undefined || !isGithubCoreEvent(event)) return legacy();
+  if (input.installation !== undefined && isGithubInstallationEvent(headers)) {
+    const result = await input.installation(secret);
+    return { status: 200, body: { delivery: result.status, deliveryId: result.deliveryId } };
+  }
+  if (input.core === undefined || !isGithubCoreEvent(event)) return { status: 202, body: { delivery: "IGNORED" } };
   const outcome = await receiveCoreGithubWebhook({ ...input.core, rawBody: body, eventName: event, deliveryId, now: input.now, log: input.log });
   switch (outcome.kind) {
-    case "legacy": return legacy();
     case "ignored": return { status: 202, body: { delivery: "IGNORED" } };
     case "throttled": return { status: 202, body: { delivery: "THROTTLED" } };
     case "duplicate": return { status: 200, body: { delivery: "DUPLICATE", deliveryId: outcome.deliveryId } };

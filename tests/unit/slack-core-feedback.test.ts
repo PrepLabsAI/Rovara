@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { expect, it, vi } from "vitest";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { coreKeepPullRequests } from "../../packages/broker/src/aws/slack-core-feedback.js";
-import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { NOT_ON_THE_CORE_YET } from "../../packages/broker/src/core-host/dev-routes.js";
 import type { CoreTaskEntry } from "../../packages/broker/src/aws/engine-boundary.js";
 
@@ -11,7 +11,7 @@ const event = { taskId, requestId: randomUUID(), expectedRevision: 9 };
 const caller = { developerId: "a".repeat(64), sessionId: "slack", name: "Owner" };
 function world(core = true) {
   const db = new FakeDynamoDb();
-  if (core) db.set({ ...engineStampKey(taskId), coreEngine: { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "on", stampedAt: "2026-11-22T00:00:00.000Z" } });
+  if (core) db.set({ ...coreTaskMarkKey(taskId), coreEngine: { engine: "core", areas: { flow: "core", build: "core", merge: "core" }, flags: "on", stampedAt: "2026-11-22T00:00:00.000Z" } });
   return { documentClient: db, tableName: "state" };
 }
 
@@ -57,12 +57,12 @@ it("failed linked identity resolution never reaches a served route", async () =>
   expect(route).not.toHaveBeenCalled();
 });
 
-it("Slack Keep on an unstamped missing task preserves the legacy owner refusal", async () => {
+it("Slack Keep on an unstamped task (an old workflow card) gets the fixed retired-button answer, not the old owner refusal (D1-2)", async () => {
   const { createDeveloperTaskBroker, MAYA } = await import("../support/developer-task-broker.js");
   const { SLACK_TEAM, SLACK_CHANNEL } = await import("../support/slack-broker.js");
   const w = await createDeveloperTaskBroker();
   const answer = await w.handler({ source: "agentx.slack-ingress", action: "workflow-keep-pull-requests", taskId,
     userId: MAYA.slackUserId, thread: { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000100" },
     requestId: randomUUID(), expectedRevision: 9 });
-  expect(JSON.parse(answer.body)).toMatchObject({ refused: true, message: "Only the task owner can do that." });
+  expect(JSON.parse(answer.body)).toMatchObject({ refused: true, code: "SLACK_BUTTON_RETIRED", message: "That button is out of date. Use the latest message in this thread." });
 });

@@ -3,17 +3,17 @@
 // One object per function container. It builds the registry (once) and a core runtime per company (once), when first asked. Every new task starts on the core (#1275: there is no switch).
 //
 // Entry points:
-//   - `engineForNewTask(company)`: where a new task starts (always `core`). The start route asks this; `core` sends the start to the company's runtime.
-//   - `engineOfTask(store, taskId, area)`: where an EXISTING task's area runs (its stamp: an unstamped task is a spec 056 workflow task, #1274).
+//   - `runtimeFor(company)`: the company's core runtime (a start goes to it).
+//   - Whether an EXISTING task is the core's is its mark (aws/engine-boundary.ts `isCoreTask`), not asked of this object (D1).
 //   - `handleScheduledJob(event)`: a schedule's event (`agentx.core-job`) runs one row of the jobs table, per company, isolated.
 //   - `relayOutbox(companies)`: the stream reader's hook on outbox inserts.
 import type { AdapterRegistry, DocumentStore, OrgId } from "@agentx/contracts";
-import { createCoreRuntime, serviceGaps, type CoreRuntime, type CoreRuntimeOptions } from "./core-runtime.js";
-import { engineForNewTask, engineOfStoredTask, listCoreInUse, type Engine } from "./engine-stamp.js";
-import { CORE_AREAS, CORE_ENGINE_ON, coreAreaOn, type CoreArea, type CoreEngineFlags, type CoreSwitch } from "./flags.js";
+import { createCoreRuntime, type CoreRuntime, type CoreRuntimeOptions } from "./core-runtime.js";
+import { listCoreInUse } from "./core-task-mark.js";
+import { CoreWiringIncompleteError, coreWiringGaps } from "./core-wiring-guard.js";
+import { CORE_AREAS, type CoreSwitch } from "./flags.js";
 import { CORE_JOBS, isCoreJobEvent, runPerCompany, type CompanyRunReport, type CoreJob } from "./jobs.js";
 import { buildCoreRegistry, type CoreAdapterContext, type CoreAdapterModule } from "./registry.js";
-import { CoreSwitchBlockedError, switchBlockers } from "./switch-blockers.js";
 
 export interface CoreHostAppOptions {
   /** The adapters (the deployment's modules in production; fakes in tests). A function is called when the registry is first built, so a deployment's inputs are asked for only then. */
@@ -23,7 +23,7 @@ export interface CoreHostAppOptions {
   /** Builds the adapter context (clients) on first use. */
   context: () => CoreAdapterContext;
   /** The per-company runtime's own wiring (signing key, access, credentials, services). */
-  runtime: (registry: AdapterRegistry, companyId: OrgId, flags: CoreEngineFlags) => Omit<CoreRuntimeOptions, "registry" | "companyId" | "flags">;
+  runtime: (registry: AdapterRegistry, companyId: OrgId) => Omit<CoreRuntimeOptions, "registry" | "companyId">;
   /** Wraps the registry's store (a deployment's retention rule). */
   wrapStorage?: (store: DocumentStore) => DocumentStore;
   /** Called on the complete registry just before its seal (the deployment's policy hook). */
@@ -47,9 +47,6 @@ export interface CoreHostAppOptions {
 }
 
 export interface CoreHostApp {
-  readonly flags: CoreEngineFlags;
-  engineForNewTask(companyId: string): Engine;
-  engineOfTask(store: Parameters<typeof engineOfStoredTask>[0], taskId: string, area: CoreArea): Promise<Engine>;
   /** The sealed registry (built once). */
   registry(): Promise<AdapterRegistry>;
   /** The core for one company (built once). */
@@ -63,7 +60,7 @@ export interface CoreHostApp {
 /** What a scheduled run leaves of its function's time for the run's own end (logging, the answer): its budget is the time left less this. */
 export const JOB_EXIT_MARGIN_MS = 20_000;
 
-/** Fixed refusal: a dispatch-only root cannot run merge tracking without the merge switch blockers. */
+/** Fixed refusal: a dispatch-only root cannot run merge tracking without the wiring guard's checks (honest CI, the required services). */
 export const DISPATCH_ONLY_MERGE_TRACKING_REFUSED = "the dispatch-only core runtime cannot include merge tracking";
 
 export class DispatchOnlyMergeTrackingError extends Error {
@@ -74,7 +71,6 @@ export class DispatchOnlyMergeTrackingError extends Error {
 }
 
 export function createCoreHostApp(options: CoreHostAppOptions): CoreHostApp {
-  const flags = CORE_ENGINE_ON;
   const jobs = options.jobs ?? CORE_JOBS;
   const nowMs = options.nowMs ?? Date.now;
   let context: CoreAdapterContext | undefined;
@@ -89,7 +85,7 @@ export function createCoreHostApp(options: CoreHostAppOptions): CoreHostApp {
   const registry = (): Promise<AdapterRegistry> => {
     // Every area's points: a half-wired registry is refused.
     registryPromise ??= Promise.resolve().then(() => modulesOf()).then((modules) => buildCoreRegistry({ modules, context: contextOnce(), areas: [...CORE_AREAS], ...(options.wrapStorage === undefined ? {} : { wrapStorage: options.wrapStorage }), ...(options.beforeSeal === undefined ? {} : { beforeSeal: options.beforeSeal }) })).catch((error: unknown) => {
-      // A failed build is not cached: the next container use tries again (a transient client error), and the switch stays effectively off meanwhile.
+      // A failed build is not cached: the next container use tries again (a transient client error).
       registryPromise = undefined;
       throw error;
     });
@@ -101,16 +97,13 @@ export function createCoreHostApp(options: CoreHostAppOptions): CoreHostApp {
     if (found === undefined) {
       found = (async () => {
         const built = await registry();
-        const runtime = createCoreRuntime({ ...options.runtime(built, companyId, flags), registry: built, companyId, flags });
+        const runtime = createCoreRuntime({ ...options.runtime(built, companyId), registry: built, companyId });
         if (options.dispatchOnly === true && runtime.services["merge-tracking"] !== undefined) throw new DispatchOnlyMergeTrackingError();
-        // Every area is on for every company, so each must have its services.
-        const areas = CORE_AREAS.filter((area) => coreAreaOn(flags, area, companyId));
-        const gaps = options.dispatchOnly === true ? [] : serviceGaps(runtime.services, areas);
-        if (gaps.length > 0) throw new Error(`the core runtime lacks services for the areas switched on: ${gaps.join(", ")}`);
-        // The switch blockers (switch-blockers.ts): required checks, by id. Honest CI is asked where the merge area is on or merge tracking runs at all. A dispatch-only root runs no merge job;
+        // The wiring guard (core-wiring-guard.ts): every required service, and the required checks by id (honest CI). A dispatch-only root runs no merge job and is not asked;
         // the guard above makes that assumption explicit so future merge-tracking wiring cannot turn this skipped check into a bypass.
-        const blockers = options.dispatchOnly === true ? [] : switchBlockers(runtime, areas);
-        if (blockers.length > 0) throw new CoreSwitchBlockedError(blockers);
+        const gaps = options.dispatchOnly === true ? { services: [], blockers: [] } : coreWiringGaps(runtime);
+        if (gaps.services.length > 0) throw new Error(`the core runtime lacks required services: ${gaps.services.join(", ")}`);
+        if (gaps.blockers.length > 0) throw new CoreWiringIncompleteError(gaps.blockers);
         return runtime;
       })();
       found.catch(() => runtimes.delete(companyId));
@@ -119,17 +112,13 @@ export function createCoreHostApp(options: CoreHostAppOptions): CoreHostApp {
     return found;
   };
 
-  const companiesFor = async (area: CoreArea): Promise<string[]> => {
+  const companiesFor = async (): Promise<string[]> => {
     // A company a lessons/system-runs flag names counts as in use for the jobs.
-    const named = (options.alsoNamedBy ?? []).flatMap((value) => (value.mode === "on-for" ? value.companies : [])).filter((companyId) => coreAreaOn(flags, area, companyId));
+    const named = (options.alsoNamedBy ?? []).flatMap((value) => (value.mode === "on-for" ? value.companies : []));
     return [...new Set([contextOnce().installCompanyId, ...named, ...(await servedCompanies())])];
   };
 
   return {
-    flags,
-    engineForNewTask: (companyId) => engineForNewTask(flags, companyId),
-    // An existing task's engine is its stamp.
-    engineOfTask: (store, taskId, area) => engineOfStoredTask(store, taskId, area),
     registry,
     runtimeFor,
     async handleScheduledJob(event, run) {
@@ -140,7 +129,7 @@ export function createCoreHostApp(options: CoreHostAppOptions): CoreHostApp {
       const configured = options.jobBudgetMs ?? 50_000;
       const budgetMs = Math.max(0, run?.remainingMs === undefined ? configured : Math.min(configured, run.remainingMs - (job.exitMarginMs ?? JOB_EXIT_MARGIN_MS)));
       // Each company's job is given what is left of the run's budget when its turn comes.
-      const companies = await runPerCompany(await companiesFor(job.area), async (companyId, leftMs) => {
+      const companies = await runPerCompany(await companiesFor(), async (companyId, leftMs) => {
         const asked = nowMs();
         const runtime = await runtimeFor(companyId);
         return await job.run(runtime, Math.max(0, leftMs - (nowMs() - asked)));

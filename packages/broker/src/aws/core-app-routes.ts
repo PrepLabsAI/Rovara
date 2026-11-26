@@ -7,7 +7,7 @@
 //   - hands a person erase (`POST /v1/app/people/<id>/erase`) to the person-erase route (#687), and every other /v1/app path to the core host's dev routes, which check the company,
 //     the person's level, grant or role on every act (DEC 254zzz73: no step-up).
 //   - answers anything the core's handlers throw (a runtime or registry that cannot be built) with fixed words and a log line naming only the error's kind.
-// While the core switch is off the deployment builds no entry at all, so the developer API answers every /v1/app/* path "route not found" and reads nothing.
+// Where no core is wired the deployment builds no entry at all, so the developer API answers every /v1/app/* path "route not found" and reads nothing.
 import { MEMBERSHIP_READ_FAILED_WORDS } from "../core/membership-read.js";
 import type { DeployedCaller, SlackThreadAnswer, SlackThreadAnswerInput } from "../core-host/dev-routes.js";
 import type { PersonEraseCaller } from "../core-host/person-erase-route.js";

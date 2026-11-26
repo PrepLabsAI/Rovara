@@ -66,8 +66,6 @@ import { guardTaskDispatch, type TaskDispatchGuard } from "../../packages/broker
 import { failActiveOperation, failOutboxOperation } from "../../packages/broker/src/aws/outbox-failure.js";
 import type { DurableOutboxRecord, Ec2OutboxRecord } from "../../packages/broker/src/aws/lambda.js";
 import type { CheckTaskPerson } from "../../packages/broker/src/developer/task-people.js";
-import { runPlanEvidenceJob, type PlanEvidenceRunOutcome } from "../../packages/broker/src/aws/plan-evidence-handler.js";
-import type { PlanEvidenceEvent } from "../../packages/broker/src/developer/plan-evidence-jobs.js";
 import { createWorkerCallbackSinks } from "../../packages/worker/src/callback-client.js";
 import { createDefaultPiSessionAdapter } from "../../packages/worker/src/pi-session.js";
 import { createRepositoryCredentialProvider } from "../../packages/worker/src/repository-credentials.js";
@@ -376,8 +374,6 @@ export async function createWorkflowE2E(options: {
   const githubPullRequests = options.github?.wire === true
     ? { ...github.gateway, ...mutableGithubReads, getPullRequestFeedback: wireFeedbackReader(github), getPullRequestMergeObservation: mergeObservationReader(github, true, mergeObservationRequests, options.mergeObservation) }
     : { ...github.gateway, ...mutableGithubReads, getPullRequestMergeObservation: mergeObservationReader(github, false, mergeObservationRequests, options.mergeObservation) };
-  // The plan evidence jobs the broker started: the background Lambda is run by the test, with `runPlanEvidenceJobs`.
-  const planEvidenceJobs: PlanEvidenceEvent[] = [];
   const workflowDependenciesConfiguration = workflowDependenciesConfigurationFromEnvironment(options.workflowDependenciesEnvironment ?? {});
   const harness = await createSingleAnswerPlanBroker({
     register: false,
@@ -396,7 +392,6 @@ export async function createWorkflowE2E(options: {
     ...(options.consistency === undefined ? {} : { consistency: options.consistency }),
     brokerExtra: {
       githubPullRequests,
-      startPlanEvidenceJob: async (event: PlanEvidenceEvent) => { planEvidenceJobs.push(event); },
       githubWebhookSecret,
       ...(options.descriptionUpdateMaxMs === undefined ? {} : { descriptionUpdateMaxMs: options.descriptionUpdateMaxMs }),
       repositoryGrants: new RepositoryGrantService(Buffer.alloc(32, 4), (reference, url, access) => github.resolveCredential(reference, url, access)),
@@ -631,7 +626,7 @@ export async function createWorkflowE2E(options: {
       retrySleep: async () => undefined,
     }, { publicKey: workerKeys.publicKey, workspaceId: invocation.workspaceId, generation: 1 });
     const deliver = createEc2Delivery({
-      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined, verifyMachine: async () => ({ ok: true }), failOperation: async () => undefined,
+      verifyMachine: async () => ({ ok: true }), failOperation: async () => undefined,
       sessions: { ensureSession: async () => ({ ready: true as const, generation: 1, privateIp: "127.0.0.1" }) },
       binding: async () => ({ deploymentMode: "ec2-ebs" }) as never,
       sign: async (message) => cryptoSign("sha256", message, workerKeys.privateKey),
@@ -961,7 +956,7 @@ export async function createWorkflowE2E(options: {
       },
       log: () => undefined,
       deliverEc2: createEc2Delivery({
-        applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined, verifyMachine: async () => ({ ok: true }), failOperation: async () => undefined,
+        verifyMachine: async () => ({ ok: true }), failOperation: async () => undefined,
         sessions: { ensureSession: async () => ({ ready: true, generation: 1, privateIp: "10.0.0.9" }) },
         binding: async () => ({ deploymentMode: "ec2-ebs" }) as never,
         sign: async () => new Uint8Array(64),
@@ -1248,14 +1243,6 @@ export async function createWorkflowE2E(options: {
   let interactionSequence = 0;
   const slackActionTimestamps: string[] = [];
   const journey = {
-    /** Runs, as the PlanEvidence Lambda would, every job the broker started since the last call; answers what each did. */
-    async runPlanEvidenceJobs(): Promise<PlanEvidenceRunOutcome[]> {
-      const outcomes: PlanEvidenceRunOutcome[] = [];
-      for (const event of planEvidenceJobs.splice(0)) {
-        outcomes.push(await runPlanEvidenceJob({ documentClient: db as never, s3, tableName: "state", bucketName: "artifacts", github: github.gateway, now: Date.now, log: () => undefined }, event));
-      }
-      return outcomes;
-    },
     /**
      * The Slack service's side of the task-thread mentions parked so far, on its real code: the question check
      * (`handleTaskQuestion`, with `route` as the scripted classifier, absent for none), the broker's task-answer workspace

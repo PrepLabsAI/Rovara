@@ -1,17 +1,13 @@
 import { z } from "zod";
 import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { WorkerInvocationSchema, agentXError, taskGraphDigest, workflowPublicationContext, workflowPublicationContextDigest, workspaceSessionKey, type Ec2RuntimeBinding, type WorkerInvocation } from "../../packages/contracts/src/index.js";
-import { createDispatcherHandler, createWorkflowE2EReadinessCompleter, createWorkflowE2EReadinessValidator, workerPingFeatures } from "../../packages/broker/src/aws/dispatcher.js";
+import { WorkerInvocationSchema, agentXError, taskGraphDigest, workflowPublicationContext, workflowPublicationContextDigest, type Ec2RuntimeBinding, type WorkerInvocation } from "../../packages/contracts/src/index.js";
+import { createDispatcherHandler, workerPingFeatures } from "../../packages/broker/src/aws/dispatcher.js";
 import { guardTaskDispatch as coreGuardTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-access.js";
-import { MACHINE_FALLBACK_MESSAGES, STARTING_COMPUTE_MESSAGE, createEc2Delivery, type Ec2Delivery, type Ec2DeliveryDependencies } from "../../packages/broker/src/aws/ec2-delivery.js";
+import { MACHINE_FALLBACK_MESSAGES, createEc2Delivery, type Ec2Delivery, type Ec2DeliveryDependencies } from "../../packages/broker/src/aws/ec2-delivery.js";
 import { planDocumentInstructions } from "../../packages/broker/src/aws/broker-shared.js";
-import type { FeatureE2EPlanningContext } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
 import type { DurableOutboxRecord, Ec2OutboxRecord } from "../../packages/broker/src/aws/lambda.js";
-import { appendOperationEvent } from "../../packages/broker/src/aws/operation-events.js";
-import { SessionManager, workspaceBinding } from "../../packages/broker/src/aws/sessions.js";
 import { verifyInvokeAuthorization, invocationMatchesClaims, invokePublicKey } from "../../packages/worker/src/invoke-auth.js";
-import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { COMPANY_A, createSessionMachinesWorld } from "../support/session-machines-world.js";
 
 const NOW = Date.parse("2026-09-27T12:00:00.000Z");
@@ -37,16 +33,12 @@ function recordFor(workspaceId = randomUUID(), fence = 2): Ec2OutboxRecord {
 function delivery(overrides: Partial<Ec2DeliveryDependencies> = {}, without: ReadonlyArray<keyof Ec2DeliveryDependencies> = []) {
   const post = vi.fn<Ec2DeliveryDependencies["post"]>(async () => ({ status: 200, body: "{\"accepted\":true}" }));
   const progress = vi.fn<Ec2DeliveryDependencies["progress"]>(async () => undefined);
-  const applicationPlanNotNegotiated = vi.fn<NonNullable<Ec2DeliveryDependencies["applicationPlanNotNegotiated"]>>(async () => undefined);
-  const planQualityNotNegotiated = vi.fn<NonNullable<Ec2DeliveryDependencies["planQualityNotNegotiated"]>>(async () => undefined);
   const dependencies: Ec2DeliveryDependencies = {
     sessions: { ensureSession: async () => ({ ready: true, generation: 3, privateIp: "10.42.128.10" }) },
     binding: async () => binding,
     sign: kmsSign,
     post,
     progress,
-    applicationPlanNotNegotiated,
-    planQualityNotNegotiated,
     verifyMachine: async () => ({ ok: true }),
     failOperation: async () => undefined,
     now: () => NOW,
@@ -54,35 +46,9 @@ function delivery(overrides: Partial<Ec2DeliveryDependencies> = {}, without: Rea
   };
   for (const key of without) delete dependencies[key];
   const deliver = createEc2Delivery(dependencies);
-  return { deliver, post, progress, applicationPlanNotNegotiated, planQualityNotNegotiated };
+  return { deliver, post, progress };
 }
 
-function readinessFixture() {
-  const db = new FakeDynamoDb();
-  const record = recordFor();
-  const taskId = randomUUID();
-  const marker = {
-    purpose: "workflow-e2e-readiness" as const,
-    taskId,
-    workflowRevision: 4,
-    candidateDigest: "a".repeat(64),
-    dispatchSk: `${taskId}#4`,
-  };
-  record.workflowE2EReadiness = marker;
-  db.set({ pk: `WORKSPACE#${record.workspaceId}`, sk: `OPERATION#${record.operationId}`, entityType: "OPERATION",
-    id: record.operationId, kind: "resume", status: "DISPATCHING", workspaceId: record.workspaceId, fence: record.invocation.fence, eventSequence: 0,
-    workflowE2EReadiness: { ...marker, outboxId: record.id } });
-  db.set({ pk: `OUTBOX#${record.id}`, sk: "OUTBOX", ...record, status: "QUEUED" });
-  db.set({ pk: `WORKSPACE#${record.workspaceId}`, sk: "META", entityType: "WORKSPACE", id: record.workspaceId, status: "BUSY",
-    deploymentMode: "ec2-ebs", projectName: "readiness-test", projectRevision: record.invocation.projectRevision,
-    activeOperationId: record.operationId, fence: record.invocation.fence });
-  db.set({ pk: "PROJECT#readiness-test", sk: `REV#${String(record.invocation.projectRevision).padStart(12, "0")}`, entityType: "PROJECT", runtimeBinding: binding });
-  db.set({ pk: `DEVTASK#${taskId}`, sk: "META", taskId, workspaceId: record.workspaceId, workflow: { revision: marker.workflowRevision, stage: "VERIFY", state: "WAITING",
-    candidate: { digest: marker.candidateDigest }, e2e: { required: true } } });
-  db.set({ pk: "WORKFLOW_DISPATCH", sk: marker.dispatchSk, taskId, workflowRevision: marker.workflowRevision,
-    candidateDigest: marker.candidateDigest, readinessOperationId: record.operationId, kind: "CHECKS" });
-  return { db, record, marker, taskId };
-}
 
 describe("ec2-ebs delivery", () => {
   it("rechecks task access after compute is ready and parks before signing or POST", async () => {
@@ -126,79 +92,6 @@ describe("ec2-ebs delivery", () => {
     expect(verifyInvokeAuthorization(init.authorization, {
       publicKey: keys.publicKey, workspaceId: record.workspaceId, generation: 3, now: () => Math.floor(NOW / 1_000) + 60,
     })).toEqual({ ok: false, reason: "expired" });
-  });
-
-  it("does not treat an unrelated resume as E2E readiness", async () => {
-    const db = new FakeDynamoDb();
-    const record = recordFor();
-    db.set({ pk: `WORKSPACE#${record.workspaceId}`, sk: `OPERATION#${record.operationId}`, kind: "resume", status: "DISPATCHING",
-      id: record.operationId, workspaceId: record.workspaceId, fence: record.invocation.fence });
-    const validate = createWorkflowE2EReadinessValidator({ documentClient: db as never, tableName: "state" });
-    const { deliver, post } = delivery({ validateWorkflowE2EReadiness: validate });
-
-    await expect(deliver(record, record.invocation)).resolves.toBe("DELIVERED");
-    expect(post).toHaveBeenCalledTimes(1);
-  });
-
-  it("rejects a forged readiness marker before provisioning compute or posting to the worker", async () => {
-    const fixture = readinessFixture();
-    fixture.record.workflowE2EReadiness = { ...fixture.marker, purpose: "not-readiness" } as unknown as typeof fixture.marker;
-    const ensureSession = vi.fn(async () => ({ ready: true as const, generation: 3, privateIp: "10.42.128.10" }));
-    const { deliver, post } = delivery({
-      validateWorkflowE2EReadiness: createWorkflowE2EReadinessValidator({ documentClient: fixture.db as never, tableName: "state" }),
-      sessions: { ensureSession },
-    });
-
-    await expect(deliver(fixture.record, fixture.record.invocation)).rejects.toThrow("stored E2E readiness operation, outbox, task, or active fence does not match");
-    expect(ensureSession).not.toHaveBeenCalled();
-    expect(post).not.toHaveBeenCalled();
-  });
-
-
-  it("completes only the validated readiness operation and releases its matching active workspace fence", async () => {
-    const fixture = readinessFixture();
-    const generation = 9;
-    fixture.db.set({ ...workspaceSessionKey(fixture.record.workspaceId), state: "READY", generation, privateIp: "10.42.128.10" });
-    const transactions: Array<{ TransactItems: Array<Record<string, Record<string, unknown>>> }> = [];
-    const documentClient = { send: async (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
-      if (command.constructor.name === "TransactWriteCommand") transactions.push(command.input as typeof transactions[number]);
-      return fixture.db.send(command);
-    } };
-    const validate = createWorkflowE2EReadinessValidator({ documentClient: documentClient as never, tableName: "state" });
-    const complete = createWorkflowE2EReadinessCompleter({ documentClient: documentClient as never, tableName: "state" });
-    const post = vi.fn<Ec2DeliveryDependencies["post"]>(async () => ({ status: 200, body: "{}" }));
-    const deliver = createEc2Delivery({
-      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined, verifyMachine: async () => ({ ok: true }), failOperation: async () => undefined,
-      sessions: { ensureSession: async () => ({ ready: true, generation, privateIp: "10.42.128.10" }) },
-      binding: async () => binding, sign: kmsSign, post, progress: async () => undefined, now: () => NOW,
-      validateWorkflowE2EReadiness: validate,
-    });
-    const handler = createDispatcherHandler({
-      markDispatching: async () => true, markDelivered: async () => undefined, markFailed: async () => undefined,
-      deliverEc2: (record, invocation) => deliver(record, invocation),
-      completeWorkflowE2EReadiness: complete, log: () => undefined,
-    });
-
-    await expect(handler({ Records: [{ messageId: "readiness", body: JSON.stringify(fixture.record) }] })).resolves.toEqual({ batchItemFailures: [] });
-    expect(post).not.toHaveBeenCalled();
-    const completedOperation = fixture.db.get(`WORKSPACE#${fixture.record.workspaceId}`, `OPERATION#${fixture.record.operationId}`)!;
-    expect(completedOperation).toMatchObject({
-      status: "SUCCEEDED", result: { status: "READY", generation },
-      workflowE2EReadiness: { ...fixture.marker, outboxId: fixture.record.id, readyGeneration: generation },
-    });
-    expect(Object.hasOwn(completedOperation, "workflowE2EReadiness.readyGeneration")).toBe(false);
-    const completion = transactions[0]?.TransactItems;
-    expect(completion).toHaveLength(6);
-    const operationUpdate = completion?.find((entry) => "Update" in entry && entry.Update?.Key && (entry.Update.Key as { sk?: string }).sk === `OPERATION#${fixture.record.operationId}`)?.Update;
-    expect(operationUpdate?.UpdateExpression).toContain("workflowE2EReadiness = :readiness");
-    expect(operationUpdate?.ExpressionAttributeValues).toMatchObject({ ":readiness": { ...fixture.marker, outboxId: fixture.record.id, readyGeneration: generation },
-      ":fence": fixture.record.invocation.fence, ":outbox": fixture.record.id });
-    const sessionCheck = completion?.find((entry) => "ConditionCheck" in entry && JSON.stringify(entry.ConditionCheck?.Key) === JSON.stringify(workspaceSessionKey(fixture.record.workspaceId)))?.ConditionCheck;
-    expect(sessionCheck).toMatchObject({ ConditionExpression: "#state = :ready AND generation = :generation",
-      ExpressionAttributeValues: { ":ready": "READY", ":generation": generation } });
-    expect(fixture.db.get(`OUTBOX#${fixture.record.id}`, "OUTBOX")).toMatchObject({ status: "DELIVERED" });
-    expect(fixture.db.get(`WORKSPACE#${fixture.record.workspaceId}`, "META")).toMatchObject({ status: "READY", fence: fixture.record.invocation.fence });
-    expect(fixture.db.get(`WORKSPACE#${fixture.record.workspaceId}`, "META")).not.toHaveProperty("activeOperationId");
   });
 
   describe("the task's readiness and workers built before it (spec 051)", () => {
@@ -363,317 +256,6 @@ describe("ec2-ebs delivery", () => {
       log.mockRestore();
     });
 
-    it("hands a version 2 application plan only to a worker that lists task.workflowE2EApplicationPlan; an older worker gets the portable-only prompt", async () => {
-      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-      const context: FeatureE2EPlanningContext = { status: "available",
-        source: { origin: "approved-setup", commitSha: "a".repeat(40), treeSha: "b".repeat(40), candidateDigest: "c".repeat(64),
-          preparedCommitStatus: "UNKNOWN", preparedCommitSha: null, currentCheckoutUnverified: true },
-        baselineScenarioIds: [], targets: [{ targetId: "web-1", applicationId: "orders", kind: "web", accountProfileId: "synthetic" }],
-        runtimeRefs: [], unavailableTargetRefs: [], unavailableReasons: [], runtimeAccountRefs: [], portableOperations: [], mockFixtures: [], accountContextRefs: [],
-        executableKinds: [{ kind: "web", steps: ["navigate", "click"], assertions: ["visible"] }] };
-      const asked = planDocumentInstructions({ kind: "plan", path: "QUICK", e2ePlanningContext: context });
-      const portable = planDocumentInstructions({ kind: "plan", path: "QUICK", e2ePlanningContext: context, applicationPlans: false });
-      const wrap = (instructions: string) => `Planning phase only.\n\n${instructions}\n\nRequest:\nadd it`;
-      const record = taskRecord({ workflowMode: "PLAN", planFormat: "structured", workflowE2EPlanVersion: 2, prompt: wrap(asked) });
-      const capable = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans", "task.workflowE2EApplicationPlan"] });
-      expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
-      expect(postedPayload(capable.post)).toMatchObject({ workflowE2EPlanVersion: 2, prompt: wrap(asked) });
-      expect(capable.applicationPlanNotNegotiated).not.toHaveBeenCalled();
-      const older = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans"] });
-      expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
-      // The operation record must stop saying the plan version was offered, before the worker runs (Ruling AW).
-      expect(older.applicationPlanNotNegotiated).toHaveBeenCalledTimes(1);
-      expect(older.applicationPlanNotNegotiated).toHaveBeenCalledWith(record);
-      expect(postedPayload(older.post)).not.toHaveProperty("workflowE2EPlanVersion");
-      expect(postedPayload(older.post).prompt).toBe(wrap(portable));
-      expect(postedPayload(older.post)).toMatchObject({ workflowMode: "PLAN", planFormat: "structured" });
-      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({
-        event: "dispatch.application_plan_omitted", reason: "worker-lacks-feature", operationId: record.operationId,
-      }));
-      log.mockRestore();
-    });
-
-    describe("application E2E admissions (Ruling BQ, mixed fleet)", () => {
-      const admission = (extra: Record<string, unknown> = {}) => ({ schemaVersion: 1, taskId: randomUUID(), workflowRevision: 3, candidateDigest: "a".repeat(64), roundId: randomUUID(), groupRunIds: [randomUUID()],
-        admissionRef: { key: `workflow-e2e-admissions/sha256/${"b".repeat(64)}.json`, sha256: "b".repeat(64), byteLength: 100 }, ...extra });
-      const checks = (ref: unknown) => taskRecord({ workflowMode: "CHECKS", readiness: [], workflowE2EAdmission: ref });
-      const checksFeatures = ["task.workflowMode", "task.workflowChecks", "task.readiness", "task.workflowE2EAdmission"];
-
-      it("never sends an application admission to a worker that does not list task.workflowE2EApplicationChecks, and says why", async () => {
-        const record = checks(admission({ kind: "application" }));
-        const older = delivery({ workerFeatures: async () => checksFeatures });
-        const refusal = await older.deliver(record, record.invocation).then(() => undefined, (error: unknown) => error as { code?: string; message?: string });
-        expect(refusal?.code).toBe("RUNTIME_UNAVAILABLE");
-        expect(refusal?.message).toContain("task.workflowE2EApplicationChecks");
-        expect(older.post).not.toHaveBeenCalled();
-      });
-
-      it("fails closed for an application admission when the worker cannot be asked which features it lists", async () => {
-        const record = checks(admission({ kind: "application" }));
-        const unprobed = delivery();
-        await expect(unprobed.deliver(record, record.invocation)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
-        expect(unprobed.post).not.toHaveBeenCalled();
-        const failing = delivery({ workerFeatures: async () => { throw new Error("ping down"); } });
-        await expect(failing.deliver(record, record.invocation)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
-        expect(failing.post).not.toHaveBeenCalled();
-      });
-
-      it("never sends a round with AI navigation steps to a worker that does not list task.workflowE2EAgentSteps.v1, and says why (M1.4 Task 4.2)", async () => {
-        const record = checks(admission({ kind: "application", agentSteps: true }));
-        const noAgents = delivery({ workerFeatures: async () => [...checksFeatures, "task.workflowE2EApplicationChecks"] });
-        const refusal = await noAgents.deliver(record, record.invocation).then(() => undefined, (error: unknown) => error as { code?: string; message?: string });
-        expect(refusal?.code).toBe("RUNTIME_UNAVAILABLE");
-        expect(refusal?.message).toContain("This worker can't run AI navigation steps yet; retry once it restarts");
-        expect(noAgents.post).not.toHaveBeenCalled();
-      });
-
-      it("never sends a round with AI navigation steps to a worker that lists agent steps but not task.workflowE2EMidStepSync.v1 (MIDSTEPCOOKIE: a scan a step old), and says why", async () => {
-        const ref = admission({ kind: "application", agentSteps: true });
-        const record = checks(ref);
-        const beforeSync = delivery({ workerFeatures: async () => [...checksFeatures, "task.workflowE2EApplicationChecks", "task.workflowE2EAgentSteps.v1"], workflowE2EAdmissionSchemaVersion: async () => "workflow-e2e-application-admission/v1" });
-        const refusal = await beforeSync.deliver(record, record.invocation).then(() => undefined, (error: unknown) => error as { code?: string; message?: string });
-        expect(refusal?.code).toBe("RUNTIME_UNAVAILABLE");
-        expect(refusal?.message).toContain("This worker can't protect session values during AI navigation steps yet");
-        expect(beforeSync.post).not.toHaveBeenCalled();
-        // A round with no AI navigation step does not need it.
-        const plain = admission({ kind: "application" });
-        const plainRecord = checks(plain);
-        const older = delivery({ workerFeatures: async () => [...checksFeatures, "task.workflowE2EApplicationChecks"], workflowE2EAdmissionSchemaVersion: async () => "workflow-e2e-application-admission/v1" });
-        expect(await older.deliver(plainRecord, plainRecord.invocation)).toBe("DELIVERED");
-      });
-
-      describe("a chosen AI navigation model or the minimal request shape (M1.4 Task 4.10A, test 15)", () => {
-        const APPLICATION = "workflow-e2e-application-admission/v1";
-        const MESSAGE = "agent-route-not-approved: this worker is too old for the chosen AI navigation model";
-        const withAgents = [...checksFeatures, "task.workflowE2EApplicationChecks", "task.workflowE2EAgentSteps.v1", "task.workflowE2EMidStepSync.v1"];
-        const dependenciesFor = (needs: boolean | undefined | Error, features: string[]) => ({
-          workerFeatures: async () => features, workflowE2EAdmissionSchemaVersion: async () => APPLICATION, workflowE2EAdmissionUsesAgentSteps: async () => true,
-          workflowE2EAdmissionNeedsModelChoice: vi.fn(async () => { if (needs instanceof Error) throw needs; return needs; }),
-        });
-        const round = () => { const ref = admission({ kind: "application", agentSteps: true }); return { ref, record: checks(ref) }; };
-
-        it("still delivers Rovara's recommended route in the standard shape to a worker without the feature, so the older fleet keeps working", async () => {
-          const { ref, record } = round();
-          const older = delivery(dependenciesFor(false, withAgents));
-          expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
-          expect(postedPayload(older.post).workflowE2EAdmission).toEqual(ref);
-        });
-
-        it("fails closed when the route cannot be read: an unreadable route is never assumed to be the default", async () => {
-          for (const needs of [undefined, new Error("ddb down")]) {
-            const { record } = round();
-            const unreadable = delivery(dependenciesFor(needs, withAgents));
-            await expect(unreadable.deliver(record, record.invocation)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: expect.stringContaining(MESSAGE) as unknown });
-            expect(unreadable.post).not.toHaveBeenCalled();
-          }
-        });
-
-      });
-
-      describe("the reference's agentSteps flag against the admission it names (checked before delivery)", () => {
-        const withAgents = [...checksFeatures, "task.workflowE2EApplicationChecks", "task.workflowE2EAgentSteps.v1", "task.workflowE2EMidStepSync.v1"];
-        const APPLICATION = "workflow-e2e-application-admission/v1";
-        const dependenciesFor = (usesAgentSteps: boolean | undefined | Error, features = withAgents) => ({
-          workerFeatures: async () => features, workflowE2EAdmissionSchemaVersion: async () => APPLICATION,
-          workflowE2EAdmissionUsesAgentSteps: vi.fn(async () => { if (usesAgentSteps instanceof Error) throw usesAgentSteps; return usesAgentSteps; }),
-        });
-
-        it("refuses a reference without agentSteps whose admission has an agent step, so the worker feature gate cannot be skipped", async () => {
-          const record = checks(admission({ kind: "application" }));
-          const unflagged = delivery(dependenciesFor(true));
-          await expect(unflagged.deliver(record, record.invocation)).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("agentSteps") as unknown });
-          expect(unflagged.post).not.toHaveBeenCalled();
-        });
-
-        it("fails closed, retryably, when the admission cannot be read for its agent steps", async () => {
-          const record = checks(admission({ kind: "application" }));
-          for (const unreadable of [undefined, new Error("s3 down")]) {
-            const attempt = delivery(dependenciesFor(unreadable));
-            await expect(attempt.deliver(record, record.invocation)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
-            expect(attempt.post).not.toHaveBeenCalled();
-          }
-        });
-
-      });
-
-      // Evaluation fix RUN-1, fix round 1 (Ruling DV): a round whose no-agent groups rely on the normal time limits (a route-pinned policy's round with a group that has no agent step) goes only to a
-      // worker that lists task.workflowE2EModelFreeLimits.v1. An older worker would compile those groups under 60 s and 10 s and refuse the admission after compute was spent.
-      describe("a round that relies on the normal no-model limits (RUN-1, Ruling DV)", () => {
-        const APPLICATION = "workflow-e2e-application-admission/v1";
-        const FEATURE = "task.workflowE2EModelFreeLimits.v1";
-        const base = [...checksFeatures, "task.workflowE2EApplicationChecks"];
-        const dependenciesFor = (relies: boolean | undefined | Error, features: string[]) => ({
-          workerFeatures: async () => features, workflowE2EAdmissionSchemaVersion: async () => APPLICATION,
-          workflowE2EAdmissionNeedsModelFreeLimits: vi.fn(async () => { if (relies instanceof Error) throw relies; return relies; }),
-        });
-
-        it("never sends it to a worker that does not list the feature, and says why, before anything runs", async () => {
-          const record = checks(admission({ kind: "application" }));
-          const older = delivery(dependenciesFor(true, base));
-          const refusal = await older.deliver(record, record.invocation).then(() => undefined, (error: unknown) => error as { code?: string; message?: string });
-          expect(refusal?.code).toBe("RUNTIME_UNAVAILABLE");
-          expect(refusal?.message).toContain(FEATURE);
-          expect(older.post).not.toHaveBeenCalled();
-        });
-
-        it("fails closed, retryably, when the admission cannot be read for the limits it relies on", async () => {
-          const record = checks(admission({ kind: "application" }));
-          for (const unreadable of [undefined, new Error("s3 down")]) {
-            const attempt = delivery(dependenciesFor(unreadable, [...base, FEATURE]));
-            await expect(attempt.deliver(record, record.invocation)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
-            expect(attempt.post).not.toHaveBeenCalled();
-          }
-        });
-      });
-
-      it("still hands a portable admission to a worker that predates application CHECKS", async () => {
-        const ref = admission();
-        const record = checks(ref);
-        const older = delivery({ workerFeatures: async () => checksFeatures });
-        expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
-        expect(postedPayload(older.post).workflowE2EAdmission).toEqual(ref);
-      });
-
-      describe("the reference's kind against the admission it names (checked before delivery)", () => {
-        const APPLICATION = "workflow-e2e-application-admission/v1";
-        const capable = [...checksFeatures, "task.workflowE2EApplicationChecks"];
-        const withSchema = (schema: string | undefined | Error) => vi.fn(async () => { if (schema instanceof Error) throw schema; return schema; });
-
-        it("refuses a reference without kind whose admission is an application admission, and sends nothing", async () => {
-          const record = checks(admission());
-          const reader = withSchema(APPLICATION);
-          const unmarked = delivery({ workerFeatures: async () => capable, workflowE2EAdmissionSchemaVersion: reader });
-          await expect(unmarked.deliver(record, record.invocation)).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("kind") as unknown });
-          expect(reader).toHaveBeenCalledTimes(1);
-          expect(unmarked.post).not.toHaveBeenCalled();
-        });
-
-        it("fails closed, retryably, when the admission cannot be read or is not one it knows", async () => {
-          const record = checks(admission());
-          for (const schema of [undefined, new Error("s3 down")]) {
-            const unreadable = delivery({ workerFeatures: async () => capable, workflowE2EAdmissionSchemaVersion: withSchema(schema) });
-            await expect(unreadable.deliver(record, record.invocation)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
-            expect(unreadable.post).not.toHaveBeenCalled();
-          }
-          const unknown = delivery({ workerFeatures: async () => capable, workflowE2EAdmissionSchemaVersion: withSchema("something-else/v1") });
-          await expect(unknown.deliver(record, record.invocation)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-        });
-
-        describe("version 2 admissions, which key the runtime rows by profile and kind (Task 3.4)", () => {
-          const V2 = "workflow-e2e-application-admission/v2";
-          const SENTENCE = "This worker can't run combined browser and API checks yet; retry once it restarts.";
-
-          it("never sends a version 2 admission to a worker that lacks task.workflowE2EApplicationChecks.v2, and says so in one plain sentence", async () => {
-            const record = checks(admission({ kind: "application" }));
-            const older = delivery({ workerFeatures: async () => capable, workflowE2EAdmissionSchemaVersion: withSchema(V2) });
-            const refusal = await older.deliver(record, record.invocation).then(() => undefined, (error: unknown) => error as { code?: string; message?: string });
-            expect(refusal?.code).toBe("RUNTIME_UNAVAILABLE");
-            expect(refusal?.message).toBe(`RUNTIME_UNAVAILABLE: ${SENTENCE}`);
-            expect(older.post).not.toHaveBeenCalled();
-            // A baseline round is an application round too: its version 2 admission is held to the same rule.
-            const baseline = checks(admission({ kind: "application", purpose: "baseline", baseCommitSha: "c".repeat(40), attempt: 1 }));
-            const olderBaseline = delivery({ workerFeatures: async () => [...capable, "task.workflowE2EBaselineChecks"], workflowE2EAdmissionSchemaVersion: withSchema(V2) });
-            await expect(olderBaseline.deliver(baseline, baseline.invocation)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: `RUNTIME_UNAVAILABLE: ${SENTENCE}` });
-            expect(olderBaseline.post).not.toHaveBeenCalled();
-          });
-
-        });
-
-      });
-
-      // M1.4 Task 4.6b, test 18: a replay (no model) goes only to a worker that lists task.workflowE2EReplayChecks.v1; an older worker is never handed one.
-      describe("audit replay rounds (Task 4.6b)", () => {
-        const replayRef = () => admission({ kind: "application", purpose: "replay", sourceRoundId: "5".repeat(8) + "-5555-4555-8555-" + "5".repeat(12), attempt: 1 });
-        const applicationOnly = [...checksFeatures, "task.workflowE2EApplicationChecks"];
-        const schema = async () => "workflow-e2e-application-admission/v1";
-
-        it("never sends a replay admission to a worker that runs application admissions (even AI navigation steps and baselines) but does not list the replay feature, and says why", async () => {
-          const record = checks(replayRef());
-          const older = delivery({ workerFeatures: async () => [...applicationOnly, "task.workflowE2EBaselineChecks", "task.workflowE2EAgentSteps.v1", "task.workflowE2EMidStepSync.v1"], workflowE2EAdmissionSchemaVersion: schema });
-          const refusal = await older.deliver(record, record.invocation).then(() => undefined, (error: unknown) => error as { code?: string; message?: string });
-          expect(refusal?.code).toBe("RUNTIME_UNAVAILABLE");
-          expect(refusal?.message).toContain("task.workflowE2EReplayChecks.v1");
-          expect(refusal?.message).toMatch(/replay/i);
-          expect(older.post).not.toHaveBeenCalled();
-        });
-
-      });
-
-      describe("baseline rounds (Task 3.7b)", () => {
-        const baselineRef = () => admission({ kind: "application", purpose: "baseline", baseCommitSha: "c".repeat(40), attempt: 1 });
-        const applicationOnly = [...checksFeatures, "task.workflowE2EApplicationChecks"];
-
-        it("never sends a baseline admission to a worker that runs application admissions but not baseline rounds, and says why", async () => {
-          const record = checks(baselineRef());
-          const older = delivery({ workerFeatures: async () => applicationOnly, workflowE2EAdmissionSchemaVersion: async () => "workflow-e2e-application-admission/v1" });
-          const refusal = await older.deliver(record, record.invocation).then(() => undefined, (error: unknown) => error as { code?: string; message?: string });
-          expect(refusal?.code).toBe("RUNTIME_UNAVAILABLE");
-          expect(refusal?.message).toContain("task.workflowE2EBaselineChecks");
-          expect(refusal?.message).toMatch(/baseline/i);
-          expect(older.post).not.toHaveBeenCalled();
-        });
-
-        it("asks a coding run to export the unchanged code only of a worker that can, and otherwise delivers the run without the request (a baseline never stops the coding)", async () => {
-          const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-          const record = taskRecord({ workflowMode: "IMPLEMENT", workflowE2EBaselineSource: true });
-          // The executor image is not on the host, so the application and baseline CHECKS features are withheld; the export needs the repository alone (review 3.7b finding 5).
-          const capable = delivery({ workerFeatures: async () => ["task.workflowMode", "task.workflowE2EBaselineSource"] });
-          expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
-          expect(postedPayload(capable.post)).toMatchObject({ workflowMode: "IMPLEMENT", workflowE2EBaselineSource: true });
-          const older = delivery({ workerFeatures: async () => ["task.workflowMode", "task.workflowE2EBaselineChecks"] });
-          expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
-          expect(postedPayload(older.post)).not.toHaveProperty("workflowE2EBaselineSource");
-          expect(postedPayload(older.post)).toMatchObject({ workflowMode: "IMPLEMENT" });
-          expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({
-            event: "dispatch.baseline_source_omitted", reason: "worker-lacks-feature", operationId: record.operationId }));
-          log.mockRestore();
-        });
-
-      });
-
-      describe("grounding rounds (T7b)", () => {
-        const groundingRef = () => admission({ kind: "application", purpose: "grounding", baseCommitSha: "c".repeat(40), attempt: 1, planArtifactSha256: "9".repeat(64) });
-        const applicationOnly = [...checksFeatures, "task.workflowE2EApplicationChecks"];
-        const v2 = async () => "workflow-e2e-application-admission/v1";
-
-        it("never sends a grounding admission to a worker that runs application admissions but not grounding rounds, and says why", async () => {
-          const record = checks(groundingRef());
-          const older = delivery({ workerFeatures: async () => [...applicationOnly, "task.workflowE2EBaselineChecks"], workflowE2EAdmissionSchemaVersion: v2 });
-          const refusal = await older.deliver(record, record.invocation).then(() => undefined, (error: unknown) => error as { code?: string; message?: string });
-          expect(refusal?.code).toBe("RUNTIME_UNAVAILABLE");
-          expect(refusal?.message).toContain("task.workflowE2EGroundingChecks.v1");
-          expect(older.post).not.toHaveBeenCalled();
-        });
-
-        it("asks a coding plan run to export the unchanged code only of a worker that can, and only while the run still negotiates the application plan", async () => {
-          const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-          const record = taskRecord({ workflowMode: "PLAN", planFormat: "structured", workflowE2EPlanVersion: 2, workflowE2EGroundingSource: true });
-          const capable = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans", "task.workflowE2EApplicationPlan", "task.workflowE2EGroundingChecks.v1"] });
-          expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
-          expect(postedPayload(capable.post)).toMatchObject({ workflowMode: "PLAN", workflowE2EPlanVersion: 2, workflowE2EGroundingSource: true });
-          // A worker without the grounding feature is sent the plan run without the request.
-          const noGrounding = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans", "task.workflowE2EApplicationPlan"] });
-          expect(await noGrounding.deliver(record, record.invocation)).toBe("DELIVERED");
-          expect(postedPayload(noGrounding.post)).not.toHaveProperty("workflowE2EGroundingSource");
-          expect(postedPayload(noGrounding.post)).toMatchObject({ workflowE2EPlanVersion: 2 });
-          // A worker that lists the grounding feature but not the application plan has the plan version removed, and the request goes with it (the schema refuses one without the other).
-          const noPlans = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans", "task.workflowE2EGroundingChecks.v1"] });
-          expect(await noPlans.deliver(record, record.invocation)).toBe("DELIVERED");
-          expect(postedPayload(noPlans.post)).not.toHaveProperty("workflowE2EPlanVersion");
-          expect(postedPayload(noPlans.post)).not.toHaveProperty("workflowE2EGroundingSource");
-          expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({ event: "dispatch.grounding_source_omitted", operationId: record.operationId }));
-          log.mockRestore();
-        });
-      });
-    });
-
-    it("refuses to downgrade a version 2 application plan when no applicationPlanNotNegotiated recorder is wired, instead of posting a run the operation record still calls version 2 (2.2b N4)", async () => {
-      const record = taskRecord({ workflowMode: "PLAN", planFormat: "structured", workflowE2EPlanVersion: 2 });
-      const unwired = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans"] }, ["applicationPlanNotNegotiated"]);
-      await expect(unwired.deliver(record, record.invocation)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-      expect(unwired.post).not.toHaveBeenCalled();
-    });
-
     it("never hands a version 2 intent in the reviewers' approved plan to a worker that cannot parse it", async () => {
       const sha256 = "a".repeat(64);
       const v1 = { schemaVersion: 1, requestedTargetIds: ["web-1"], accountContextRefs: [], scenarios: [], semanticExportDeltas: [] };
@@ -710,39 +292,6 @@ describe("ec2-ebs delivery", () => {
         event: "dispatch.code_anchors_omitted", reason: "worker-lacks-feature", operationId: record.operationId,
       }));
       log.mockRestore();
-    });
-
-    it("asks a planning run for the plan quality members only on a worker that lists task.workflowPlanDryRun.v1; an older worker is sent the prompt without them", async () => {
-      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
-      const asked = planDocumentInstructions({ kind: "plan", path: "QUICK", planQuality: true });
-      const plain = planDocumentInstructions({ kind: "plan", path: "QUICK" });
-      const record = taskRecord({ workflowMode: "PLAN", planFormat: "structured", prompt: `Planning phase only.\n\n${asked}\n\nRequest:\nadd it` });
-      const capable = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans", "task.workflowPlanDryRun.v1"] });
-      expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
-      expect(postedPayload(capable.post).prompt).toContain("scenarioProves");
-      expect(capable.planQualityNotNegotiated).not.toHaveBeenCalled();
-      const older = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans"] });
-      expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
-      expect(postedPayload(older.post).prompt).toBe(`Planning phase only.\n\n${plain}\n\nRequest:\nadd it`);
-      // The operation record is told, so the broker never sends that planner a revision naming the members.
-      expect(older.planQualityNotNegotiated).toHaveBeenCalledWith(record);
-      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({
-        event: "dispatch.plan_quality_omitted", reason: "worker-lacks-feature", operationId: record.operationId,
-      }));
-      log.mockRestore();
-    });
-
-    it("refuses to send a planning run without the plan quality members to an older worker when no planQualityNotNegotiated recorder is wired, instead of a run the operation record still calls asked", async () => {
-      const asked = planDocumentInstructions({ kind: "plan", path: "QUICK", planQuality: true });
-      const record = taskRecord({ workflowMode: "PLAN", planFormat: "structured", prompt: `Planning phase only.\n\n${asked}\n\nRequest:\nadd it` });
-      // The older worker would be sent the prompt without the members, and a revision would then name members its strict parser rejects: nothing goes out.
-      const unwired = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans"] }, ["planQualityNotNegotiated"]);
-      await expect(unwired.deliver(record, record.invocation)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
-      expect(unwired.post).not.toHaveBeenCalled();
-      // A worker that lists the feature is sent the guidance as asked and needs no recorder.
-      const capable = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans", "task.workflowPlanDryRun.v1"] }, ["planQualityNotNegotiated"]);
-      expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
-      expect(postedPayload(capable.post).prompt).toContain("scenarioProves");
     });
 
     it("refuses a graph-aware invocation when the worker does not advertise the exact feature and never strips the graph", async () => {
@@ -1063,6 +612,19 @@ describe("ec2-ebs delivery", () => {
 
   });
 
+  // D1-2 pre-review S1: an outbox record the retired old workflow engine queued as its internal E2E warm-up never reaches the worker as an ordinary `resume`.
+  it("refuses a record that carries the retired E2E readiness marker, before any session or POST, and still delivers the same record without it", async () => {
+    const marked = { ...recordFor(), workflowE2EReadiness: { purpose: "WORKFLOW_E2E_READINESS" } } as unknown as Ec2OutboxRecord;
+    const d = delivery();
+    await expect(d.deliver(marked, marked.invocation)).rejects.toMatchObject({ message: expect.stringContaining("CALLBACK_FORBIDDEN") as string });
+    expect(d.post).not.toHaveBeenCalled();
+    expect(d.progress).not.toHaveBeenCalled();
+    const { workflowE2EReadiness: _marker, ...plain } = marked;
+    void _marker;
+    await d.deliver(plain, plain.invocation);
+    expect(d.post).toHaveBeenCalledOnce();
+  });
+
   it("fails an attempt when the worker refuses, and when the workspace has no ec2-ebs binding", async () => {
     const refused = delivery({ post: async () => ({ status: 401, body: "{\"reason\":\"expired\"}" }) });
     const record = recordFor();
@@ -1211,99 +773,6 @@ describe("ec2-ebs delivery through the real session manager", () => {
       `http://${sessionB.privateIp}:8080/invocations`,
     ]);
     expect(world.executions.map(({ name }) => name)).toEqual([`ws-${workspaceA}-gen-1`, `ws-${workspaceB}-gen-1`]);
-  });
-
-  it("parks the first delivery with one event, re-queues it when ready, then delivers it", async () => {
-    const db = new FakeDynamoDb();
-    const start = vi.fn(async ({ name }: { name: string }) => `arn:aws:states:us-east-1:111122223333:execution:provisioner:${name}`);
-    const sessions = new SessionManager({
-      documentClient: db, tableName: "state",
-      executions: { provisionerArn: "arn:aws:states:us-east-1:111122223333:stateMachine:provisioner", deleterArn: "arn:aws:states:us-east-1:111122223333:stateMachine:deleter", start },
-    });
-    const record = recordFor();
-    db.set({ pk: `WORKSPACE#${record.workspaceId}`, sk: "META", entityType: "WORKSPACE", deploymentMode: "ec2-ebs" as const, projectName: "ec2-test", projectRevision: 1, activeOperationId: record.operationId, fence: 2 });
-    db.set({ pk: "PROJECT#ec2-test", sk: "REV#000000000001", entityType: "PROJECT", runtimeBinding: binding });
-    db.set({ pk: `WORKSPACE#${record.workspaceId}`, sk: `OPERATION#${record.operationId}`, status: "DISPATCHING", fence: 2, eventSequence: 0 });
-    db.set({ pk: `OUTBOX#${record.id}`, sk: "OUTBOX", ...record });
-    const post = vi.fn<Ec2DeliveryDependencies["post"]>(async () => ({ status: 200, body: "{}" }));
-    const deliver = createEc2Delivery({
-      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined, verifyMachine: async () => ({ ok: true }), failOperation: async () => undefined,
-      sessions,
-      binding: (workspaceId) => workspaceBinding(db, "state", workspaceId),
-      sign: kmsSign,
-      post,
-      progress: (parked, message) => appendOperationEvent(db, "state", {
-        workspaceId: parked.workspaceId, operationId: parked.operationId, fence: parked.invocation.fence, onceKey: `session-wait#${parked.id}`,
-        event: { type: "progress", timestamp: new Date(NOW).toISOString(), payload: { message } },
-      }),
-      now: () => NOW,
-    });
-
-    expect(await deliver(record, record.invocation)).toBe("WAITING_FOR_SESSION");
-    // A duplicate SQS delivery of the parked record adds no second event.
-    expect(await deliver(record, record.invocation)).toBe("WAITING_FOR_SESSION");
-    expect(start).toHaveBeenCalledOnce();
-    expect(db.get(`OUTBOX#${record.id}`, "OUTBOX")).toMatchObject({ status: "WAITING_FOR_SESSION" });
-    const events = db.find((item) => item.entityType === "EVENT" && item.operationId === record.operationId);
-    expect(events).toEqual([expect.objectContaining({ type: "progress", sequence: 1, payload: { message: STARTING_COMPUTE_MESSAGE } })]);
-    expect(db.get(`WORKSPACE#${record.workspaceId}`, `OPERATION#${record.operationId}`)).toMatchObject({ eventSequence: 1 });
-
-    await sessions.markVolume(record.workspaceId, 1, "vol-0123456789abcdef0");
-    await sessions.markInstance(record.workspaceId, 1, "i-0123456789abcdef0", "10.42.128.10");
-    expect(await sessions.markReady(record.workspaceId, 1)).toEqual({ requeued: [record.id] });
-    expect(db.get(`OUTBOX#${record.id}`, "OUTBOX")).toMatchObject({ status: "PENDING" });
-
-    expect(await deliver(record, record.invocation)).toBe("DELIVERED");
-    expect(post.mock.calls[0]![0]).toBe("http://10.42.128.10:8080/invocations");
-    expect(verifyInvokeAuthorization(post.mock.calls[0]![1].authorization, {
-      publicKey: keys.publicKey, workspaceId: record.workspaceId, generation: 1, now: () => Math.floor(NOW / 1_000),
-    }).ok).toBe(true);
-  });
-
-  it("acknowledges a duplicate readiness delivery already parked while provisioning", async () => {
-    const fixture = readinessFixture();
-    const start = vi.fn(async ({ name }: { name: string }) => `arn:aws:states:us-east-1:111122223333:execution:provisioner:${name}`);
-    const sessions = new SessionManager({ documentClient: fixture.db, tableName: "state",
-      executions: { provisionerArn: "arn:aws:states:us-east-1:111122223333:stateMachine:provisioner", deleterArn: "arn:aws:states:us-east-1:111122223333:stateMachine:deleter", start } });
-    const post = vi.fn<Ec2DeliveryDependencies["post"]>(async () => ({ status: 200, body: "{}" }));
-    const markFailed = vi.fn(async () => undefined);
-    const markDelivered = vi.fn(async () => undefined);
-    const deliver = createEc2Delivery({
-      applicationPlanNotNegotiated: async () => undefined, planQualityNotNegotiated: async () => undefined, verifyMachine: async () => ({ ok: true }), failOperation: async () => undefined,
-      sessions,
-      binding: (workspaceId) => workspaceBinding(fixture.db, "state", workspaceId),
-      sign: kmsSign,
-      post,
-      progress: (record, message) => appendOperationEvent(fixture.db, "state", {
-        workspaceId: record.workspaceId, operationId: record.operationId, fence: record.invocation.fence,
-        onceKey: `session-wait#${record.id}`, event: { type: "progress", timestamp: new Date(NOW).toISOString(), payload: { message } },
-      }),
-      validateWorkflowE2EReadiness: createWorkflowE2EReadinessValidator({ documentClient: fixture.db as never, tableName: "state" }),
-      now: () => NOW,
-    });
-    const handler = createDispatcherHandler({
-      markDispatching: async () => true, markDelivered, markFailed,
-      deliverEc2: (record, invocation) => deliver(record, invocation), log: () => undefined,
-    });
-    const message = { messageId: "readiness-parked", body: JSON.stringify(fixture.record) };
-
-    await expect(handler({ Records: [message] })).resolves.toEqual({ batchItemFailures: [] });
-    expect(fixture.db.get(`OUTBOX#${fixture.record.id}`, "OUTBOX")).toMatchObject({ status: "WAITING_FOR_SESSION" });
-    expect(fixture.db.get(...Object.values(workspaceSessionKey(fixture.record.workspaceId)) as [string, string])).toMatchObject({
-      state: "PROVISIONING", generation: 1, waitingOutboxIds: new Set([fixture.record.id]),
-    });
-    expect(start).toHaveBeenCalledOnce();
-
-    await expect(handler({ Records: [{ ...message, messageId: "readiness-duplicate" }] })).resolves.toEqual({ batchItemFailures: [] });
-    expect(start).toHaveBeenCalledOnce();
-    expect(markFailed).not.toHaveBeenCalled();
-    expect(markDelivered).not.toHaveBeenCalled();
-    expect(post).not.toHaveBeenCalled();
-    expect(fixture.db.get(`OUTBOX#${fixture.record.id}`, "OUTBOX")).toMatchObject({ status: "WAITING_FOR_SESSION" });
-    expect(fixture.db.get(...Object.values(workspaceSessionKey(fixture.record.workspaceId)) as [string, string])).toMatchObject({
-      state: "PROVISIONING", generation: 1, waitingOutboxIds: new Set([fixture.record.id]),
-    });
-    expect(fixture.db.find((item) => item.entityType === "EVENT" && item.operationId === fixture.record.operationId)).toHaveLength(1);
   });
 });
 

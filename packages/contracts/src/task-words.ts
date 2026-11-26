@@ -124,6 +124,8 @@ export const STATUS_LINES = {
   understanding: { next: "A plan follows once the request is understood." },
   planning: { next: "You review the plan when it is ready." },
   building: { next: "Checks and a pull request follow." },
+  // A fix round after the pull request exists (coding again): the pull request is already open, so only the checks follow.
+  buildingAfterPullRequest: { next: "Checks follow." },
   checking: { next: "A pull request is opened once the checks pass." },
   // SPEND-UNREPORTED-RUN item 3: what a decision card says when the task's spend cannot be read yet (the stable code is `spend_unreadable`, in `DECISION_REFUSAL_REASONS`): the real reason and what happens next,
   // never "This isn't ready to be decided yet". Rovara settles an ended run that sent no usage report by itself, so the next step is waiting, not an action.

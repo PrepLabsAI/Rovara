@@ -14,7 +14,7 @@ import {
 import type { TaskActionAnswer, TaskActionInput } from "../core-host/task-action-routes.js";
 import type { SlackActionHandler, SlackBlockAction } from "./slack-interactivity.js";
 import { slackWebFetch } from "./slack-web.js";
-import { ownerOfTaskId } from "./engine-boundary.js";
+import { isCoreTask } from "./engine-boundary.js";
 
 /** What the press asks of the broker: the same shape the core takes, plus the answer's `notLinked` (the account is linked to nobody). */
 export type TaskActionAsk = (press: TaskActionInput, timeoutMs: number) => Promise<TaskActionAnswer | { notLinked: true }>;
@@ -314,7 +314,7 @@ export function awsTaskActionPress(input: {
   const deps = taskActionDepsFrom({
     invokeBroker: (event, timeoutMs) => input.invokeBroker(event, timeoutMs), api: async (method, body, timeoutMs) => slackApiResult(await input.token(), method, body, fetch, timeoutMs),
     respondEphemeral: (url, text, blocks) => respondEphemeralBlocks(url, text, blocks), log: input.log,
-    isCoreTask: async (taskId) => input.stateTable.tableName !== undefined && await ownerOfTaskId({ documentClient: input.stateTable.documentClient, tableName: input.stateTable.tableName }, taskId) === "core",
+    isCoreTask: async (taskId) => input.stateTable.tableName !== undefined && await isCoreTask({ documentClient: input.stateTable.documentClient, tableName: input.stateTable.tableName }, taskId),
   });
   return { handler: taskActionPressHandler(deps), submission: taskActionSubmission(deps) };
 }

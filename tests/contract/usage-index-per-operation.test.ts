@@ -200,20 +200,9 @@ describe("the usage index holds each operation's own cost, written once", () => 
     // One row per report that spent something: the review has one for its conversation session and one per reviewer session, the retried operation has one row per attempt, a run with no model call has none.
     const rowsOf = (id: string) => [...index.rows.values()].filter((row) => row.operationId === id).length;
     expect(operations.map((operation) => rowsOf(operation.id))).toEqual([1, 1, 2, 3, 1, 0, 1, 1]);
-    // The AUTOFIX spend cap adds up the usage events themselves (not the index): over a reopen, a retry and a crash and its retry, each operation's sum is what that operation really spent.
-    const eventsClient = { send: async (command: { input: { ExpressionAttributeValues?: Record<string, unknown> } }) => ({ Items: stored.filter((item) => item.pk === command.input.ExpressionAttributeValues![":pk"]).map((item) => ({ payload: item.payload })) }) };
-    // The broker's entry module reads its settings when it loads.
-    Object.assign(process.env, {
-      AWS_REGION: "us-east-1", STATE_TABLE_NAME: "unused", ARTIFACT_BUCKET_NAME: "unused", OIDC_ISSUER: "https://identity.example.test",
-      GITHUB_APP_PRIVATE_KEY_SECRET_ARN: "arn:aws:secretsmanager:us-east-1:111122223333:secret:test",
-      GITHUB_APP_CREDENTIAL_REF: "github-app", GITHUB_APP_ACCOUNT: "example", GITHUB_APP_ID: "123", GITHUB_APP_INSTALLATION_ID: "456",
-    });
-    const { autofixOperationUsage } = await import("../../packages/broker/src/aws/broker.js");
-    const autofixed = async (id: string) => autofixOperationUsage({ documentClient: eventsClient, tableName: "table" } as never, id);
-    const spentBy = [0.03815, 0.02035, 0.04978 + 0.0123, 0.03688 + 0.02712, 0.0517, 0, 0.0777 + 0.0111, 0.0299];
-    for (const [position, operation] of operations.entries()) expect((await autofixed(operation.id))?.total, `operation ${String(position)}`).toBeCloseTo(spentBy[position]!, 6);
   });
 });
+
 
 describe("a run whose usage cannot be worked out reports none, and says so", () => {
   const invocation = (operationId: string, conversationId: string, base: string, started: boolean) => WorkerInvocationSchema.parse({

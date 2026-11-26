@@ -15,7 +15,7 @@ import { Membership, membershipKey, boundedCompanyReads, companyReadActions, own
 import { grantsPkFor, namedCompany, namedCompanyLatestRevisionRow, namedCompanyProjectArchived } from "./company-layout.js";
 import { isProjectUnreadable, logProjectLeftOut } from "../core/project-left-out.js";
 import { slackChannelBindingPkFor } from "./slack-company-layout.js";
-import type { TaskMergeWiring } from "./task-merge.js"; import { putCodeSettings, readCodeSettings } from "./project-code-settings.js"; import { putEvalNone, putSkip, readProjectSetupStatus } from "./project-setup-status.js"; import { LIFECYCLE_NOT_FOUND, routeProjectLifecycle, type LifecycleAction } from "./project-lifecycle-routes.js";
+ import { putCodeSettings, readCodeSettings } from "./project-code-settings.js"; import { putEvalNone, putSkip, readProjectSetupStatus } from "./project-setup-status.js"; import { LIFECYCLE_NOT_FOUND, routeProjectLifecycle, type LifecycleAction } from "./project-lifecycle-routes.js";
 // Spec 025 FR-009, FR-013, FR-014 and FR-016: GET projects, and the project access check the task
 // routes use. /v1/dev/* has no API Gateway authorizer (D17): the broker verifies the developer
 // access token itself, then checks the environment, the method and the sign-in session on every
@@ -130,17 +130,13 @@ import { MACHINE_SIZE_ROWS, MACHINE_STORED_ONLY_LINE } from "@agentx/contracts";
 import { machineSizeEnabled, machineCard, setMachineChoice } from "../core/test-env/machine-size.js";
 import { testEnvironmentView } from "../core/test-env/local-view.js";
 import { DynamoDocumentStore } from "@rovara/aws-adapters";
-import {
-  createPageComment, decideOnPage, deletePageComment, editPageComment, getTaskDocumentView, getTaskFreshness, getTaskPageState, listPageComments, pageFeatureChoices, retryApplicationRoundOnPage, setPageFeature, setPageSuggestion,
-  confirmTaskPeopleProposal, getTaskPeople, getTaskPeopleCapabilities, getTaskPeopleProposal, getTaskPeopleProposalMetadata, getTaskPersonPresentationName,
-  proposeTaskOwnershipForPage, proposeTaskPeopleRoleForPage, getTaskPeopleCandidatesForPage, addTaskWebPersonForPage,
-  getWorkflowFeedbackReview, routeDeveloperTaskRequest, submitWorkflowFeedbackDecision, type DeveloperTaskRouteDependencies } from "./developer-tasks.js";
+import { confirmTaskPeopleProposal, getTaskPeopleProposal, getTaskPeopleProposalMetadata, routeDeveloperTaskRequest, type DeveloperTaskRouteDependencies } from "./developer-tasks.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
-import { createFeedbackReviewWeb } from "./feedback-review-web.js";
-import { TASK_PAGE, TASK_PEOPLE_CONFIRMATION, TASK_STATUS, createTaskWeb } from "./task-web.js";
-import { TASK_PAGE_API_PREFIX, createTaskWebApi } from "./task-web-api.js";
-import { getTaskE2EArtifact } from "./task-e2e-artifact.js";
-import { coreAnswerValue, ownerOfExistingTask, type CoreTaskEntry } from "./engine-boundary.js";
+
+
+
+
+import { coreAnswerValue, isCoreTaskThatExists, type CoreTaskEntry } from "./engine-boundary.js";
 import type { CoreAppEntry } from "./core-app-routes.js";
 import type { BrokerResponse } from "../handler.js"; import { profileDisplayName } from "../developer/github-profile.js";
 import type { CompanyImportRegistry } from "./company-import-forwarding.js"; import { routeSignInLinks, type SignInLinkForward } from "./sign-in-link-routes.js";
@@ -162,6 +158,9 @@ import {
   type ChannelMembersInvokeResult,
   type SignInClientRegistry,
 } from "./slack-identity-lambda.js";
+import { PEOPLE_CONFIRM_PAGE } from "./people-confirm-web.js";
+import { PEOPLE_CONFIRM_API } from "./people-confirm-web.js";
+import { createPeopleConfirmWeb } from "./people-confirm-web.js";
 export type { ChannelMembersInvokeResult, SignInClientRegistry };
 
 export interface DeveloperApiConfiguration {
@@ -175,7 +174,7 @@ export interface DeveloperApiConfiguration {
   channelMembers(request: ChannelMembersRequest): Promise<ChannelMembersResponse>;
   /** Lane E2: the core's own handlers for a task stamped `core` (engine-boundary.ts), as the deployment composes them. Absent: a core task reads exactly like a missing one. */
   coreTasks?: CoreTaskEntry;
-  /** Lane L12: the core's own /v1/app/* routes (aws/core-app-routes.ts), set only while the core switch serves. Absent: every /v1/app/* path answers "route not found", reading nothing. */
+  /** Lane L12: the core's own /v1/app/* routes (aws/core-app-routes.ts), set only where a core is wired. Absent: every /v1/app/* path answers "route not found", reading nothing. */
   coreApp?: CoreAppEntry;
   /** Guided onboarding PR 16: whether archiving this company's project takes effect (its new tasks start on the core engine, which reads the archived state). Absent: an archive is refused. */
   projectArchiveTakesEffect?: (companyId: string) => boolean;
@@ -227,7 +226,7 @@ export interface DeveloperApiConfiguration {
   linearConnect?: LinearConnectWiring;
   /** R1 + L1: a member links their own Linear account, and the company's admin lists and removes links (linear-account-link-routes.ts). Absent (or no company layer): those routes are unknown. */
   linearLink?: LinearLinkWiring;
-  /** L2-4: the company's hosted intake (the first team pick seeds the ticket updates); its waiting-ticket routes are the core's (core-host/intake-routes.ts). Set only while the core switch serves and Linear is wired. */
+  /** L2-4: the company's hosted intake (the first team pick seeds the ticket updates); its waiting-ticket routes are the core's (core-host/intake-routes.ts). Set only where a core is wired and Linear is wired. */
   coreIntake?: HostedIntake;
   /** Guided onboarding PR 14 (DEC 254n item 1): the company engine model route (company-engine-model-routes.ts). Absent (no model gateway, or no company layer): the route is unknown. */
   companyEngineModel?: CompanyEngineModelWiring; companyLearningModel?: CompanyLearningModelWiring; companyEgress?: CompanyEgressWiring; // L4-EGR (company-egress-routes.ts): Rovara's outbound addresses; absent (or no company layer): the route is unknown. Kept on this line so the forwarding sites below do not move.
@@ -256,8 +255,6 @@ export interface DeveloperRouteDependencies {
   channelLinkCodes?: { preview(personId: string, code: string): Promise<{ channel: string; maskedUserId: string } | undefined>; redeem(personId: string, code: string): ReturnType<typeof redeemLinkCode> };
   policyHook?: ProjectSettingsHook;
   companies?: CompanyMembershipReader;
-  /** Lane W: the merge core wired for this deployment's tasks (task-merge.ts). Absent: `POST /v1/dev/tasks/{id}/merge` answers a fixed "not set up". */
-  taskMerge?: TaskMergeWiring;
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
   developer: DeveloperApiConfiguration;
@@ -1168,7 +1165,7 @@ async function readClientProject(deps: DeveloperRouteDependencies, developerId: 
 /**
  * DEC 253z: is this live session one with no company? Only the install-level web app with full access, the install's own OIDC sign-in, a session
  * that names no company, NO membership row for the person at all (a removed member's row stays, so they stay refused), and a sign-in record the
- * no-company sign-in wrote (never a legacy person's). Read live, on the sign-in table; any doubt is no.
+ * no-company sign-in wrote (never a legacy person's) that points at no person (`mergedInto`). Read live, on the sign-in table; any doubt is no.
  */
 async function companylessSession(deps: DeveloperRouteDependencies, client: SignInClientRecord, session: SessionRecord): Promise<boolean> {
   if (deps.companies === undefined || client.installLevel !== true || client.fullAccess !== true || client.webApp !== true || (session.amr !== "oidc" && session.amr !== "slack" && session.amr !== "github") || session.companyId !== undefined) return false;
@@ -1177,8 +1174,9 @@ async function companylessSession(deps: DeveloperRouteDependencies, client: Sign
     return await readingMembership(async () => {
       const membership = await deps.documentClient.send(new GetCommand({ TableName: deps.developer.signInTableName, Key: membershipKey(session.developerId), ConsistentRead: true })) as { Item?: unknown };
       if (membership.Item !== undefined) return false;
-      const developer = await getSignIn<{ revoked?: unknown; companyless?: unknown }>(deps, `DEVELOPER#${session.developerId}`);
-      return developer?.revoked === false && developer.companyless === true;
+      const developer = await getSignIn<{ revoked?: unknown; companyless?: unknown; mergedInto?: unknown }>(deps, `DEVELOPER#${session.developerId}`);
+      // SLACK-LINK-L2: a record that points at a person is never one with no company.
+      return developer?.revoked === false && developer.companyless === true && developer.mergedInto === undefined;
     });
   } catch (error) { rethrowMembershipReadFailure(error); return false; }
 }
@@ -1330,7 +1328,7 @@ async function taskReaderPerson(deps: DeveloperRouteDependencies, developerId: s
     try {
       // Channel access holds an OLD-engine task only: the one the engine stamp (`TASK_ENGINE#<id>`, written by the core's own start) is missing for. A core task's own person needs the grant, as its start
       // and every step do (core-engine-root.ts); no task id, a stamp that is there, or a stamp that cannot be read: grant only.
-      if (options.taskId === undefined || await ownerOfExistingTask(deps, options.taskId) !== "workflow") return { name, projectMember: held, mayStart: false };
+      if (options.taskId === undefined || await isCoreTaskThatExists(deps, options.taskId)) return { name, projectMember: held, mayStart: false };
       await checkProjectAccess(deps, { developerId, ...(person.slackUserId === undefined ? {} : { slackUserId: person.slackUserId }) }, project);
       return { name, projectMember: held, mayStart: true };
     } catch (error) { rethrowMembershipReadFailure(error); return { name, projectMember: held, mayStart: false }; }
@@ -1899,10 +1897,17 @@ function isTaskCommentPost(request: AdaptedHttpRequest, url: URL): boolean {
   return request.method === "POST" && /^\/v1\/dev\/tasks\/[^/]+\/comments$/.test(url.pathname);
 }
 
-/** Review comment calls use live membership, just like the core developer routes. */
-async function commentPageRouteDependencies(deps: DeveloperRouteDependencies, caller: DeveloperCaller): Promise<DeveloperTaskRouteDependencies> {
-  const companyId = await resolveCompany(deps.companies ?? deps.developer.companies, caller.developerId);
-  return { ...developerTaskRouteDependencies(deps, caller), ...(companyId === undefined ? {} : { companyId }) };
+/**
+ * The task-local name of a person the People confirmation page shows, from the immutable PERSON row and its matching PERSON_SUBJECT row (the rows the old presentation reader used), never from the
+ * live People view: that view needs the display reads, which a Slack-shared task in a deployment without them refuses, and a confirmation that cannot say whom it changes would be unusable. The page
+ * calls this only after the proposal itself was read for this caller (the proposer's own pending request), so no name is given to anyone else.
+ */
+export async function taskPersonStoredName(deps: DeveloperRouteDependencies, taskId: string, personId: string): Promise<string | undefined> {
+  const read = async (sk: string) => (await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: { pk: `DEVTASK#${taskId}`, sk }, ConsistentRead: true }))) as { Item?: Record<string, unknown> };
+  const person = (await read(`PERSON#${personId}`)).Item;
+  if (person === undefined || person["personId"] !== personId || typeof person["developerId"] !== "string" || typeof person["name"] !== "string") return undefined;
+  const subject = (await read(`PERSON_SUBJECT#${person["developerId"]}`)).Item;
+  return subject !== undefined && subject["personId"] === personId && subject["developerId"] === person["developerId"] ? person["name"] : undefined;
 }
 
 export function developerTaskRouteDependencies(
@@ -2459,60 +2464,20 @@ function routeReviewLinkPage(deps: DeveloperRouteDependencies, request: AdaptedH
   })(request, url);
 }
 
-function isTaskWebReviewPath(pathname: string): boolean {
-  return TASK_PAGE.test(pathname) || TASK_PEOPLE_CONFIRMATION.test(pathname) || TASK_STATUS.test(pathname) || TASK_PAGE_API_PREFIX.test(pathname);
-}
-
-function routeReviewTaskWeb(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL, authenticateSession: (sessionId: string) => Promise<DeveloperCaller | undefined>): Promise<unknown> {
-  const routeDeps = (caller: DeveloperCaller) => developerTaskRouteDependencies(deps, caller);
-  return createTaskWeb({
-    authenticateSession,
-    getTaskDocumentView: (caller, taskId) => getTaskDocumentView(routeDeps(caller), caller, taskId),
-    getTaskFreshness: (caller, taskId) => getTaskFreshness(routeDeps(caller), caller, taskId),
-    getTaskPeople: (caller, taskId) => getTaskPeople(routeDeps(caller), caller, taskId),
-    getTaskPeopleRequest: (caller, taskId, requestId) => getTaskPeopleProposal(routeDeps(caller), caller, taskId, requestId),
-    getTaskPeopleProposalMetadata: (caller, taskId, requestId) => getTaskPeopleProposalMetadata(routeDeps(caller), caller, taskId, requestId),
-    getTaskPersonName: (caller, taskId, personId) => getTaskPersonPresentationName(routeDeps(caller), taskId, personId),
-    getTaskPeopleCapabilities: (caller, taskId) => getTaskPeopleCapabilities(routeDeps(caller), caller, taskId),
-    api: createTaskWebApi({
-      origin: deps.developer.issuer,
-      authenticateSession,
-      taskState: async (caller, taskId) => getTaskPageState(await commentPageRouteDependencies(deps, caller), caller, taskId),
-      listComments: async (caller, taskId) => listPageComments(await commentPageRouteDependencies(deps, caller), caller, taskId),
-      createComment: async (caller, taskId, input) => createPageComment(await commentPageRouteDependencies(deps, caller), caller, taskId, input),
-      editComment: async (caller, taskId, input) => editPageComment(await commentPageRouteDependencies(deps, caller), caller, taskId, input),
-      deleteComment: async (caller, taskId, input) => deletePageComment(await commentPageRouteDependencies(deps, caller), caller, taskId, input),
-      setSuggestion: async (caller, taskId, input) => setPageSuggestion(await commentPageRouteDependencies(deps, caller), caller, taskId, input),
-      decide: (caller, taskId, input) => decideOnPage(routeDeps(caller), caller, taskId, input),
-      retryApplicationRound: (caller, taskId, input) => retryApplicationRoundOnPage(routeDeps(caller), caller, taskId, input),
-      featureChoices: (caller, taskId) => pageFeatureChoices(routeDeps(caller), caller, taskId),
-      setFeature: (caller, taskId, input) => setPageFeature(routeDeps(caller), caller, taskId, input),
-      readE2EArtifact: (caller, taskId, sha256) => getTaskE2EArtifact(routeDeps(caller), caller, taskId, sha256),
-      getPeople: (caller, taskId) => getTaskPeople(routeDeps(caller), caller, taskId),
-      proposePeopleRole: (caller, taskId, input) => proposeTaskPeopleRoleForPage(routeDeps(caller), caller, taskId, input),
-      proposeOwnership: (caller, taskId, input) => proposeTaskOwnershipForPage(routeDeps(caller), caller, taskId, input),
-      getPeopleRequest: (caller, taskId, requestId) => getTaskPeopleProposal(routeDeps(caller), caller, taskId, requestId),
-      confirmPeopleRequest: (caller, taskId, requestId) => confirmTaskPeopleProposal(routeDeps(caller), caller, taskId, requestId),
-      getPeopleCandidates: (caller, taskId) => getTaskPeopleCandidatesForPage(routeDeps(caller), caller, taskId),
-      addPeople: (caller, taskId, input) => addTaskWebPersonForPage(routeDeps(caller), caller, taskId, input),
-    }),
-  })(request, url);
-}
-
 function routeReviewRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
-  if (deps.tasks === undefined) throw agentXError("NOT_FOUND", "developer tasks are not set up in this deployment");
-  const authenticateSession = makeSessionAuthenticator(deps);
-  // Task 18: the read-only task page and its "moved on" check; every other /review/ path is the PR-feedback review.
-  // Spec 061 slice 2: the page's JSON API is matched here too, so the PR-feedback page never sees its paths.
-  if (isTaskWebReviewPath(url.pathname)) return routeReviewTaskWeb(deps, request, url, authenticateSession);
-  const web = createFeedbackReviewWeb({
-    origin: new URL(deps.developer.issuer).origin,
-    authenticateSession,
-    getWorkflowFeedbackReview: (caller, taskId) => getWorkflowFeedbackReview(developerTaskRouteDependencies(deps, caller), caller, taskId),
-    submitWorkflowFeedbackDecision: (caller, taskId, input) => submitWorkflowFeedbackDecision(developerTaskRouteDependencies(deps, caller), caller, taskId, input),
-    now: deps.now,
-  });
-  return web(request, url);
+  // D1 (owner DEC 254zzz511): Code's own HTML task page and the old PR-feedback review page are deleted (they served only the old workflow engine's tasks: a core task was always "no task" there).
+  // The one page that stays is the People confirmation (people-confirm-web.ts): an AI tool or script proposes a role or ownership change and hands a person this link, and confirming it is a
+  // human-in-the-loop security step. Every other /review/ path (besides the channel link page) is a path nobody serves.
+  if (deps.tasks === undefined || !(PEOPLE_CONFIRM_PAGE.test(url.pathname) || PEOPLE_CONFIRM_API.test(url.pathname))) throw agentXError("NOT_FOUND", "route not found");
+  const routeDeps = (caller: DeveloperCaller) => developerTaskRouteDependencies(deps, caller);
+  return createPeopleConfirmWeb({
+    origin: deps.developer.issuer,
+    authenticateSession: makeSessionAuthenticator(deps),
+    getRequest: (caller, taskId, requestId) => getTaskPeopleProposal(routeDeps(caller), caller, taskId, requestId),
+    getMetadata: (caller, taskId, requestId) => getTaskPeopleProposalMetadata(routeDeps(caller), caller, taskId, requestId),
+    getPersonName: (_caller, taskId, personId) => taskPersonStoredName(deps, taskId, personId),
+    confirm: (caller, taskId, requestId) => confirmTaskPeopleProposal(routeDeps(caller), caller, taskId, requestId),
+  })(request, url);
 }
 
 function routePreAuthDeveloperPath(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> | undefined {
@@ -2589,8 +2554,6 @@ async function routeDeveloperTasksRequest(deps: DeveloperRouteDependencies, call
   if (deps.tasks === undefined) throw agentXError("NOT_FOUND", "developer tasks are not set up in this deployment");
   const checked = isCheckedTaskRead(request, url);
   const scope = checked && deps.companies !== undefined ? boundedCompanyReads(deps.documentClient) : undefined;
-  // Lane W: a merge press is company-checked too (membership, never a claim).
-  const merging = request.method === "POST" && /^\/v1\/dev\/tasks\/[^/]+\/merge$/.test(url.pathname);
   const commenting = isTaskCommentPost(request, url);
   // Reuse this route's live membership for money visibility; never read it again per task.
   let membership: Awaited<ReturnType<NonNullable<CompanyMembershipReader["membershipOf"]>>>;
@@ -2601,16 +2564,15 @@ async function routeDeveloperTasksRequest(deps: DeveloperRouteDependencies, call
       return membership?.companyId;
     },
   };
-  const companyId = checked || merging || commenting ? await resolveCompany(checkedCompanies, caller.developerId) : undefined;
+  const companyId = checked || commenting ? await resolveCompany(checkedCompanies, caller.developerId) : undefined;
   const taskDeps = developerTaskRouteDependencies(scope === undefined ? deps : { ...deps, documentClient: scope.client }, caller);
-  if ((checked || merging) && companies !== undefined) {
+  if (checked && companies !== undefined) {
     taskDeps.taskMoneyVisible = async (task) => recordInCompany(task, companyId)
       && (taskOwnerView(task)?.developerId === caller.developerId || membership?.role === "owner" || membership?.role === "admin");
   }
   const checkedDeps = wrapTaskDepsForCompanyReads(taskDeps, scope);
   const result = await routeDeveloperTaskRequest({
     ...checkedDeps, ...(companyId === undefined ? {} : { companyId }),
-    ...(merging && deps.taskMerge !== undefined ? { taskMerge: deps.taskMerge } : {}),
   }, caller, request, url);
   // Only a completed list page with an explicit continuation may consume an item-bound signal.
   scope?.check(url.pathname === "/v1/dev/tasks" && result !== null && typeof result === "object" && "nextCursor" in result);
@@ -2656,7 +2618,7 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
 
 /**
  * Lane L12: the core engine's own /v1/app/* routes. Like /v1/dev/*, no API Gateway authorizer runs on them: a method and path with no row in the route table (APP_ROUTES), or any
- * /v1/app/* path while the core switch is off (no `coreApp`), is refused before anyone is authenticated; otherwise the broker verifies the developer token, checks the row's scope and
+ * /v1/app/* path where no core is wired (no `coreApp`), is refused before anyone is authenticated; otherwise the broker verifies the developer token, checks the row's scope and
  * hands the signed-in caller (with its verified sign-in method) to the core, which takes the company from live membership. The core's answer is returned as it is (its status and body), never cached.
  */
 export async function routeAppRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<BrokerResponse> {

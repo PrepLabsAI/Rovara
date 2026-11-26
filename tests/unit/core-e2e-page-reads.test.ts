@@ -25,10 +25,10 @@ async function fixture() {
 }
 
 describe("existing review-page routes for a core task", () => {
-  it("serves the owner page and state, and an unknown screenshot is 404", async () => {
+  it("answers the owner page, its state and an unknown screenshot as a route that does not exist (DEC 254zzz511: Code's own HTML task page is deleted)", async () => {
     const h = await fixture();
-    expect((await h.get(MAYA)).statusCode).toBe(200);
-    expect((await h.get(MAYA, "/api/state")).statusCode).toBe(200);
+    expect((await h.get(MAYA)).statusCode).toBe(404);
+    expect((await h.get(MAYA, "/api/state")).statusCode).toBe(404);
     expect((await h.get(MAYA, `/api/e2e/artifacts/${"f".repeat(64)}`)).statusCode).toBe(404);
   });
   it("returns 404 to an ungranted company member and a foreign member before data or lifecycle writes", async () => {

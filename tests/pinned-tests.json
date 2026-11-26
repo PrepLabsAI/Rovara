@@ -65,7 +65,7 @@
     },
     {
       "path": "tests/contract/task-people.test.ts",
-      "minimumTests": 36,
+      "minimumTests": 34,
       "reason": "Read-only People authority refuses reconciliation without calling a writer. RESTORE-8F1BE0A80 item 3 restores our one removed case (35 to 36); the other removed old-engine cases are outside this lane.",
       "decision": "DEC 254zzz333",
       "restoreTarget": 36
@@ -288,8 +288,9 @@
     {
       "path": "tests/journeys/page.test.ts",
       "minimumTests": 6,
-      "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): journey 15, the task page for a core task (sign-in expiry and revocation, who sees what, CSRF and Origin, deep links, comment limits, and the G1 proof for a removed member). DELETED WITH CODE'S TASK PAGE (DEC 254zzz511): D1-3 removes this row with the file; it does not gate D1. A whole task on the real core and real worker, in every pull request run; the floor is the file's 6 runnable declarations, and deleting or trimming one is a reviewed edit.",
-      "decision": "DEC 254zzz459"
+      "reason": "Retired: file deleted with the old task page (D1-2, DEC 254zzz511). This was journey 15, Code's HTML task page for a core task. The guard cannot drop a pin, so the row moves with replaced-by to the surviving core task comment cases, which keep the floor of 6; the page's own sign-in, CSRF and deep-link cases went with the page.",
+      "decision": "DEC 254zzz459",
+      "replaced-by": "tests/contract/core-plan-comments.test.ts"
     },
     {
       "path": "tests/journeys/mcp.test.ts",
@@ -299,8 +300,8 @@
     },
     {
       "path": "tests/unit/github-webhook-install-cases.test.ts",
-      "minimumTests": 6,
-      "reason": "G-G (D1-PLAN 5.3, DEC 254zzz459): the install and webhook cases that survive the old engine, on the route with the real secret loader and the real core branch: no webhook secret, the webhook added after the pull request opened, a rotated secret, an event the App is not subscribed to, and a project registered again under DynamoDB's map order. The floor is the file's 6 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "minimumTests": 5,
+      "reason": "G-G (D1-PLAN 5.3, DEC 254zzz459): the install and webhook cases that survive the old engine, on the route with the real secret loader and the real core branch: no webhook secret, the webhook added after the pull request opened, a rotated secret, an event the App is not subscribed to, and a project registered again under DynamoDB's map order. The floor is the file's 5 runnable declarations (D1-2: one case of the old workflow engine's webhook handler went with it), and deleting or trimming one is a reviewed edit.",
       "decision": "DEC 254zzz459"
     },
     {

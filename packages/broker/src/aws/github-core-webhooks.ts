@@ -3,7 +3,7 @@
 //
 // Order of work (nothing earlier may be skipped; a contract test pins it): parse and shape, the cheap action filter, the per-installation limit (memory), the mapping (READS only: installation -> company ->
 // pull request / head -> link row -> task -> pinned repository -> tracking row), the durable per-installation limit, and only then the delivery reservation and the wake. A signed delivery that maps to nothing
-// is answered 202 IGNORED with ZERO writes. A task the legacy engine owns goes back to the caller (`legacy`), unchanged.
+// is answered 202 IGNORED with ZERO writes. A task that is not the core's (an old workflow engine task: D1 removed that engine) is ignored too, with the reason `not_core_task`.
 //
 // Fairness: one installation's flood cannot starve the others. (1) Everything before the mapping is cheap and reads nothing. (2) A per-installation fixed window in this container's memory refuses its
 // excess before any read. (3) After the mapping, a durable per-installation window (all containers) refuses the excess before any write. (4) A delivery costs a fixed handful of DynamoDB operations and no
@@ -16,7 +16,7 @@ import { findLinkedChangeRequest } from "../core/proof/revert/linked-change-requ
 import { codeHostRepositoryKey } from "../core/proof/revert/repository-key.js";
 import { recoveryRowKey, taskRecordKey } from "../core/merge/store.js";
 import { TRACKING_FAILURE_MAX_MS, TRACKING_POLL_MS } from "../services/merge-tracking.js";
-import { entryOwner, readTaskStamp } from "./engine-boundary.js";
+import { isCoreTask } from "./engine-boundary.js";
 import { isConditional } from "./broker-shared.js";
 import { recordInCompany } from "./company-check.js";
 import { GithubWebhookRefusal } from "./github-webhooks.js";
@@ -35,10 +35,9 @@ export const isGithubCoreEvent = (name: string): name is GithubCoreEvent => (GIT
 
 /** Why a signed delivery did nothing (fixed words; the answer to GitHub carries none of them, only the metric does). */
 export type GithubIgnoredReason = "malformed" | "unsupported_action" | "unknown_installation" | "installation_inactive" | "no_link" | "no_head" | "company_mismatch" | "task_ended"
-  | "workflow_mismatch" | "repository_mismatch" | "no_row";
+  | "workflow_mismatch" | "repository_mismatch" | "no_row" | "not_core_task" | "installation_unbound";
 
 export type GithubCoreOutcome =
-  | { kind: "legacy" }
   | { kind: "ignored"; reason: GithubIgnoredReason }
   | { kind: "throttled" }
   | { kind: "accepted"; deliveryId: string; wake: "woken" | "coalesced" | "no_row" }
@@ -59,8 +58,6 @@ export interface GithubCoreWebhookInput {
   now: () => number;
   log: (entry: Record<string, unknown>) => void;
   perMinute?: number;
-  /** True where the legacy handler has no company scoping of its own (the hosted broker): the core then hands it what it has always served there (a task with no company, an installation with no owner). */
-  legacyUnscoped?: boolean;
 }
 
 const Positive = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
@@ -184,15 +181,12 @@ async function pullRequestOf(input: GithubCoreWebhookInput, companyId: string, r
   return { number: head["number"], taskId: head["taskId"] };
 }
 
-/** The linked task, for this company: its record, its engine, its state, its workflow, its pinned repository and its tracking row. `legacy`: the task is the legacy engine's. */
-async function mapTask(input: GithubCoreWebhookInput, companyId: string, repositoryKey: string, link: { taskId: string; repositoryId: string; number: number; url: string; candidateDigest: string }): Promise<GithubIgnoredReason | "legacy" | "ok"> {
+/** The linked task, for this company: its record, its engine, its state, its workflow, its pinned repository and its tracking row. `not_core_task`: the task is not the core's (D1: the old engine's, which nothing serves now). */
+async function mapTask(input: GithubCoreWebhookInput, companyId: string, repositoryKey: string, link: { taskId: string; repositoryId: string; number: number; url: string; candidateDigest: string }): Promise<GithubIgnoredReason | "ok"> {
   const task = await get(input, taskRecordKey(link.taskId));
-  const legacyOwned = entryOwner(await readTaskStamp(input, link.taskId), "flow") !== "core";
-  // Where the legacy handler is NOT company-scoped (the hosted broker: no broker-wide bindings), a task it owns that carries no company (the built-in company's, which that handler has always served
-  // whatever company the installation is bound to) or that has no record at all is its to answer, not a company mismatch. Where it IS scoped it refuses by company itself, so the rule below holds.
-  if (legacyOwned && input.legacyUnscoped === true && (task === undefined || task["companyId"] === undefined)) return "legacy";
+  const legacyOwned = !await isCoreTask(input, link.taskId);
   if (task === undefined || !recordInCompany(task, companyId)) return "company_mismatch";
-  if (legacyOwned) return "legacy";
+  if (legacyOwned) return "not_core_task";
   // A core task's company is stamped and must be exactly the installation's (no implicit fallback).
   if (task["companyId"] !== companyId) return "company_mismatch";
   if (taskEnded(task)) return "task_ended";
@@ -202,13 +196,13 @@ async function mapTask(input: GithubCoreWebhookInput, companyId: string, reposit
   return row === undefined || row["kind"] !== "tracking" ? "no_row" : "ok";
 }
 
-/** installation -> company -> pull request -> link -> task, every step a read and every failure a reason. `legacy`: the task is the legacy engine's (or the installation is the old single-company one). */
-async function map(input: GithubCoreWebhookInput, payload: ParsedPayload, hit: Hit): Promise<Mapped | GithubIgnoredReason | "legacy"> {
+/** installation -> company -> pull request -> link -> task, every step a read and every failure a reason. */
+async function map(input: GithubCoreWebhookInput, payload: ParsedPayload, hit: Hit): Promise<Mapped | GithubIgnoredReason> {
   const installation = await input.bindings.ownerAndState(payload.installation.id);
-  // No binding row after the backfill marker: nobody owns it, so the core makes no wake on a guess; the legacy handler keeps serving what it always served here.
-  if (installation.owner === undefined) return input.legacyUnscoped === true ? "legacy" : "unknown_installation";
-  // The install's old single company has no binding row: only the legacy path serves it (no core wake is made on a guess of who owns what).
-  if (!installation.bound) return "legacy";
+  // No binding row after the backfill marker: nobody owns it, so the core makes no wake on a guess.
+  if (installation.owner === undefined) return "unknown_installation";
+  // The install's old single company has no binding row: no core wake is made on a guess of who owns what.
+  if (!installation.bound) return "installation_unbound";
   if (installation.state !== "active") return "installation_inactive";
   const companyId = installation.owner;
   const repositoryKey = codeHostRepositoryKey("github", `https://github.com/${payload.repository.full_name}`);
@@ -330,7 +324,6 @@ export async function receiveCoreGithubWebhook(input: GithubCoreWebhookInput): P
   const limit = input.perMinute ?? GITHUB_WEBHOOK_PER_MINUTE;
   if (overMemoryLimit(parsed.data.installation.id, input.now(), limit)) { input.log({ event: "github_webhook.rate_limited", where: "memory" }); return { kind: "throttled" }; }
   const mapped = await map(input, parsed.data, hit);
-  if (mapped === "legacy") return { kind: "legacy" };
   if (typeof mapped === "string") return refuse(input.log, mapped, input.eventName);
   if (await overDurableLimit(input, mapped.installationId, limit)) { input.log({ event: "github_webhook.rate_limited", where: "table" }); return { kind: "throttled" }; }
   // GitHub signs the body, not X-GitHub-Event: the event name is bound into the replay identity, so a body signed for one event cannot be replayed as another.

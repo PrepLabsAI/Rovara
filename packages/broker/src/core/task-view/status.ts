@@ -8,7 +8,7 @@ export const BUDGET_PAUSE_NEXT = STATUS_LINES.spendStopped.next;
 
 /** What the status reads of a task: the same facts a session summary holds (`SessionTaskFacts` fits it). */
 export interface StatusFacts {
-  workflow?: { stage: string; state: string; outcome?: string | undefined; blockReason?: string | undefined } | undefined;
+  workflow?: { stage: string; state: string; outcome?: string | undefined; blockReason?: string | undefined; pullRequests?: readonly unknown[] | undefined } | undefined;
   failedPrepare?: { at?: string | undefined } | undefined;
   budgetPaused?: boolean | undefined;
   /** A person pressed Stop and nothing has started the work again (the standing's own fact): the line says the run finished and waits, never that a person is needed. */
@@ -27,7 +27,8 @@ function workflowStatus(workflow: NonNullable<StatusFacts["workflow"]>): TaskSta
   switch (workflow.stage) {
     case "UNDERSTAND": return { state: "understanding", ...STATUS_LINES.understanding };
     case "PLAN": case "PLAN_CRITIQUE": case "PLAN_REVIEW": return { state: "planning", ...STATUS_LINES.planning };
-    case "IMPLEMENT": return { state: "building", ...STATUS_LINES.building };
+    // A fix round after the pull request was opened says only that the checks follow.
+    case "IMPLEMENT": return { state: "building", ...((workflow.pullRequests?.length ?? 0) > 0 ? STATUS_LINES.buildingAfterPullRequest : STATUS_LINES.building) };
     case "VERIFY": case "REVIEW": case "PULL_REQUEST": return { state: "checking", ...STATUS_LINES.checking };
     default: return { state: "building" };
   }

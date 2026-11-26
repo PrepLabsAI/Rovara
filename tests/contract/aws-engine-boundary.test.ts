@@ -1,4 +1,3 @@
-import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import { legacyWorkspaceKey } from "../../packages/broker/src/core/task-flow/legacy-keys.js";
 // Lane E2 (plan v3.2), step 6 part: the AWS entry points go by a task's stored engine. A workflow task (no stamp) keeps today's AWS readers; a core task is answered by the core's
 // own handlers (the core host's dev routes, company-aware) or refused exactly like a missing task, and no AWS reader returns its record, workspace or operations. A mixed stamp has one
@@ -14,13 +13,10 @@ import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import { writeInvolvedRow } from "../../packages/broker/src/core/task-flow/involved.js";
-import { createCoreHostApp, engineStampKey, stampOf, type CoreHostApp, type EngineStamp } from "../../packages/broker/src/core-host/index.js";
+import { createCoreHostApp, coreTaskMarkKey, coreTaskMarkOf, type CoreHostApp, type CoreTaskMark } from "../../packages/broker/src/core-host/index.js";
 import { NOT_ON_THE_CORE_YET, createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
-import { TASK_ENTRY_AREAS, coreAnswerValue, coreTaskEntryFrom, entryOwner, ownerOfTaskId, ownerOfWorkspace, taskEntryOperation, type CoreTaskEntry } from "../../packages/broker/src/aws/engine-boundary.js";
+import { TASK_ENTRY_OPERATIONS, coreAnswerValue, coreTaskEntryFrom, isCoreTask, isCoreWorkspace, taskEntryOperation, type CoreTaskEntry } from "../../packages/broker/src/aws/engine-boundary.js";
 import { workspaceOwner } from "../../packages/broker/src/aws/admin-reads.js";
-import { requireOperation } from "../../packages/broker/src/aws/cancellation.js";
-import { getTaskPageState, getWorkflowFeedbackReview, listPageComments, loadOwnedTask } from "../../packages/broker/src/aws/developer-tasks.js";
-import { resolveTaskAccess } from "../../packages/broker/src/developer/task-access.js";
 import { MAYA, OMAR, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { SLACK_CHANNEL, SLACK_TEAM, loadSlackBroker } from "../support/slack-broker.js";
@@ -34,11 +30,8 @@ const PROJECT: ProjectDefinition = {
 // Switch blocker honest-ci (#680): a deployment hands in the project's own CI mode reader.
 const HONEST_CI = { honest: true as const, ciMode: () => "their_ci_fix" as const };
 const SERVICES = () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } });
-const STAMP = (areas: EngineStamp["areas"]): EngineStamp => ({ engine: areas.flow, areas, flags: "cc=on", stampedAt: "2026-11-15T00:00:00.000Z" });
+const STAMP = (areas: CoreTaskMark["areas"]): CoreTaskMark => ({ engine: areas.flow, areas, flags: "cc=on", stampedAt: "2026-11-15T00:00:00.000Z" });
 const CORE = STAMP({ merge: "core", build: "core", flow: "core" });
-const MIXED = STAMP({ merge: "workflow", build: "workflow", flow: "core" });
-const INVERTED = STAMP({ merge: "core", build: "core", flow: "workflow" });
-const WORKFLOW = STAMP({ merge: "workflow", build: "workflow", flow: "workflow" });
 
 beforeAll(async () => { await loadSlackBroker(); });
 
@@ -51,33 +44,35 @@ describe("the owner of each operation, for every stamp", () => {
   it("names an operation for every developer task route, and none for anything else", () => {
     const named = ROUTE_SUFFIXES.map((suffix) => taskEntryOperation(suffix));
     expect(named.every((operation) => operation !== undefined)).toBe(true);
-    expect(new Set(named)).toEqual(new Set(Object.keys(TASK_ENTRY_AREAS)));
+    expect(new Set(named)).toEqual(new Set(TASK_ENTRY_OPERATIONS));
     for (const other of ["/read", "/people/requests", "/nope", "events", "/workflow", "/readers/a/b", "/people/requests/a/b", "/__proto__", "/constructor"]) expect(taskEntryOperation(other), other).toBeUndefined();
   });
 
-  it("is the workflow with no stamp or an unreadable one, and otherwise the flow's engine for every operation (a narrowed area never hands a task's rows to the other engine)", () => {
-    for (const [operation, area] of Object.entries(TASK_ENTRY_AREAS)) {
-      expect(entryOwner(undefined, area), operation).toBe("workflow");
-      expect(entryOwner(WORKFLOW, area), operation).toBe("workflow");
-      expect(entryOwner(CORE, area), operation).toBe("core");
-      // flow = core with build and merge narrowed to the workflow: the core's, for its build and merge operations too.
-      expect(entryOwner(MIXED, area), operation).toBe("core");
-      // flow = workflow with core areas (no start writes this): the workflow's, whole.
-      expect(entryOwner(INVERTED, area), operation).toBe("workflow");
-    }
+  it("is the core's when the task's mark is there, whatever its areas say, and no core task's with no mark (the old workflow is retired, D1-2c)", async () => {
+    const db = new FakeDynamoDb();
+    const table = { documentClient: db, tableName: "state" };
+    const [none, core, areasWorkflow] = [randomUUID(), randomUUID(), randomUUID()];
+    db.set({ ...coreTaskMarkKey(core), coreEngine: CORE });
+    // No start writes any mark but the core's; a mark of another shape that reads as one is still the mark, so it is the core's.
+    db.set({ ...coreTaskMarkKey(areasWorkflow), coreEngine: STAMP({ merge: "workflow", build: "workflow", flow: "workflow" }) });
+    expect(await isCoreTask(table, none)).toBe(false);
+    expect(await isCoreTask(table, core)).toBe(true);
+    expect(await isCoreTask(table, areasWorkflow)).toBe(true);
+    // A malformed id is no core task's, and is not read.
+    expect(await isCoreTask(table, "not-an-id")).toBe(false);
   });
 });
 
 describe("reading the stamp", () => {
   const table = (db: FakeDynamoDb) => ({ documentClient: db, tableName: "state" });
-  it("a stamp item that is there but cannot be read as one is an error (only the core writes it), and so is a read that fails; neither is ever the workflow", async () => {
+  it("a stamp item that is there but cannot be read as one is an error (only the core writes it), and so is a read that fails; neither is ever not the core's", async () => {
     const db = new FakeDynamoDb();
     const taskId = randomUUID();
-    db.set({ ...engineStampKey(taskId), coreEngine: { engine: "core", areas: { flow: "core", build: "core" }, flags: "x", stampedAt: "y" } });
-    await expect(ownerOfTaskId(table(db), taskId)).rejects.toThrow("a task's engine stamp could not be read");
+    db.set({ ...coreTaskMarkKey(taskId), coreEngine: { engine: "core", areas: { flow: "core", build: "core" }, flags: "x", stampedAt: "y" } });
+    await expect(isCoreTask(table(db), taskId)).rejects.toThrow("a task's engine stamp could not be read");
     const failing = new FakeDynamoDb();
     failing.injectFault({ command: "GetCommand", error: { name: "ProvisionedThroughputExceededException" } });
-    await expect(ownerOfTaskId(table(failing), randomUUID())).rejects.toThrow();
+    await expect(isCoreTask(table(failing), randomUUID())).rejects.toThrow();
   });
 
   it("never uses a discovery pointer alone or a cached engine verdict to bypass scoped ownership", async () => {
@@ -87,18 +82,39 @@ describe("reading the stamp", () => {
     db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "META", entityType: "WORKSPACE_COMPANY_POINTER", workspaceId, companyId: FAKE_COMPANY });
     // A legacy task pointer must never be a fallback for a company discovery pointer.
     db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "DEVELOPER_TASK", taskId });
-    db.set({ ...engineStampKey(taskId), coreEngine: CORE });
-    await expect(ownerOfWorkspace(table(db), workspaceId)).rejects.toMatchObject({ code: "NOT_FOUND", message: "NOT_FOUND: workspace unavailable" });
+    db.set({ ...coreTaskMarkKey(taskId), coreEngine: CORE });
+    await expect(isCoreWorkspace(table(db), workspaceId)).rejects.toMatchObject({ code: "NOT_FOUND", message: "NOT_FOUND: workspace unavailable" });
     expect(integrity.mock.calls).toEqual([[{ component: "broker", event: "workspace.pointer_integrity" }]]);
     integrity.mockClear();
     const scoped = { pk: workspacePartition(FAKE_COMPANY, workspaceId), sk: "META", entityType: "WORKSPACE", companyId: FAKE_COMPANY };
     db.set(scoped);
     db.set({ pk: scoped.pk, sk: "DEVELOPER_TASK", taskId });
-    expect(await ownerOfWorkspace(table(db), workspaceId)).toBe("core");
+    expect(await isCoreWorkspace(table(db), workspaceId)).toBe(true);
     db.set({ ...scoped, companyId: OTHER });
-    await expect(ownerOfWorkspace(table(db), workspaceId)).rejects.toMatchObject({ code: "NOT_FOUND", message: "NOT_FOUND: workspace unavailable" });
+    await expect(isCoreWorkspace(table(db), workspaceId)).rejects.toMatchObject({ code: "NOT_FOUND", message: "NOT_FOUND: workspace unavailable" });
     expect(integrity.mock.calls).toEqual([[{ component: "broker", event: "workspace.pointer_integrity" }]]);
     integrity.mockRestore();
+  });
+
+  // D1 pre-review MUST-3: a workspace with no company discovery pointer is the core's only when the task its pointer names is stamped.
+  it("a legacy workspace is the core's only when its task pointer names a stamped task: no pointer, an unstamped task or a malformed task id is not", async () => {
+    const pointerTo = (db: FakeDynamoDb, workspaceId: string, taskId: unknown) => db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "DEVELOPER_TASK", taskId });
+    const none = new FakeDynamoDb();
+    expect(await isCoreWorkspace(table(none), randomUUID())).toBe(false);
+    const unstamped = new FakeDynamoDb(), unstampedWorkspace = randomUUID();
+    pointerTo(unstamped, unstampedWorkspace, randomUUID());
+    expect(await isCoreWorkspace(table(unstamped), unstampedWorkspace)).toBe(false);
+    const malformed = new FakeDynamoDb(), malformedWorkspace = randomUUID();
+    pointerTo(malformed, malformedWorkspace, "not-a-task-id");
+    const stampReads: string[] = [];
+    const watched = { send: async (command: unknown) => { const key = (command as { input?: { Key?: { pk?: string } } }).input?.Key?.pk ?? ""; if (key.startsWith("TASK_ENGINE#")) stampReads.push(key); return malformed.send(command as never); } };
+    expect(await isCoreWorkspace({ documentClient: watched, tableName: "state" }, malformedWorkspace)).toBe(false);
+    // a malformed id is answered without asking for any stamp
+    expect(stampReads).toEqual([]);
+    const stamped = new FakeDynamoDb(), stampedWorkspace = randomUUID(), stampedTask = randomUUID();
+    pointerTo(stamped, stampedWorkspace, stampedTask);
+    stamped.set({ ...coreTaskMarkKey(stampedTask), coreEngine: CORE });
+    expect(await isCoreWorkspace(table(stamped), stampedWorkspace)).toBe(true);
   });
 
   it("reads the core's answer: a value for 200, the closed-list error otherwise, and fixed words for anything it cannot read (never echoed)", () => {
@@ -167,7 +183,7 @@ async function coreWorld(options: { access?: TaskFlowDeps["access"]; withoutRead
   const coreTasks: CoreTaskEntry = options.newTasksOnWorkflow !== true ? entry : { route: async (request, caller) => (request.method === "POST" && request.path.split("?")[0] === "/v1/dev/tasks" ? undefined : await entry.route(request, caller)) };
   const harness = await createDeveloperTaskBroker(options.wired === false ? {} : { developerExtra: { coreTasks } });
   const rows = [
-    ...await partition(world, `DEVTASK#${task.taskId}`), ...await partition(world, engineStampKey(task.taskId).pk),
+    ...await partition(world, `DEVTASK#${task.taskId}`), ...await partition(world, coreTaskMarkKey(task.taskId).pk),
     ...await partition(world, workspacePartition(FAKE_COMPANY, task.workspaceId)), ...await partition(world, `DEVELOPER#${developerIdOf(owner)}`),
     ...await partition(world, `WORKSPACE#${task.workspaceId}`),
   ];
@@ -356,6 +372,30 @@ describe("the owner's answers on the AWS developer route `POST /v1/dev/tasks/{id
     expect(answered?.round).toEqual({ round: 1, questions: [{ ...WAITING_ROUND.questions[0]!, answered: true }] });
   });
 
+  // DEC 254zzz502 (D1-2b): a task with no core mark is the retired old workflow's: it is no longer listed, ended or not. Its records are kept.
+  it("lists only tasks that carry the core's mark: an old task's index row, ended or not, is no longer listed, and nothing is written or deleted", async () => {
+    const { dev, task, world, db } = await coreWorld();
+    await publish(world, db, task.taskId);
+    const oldIds = [randomUUID(), randomUUID()];
+    const rows = oldIds.map((taskId, position) => {
+      const meta = { pk: `DEVTASK#${taskId}`, sk: "META", entityType: "DEVELOPER_TASK", taskId, developerId: MAYA.developerId, title: `Old task ${position}`, project: "payments", createdAt: `2026-10-0${position + 1}T00:00:00.000Z`, updatedAt: `2026-10-0${position + 1}T00:00:00.000Z` };
+      const index = { ...meta, pk: `DEVELOPER#${MAYA.developerId}`, sk: `TASK#2026-10-0${position + 1}T00:00:00.000Z#${taskId}`, entityType: "DEVELOPER_TASK_INDEX", status: position === 0 ? "CLOSED" : "RUNNING" };
+      return { meta, index };
+    });
+    for (const { meta, index } of rows) { db.set(meta); db.set(index); }
+    const writes: unknown[] = [];
+    db.onWrite((change) => writes.push(change));
+    const listed = (await dev(MAYA, "GET", "/v1/dev/tasks")).body.tasks as Array<{ taskId: string }>;
+    expect(listed.map((row) => row.taskId)).toContain(task.taskId);
+    for (const taskId of oldIds) expect(listed.map((row) => row.taskId), taskId).not.toContain(taskId);
+    // With detail and a status filter too, and nothing is written (no index sync of the old rows) ...
+    const detailed = (await dev(MAYA, "GET", "/v1/dev/tasks?detail=1&status=RUNNING")).body.tasks as Array<{ taskId: string }>;
+    for (const taskId of oldIds) expect(detailed.map((row) => row.taskId), taskId).not.toContain(taskId);
+    expect(writes).toEqual([]);
+    // ... and the old records are still there.
+    for (const { meta, index } of rows) { expect(db.get(String(meta.pk), "META")).toBeDefined(); expect(db.get(String(index.pk), String(index.sk))).toBeDefined(); }
+  });
+
   it("?detail=1 gives no round once the task is past Understand, and gives the workflow's outcome", async () => {
     const { dev, task, world, app, db } = await coreWorld({ actions: true, understand: true });
     await asked(world, app, task.taskId);
@@ -456,27 +496,6 @@ describe("the AWS readers see only workflow rows", () => {
     expect(workspaceReads()).toEqual([]);
   });
 
-  it("the task actions (READERS.md: workspace, operations, artifacts, pull requests, failed publications) answer nothing for a core task's workspace", async () => {
-    const { actions, task } = await coreWorld();
-    await expect(actions.workspace(task.workspaceId)).rejects.toMatchObject({ code: "NOT_FOUND" });
-    expect(await actions.operations(task.workspaceId)).toEqual([]);
-    expect(await actions.artifacts(task.workspaceId, "any")).toEqual([]);
-    expect(await actions.pullRequests(task.workspaceId)).toEqual([]);
-    expect(await actions.failedPublications(task.workspaceId, { repositoryId: "demo", candidateDigest: "d", treeSha: "t" })).toBe(0);
-  });
-
-  it("the workflow's task access and owned-task load refuse a core task exactly as a missing one", async () => {
-    const { db, task, actions, brokerInput } = await coreWorld();
-    // Even with the record made to look like the caller's own, the core's task is not read here.
-    db.set({ ...(db.get(`DEVTASK#${task.taskId}`, "META") as Record<string, unknown> & { pk: string; sk: string }), developerId: MAYA.developerId });
-    const deps = { documentClient: db, tableName: brokerInput.tableName, actions, checkAccess: async () => { throw new Error("never asked"); } } as never;
-    const caller = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name };
-    await expect(resolveTaskAccess(deps, caller, task.taskId, "read")).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
-    await expect(loadOwnedTask(deps, caller, task.taskId)).rejects.toMatchObject({ code: "TASK_NOT_FOUND", message: `TASK_NOT_FOUND: no task ${task.taskId} of yours` });
-    // The task page's poll and comments and the PR feedback review page go through the same access.
-    for (const page of [getTaskPageState, listPageComments, getWorkflowFeedbackReview]) await expect(page(deps, caller, task.taskId), page.name).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
-  });
-
   it("?detail=1 adds each row's detail (Cloud #188 item 5): a core task's workflow stage and state, its cost and run limit from the core's own money read, as its owner; nothing is written", async () => {
     const { db, task, dev, coreTasks, workspaceReads } = await coreWorld({ actions: true, roundCap: async () => ({ limitUsd: 7.5, spentUsd: 1.25 }) });
     db.set({ ...(db.get(`DEVTASK#${task.taskId}`, "META") as Record<string, unknown> & { pk: string; sk: string }), developerId: MAYA.developerId });
@@ -549,48 +568,6 @@ describe("the AWS readers see only workflow rows", () => {
     }
   });
 
-  it("Slack Keep returns the served core response without falling through to the legacy owner path", async () => {
-    const w = await coreWorld();
-    const expected = { task: { taskId: w.task.taskId } };
-    const calls: unknown[] = [];
-    w.coreTasks.route = async (request, caller) => {
-      calls.push({ path: request.path, body: JSON.parse(request.body!) as unknown, developerId: caller.developerId });
-      return { statusCode: 200, headers: {}, body: JSON.stringify(expected) };
-    };
-    const requestId = randomUUID();
-    const answer = await w.handler({ source: "agentx.slack-ingress", action: "workflow-keep-pull-requests", taskId: w.task.taskId,
-      userId: MAYA.slackUserId, thread: { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000100" },
-      requestId, expectedRevision: w.task.workflow!.revision });
-    expect(JSON.parse(answer.body)).toEqual({ ...expected, requestId: "slack-ingress" });
-    expect(calls).toEqual([{ path: `/v1/dev/tasks/${w.task.taskId}/workflow/keep-pull-requests`,
-      body: { requestId, expectedRevision: w.task.workflow!.revision }, developerId: developerIdForSlackUser(MAYA.slackUserId!) }]);
-  });
-
-  it("Slack Keep refuses a disabled workspace before the core route", async () => {
-    const w = await coreWorld();
-    const route = vi.spyOn(w.coreTasks, "route");
-    const answer = await w.handler({ source: "agentx.slack-ingress", action: "workflow-keep-pull-requests", taskId: w.task.taskId,
-      userId: MAYA.slackUserId, thread: { teamId: "T0WRONG000", channelId: SLACK_CHANNEL, threadTs: "1695500000.000100" },
-      requestId: randomUUID(), expectedRevision: w.task.workflow!.revision });
-    expect(JSON.parse(answer.body)).toMatchObject({ refused: true, message: "Only the task owner can do that." });
-    expect(route).not.toHaveBeenCalled();
-  });
-
-  it("Slack Keep on hosted without decision routes says not available yet and starts no paid work", async () => {
-    const w = await coreWorld();
-    w.principals.set(developerIdForSlackUser(MAYA.slackUserId!), w.principals.get(MAYA.developerId)!);
-    const runtime = await w.app.runtimeFor(FAKE_COMPANY);
-    const admission = vi.spyOn(runtime.flow.deps.admission, "admit");
-    const before = await readCoreTask(runtime.flow.deps, w.task.taskId);
-    const answer = await w.handler({ source: "agentx.slack-ingress", action: "workflow-keep-pull-requests", taskId: w.task.taskId,
-      userId: MAYA.slackUserId, thread: { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000100" },
-      requestId: randomUUID(), expectedRevision: w.task.workflow!.revision });
-    expect(JSON.parse(answer.body)).toEqual({ refused: true, message: "This action is not available on this install yet.", requestId: "slack-ingress" });
-    expect(admission).not.toHaveBeenCalled();
-    expect(await readCoreTask(runtime.flow.deps, w.task.taskId)).toEqual(before);
-    expect(w.db.find(row => row.entityType === "WORKFLOW_DISPATCH")).toEqual([]);
-  });
-
   it("a Slack thread note on a core task's thread is refused, even where the workflow would take it from a legacy commenter, and nothing is written", async () => {
     const { db, task, handler } = await coreWorld();
     const thread = { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000100" };
@@ -621,34 +598,13 @@ describe("the AWS readers see only workflow rows", () => {
 
 });
 
-describe("the operation readers behind requireOperation see only workflow rows (T1 follow-up)", () => {
-  const operationOf = async (db: FakeDynamoDb, workspaceId: string) => db.find((item) => item.workspaceId === workspaceId && String(item.sk).startsWith("OPERATION#"))[0] as { id: string; sk: string };
-  const notHere = { code: "NOT_FOUND", message: `NOT_FOUND: ${NOT_ON_THE_CORE_YET}` };
-
-  for (const entry of ["workflowBinding", "workflowCandidateSourceExportDigest", "requireOperation"] as const) {
-    it(`${entry} answers a core task's operation with the fixed words and never reads the operation row`, async () => {
-      const { db, task, actions, brokerInput } = await coreWorld();
-      const operation = await operationOf(db, task.workspaceId);
-      expect(operation).toBeDefined();
-      const sent = vi.spyOn(db, "send");
-      sent.mockClear();
-      const read = entry === "requireOperation"
-        ? requireOperation({ documentClient: db, tableName: brokerInput.tableName }, task.workspaceId, operation.id)
-        : actions[entry](task.workspaceId, operation.id);
-      await expect(read).rejects.toMatchObject(notHere);
-      expect(sent.mock.calls.some(([command]) => JSON.stringify((command as { input?: unknown }).input ?? {}).includes(operation.sk))).toBe(false);
-    });
-  }
-
-});
-
 describe("a task's start on the AWS developer route (lane E2 step 6)", () => {
   it("goes to the core for a member of a company the switch sends there: the core's task view, its rows on the core, none of the workflow's", async () => {
     const { dev, world, db } = await coreWorld();
     const started = await dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Add a /ready endpoint", workflow: true, workflowPath: "QUICK" });
     expect(started.status).toBe(200);
     const taskId = (started.body.task as { taskId: string }).taskId;
-    expect(stampOf(await world.store.get(engineStampKey(taskId)))).toMatchObject({ engine: "core" });
+    expect(coreTaskMarkOf(await world.store.get(coreTaskMarkKey(taskId)))).toMatchObject({ engine: "core" });
     expect(db.get(`DEVTASK#${taskId}`, "META")).toBeUndefined();
   });
 

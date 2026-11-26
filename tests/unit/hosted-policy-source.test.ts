@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { companyScoped, type PolicyResolveRequest } from "@agentx/contracts";
 import { policyCiReporting } from "../../packages/broker/src/aws/core-job-services.js";
 import { hostedPolicySource, HOSTED_POLICY_FAILURE_TTL_MS, HOSTED_POLICY_TTL_MS } from "../../packages/broker/src/aws/core-policy-source.js";
-import { CI_MODE_UNREADABLE_WORDS } from "../../packages/broker/src/core-host/switch-blockers.js";
+import { CI_MODE_UNREADABLE_WORDS } from "../../packages/broker/src/core-host/core-wiring-guard.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { ISSUER, fakeService, makeKey, settingsFor, signerOf } from "./policy-hook-fixture.js";
 import { COMPANY_A_ID, COMPANY_B_ID } from "../../packages/testing/src/isolation/two-company.js";

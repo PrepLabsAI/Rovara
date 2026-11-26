@@ -60,12 +60,12 @@ it.each(["operation", "task", "revision", "proposal", "requirements", "candidate
 
 it.each(["busy-workspace", "missing-stamp", "expired-queue"])("critic admission handles %s before paid work", async kind => {
   const { PR_FEEDBACK_REVIEW_DEADLINE_MS } = await import("../../packages/broker/src/core/pr-feedback/recovery.js");
-  const { engineStampKey } = await import("../../packages/broker/src/core-host/engine-stamp.js");
+  const { coreTaskMarkKey } = await import("../../packages/broker/src/core-host/core-task-mark.js");
   const w = await feedbackWorld();
   await collectPrFeedback(w.deps, w.task, w.budget);
   const task = (await readTask(w.h.deps, w.task.taskId))!;
   if (kind === "busy-workspace") await w.h.store.update({ key: { pk: `WORKSPACE#${task.workspaceId}`, sk: "META" }, ops: [change.set("status", "PREPARING"), change.set("activeOperationId", "99999999-9999-4999-8999-999999999999")] });
-  if (kind === "missing-stamp") await w.h.store.delete({ key: engineStampKey(task.taskId) });
+  if (kind === "missing-stamp") await w.h.store.delete({ key: coreTaskMarkKey(task.taskId) });
   if (kind === "expired-queue") w.h.clock.advance(PR_FEEDBACK_REVIEW_DEADLINE_MS / 1000);
   const admit = vi.spyOn(w.h.deps.admission, "admit");
   expect(await createBuildSteps().runRow(w.h.deps, { taskId: task.taskId, workflowRevision: task.workflow!.revision, kind: "REVIEW" })).toBe(kind === "busy-workspace" ? "WAITING" : "STALE");

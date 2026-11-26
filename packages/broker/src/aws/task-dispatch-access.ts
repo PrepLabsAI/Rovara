@@ -305,108 +305,11 @@ export async function guardTaskDispatch(deps: TaskDispatchAccessDependencies, re
 
 const TASK_PAUSE_RESERVE_MS = 2_000;
 
-interface PausedTaskDispatch {
-  taskId: string;
-  outboxId: string;
-  operationId: string;
-  workspaceId: string;
-  peopleRevision: number;
-  workflowRevision?: number;
-  workflowStage?: string;
-  workflowState?: string;
-}
-
-/**
- * Explicit current-owner redrive for the one parked operation. It changes only the original
- * outbox back to PENDING, so the publisher requeues the exact invocation without a new charge.
- * Merely taking ownership, session readiness, and recovery sweeps never call this function.
- */
-export async function resumeTaskDispatch(
-  deps: TaskDispatchAccessDependencies & { now(): number },
-  input: { task: DeveloperTaskRecord; peopleRevision: number; actorId: string; requestId: string; payloadHash: string; reauthorize?(): Promise<void> },
-): Promise<boolean> {
-  assertCoreCompany(deps, input.task);
-  const auditKey = { pk: `DEVTASK#${input.task.taskId}`, sk: `TASK_ACCESS_RETRY#${input.requestId}` };
-  const priorAudit = await get<{ actorId?: string; operationId?: string; payloadHash?: string }>(deps, auditKey);
-  if (priorAudit !== undefined) {
-    if (priorAudit.actorId !== input.actorId || priorAudit.payloadHash !== input.payloadHash) {
-      throw agentXError("IDEMPOTENCY_CONFLICT", "this retry request ID was already used");
-    }
-    await input.reauthorize?.();
-    return true;
-  }
-  const response = await deps.documentClient.send(new QueryCommand({
-    TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :pause)",
-    ExpressionAttributeValues: { ":pk": `DEVTASK#${input.task.taskId}`, ":pause": "TASK_ACCESS_PAUSE#" }, ConsistentRead: true,
-  })) as { Items?: PausedTaskDispatch[] };
-  const workspace = await get<{ activeOperationId?: string }>(deps, { pk: workspacePk(deps, input.task.workspaceId), sk: "META" });
-  const pauses = (response.Items ?? []).filter((pause) => pause.taskId === input.task.taskId && pause.workspaceId === input.task.workspaceId
-    && pause.operationId === workspace?.activeOperationId);
-  if (pauses.length === 0) return false;
-  const pause = pauses.length === 1 ? pauses[0]! : undefined;
-  const workflow = input.task.workflow;
-  if (pause === undefined || pause.peopleRevision > input.peopleRevision || workflow === undefined
-    || pause.workflowRevision !== workflow.revision || pause.workflowStage !== workflow.stage || pause.workflowState !== workflow.state) return false;
-  const outbox = await get<DurableOutboxRecord>(deps, outboxKey(deps, pause.outboxId));
-  if (outbox?.status !== "WAITING_FOR_TASK_ACCESS" || outbox.operationId !== pause.operationId || outbox.workspaceId !== pause.workspaceId) return false;
-  const at = new Date(deps.now()).toISOString();
-  const items: TransactItem[] = [
-    resumeOutboxItem(deps, pause, at),
-    { ConditionCheck: {
-      TableName: deps.tableName, Key: taskKey(input.task.taskId),
-      ConditionExpression: "workflow.#revision = :workflowRevision AND workflow.#stage = :workflowStage AND workflow.#state = :workflowState AND attribute_not_exists(closedAt)",
-      ExpressionAttributeNames: { "#revision": "revision", "#stage": "stage", "#state": "state" }, ExpressionAttributeValues: {
-        ":workflowRevision": pause.workflowRevision, ":workflowStage": pause.workflowStage, ":workflowState": pause.workflowState,
-      },
-    } },
-    { ConditionCheck: {
-      TableName: deps.tableName, Key: { pk: `DEVTASK#${input.task.taskId}`, sk: "PEOPLE" },
-      ConditionExpression: "#revision = :revision", ExpressionAttributeNames: { "#revision": "revision" }, ExpressionAttributeValues: { ":revision": input.peopleRevision },
-    } },
-    { ConditionCheck: {
-      TableName: deps.tableName, Key: { pk: workspacePk(deps, pause.workspaceId), sk: `OPERATION#${pause.operationId}` },
-      ConditionExpression: "fence = :fence AND (#status = :accepted OR #status = :dispatching)", ExpressionAttributeNames: { "#status": "status" },
-      ExpressionAttributeValues: { ":fence": outbox.invocation.fence, ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING" },
-    } },
-    { ConditionCheck: {
-      TableName: deps.tableName, Key: { pk: workspacePk(deps, pause.workspaceId), sk: "META" },
-      ConditionExpression: "fence = :fence AND activeOperationId = :operationId",
-      ExpressionAttributeValues: { ":fence": outbox.invocation.fence, ":operationId": pause.operationId },
-    } },
-    { Delete: { TableName: deps.tableName, Key: pauseKey(pause.outboxId), ConditionExpression: "operationId = :operationId", ExpressionAttributeValues: { ":operationId": pause.operationId } } },
-    { Delete: { TableName: deps.tableName, Key: taskPauseKey(input.task.taskId, pause.outboxId), ConditionExpression: "operationId = :operationId", ExpressionAttributeValues: { ":operationId": pause.operationId } } },
-    { Put: { TableName: deps.tableName, Item: { ...auditKey, entityType: "TASK_ACCESS_RETRY", schemaVersion: 1, taskId: input.task.taskId,
-      requestId: input.requestId, actorId: input.actorId, payloadHash: input.payloadHash, outboxId: pause.outboxId, operationId: pause.operationId, at }, ConditionExpression: "attribute_not_exists(pk)" } },
-  ];
-  try {
-    await deps.documentClient.send(new TransactWriteCommand({ TransactItems: items }));
-    return true;
-  } catch (error) {
-    if (!conditional(error)) throw error;
-    const audit = await get<{ actorId?: string; operationId?: string; payloadHash?: string }>(deps, auditKey);
-    const current = await get<{ status?: string; operationId?: string }>(deps, outboxKey(deps, pause.outboxId));
-    if (audit?.actorId === input.actorId && audit.operationId === pause.operationId && audit.payloadHash === input.payloadHash && current?.status === "PENDING") {
-      await input.reauthorize?.();
-      return true;
-    }
-    throw error;
-  }
-}
-
 
 function assertCoreCompany(deps: TaskDispatchAccessDependencies, task: DeveloperTaskRecord): void {
   if (deps.core !== undefined && task.companyId !== deps.core.companyId) throw agentXError("RUNTIME_UNAVAILABLE", "task dispatch company does not match");
 }
 
-function resumeOutboxItem(deps: TaskDispatchAccessDependencies, pause: PausedTaskDispatch, at: string): TransactItem {
-  return { Update: {
-      TableName: deps.tableName, Key: outboxKey(deps, pause.outboxId), UpdateExpression: `SET #status = :pending${deps.core === undefined ? "" : `, ${OUTBOX_PENDING_INDEX.partitionAttribute} = :pendingPk, ${OUTBOX_PENDING_INDEX.sortAttribute} = :at, attempts = :zero`} REMOVE taskAccessPausedAt`,
-      ConditionExpression: `#status = :waiting AND ${outboxMatch(deps)}`,
-      ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: {
-        ...companyValues(deps), ...(deps.core === undefined ? {} : { ":pendingPk": `PENDING#${deps.core.companyId}`, ":at": at, ":zero": 0 }), ":pending": "PENDING", ":waiting": "WAITING_FOR_TASK_ACCESS", ":operationId": pause.operationId, ":workspaceId": pause.workspaceId,
-      },
-    } };
-}
 
 // The relay writes the store's configured expiry; a paused delivery must outlive it.
 function outboxExpiryNames(deps: TaskDispatchAccessDependencies): Record<string, string> {

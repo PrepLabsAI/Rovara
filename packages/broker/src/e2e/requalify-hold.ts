@@ -1,13 +1,12 @@
 import { GetCommand, QueryCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { OrgIdSchema, companyScoped } from "@agentx/contracts";
-import { CORE_IN_USE_PARTITION } from "../core-host/engine-stamp.js";
+import { CORE_IN_USE_PARTITION } from "../core-host/core-task-mark.js";
 import { STALE_RUN_SWEEP_AGE_MS } from "@agentx/verifier";
 import {
   INDEX_EXPIRY_ATTRIBUTE, REQUALIFY_PROFILE_ID, RequalifyHoldSchema, TERMINAL_OPERATION_STATUSES, WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX, WORKSPACE_SESSION_STATE_INDEX,
   agentXError, canonicalJson, projectSetupExecutionKey, requalifyDrainProjection, requalifyHoldKey,
-  type E2EApplicationSelectionRecord, type E2ERegisteredRuntime, type RequalifyDrainRead,
+  type E2EApplicationSelectionRecord, type RequalifyDrainRead,
 } from "@agentx/contracts";
-import type { SessionManager } from "../aws/sessions.js";
 import { isConditional } from "../aws/broker-shared.js";
 import { ApplicationDispatchRefusal, applicationSelectionStillCurrent } from "./application-dispatch-check.js";
 
@@ -20,7 +19,6 @@ import { ApplicationDispatchRefusal, applicationSelectionStillCurrent } from "./
  *  - The drain. `requalifyDrainStatus` says whether any round or setup run that already started on the old machine is still running.
  *  - The renewal-only change. A selection that differs from the approved one only because the machine was renewed (same profile, binding and capabilities, a newer generation, the
  *    plan, setup, targets and test accounts untouched) is told apart from every other change, so that one automatic retry approves it again. Nothing else is ever approved by Rovara.
- *  - Replays. A round that ran on an earlier machine cannot be replayed exactly (its case ids are bound to the rows it ran on); the refusal says so.
  *
  * Nothing here is built from what a runner, a worker or a model said. The renewal's steps (AR-2) place and release the hold and poll `requalifyDrainCount`.
  */
@@ -202,44 +200,5 @@ export function isRenewalOnlyChange(recorded: E2EApplicationSelectionRecord, cur
   return moved;
 }
 
-/**
- * The refusal for an approved selection that is no longer the current one: the renewal kind when the machine was only renewed, else the ordinary one that asks for a person. The
- * message is the prefix plus the reason `applicationSelectionStillCurrent` gave.
- */
-export function selectionChangedRefusal(recorded: E2EApplicationSelectionRecord, current: E2EApplicationSelectionRecord, reason: string, ordinaryPrefix: string): ApplicationDispatchRefusal {
-  return isRenewalOnlyChange(recorded, current) ? new ApplicationRuntimeRenewed(`${WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX}${reason}`) : new ApplicationDispatchRefusal(`${ordinaryPrefix}${reason}`);
-}
-
 /** Whether a block reason is the renewal kind, whose approval again Rovara's own retry may do (once, by the policy's retry limit). */
 export const isRuntimeRenewedBlock = (blockReason: string | undefined): boolean => blockReason?.startsWith(WORKFLOW_APPLICATION_RUNTIME_RENEWED_PREFIX) === true;
-
-/**
- * The guard on Rovara's own re-approval: the selection derived again must be the approved one with only the rows renewed (and the same test accounts, which the owner's re-approval would
- * otherwise move to the latest). Anything else needs the owner, so the automatic retry refuses.
- */
-export function requireRenewalOnlyReapproval(approved: E2EApplicationSelectionRecord, derived: E2EApplicationSelectionRecord): void {
-  if (!isRenewalOnlyChange(approved, derived)) throw agentXError("CONFIG_INVALID", "this block needs the owner to approve the plan again; only a renewal of the test machine is approved again automatically");
-}
-
-// ---- replays ------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-/** Whether a round ran on runtime rows that are not the registered ones any more (a row that is gone or was requalified since). */
-export function replayPredatesRenewal(admitted: readonly E2ERegisteredRuntime[], current: readonly E2ERegisteredRuntime[]): boolean {
-  return admitted.some((row) => {
-    const now = current.find((item) => item.capabilities.kind === row.capabilities.kind && item.profileId === row.profileId);
-    return now === undefined || canonicalJson(now) !== canonicalJson(row);
-  });
-}
-
-// ---- a task worker on another kernel than the test machine ------------------------------------------------------------------------------------------------------------------
-
-/**
- * A round ended `runtime-environment-drifted`: the task's worker booted on another image than the machine the runtime was qualified on. The worker is stopped so that the one automatic
- * retry starts a fresh one (which the provisioner launches from the qualified image, AR-4). Only a READY session is claimed, and with the reaper's own atomic claim: it fails if the
- * worker was touched since it was read or the workspace has an operation running, so a dispatch always wins. Returns whether the worker was claimed; any other state needs nothing.
- */
-export async function recycleDriftedWorker(sessions: Pick<SessionManager, "get" | "claimStop">, workspaceId: string): Promise<boolean> {
-  const seen = await sessions.get(workspaceId);
-  if (seen === undefined || seen.state !== "READY") return false;
-  return sessions.claimStop(seen);
-}

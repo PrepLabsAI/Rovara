@@ -64,7 +64,7 @@ import { z } from "zod";
 import { readSetupJournal } from "../core/setup-agent/journal.js";
 import { HOST_ASK_REVISION, SETUP_HOST_KIND, hostAskDigest, hostAskSubjectId, hostDecisionRequestId, listHostAsks, readOpenHostAsk } from "../core/setup-agent/host-ask.js";
 import { setupAgentKey } from "../core/setup-agent/keys.js";
-import { ensureCoreInUse } from "./engine-stamp.js";
+import { ensureCoreInUse } from "./core-task-mark.js";
 import { setupStateOf, startProjectSetupCheck } from "../core/setup-agent/check.js";
 import { stopProjectSetupChecks } from "../core/setup-agent/check-stop.js";
 import { resumeSetupPausedTasks } from "../core/setup-agent/auto-resume.js";
@@ -140,8 +140,6 @@ export interface HostedSetupRunInput {
   wiring: HostedSetupRunWiring;
   /** The audit sink for this request (the dev routes' `auditFor`, else the runtime's). */
   audit: AuditSink;
-  /** Whether the switch sends this company's NEW tasks to the core. False: a start is refused. */
-  startsNewTasks: boolean;
   now: () => number;
 }
 
@@ -523,8 +521,8 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
     const raw = bodyOf(input.request);
     if (tail === undefined) {
       const body = parsed(SetupAgentStartBodySchema, raw);
-      // A run spends model money by the minute: only where this company's new tasks run on the core, and the install's model gateway meters the run. Nothing is written otherwise.
-      if (!input.startsNewTasks || !deps.modelAccessConfigured) throw agentXError("RUNTIME_UNAVAILABLE", SETUP_RUN_UNAVAILABLE);
+      // A run spends model money by the minute: only where the install's model gateway meters the run. Nothing is written otherwise.
+      if (!deps.modelAccessConfigured) throw agentXError("RUNTIME_UNAVAILABLE", SETUP_RUN_UNAVAILABLE);
       const answer = await startSetupAgent(deps, project, body);
       return json(answer.status, { ...answer.view, canManage: true });
     }
@@ -652,7 +650,6 @@ export async function routeHostedSetupCheck(input: HostedSetupRunInput): Promise
       await recorded(input, auditEvent(input, "setup_check.stop_requested", `setup_check.stop_requested:${companyId}:${project}:${input.principal.personId}:${body.requestId}`, project, standing.basis, { requestId: body.requestId }));
       return json(200, await stopProjectSetupChecks(flow, project));
     }
-    if (!input.startsNewTasks) throw agentXError("RUNTIME_UNAVAILABLE", SETUP_RUN_UNAVAILABLE);
     const personId = input.principal.personId;
     await recorded(input, auditEvent(input, "setup_check.requested", `setup_check.requested:${companyId}:${project}:${personId}:${body.requestId}`, project, standing.basis, { requestId: body.requestId }));
     await ensureCoreInUse(flow.store, companyId);

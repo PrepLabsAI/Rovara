@@ -156,8 +156,8 @@ it("an explicitly authorized co-owner is recorded as the real actor", async () =
 
 it("a retired stamp cannot authorize a core feedback decision", async () => {
   const w = await reviewedFeedbackWorld();
-  const { engineStampKey } = await import("../../packages/broker/src/core-host/engine-stamp.js");
-  await w.h.store.delete({ key: engineStampKey(w.task.taskId) });
+  const { coreTaskMarkKey } = await import("../../packages/broker/src/core-host/core-task-mark.js");
+  await w.h.store.delete({ key: coreTaskMarkKey(w.task.taskId) });
   await expect(decidePrFeedback(w.h.deps, w.h.owner, w.task.taskId, w.request)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
   expect((await readTask(w.h.deps, w.task.taskId))!.workflow).toEqual(w.task.workflow);
 });

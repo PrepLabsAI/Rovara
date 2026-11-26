@@ -23,32 +23,19 @@ async function send(seeded: NonNullable<Parameters<typeof seed>[1]>, verify: boo
   const r = await handler({ rawPath: "/v1/github/webhooks", body, headers: { "x-github-delivery": ID, "x-github-event": "pull_request", "x-hub-signature-256": `sha256=${sig}` }, requestContext: { requestId: "t", http: { method: "POST" } } });
   return { r, db, json: JSON.parse(r.body) as Record<string, unknown> };
 }
-it("no link row: 202 not_linked, nothing written", async () => {
-  const { r, json, db } = await send({ link: false }, true);
-  expect(r.statusCode).toBe(202); expect(json).toMatchObject({ ignored: true, reason: "not_linked" });
-  expect(db.get(`GITHUB_DELIVERY#${ID}`, "META")).toBeUndefined();
-});
-it("link row but the task is closed, or no longer lists the PR: 202 not_linked", async () => {
-  expect((await send({ closed: true }, true)).json).toMatchObject({ reason: "not_linked" });
-  expect((await send({ trackPr: false }, true)).json).toMatchObject({ reason: "not_linked" });
-});
-it("linked task, pinned project lacks the repo, or live GitHub disagrees: stays 403 (never ignored)", async () => {
-  for (const [s, v] of [[{ project: "other-repo" }, true], [{}, false]] as const) {
-    const { r, json, db } = await send(s, v);
-    expect(r.statusCode).toBe(403); expect(JSON.stringify(json)).toMatch(/outside the registered installation and repository scope/);
+// D1-2: the old workflow's webhook handler (and its linked / not-linked / mismatch verdicts) is deleted. A pull request event that is not a core task's is answered 202 IGNORED
+// whatever the old link rows say, and writes nothing; the signature is still checked first.
+it("a pull request event with an old link row, or none, or a closed task, or a repo the project lacks, is 202 IGNORED and writes nothing", async () => {
+  for (const seeded of [{ link: false }, {}, { closed: true }, { trackPr: false }, { project: "other-repo" }] as const) {
+    const { r, json, db } = await send(seeded, true);
+    expect(r.statusCode).toBe(202);
+    expect(json).toMatchObject({ delivery: "IGNORED" });
     expect(db.get(`GITHUB_DELIVERY#${ID}`, "META")).toBeUndefined();
   }
 });
-it("linked and verified: accepted (real feedback is not dropped)", async () => {
-  // Authorized: the delivery is reserved (a row exists); the later processing step needs more fixtures than this test builds, so only the reservation is asserted.
-  const { db, json } = await send({}, true);
-  expect(json).not.toHaveProperty("ignored");
-  expect(db.get(`GITHUB_DELIVERY#${ID}`, "META")).toBeDefined();
-});
-it("a live-GitHub outage during verification is still retryable, not ignored", async () => {
-  const { AgentXError } = await import("@agentx/contracts");
-  const { r } = await send({}, async () => { throw new AgentXError("RUNTIME_UNAVAILABLE", "down", 503); });
-  expect(r.statusCode).toBe(503);
+it("is ignored without asking live GitHub, so an outage there changes nothing", async () => {
+  const { r } = await send({}, async () => { throw new Error("GitHub must not be asked"); });
+  expect(r.statusCode).toBe(202);
 });
 it("bad signature is 403 for every link state", async () => {
   for (const s of [{ link: false }, {}, { closed: true }, { project: "other-repo" }] as const) expect((await send(s, true, false)).r.statusCode).toBe(403);

@@ -9,7 +9,7 @@ import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-act
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { checkTaskPersonIdentity, resolveTaskPersonId, type ProjectAccessSubject, type TaskPersonIdentity, type TaskPersonIdentityDependencies } from "../../packages/broker/src/developer/task-person-identity.js";
 import { TASK_PERSON_UNNAMED, parseTaskPeopleEntry, parseTaskPersonIdentity, taskPeopleEntryOf } from "../../packages/broker/src/developer/task-person-rows.js";
-import { changeTaskPeople, getTaskPeople, getTaskPeoplePresentation, resolveTaskDispatchPeople, type TaskPeopleDependencies, type TaskPersonCheck } from "../../packages/broker/src/developer/task-people.js";
+import { changeTaskPeople, getTaskPeople, resolveTaskDispatchPeople, type TaskPeopleDependencies, type TaskPersonCheck } from "../../packages/broker/src/developer/task-people.js";
 import type { TaskPeopleDisplayAdmission } from "../../packages/broker/src/developer/task-people-display-budget.js";
 import { taskOwnerKey, type DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
 import type { DeveloperRecord } from "../../packages/broker/src/developer/store.js";
@@ -336,7 +336,7 @@ describe("company boundary: rows are read only from the task's own partition", (
     h.reads.length = 0;
     expect((await errorOf(checkTaskPersonIdentity(h.identityDeps, companyA, GALE_ID))).code).toBe("PROJECT_ACCESS_DENIED");
     await expect(resolveTaskDispatchPeople(h.peopleDeps, companyA)).resolves.toMatchObject({ status: "ALLOWED", ownerActorIds: [taskOwnerKey(SAM_ID, TASK_A)] });
-    await expect(getTaskPeoplePresentation(h.peopleDeps, TASK_A)).resolves.toEqual([{ personId: P_SAM, developerId: SAM_ID, name: "Sam Slack" }]);
+    // D1-2: the presentation reader (getTaskPeoplePresentation) was the deleted task page's; the two live readers above carry the boundary.
     expect(h.reads.length).toBeGreaterThan(0);
     expect(h.reads.every((key) => key.startsWith(`DEVTASK#${TASK_A}/`))).toBe(true);
     // Company B's malformed PEOPLE row is refused for B, and A is unaffected.

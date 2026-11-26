@@ -7,7 +7,7 @@ import { IMPLICIT_COMPANY_ID, type OrgId, type Principal } from "@agentx/contrac
 import { createCoreTaskRuleRoutes } from "../../packages/broker/src/aws/core-task-rule-routes.js";
 import { hostedTaskAccess, NO_PROJECT_GRANT, projectGrantRoleFromDynamo } from "../../packages/broker/src/aws/core-engine-root.js";
 import { developerTaskRouteDependencies, type DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
-import { engineStampKey } from "../../packages/broker/src/core-host/engine-stamp.js";
+import { coreTaskMarkKey } from "../../packages/broker/src/core-host/core-task-mark.js";
 import { HOSTED_IDENTITY_PROVIDER } from "../../packages/broker/src/core-host/hosted-modules.js";
 import { resolveCoreTaskAccess } from "../../packages/broker/src/developer/task-access.js";
 import type { TaskPeopleDependencies } from "../../packages/broker/src/developer/task-people.js";
@@ -69,7 +69,7 @@ describe("a channel-only person on the NEW engine: the old routes that still ask
     const h = companyRouteHarness();
     h.project(undefined, "channel"); h.task(TASK, IMPLICIT_COMPANY_ID);
     h.db.set({ ...h.db.get(`DEVTASK#${TASK}`, "META")!, developerId: "e".repeat(64), ownerKey: "e".repeat(64), share: { teamId: "T0SHARED", channelId: "C0SHARED", threadTs: "1700000000.000100" } });
-    h.db.set({ ...engineStampKey(TASK), entityType: "TASK_ENGINE", orgId: IMPLICIT_COMPANY_ID, taskId: TASK, coreEngine: { engine: "core", areas: { merge: "core", build: "core", flow: "core" }, flags: "test", stampedAt: TIME } });
+    h.db.set({ ...coreTaskMarkKey(TASK), entityType: "TASK_ENGINE", orgId: IMPLICIT_COMPANY_ID, taskId: TASK, coreEngine: { engine: "core", areas: { merge: "core", build: "core", flow: "core" }, flags: "test", stampedAt: TIME } });
     return h;
   }
   const row = (h: ReturnType<typeof companyRouteHarness>) => h.db.get(`DEVTASK#${TASK}`, "META") as never;

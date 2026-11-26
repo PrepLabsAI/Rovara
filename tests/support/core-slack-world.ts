@@ -13,7 +13,7 @@ import { stopWorkspaceAsAdministrator } from "../../packages/broker/src/core/tas
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { createCoreHostApp, engineStampKey, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
+import { createCoreHostApp, coreTaskMarkKey, type CoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { createCoreDevRoutes, type CompanyMembership, type DeployedCaller } from "../../packages/broker/src/core-host/dev-routes.js";
 import { coreTaskEntryFrom, type CoreTaskEntry } from "../../packages/broker/src/aws/engine-boundary.js";
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
@@ -23,7 +23,7 @@ import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "./core-host-fakes.js";
 import { workflowSlackHandlers, createSlackPressDispatcher, type SlackBlockAction } from "../../packages/broker/src/aws/slack-interactivity.js";
 import { taskActionDepsFrom, taskActionPressHandler, taskActionSubmission } from "../../packages/broker/src/aws/slack-task-actions.js";
-import { ownerOfTaskId } from "../../packages/broker/src/aws/engine-boundary.js";
+import { isCoreTask } from "../../packages/broker/src/aws/engine-boundary.js";
 
 export const OTHER_COMPANY = "org_corehost00000000000b";
 export const CORE_PROJECT: ProjectDefinition = {
@@ -111,7 +111,7 @@ export async function coreSlackWorld(options: { roundCap?: () => Promise<{ limit
   };
   const harness = await createDeveloperTaskBroker({ developerExtra: { coreTasks } });
   const rows = [
-    ...await partition(world, `DEVTASK#${task.taskId}`), ...await partition(world, engineStampKey(task.taskId).pk),
+    ...await partition(world, `DEVTASK#${task.taskId}`), ...await partition(world, coreTaskMarkKey(task.taskId).pk),
     ...await partition(world, workspacePartition(FAKE_COMPANY, task.workspaceId)), ...await partition(world, `WORKSPACE#${task.workspaceId}`),
   ];
   for (const row of rows) harness.db.set(JSON.parse(JSON.stringify(row)) as Record<string, unknown> & { pk: string; sk: string });
@@ -173,7 +173,7 @@ export function hostedPressDispatcher(world: CoreSlackWorld) {
       return method === "views.open" ? { view: { id: `V${String(views.length)}` } } : {};
     },
     respondEphemeral,
-    isCoreTask: async (taskId) => await ownerOfTaskId({ documentClient: world.harness.db, tableName: "state" }, taskId) === "core",
+    isCoreTask: async (taskId) => await isCoreTask({ documentClient: world.harness.db, tableName: "state" }, taskId),
     log: () => undefined,
   });
   const taskActions = taskActionPressHandler(handlerDeps);

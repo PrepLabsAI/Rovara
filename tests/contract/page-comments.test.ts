@@ -2,8 +2,8 @@
 // through conditional writes, and checked against the stored document and the one access rule.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { NUDGE_WINDOW_MS, sharedTaskKey, type TaskComment } from "@agentx/contracts";
-import { createTaskComment, deleteTaskComment, editTaskComment, listSuggestions, queueCommentAnswer, setSuggestion, takeRate } from "../../packages/broker/src/developer/page-comments.js";
+import { NUDGE_WINDOW_MS } from "@agentx/contracts";
+import { createTaskComment, takeRate } from "../../packages/broker/src/developer/page-comments.js";
 import { resolveTaskAccess } from "../../packages/broker/src/developer/task-access.js";
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import { PRIYA, SAM, pagePlan, pageTask, type PageTaskFixture } from "../support/page-tasks.js";
@@ -21,7 +21,6 @@ const refusal = async (promise: Promise<unknown>) => {
   }
   throw new Error("expected a refusal");
 };
-const stored = (fixture: PageTaskFixture, commentId: string) => fixture.db.get(`DEVTASK#${fixture.taskId}`, `COMMENT#${commentId}`);
 const counter = (fixture: PageTaskFixture) => fixture.db.get(`DEVTASK#${fixture.taskId}`, "COMMENTS");
 
 function waitingTask(): PageTaskFixture {
@@ -57,26 +56,6 @@ describe("page comments", () => {
     expect(counter(fixture)).toMatchObject({ count: 1 });
     // The same request ID from someone else is their own comment.
     expect((await comment(fixture, PRIYA, { requestId })).comment.commentId).not.toBe(first.comment.commentId);
-  });
-
-  it("replies are one level deep and at most 20", async () => {
-    const fixture = waitingTask();
-    const { comment: parent } = await comment(fixture, SAM);
-    const { comment: reply } = await comment(fixture, PRIYA, { parentId: parent.commentId, target: { kind: "document" }, text: "Agreed." });
-    // A reply sits in its parent's thread, whatever the request named.
-    expect(reply).toMatchObject({ parentId: parent.commentId, document: "plan", version: 1, target: { kind: "claim", id: "2.1" } });
-    expect((await refusal(comment(fixture, SAM, { parentId: reply.commentId }))).pageReason).toBe("not_here");
-    expect((await refusal(comment(fixture, SAM, { parentId: randomUUID() }))).pageReason).toBe("not_here");
-    for (let index = 1; index < 20; index += 1) {
-      await comment(fixture, index % 2 === 0 ? SAM : PRIYA, { parentId: parent.commentId, text: `Reply ${index}` });
-    }
-    const full = await refusal(comment(fixture, SAM, { parentId: parent.commentId }));
-    expect(full.pageReason).toBe("thread_full");
-    expect(counter(fixture)).toMatchObject({ count: 21 });
-    // A deleted comment takes no new replies.
-    const { comment: other } = await comment(fixture, SAM, { target: { kind: "document" } });
-    await deleteTaskComment(fixture.deps, await access(fixture, SAM), { commentId: other.commentId, rev: 1 });
-    expect((await refusal(comment(fixture, PRIYA, { parentId: other.commentId }))).pageReason).toBe("not_here");
   });
 
   it("comments only on the current step's latest version; replies anywhere while open", async () => {
@@ -129,87 +108,6 @@ describe("page comments", () => {
     expect(await takeRate(fixture.deps, key, 2, 60_000)).toBe(true);
   });
 
-  it("only the author edits or deletes, and not after it is sent", async () => {
-    const fixture = waitingTask();
-    const { comment: written } = await comment(fixture, SAM);
-    const notYours = await refusal(editTaskComment(fixture.deps, await access(fixture, PRIYA), { commentId: written.commentId, rev: 1, text: "Changed" }));
-    expect(notYours.pageReason).toBe("not_yours");
-    expect((await refusal(deleteTaskComment(fixture.deps, await access(fixture, PRIYA), { commentId: written.commentId, rev: 1 }))).pageReason).toBe("not_yours");
-    fixture.advance(1_000);
-    const edited = await editTaskComment(fixture.deps, await access(fixture, SAM), { commentId: written.commentId, rev: 1, text: "Above, please. token=abcdefabcdefabcdef" });
-    expect(edited).toMatchObject({ rev: 2, editedAt: new Date(fixture.deps.now()).toISOString() });
-    expect(edited.text).toContain("Above, please.");
-    expect(edited.text).not.toContain("abcdefabcdefabcdef");
-    expect(counter(fixture)).toMatchObject({ count: 1, seq: 2 });
-    // A decision locked it.
-    fixture.db.set({ ...stored(fixture, written.commentId)!, lockedBy: { requestId: randomUUID(), decision: "APPROVE", at: new Date(fixture.deps.now()).toISOString() }, rev: 3 });
-    const locked = await refusal(editTaskComment(fixture.deps, await access(fixture, SAM), { commentId: written.commentId, rev: 3, text: "Again" }));
-    expect([locked.pageReason, locked.message]).toEqual(["locked", expect.stringContaining("Sent with a decision, so it can't be changed.")]);
-    expect((await refusal(deleteTaskComment(fixture.deps, await access(fixture, SAM), { commentId: written.commentId, rev: 3 }))).pageReason).toBe("locked");
-    // Deleting removes the text at once and keeps its place.
-    const { comment: other } = await comment(fixture, SAM, { target: { kind: "document" } });
-    const deleted = await deleteTaskComment(fixture.deps, await access(fixture, SAM), { commentId: other.commentId, rev: 1 });
-    expect(deleted).toMatchObject({ text: "", rev: 2, author: { developerId: SAM.developerId } });
-    expect(typeof deleted.deletedAt).toBe("string");
-    expect(JSON.stringify(stored(fixture, other.commentId))).not.toContain("Should this be above?");
-  });
-
-  it("an edit with an old rev is refused", async () => {
-    const fixture = waitingTask();
-    const { comment: written } = await comment(fixture, SAM);
-    await editTaskComment(fixture.deps, await access(fixture, SAM), { commentId: written.commentId, rev: 1, text: "Second" });
-    const stale = await refusal(editTaskComment(fixture.deps, await access(fixture, SAM), { commentId: written.commentId, rev: 1, text: "Third" }));
-    expect(stale.pageReason).toBe("changed");
-    expect((stored(fixture, written.commentId) as unknown as TaskComment).text).toBe("Second");
-  });
-
-  it("writes nothing when PEOPLE appears or changes after page authority was resolved", async () => {
-    const appeared = waitingTask();
-    const staleLegacyActor = await access(appeared, SAM);
-    appeared.db.set({ pk: `DEVTASK#${appeared.taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false, people: [] });
-
-    await expect(createTaskComment(appeared.deps, staleLegacyActor, {
-      requestId: randomUUID(), document: "plan", version: 1, target: { kind: "document" }, text: "stale", ask: false,
-    })).rejects.toBeDefined();
-    expect(appeared.db.find((item) => item.entityType === "TASK_COMMENT" || item.entityType === "TASK_RATE")).toEqual([]);
-
-    const changed = waitingTask();
-    const original = await comment(changed, SAM);
-    const stalePeopleActor = { ...await access(changed, SAM), peopleRevision: 1 };
-    changed.db.set({ pk: `DEVTASK#${changed.taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 2, orphaned: false, people: [] });
-    await expect(editTaskComment(changed.deps, stalePeopleActor, { commentId: original.comment.commentId, rev: 1, text: "changed" })).rejects.toBeDefined();
-    expect((stored(changed, original.comment.commentId) as unknown as TaskComment).text).toBe(original.comment.text);
-  });
-
-  it("writes no suggestion or rate item when the task closes after authority was resolved", async () => {
-    const fixture = waitingTask();
-    const stale = await access(fixture, SAM);
-    fixture.close();
-
-    await expect(setSuggestion(fixture.deps, stale, { document: "plan", decisionId: "d1", optionId: "above" })).rejects.toBeDefined();
-    expect(await listSuggestions(fixture.deps, fixture.taskId)).toEqual([]);
-    expect(fixture.db.get(`DEVTASK#${fixture.taskId}`, `RATE#suggestion#${SAM.developerId}`)).toBeUndefined();
-  });
-
-  it("does not queue or spend ask limits when the task closes after the comment was read", async () => {
-    const fixture = waitingTask();
-    const stale = await access(fixture, SAM);
-    const written = (await comment(fixture, SAM)).comment;
-    const share = stale.task.share!;
-    fixture.db.set({ ...sharedTaskKey({ teamId: share.teamId, channelId: share.channelId, threadTs: share.threadTs! }),
-      taskId: fixture.taskId, workflowThread: true });
-    fixture.close();
-    let sent = 0;
-
-    const outcome = await queueCommentAnswer({ ...fixture.deps, slackRequestQueue: { send: async () => { sent += 1; } } }, {
-      task: stale.task, comment: written, caller: SAM, access: stale,
-    });
-    expect(outcome.outcome).toBe("failed");
-    expect(sent).toBe(0);
-    expect(stored(fixture, written.commentId)?.ask).toBeUndefined();
-    expect(fixture.db.find((item) => item.entityType === "TASK_RATE" && String(item.sk).startsWith("RATE#ask"))).toEqual([]);
-  });
-
   it("the 301st item is refused", async () => {
     const fixture = waitingTask();
     await comment(fixture, SAM);
@@ -219,22 +117,6 @@ describe("page comments", () => {
     expect(fixture.db.find((item) => item.entityType === "TASK_COMMENT")).toHaveLength(1);
     // A refusal for a full task spends none of the writer's limit.
     expect(fixture.db.get(`DEVTASK#${fixture.taskId}`, `RATE#comment#${PRIYA.developerId}`)).toBeUndefined();
-  });
-
-  it("one suggestion per person per decision; owners don't suggest", async () => {
-    const fixture = waitingTask();
-    const sam = await access(fixture, SAM);
-    await setSuggestion(fixture.deps, sam, { document: "plan", decisionId: "d1", optionId: "above" });
-    await setSuggestion(fixture.deps, sam, { document: "plan", decisionId: "d1", optionId: "below" });
-    const suggestions = await listSuggestions(fixture.deps, fixture.taskId);
-    expect(suggestions).toEqual([expect.objectContaining({ document: "plan", decisionId: "d1", developerId: SAM.developerId, optionId: "below", name: "Sam Lee", version: 1, rev: 2 })]);
-    expect((await refusal(setSuggestion(fixture.deps, await access(fixture, PRIYA), { document: "plan", decisionId: "d1", optionId: "above" }))).pageReason).toBe("owners_answer");
-    expect((await refusal(setSuggestion(fixture.deps, sam, { document: "plan", decisionId: "d1", optionId: "sideways" }))).pageReason).toBe("not_here");
-    expect((await refusal(setSuggestion(fixture.deps, sam, { document: "plan", decisionId: "d9", optionId: "above" }))).pageReason).toBe("not_here");
-    expect((await refusal(setSuggestion(fixture.deps, sam, { document: "design", decisionId: "d1", optionId: "above" }))).pageReason).toBe("not_here");
-    await setSuggestion(fixture.deps, sam, { document: "plan", decisionId: "d1", optionId: null });
-    expect(await listSuggestions(fixture.deps, fixture.taskId)).toEqual([]);
-    await setSuggestion(fixture.deps, sam, { document: "plan", decisionId: "d1", optionId: null });
   });
 
   it("a nudge marker opens once per 10 minutes", async () => {

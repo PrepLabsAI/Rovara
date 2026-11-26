@@ -3,6 +3,15 @@ import ts from "typescript";
 type Pin = { path: string; minimumTests: number; reason: string; decision: string; "replaced-by"?: string; restoreTarget?: number };
 type PendingRestore = Pin & { restoringLane: string; deletedBy: string };
 
+/**
+ * One-time exception (DEC 254zzz555); delete with its test in the next train. The owner approved these drops ONCE, because the cases went with their deleted subject (the old workflow
+ * engine, D1-2). A lowered floor passes history only when (path, the held floor, the new floor) matches an entry here EXACTLY; every other drop, and any drop below `to`, is still refused.
+ */
+export const APPROVED_FLOOR_DROPS = Object.freeze([
+  Object.freeze({ path: "tests/contract/task-people.test.ts", from: 36, to: 34, decision: "DEC 254zzz555" }),
+  Object.freeze({ path: "tests/unit/github-webhook-install-cases.test.ts", from: 6, to: 5, decision: "DEC 254zzz555" }),
+] as const);
+
 function record(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -42,7 +51,9 @@ export function validatePinnedHistory(current: unknown, prior: unknown): string[
   const findings = before.flatMap((pin) => {
     const next = byPath.get(pin.path);
     if (!next) return [`${pin.path}: historical pin removed; retain it with replaced-by when moving`];
-    return next.minimumTests < pin.minimumTests ? [`${pin.path}: minimum lowered from ${pin.minimumTests} to ${next.minimumTests}`] : [];
+    if (next.minimumTests >= pin.minimumTests) return [];
+    const approved = APPROVED_FLOOR_DROPS.some((drop) => drop.path === pin.path && drop.from === pin.minimumTests && drop.to === next.minimumTests);
+    return approved ? [] : [`${pin.path}: minimum lowered from ${pin.minimumTests} to ${next.minimumTests}`];
   });
   const pendingByPath = new Map(pendingAfter.map((pin) => [pin.path, pin]));
   for (const pin of pendingBefore) {

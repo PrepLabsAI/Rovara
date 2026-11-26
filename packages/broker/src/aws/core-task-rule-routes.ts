@@ -53,6 +53,8 @@ export interface CoreTaskRuleRoutes {
   route(input: CoreTaskRuleRouteInput): Promise<BrokerResponse>;
   /** DEC 254zzz44 (a): the stored share (spec 067, `readerShare`) of this person on a task of this company: its role as stored, while they are still a member of the task's project. The read rule decides what it shows. */
   sharedReader(input: Pick<CoreTaskRuleRouteInput, "person" | "companyId" | "task">): Promise<{ role: string } | undefined>;
+  /** The old People page rule (`pageRule`) as the read rule's seam, for a person and a task of this company: resolves when it admits, throws its refusal, says `viaChannelShare` for a person who reads only because the task is shared into their channel. */
+  peoplePage(input: Pick<CoreTaskRuleRouteInput, "person" | "companyId" | "task">): Promise<void | { holdsOwnTask: true } | { viaChannelShare: true }>;
   /**
    * The task's own person's live hold on their task (the hotfix's test, one implementation: the grant, or the access that let them start it, a bound-channel member where the project lets channel members use it), read now,
    * for a task of this company. The read rule's live-grant seam asks it for the task's own person; anyone else it asks for the grant. A read that fails is "no".
@@ -172,7 +174,9 @@ async function documentRoute(rest: string, deps: DeveloperTaskRouteDependencies,
   }
   if (rest === "comments") {
     // A read of the comments asks the one rule (the old People page rule is its seam); a POST is a comment, judged by the comment action's own rule inside `createCorePlanComment`.
-    if (request.method === "POST") return json(await createCorePlanComment(deps, caller, task, bodyOf(request)));
+    // The comment is judged by the comment action's own rule (the People list's, which gives the Slack channel share its commenter role). A person the task is shared with by the stored share ("Can view") comments too (owner
+    // decision 254zzz558): asked of the one read rule only after the People rule said "no such task", and only the stored share's decision counts.
+    if (request.method === "POST") return json(await createCorePlanComment(deps, caller, task, bodyOf(request), async () => (await authorize("comments", { peoplePage: () => pageRule(deps, caller, task) }).catch(() => undefined))?.mode === "shared"));
     return json(await listCorePlanComments(deps, await authorize("comments", { peoplePage: () => pageRule(deps, caller, task) })));
   }
   return undefined;
@@ -204,6 +208,10 @@ export function createCoreTaskRuleRoutes(depsFor: (person: { developerId: string
       if (input.task["companyId"] !== input.companyId || typeof task.taskId !== "string") return false;
       const deps: DeveloperTaskRouteDependencies = { ...ruleDependencies(depsFor(input.person, input.companyId), artifacts), companyId: input.companyId };
       return await holdsOwnTask(deps, task, input.person.developerId);
+    },
+    async peoplePage(input) {
+      const { deps, caller } = peopleOf(input);
+      return await pageRule(deps, caller, input.task as unknown as DeveloperTaskRecord);
     },
     async sharedReader(input) {
       const task = input.task as unknown as DeveloperTaskRecord;

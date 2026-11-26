@@ -1,6 +1,6 @@
 // Webhook lane W3 (public GitHub webhook tracking): the dedicated webhook secret slot and the webhook route's throttle, in the named and the legacy control-plane templates.
 //  - the slot is created EMPTY by the stack (no value in the template), retained, and readable by the broker's role alone among the workloads, through the secret's own resource policy;
-//    no identity policy anywhere (the plan-evidence job's included) names it or reaches it by a wildcard;
+//    no identity policy anywhere names it or reaches it by a wildcard;
 //  - the broker is wired to it by derivation: it derives exactly the name the secret was created with;
 //  - the webhook route is throttled (20 a second, burst 100, detailed metrics on) in the SAME stage map as the four sign-in routes: nothing overwrites anything;
 //  - one alarm watches the route's rejected traffic.
@@ -99,19 +99,13 @@ describe.each([["named (staging)", named, "staging"], ["legacy (production)", le
     expect(statements[0]!.Principal).toEqual({ AWS: { "Fn::GetAtt": [roleIdOf(broker), "Arn"] } });
   });
 
-  it("is reached by NO identity policy: no statement names it, and none covers it by a wildcard, a service wildcard or an all-resources grant (the plan-evidence job's included)", () => {
+  it("is reached by NO identity policy: no statement names it, and none covers it by a wildcard, a service wildcard or an all-resources grant", () => {
     // Opus review: a NotAction or NotResource Allow is treated as reaching (it grants everything it does not name).
     const reaching = identityStatements(template).filter(({ statement }) => statement.Effect === "Allow" && ("NotAction" in statement || "NotResource" in statement || [statement.Action].flat().some(REACHES_SECRETS))
       && renderedResource(statement.Resource, secretId).some((resource) => patternCovers(resource, name)));
     expect(reaching.map(({ owner, statement }) => `${owner} ${statement.Sid ?? ""}`)).toEqual([]);
-    // The plan-evidence job reads the App's secret (private key included) by its parameter's ARN, and nothing here.
-    const planEvidenceFunction = entries(template, "AWS::Lambda::Function").find(([id]) => /^PlanEvidence[0-9A-F]{8}$/u.test(id));
-    // Named environments only (the legacy template has no plan-evidence job); where it exists, nothing on its role names the slot.
-    if (planEvidenceFunction === undefined) { expect(env).toBe("production"); return; }
-    const planEvidenceRole = roleIdOf(planEvidenceFunction[1]);
-    const own = entries(template, "AWS::IAM::Policy").filter(([, resource]) => JSON.stringify(resource.Properties.Roles).includes(`"${planEvidenceRole}"`));
-    expect(JSON.stringify(own.map(([, resource]) => resource.Properties.PolicyDocument))).not.toContain(secretId);
-    expect(JSON.stringify(own.map(([, resource]) => resource.Properties.PolicyDocument))).not.toContain("github-webhook-secret");
+    // D1: the plan-evidence job (a function that read the App's secret) is gone from every layout.
+    expect(entries(template, "AWS::Lambda::Function").some(([id]) => /^PlanEvidence[0-9A-F]{8}$/u.test(id))).toBe(false);
   });
 
   it("is wired to the broker by derivation: the broker derives exactly this name, and no function's variables carry it as a value", () => {

@@ -13,7 +13,7 @@ import { type CompanyMembershipReader, ownPartitionRow, readTaskLegacyProject, r
 import { createSlackLinkCodes, slackBindingCompany, slackCompanyProject } from "./slack-person.js";
 import { namedCompanySlackBinding } from "./slack-company-layout.js";
 import { grantKeyFor, latestRevisionRowFor, namedCompany } from "./company-layout.js";
-import { ownerOfWorkspace } from "./engine-boundary.js";
+import { isCoreWorkspace } from "./engine-boundary.js";
 import { slackThreadKey } from "./failed-preparation.js";
 import { companyThenInstallLinkCodes, installAdapterLinkCodes } from "./slack-company-split.js";
 import { type ChannelAdapterDependencies, getChannelAdapter } from "./channel-adapters.js";
@@ -29,7 +29,7 @@ import { type GitHubAppCredentialProvider, parseGitHubRepository } from "../gith
 import type { ScopeDiscovery } from "./connector-routes.js";
 import type { AuthenticatedIdentity } from "../auth.js";
 import type { DeveloperRouteDependencies } from "./developer-routes.js";
-import type { ReplayRecord } from "./workflow-e2e-replay.js";
+
 import type { RuntimeBinding } from "./lambda.js";
 
 export function projectSetupPolicy(proposal: E2ESetupProposal, agentRoute?: { revision: string; definition: { budgets: Parameters<typeof e2eAgentRoutePolicyLimits>[0] } }): ReturnType<typeof E2EPolicySchema.parse> {
@@ -196,10 +196,6 @@ export async function getChannelBinding(dependencies: AwsBrokerDependencies, ref
   return readChannelBindingItem(ref, await getItem<Record<string, unknown>>(dependencies, channelBindingKey(ref)));
 }
 
-export function slackBindingKey(teamId: string, channelId: string) {
-  return channelBindingKey({ channel: SLACK_CHANNEL, tenant: teamId, space: channelId });
-}
-
 /** An operation a developer started from an AI tool (FR-022), rather than from Slack. */
 export function developerRequested(operation: Pick<OperationRecord, "requestedBy">): boolean {
   const requester = operation.requestedBy;
@@ -218,7 +214,7 @@ export async function requireOwnedWorkspace(
 
 export async function requireWorkspace(dependencies: AwsBrokerDependencies, workspaceId: string): Promise<WorkspaceInstance> {
   // Lane E2: a core task's workspace is not the workflow's to read or act on (engine-boundary.ts); it answers like a missing one.
-  if (await ownerOfWorkspace(dependencies, workspaceId) === "core") throw agentXError("NOT_FOUND", "workspace not found");
+  if (await isCoreWorkspace(dependencies, workspaceId)) throw agentXError("NOT_FOUND", "workspace not found");
   const item = await getItem<Record<string, unknown>>(dependencies, workspaceKey(workspaceId));
   if (!item) throw agentXError("NOT_FOUND", "workspace not found");
   return WorkspaceInstanceSchema.parse(workspaceRecordFields(item));
@@ -520,12 +516,6 @@ export async function requireAdministratorGrant(
   if (membership.role !== "administrator") throw agentXError("FORBIDDEN", "administrator project membership is required");
 }
 
-/** What the operator reads of a replay record: its state, when, and the broker's own result; never an id of an operation or an object. */
-export function replayRecordView(record: ReplayRecord) {
-  return { attempt: record.attempt, state: record.state, requestedAt: record.requestedAt, ...(record.startedAt === undefined ? {} : { startedAt: record.startedAt }),
-    ...(record.recordedAt === undefined ? {} : { recordedAt: record.recordedAt }), ...(record.reason === undefined ? {} : { reason: record.reason }), ...(record.replay === undefined ? {} : { replay: record.replay }) };
-}
-
 /** Whether closing a workspace of this mode deletes its storage. */
 export function closeReleasesStorage(workspace: WorkspaceInstance): boolean {
   switch (workspace.deploymentMode) {
@@ -567,32 +557,6 @@ export function workspaceItem(workspace: WorkspaceInstance) {
 /** DEC 254zzz80: a named company's grant row is in its own partition (company-layout.ts); otherwise the legacy key. */
 export function membershipRecord(ownerKey: string, projectName: string, role: MembershipRecord["role"], companyId?: string): MembershipRecord {
   return { ...grantKeyFor(companyId, ownerKey, projectName), entityType: "MEMBERSHIP", ownerKey, projectName, role, grantId: randomUUID() };
-}
-
-export function githubRepositoryFullName(repositoryUrl: string): string {
-  let url: URL;
-  try { url = new URL(repositoryUrl); } catch { throw agentXError("CONFIG_INVALID", "registered repository URL is invalid for GitHub PR tracking"); }
-  const segments = url.pathname.split("/").filter(Boolean);
-  const name = segments[1]?.endsWith(".git") ? segments[1].slice(0, -4) : segments[1];
-  if (url.protocol !== "https:" || url.hostname.toLowerCase() !== "github.com" || url.port !== ""
-    || url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== ""
-    || segments.length !== 2 || segments.some((segment) => segment.includes("%"))
-    || !segments[0] || !name || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(segments[0])
-    || !/^[A-Za-z0-9_.-]{1,100}$/.test(name)) {
-    throw agentXError("CONFIG_INVALID", "registered repository URL is not a canonical GitHub repository");
-  }
-  return `${segments[0]}/${name}`;
-}
-
-export function pullRequestMatchesRepository(pullRequestUrl: string, repositoryFullName: string, number: number): boolean {
-  try {
-    const url = new URL(pullRequestUrl);
-    return url.protocol === "https:" && url.hostname.toLowerCase() === "github.com" && url.port === ""
-      && url.username === "" && url.password === "" && url.search === "" && url.hash === ""
-      && url.pathname.toLowerCase() === `/${repositoryFullName.toLowerCase()}/pull/${number}`;
-  } catch {
-    return false;
-  }
 }
 
 export function workspaceKey(id: string) {

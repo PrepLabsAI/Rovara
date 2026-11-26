@@ -4,7 +4,7 @@
 //                                        tracking last read), with the heads and the risk level a press would merge at
 //   POST /v1/app/tasks/{taskId}/merge   { requestId, expectedHeads, risk }: merges the task's pull requests through the merge core; what the person was shown (heads, risk, both required) must still be what merges
 //
-// What this file decides, and nothing else (every merge rule is the merge core's, core/merge/merge.ts `pressMergeAsPerson`, which runs every gate `pressMerge` runs except the approver proof):
+// What this file decides, and nothing else (every merge rule is the merge core's, core/merge/merge.ts `pressMergeAsPerson`, which runs every gate of the merge, with no approver proof):
 //   - WHERE: a press comes only from the Rovara website's own sign-in client (`webApp`, set by the broker's sign-in from the client's registration, never from a request; DEC 254zzz91). The CLI's token or an
 //     AI tool's is refused with ON_THE_WEBSITE_MESSAGE before anything is read. A script token never reaches these paths (the dev routes refuse it first). Reading readiness is allowed anywhere.
 //   - WHO (replaces the approver proof, DEC 254zzz104): the task's owner or a People co-owner (the flow's own `canAct`, as every owner move), a live owner or admin of the task's company (membership's role,

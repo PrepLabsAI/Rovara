@@ -4,13 +4,11 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, type WorkflowSnapshot } from "../../packages/contracts/src/task-workflow-node.js";
 import { GENERAL_FAKE_MADE_NOTE } from "../../packages/contracts/src/general-fakes.js";
-import { verificationReport } from "../../packages/broker/src/core/proof/verification-report.js";
 import { workflowPullRequestBody, workflowPullRequestStatusLines } from "../../packages/broker/src/core/proof/workflow-pull-request-body.js";
-import { workflowPullRequestStatusLines as awsStatusLines } from "../../packages/broker/src/aws/developer-tasks.js";
+import { verificationReport } from "../../packages/broker/src/core/proof/verification-report.js";
 import { proofReportOf } from "../../packages/broker/src/local/app/proof-report.js";
 import { testingSectionLines } from "../../packages/broker/src/core/proof/testing-section.js";
 import { checksReplyPrefix, AGENTX_PREAMBLE_VERSION, agentxPreambleSha256, type CheckEntry } from "../../packages/contracts/src/index.js";
-import { withStatusLines } from "../../packages/broker/src/developer/pull-request-feedback-section.js";
 import { workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
 
 const now = "2026-11-16T12:00:00.000Z";
@@ -35,13 +33,9 @@ describe("the label wherever a check is said to have passed", () => {
     expect(verificationReport(failing, [], {}).failed[0]!.label).toBe(`Unit tests (${GENERAL_FAKE_MADE_NOTE})`);
   });
 
-  it("both Checks status lines (the PR body rewrite and the older copy) carry it", () => {
-    for (const lines of [workflowPullRequestStatusLines(made, {}), awsStatusLines(made)]) {
-      expect(lines.find((line) => line.startsWith("Checks:"))).toBe(`Checks: Unit tests passed (${GENERAL_FAKE_MADE_NOTE}), Lint passed`);
-    }
-    for (const lines of [workflowPullRequestStatusLines(plain, {}), awsStatusLines(plain)]) {
-      expect(lines.find((line) => line.startsWith("Checks:"))).toBe("Checks: Unit tests passed, Lint passed");
-    }
+  it("the core's PR body Checks status line carries it", () => {
+    expect(workflowPullRequestStatusLines(made, {}).find((line) => line.startsWith("Checks:"))).toBe(`Checks: Unit tests passed (${GENERAL_FAKE_MADE_NOTE}), Lint passed`);
+    expect(workflowPullRequestStatusLines(plain, {}).find((line) => line.startsWith("Checks:"))).toBe("Checks: Unit tests passed, Lint passed");
   });
 
   it("the task page's proof row says it", () => {
@@ -86,15 +80,10 @@ describe("the label wherever a check is said to have passed", () => {
     expect(checksReplyPrefix([report([entry("a", { madeByRovara: true }), entry("b"), entry("c", { class: "already_failing", after: "failed" })])])).toContain(`Checks: 2 of 3 pass (1 ${GENERAL_FAKE_MADE_NOTE}).`);
     expect(checksReplyPrefix([report([entry("a"), entry("b")])])).toBe("Checks passed (2 project checks).\n\n*Agent's account:*\n");
   });
-
-  it("the pull request footer says it, and a labelled Checks line is still refreshed after a pushed fix", () => {
+  it("the pull request footer says it", () => {
     for (const body of [workflowPullRequestBodyFooter(made), workflowPullRequestBodyFooter(plain)]) expect(typeof body).toBe("string");
     expect(workflowPullRequestBodyFooter(made)).toContain(`checks and reviews passed (${GENERAL_FAKE_MADE_NOTE}). Merge it on GitHub.`);
     expect(workflowPullRequestBodyFooter(plain)).toContain("checks and reviews passed. Merge it on GitHub.");
-    const old = ["Checks: Lint passed, Unit tests passed (Made by Rovara, never change proof)", "Reviews: code review passed; security review passed"].join("\n");
-    const next = withStatusLines(`Intro\n\n${old}\n\nOpened by me`, ["Checks: Unit tests passed, Lint passed", "Reviews: code review passed; security review passed"]);
-    expect(next).toContain("Checks: Unit tests passed, Lint passed");
-    expect(next).not.toContain("never change proof");
   });
 });
 

@@ -277,7 +277,7 @@ describe("the wiring (guards on the source, beside the behaviour above)", () => 
   it("a Slack start asks the core first, with the Slack person's own caller, and the old start still follows", () => {
     const source = read("packages/broker/src/aws/broker.ts");
     expect(source).toMatch(/dependencies\.workspaces === undefined \|\| company === undefined \? undefined : await startSlackWorkflowOnCore\(dependencies\.developer\.coreTasks, \{ caller, companyId: company, thread, userId, requestId, project: binding\.projectName, instructions, workflowPath: event\.workflowPath \}/u);
-    expect(source).toMatch(/if \(onCore !== undefined\) return \{ task: \{ taskId: onCore\.taskId \} \};\n\s+const developer = /u);
+    expect(source).toMatch(/if \(onCore !== undefined\) return \{ task: \{ taskId: onCore\.taskId \} \};\n(?:\s*\/\/[^\n]*\n)*\s+const developer = /u);
     expect(source).toContain("shareToChannel: true, channel: thread.channelId");
   });
 

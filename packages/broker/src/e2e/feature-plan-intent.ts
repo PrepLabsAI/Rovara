@@ -2,14 +2,12 @@ import { createHash } from "node:crypto";
 import {
   canonicalJson, E2EFeaturePlanIntentSchema, E2EPortableApprovalBindingSchema, e2EPortableApprovalBindingDigest,
   e2ePortableOperationDescriptorDigest, e2ePortableRegistrationKey, e2EDefaultSyntheticAccountDefinition,
-  E2EPolicySchema, E2EScenarioBundleSchema, e2ePolicyDigest, e2eScenarioBundleDigest,   E2EApiMockFixtureSchema, type E2EPolicy, type E2EExecutionPlan, type E2EScenarioBundle,
+  E2EPolicySchema, E2EScenarioBundleSchema, e2eScenarioBundleDigest,   E2EApiMockFixtureSchema, type E2EPolicy, type E2EExecutionPlan, type E2EScenarioBundle,
   verifyE2ESourceSnapshot, type E2EFeaturePlanIntent, type E2EPortableApprovalBinding, type E2ESourceSnapshot,
 } from "@agentx/contracts";
 import { selectE2EExecutionPlan } from "@agentx/contracts/e2e-execution-plan";
 import { inspectE2ERepository } from "@agentx/contracts";
 import { inspectE2EPortableSource } from "@agentx/contracts/e2e-execution-plan";
-import { compileE2EScenarios } from "@agentx/verifier";
-import { E2ERunBindingSchema, E2ERoundSchema, type E2ERound } from "@agentx/contracts";
 import { admitE2EFeatureVerifier, E2E_FEATURE_PROCESS_RESPONSE_SCOPE, type E2EFeatureVerifierRecord } from "../aws/e2e-feature-verifier-catalog.js";
 
 export { deriveE2EApplicationFeatureExecutionSelection } from "./application-feature-plan-intent.js";
@@ -179,47 +177,6 @@ export function deriveE2EFeatureExecutionAdmission(input: {
   const bundleBody = { schemaVersion: 1 as const, planDigest: input.planDigest, templateVersion: "trusted-e2e/v1", scenarios: selectionInput.scenarios, bundleDigest: "0".repeat(64) };
   const bundle = E2EScenarioBundleSchema.parse({ ...bundleBody, bundleDigest: e2eScenarioBundleDigest(bundleBody) });
   return { runtime, portableApprovalBinding, plan, bundle, selectionInput };
-}
-
-/** Builds every immutable group binding for one server-owned CHECKS operation. */
-export function buildE2EFeatureRound(input: {
-  admission: ReturnType<typeof deriveE2EFeatureExecutionAdmission>;
-  taskId: string;
-  operationId: string;
-  operationFence: number;
-  workflowRevision: number;
-  roundId: string;
-  runIds: readonly string[];
-  admittedAt: string;
-  deadlineAt: string;
-}): { round: E2ERound; groupAdmissions: Array<Record<string, unknown>> } {
-  const { admission } = input;
-  if (admission.plan.groups.length === 0 || admission.plan.groups.length > 4
-    || input.runIds.length !== admission.plan.groups.length || new Set(input.runIds).size !== input.runIds.length) {
-    throw new Error("feature CHECKS admission must bind every bounded execution group exactly once");
-  }
-  const groups = admission.plan.groups.map((group, index) => {
-    const compiled = compileE2EScenarios(admission.bundle, admission.plan.effectiveTargets, group,
-      { selectionInput: admission.selectionInput, executionPlan: admission.plan, group });
-    const binding = E2ERunBindingSchema.parse({ schemaVersion: 1, runId: input.runIds[index], roundId: input.roundId,
-      taskId: input.taskId, operationId: input.operationId, operationFence: input.operationFence,
-      workflowRevision: input.workflowRevision, groupId: group.groupId, executionPlanDigest: admission.plan.digest,
-      executionMode: group.mode, mockManifestDigest: group.mockManifestDigest,
-      authorizationRevision: `feature-${admission.runtime.runtimeCatalogId}-${admission.runtime.catalogRevision}-${admission.runtime.generation}`,
-      candidateDigest: admission.selectionInput.candidateDigest, planDigest: admission.selectionInput.planDigest,
-      policyDigest: e2ePolicyDigest(admission.selectionInput.policy), bundleDigest: admission.bundle.bundleDigest,
-      appBuildDigest: sha256(canonicalJson(compiled.inventory)), environmentDigest: admission.runtime.runnerEnvironmentDigest,
-      runtimeManifestDigest: admission.runtime.manifestDigest, modelRouteRevision: admission.selectionInput.policy.modelRouteRevision,
-      expectedCases: compiled.expectedCases, admittedAt: input.admittedAt, deadlineAt: input.deadlineAt });
-    return { group, binding, expectedConfigDigest: compiled.expectedConfigDigest,
-      compiledInventoryDigest: compiled.inventory.digest, expectedCases: compiled.expectedCases,
-      selectionPacketPath: compiled.selectionPacketPath };
-  });
-  const round = E2ERoundSchema.parse({ schemaVersion: 1, roundId: input.roundId, taskId: input.taskId,
-    operationId: input.operationId, operationFence: input.operationFence, workflowRevision: input.workflowRevision,
-    executionPlanDigest: admission.plan.digest, admittedAt: input.admittedAt, deadlineAt: input.deadlineAt,
-    limits: admission.selectionInput.policy.limits, groupBindings: groups.map((group) => group.binding) });
-  return { round, groupAdmissions: groups };
 }
 
 /** A compact stable identity for derived feature semantics; candidate bytes are bound separately on every admission. */

@@ -1,5 +1,5 @@
 import { QueryCommand } from "@aws-sdk/lib-dynamodb";
-import { inspectE2ERepository, readE2EApplicationProjectContract, type E2EApplicationAccountDefinition, type E2EApplicationProjectContract, type E2ERuntimeAccountRef, type E2ESourceSnapshot, type OrgId } from "@agentx/contracts";
+import { inspectE2ERepository, readE2EApplicationProjectContract, type E2EApplicationAccountDefinition, type E2EApplicationProjectContract, type E2ESourceSnapshot, type OrgId } from "@agentx/contracts";
 import {
   E2EAccountRegistryError, accountDefinitionRow, accountLatestRow, e2eAccountDefinitionKey, e2eAccountLatestKey, e2eAccountRevisionPrefix, parseAccountDefinitionRow,
   parseAccountEntry, planSyntheticAccountWrites, type E2EAccountRegistryEntry, type E2EAccountRegistryWrite,
@@ -64,23 +64,6 @@ export async function readAccountRegistryEntries(dependencies: StateTable, orgId
   return { entries, corrupt };
 }
 
-/**
- * The conditions that keep each account ref an approval (or a verdict) stands on as it was read, until the transaction that records it commits: the account's pointer must
- * still name exactly that revision and digest. A ref with no registered account (an M1.2 record) has nothing to fence.
- */
-export function accountRegistryFences(input: { orgId: OrgId; tableName: string; projectId: string; refs: readonly E2ERuntimeAccountRef[]; entries: readonly E2EAccountRegistryEntry[] }): TransactItems {
-  return input.refs.flatMap((ref) => {
-    const entry = input.entries.find((item) => item.definition.applicationId === ref.applicationId && item.definition.profileId === ref.profileId);
-    if (entry === undefined) return [];
-    const matches = (key: { pk: string; sk: string }) => ({ ConditionCheck: { TableName: input.tableName, Key: key,
-      ConditionExpression: "entityType = :entity AND revision = :revision AND definitionDigest = :digest",
-      ExpressionAttributeValues: { ":entity": "E2E_ACCOUNT_LATEST", ":revision": entry.latest.revision, ":digest": entry.latest.definitionDigest } } });
-    if (entry.legacy !== true) return [matches(e2eAccountLatestKey(input.orgId, input.projectId, ref.applicationId, ref.profileId))];
-    // Read from the old key: it must still be as it was read, and the account must still have no row under the company's key (a registration that moved it makes this read stale).
-    return [matches(e2eAccountLatestKey(LEGACY_KEY_SCOPE, input.projectId, ref.applicationId, ref.profileId)),
-      { ConditionCheck: { TableName: input.tableName, Key: e2eAccountLatestKey(input.orgId, input.projectId, ref.applicationId, ref.profileId), ConditionExpression: "attribute_not_exists(pk)" } }];
-  });
-}
 
 /**
  * The rows of one write, always under the company's key. An account read from the old key has no pointer there to replace, so its new pointer (and, for a pointer raise, the

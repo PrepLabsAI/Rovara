@@ -6,12 +6,11 @@ import { ChangeMessageVisibilityCommand, SQSClient } from "@aws-sdk/client-sqs";
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
 import { machineSizePicker, optionalPicker } from "./worker-machines/machine-size-pick.js";
 import { GetCommand, DynamoDBDocumentClient, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { WORKER_POST_TIMEOUT_MS, CORE_DISPATCH_QUEUE_URL_VARIABLE, Ec2RuntimeBindingSchema, ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, agentXError, redactText, DISPATCH_GAVE_UP_WORDS, type DispatchGaveUpCode, projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey, workspaceSessionKey, type WorkerInvocation } from "@agentx/contracts";
+import { WORKER_POST_TIMEOUT_MS, CORE_DISPATCH_QUEUE_URL_VARIABLE, Ec2RuntimeBindingSchema, ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, redactText, DISPATCH_GAVE_UP_WORDS, type DispatchGaveUpCode, projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey, type WorkerInvocation } from "@agentx/contracts";
 import { requiredEnvironment, type DurableOutboxRecord, type Ec2OutboxRecord } from "./lambda.js";
 import type { Ec2Delivery } from "./ec2-delivery.js";
 import { failOutboxOperation } from "./outbox-failure.js";
 import { DeliveryFailure, DeliveryRefusal, createEc2Delivery } from "./ec2-delivery.js";
-import { createWorkflowE2EAdmissionAgentStepsReader, createWorkflowE2EAdmissionModelChoiceReader, createWorkflowE2EAdmissionNeedsModelFreeLimitsReader, createWorkflowE2EAdmissionSchemaReader } from "./workflow-e2e-admission-schema.js";
 import { appendOperationEvent } from "./operation-events.js";
 import { ProjectSetupSessionManager, SessionManager, workspaceBinding } from "./sessions.js";
 import { admitProjectSetupRuntime, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "./project-setup-runtime-catalog.js";
@@ -38,92 +37,6 @@ export interface SqsEvent {
 }
 
 export interface DispatcherLambdaContext { getRemainingTimeInMillis(): number }
-
-/** Validates an internal warm-up against its stored operation and every active workflow/workspace fence. */
-/**
- * Clears the planning operation's record of the schema-v2 application plan when delivery dropped it for an older worker, so the broker refuses a
- * v2 plan that run uploads (Ruling AW). Idempotent: a redelivery clears an already-cleared record.
- */
-export function createApplicationPlanNegotiationRecorder(input: { documentClient: DynamoDBDocumentClient; tableName?: string }) {
-  return async (record: Ec2OutboxRecord): Promise<void> => {
-    await input.documentClient.send(new UpdateCommand({
-      TableName: input.tableName ?? requiredEnvironment("STATE_TABLE_NAME"),
-      Key: { pk: `WORKSPACE#${record.workspaceId}`, sk: `OPERATION#${record.operationId}` },
-      UpdateExpression: "REMOVE workflowE2EPlanVersion",
-      ConditionExpression: "attribute_exists(pk)",
-    }));
-  };
-}
-
-/** Clears the planning operation's record that its planner was asked for the plan quality members, when delivery dropped that guidance for an older worker. Idempotent. */
-export function createPlanQualityNegotiationRecorder(input: { documentClient: DynamoDBDocumentClient; tableName?: string }) {
-  return async (record: Ec2OutboxRecord): Promise<void> => {
-    await input.documentClient.send(new UpdateCommand({
-      TableName: input.tableName ?? requiredEnvironment("STATE_TABLE_NAME"),
-      Key: { pk: `WORKSPACE#${record.workspaceId}`, sk: `OPERATION#${record.operationId}` },
-      UpdateExpression: "REMOVE planQualityAsked",
-      ConditionExpression: "attribute_exists(pk)",
-    }));
-  };
-}
-
-export function createWorkflowE2EReadinessValidator(input: { documentClient: DynamoDBDocumentClient; tableName?: string }) {
-  return async (record: Ec2OutboxRecord, invocation: WorkerInvocation): Promise<"ORDINARY" | "READINESS" | "PARKED"> => {
-    if (invocation.kind !== "resume") return "ORDINARY";
-    const table = input.tableName ?? requiredEnvironment("STATE_TABLE_NAME");
-    const opKey = { pk: `WORKSPACE#${record.workspaceId}`, sk: `OPERATION#${record.operationId}` };
-    const operation = (await input.documentClient.send(new GetCommand({ TableName: table, Key: opKey, ConsistentRead: true }))).Item as Record<string, unknown> | undefined;
-    const marker = operation?.workflowE2EReadiness as Record<string, unknown> | undefined;
-    if (marker === undefined) {
-      if (record.workflowE2EReadiness !== undefined) throw agentXError("CALLBACK_FORBIDDEN", "an outbox readiness marker has no stored operation authority");
-      return "ORDINARY";
-    }
-    const outbox = (await input.documentClient.send(new GetCommand({ TableName: table,
-      Key: { pk: `OUTBOX#${record.id}`, sk: "OUTBOX" }, ConsistentRead: true }))).Item as Record<string, unknown> | undefined;
-    const taskId = marker.taskId;
-    const dispatchSk = marker.dispatchSk;
-    const task = typeof taskId === "string" ? (await input.documentClient.send(new GetCommand({ TableName: table,
-      Key: { pk: `DEVTASK#${taskId}`, sk: "META" }, ConsistentRead: true }))).Item as Record<string, unknown> | undefined : undefined;
-    const dispatch = typeof dispatchSk === "string" ? (await input.documentClient.send(new GetCommand({ TableName: table,
-      Key: { pk: "WORKFLOW_DISPATCH", sk: dispatchSk }, ConsistentRead: true }))).Item as Record<string, unknown> | undefined : undefined;
-    const workspace = (await input.documentClient.send(new GetCommand({ TableName: table,
-      Key: { pk: `WORKSPACE#${record.workspaceId}`, sk: "META" }, ConsistentRead: true }))).Item as Record<string, unknown> | undefined;
-    const workflow = task?.workflow as Record<string, unknown> | undefined;
-    const candidate = workflow?.candidate as Record<string, unknown> | undefined;
-    const dispatchRevision = dispatch?.workflowRevision;
-    const dispatchCandidate = dispatch?.candidateDigest;
-    const storedInvocation = outbox?.invocation as Record<string, unknown> | undefined;
-    const storedPayload = storedInvocation?.payload as Record<string, unknown> | undefined;
-    const durableOutboxMarker = outbox?.workflowE2EReadiness as Record<string, unknown> | undefined;
-    const exactMarker = record.workflowE2EReadiness !== undefined && durableOutboxMarker !== undefined
-      && marker.purpose === "workflow-e2e-readiness" && record.workflowE2EReadiness.purpose === marker.purpose
-      && record.workflowE2EReadiness.taskId === marker.taskId && record.workflowE2EReadiness.workflowRevision === marker.workflowRevision
-      && record.workflowE2EReadiness.candidateDigest === marker.candidateDigest && record.workflowE2EReadiness.dispatchSk === marker.dispatchSk
-      && durableOutboxMarker.purpose === marker.purpose && durableOutboxMarker.taskId === marker.taskId
-      && durableOutboxMarker.workflowRevision === marker.workflowRevision && durableOutboxMarker.candidateDigest === marker.candidateDigest
-      && durableOutboxMarker.dispatchSk === marker.dispatchSk
-      && marker.outboxId === record.id;
-    if (!exactMarker || operation?.kind !== "resume" || operation.status !== "DISPATCHING" || operation.id !== record.operationId
-      || operation.workspaceId !== record.workspaceId || operation.fence !== invocation.fence || invocation.operationId !== record.operationId
-      || invocation.workspaceId !== record.workspaceId || invocation.payload === undefined || Object.keys(invocation.payload).length !== 0
-      || outbox?.operationId !== record.operationId || outbox.workspaceId !== record.workspaceId || outbox.id !== record.id
-      || storedInvocation?.kind !== "resume" || storedInvocation.operationId !== record.operationId
-      || storedInvocation.workspaceId !== record.workspaceId || storedInvocation.fence !== invocation.fence
-      || storedPayload === undefined || Object.keys(storedPayload).length !== 0
-      || outbox.workflowE2EReadiness === undefined
-      || !["QUEUED", "PENDING", "WAITING_FOR_SESSION", "WAITING_FOR_TASK_ACCESS"].includes(String(outbox.status))
-      || workspace?.status !== "BUSY" || workspace.id !== record.workspaceId || workspace.projectRevision !== invocation.projectRevision
-      || workspace.activeOperationId !== record.operationId || workspace.fence !== invocation.fence
-      || task?.taskId !== taskId || task?.workspaceId !== record.workspaceId || task?.closedAt !== undefined
-      || workflow?.revision !== marker.workflowRevision || workflow?.stage !== "VERIFY" || workflow?.state !== "WAITING"
-      || candidate?.digest !== marker.candidateDigest || (workflow.e2e as Record<string, unknown> | undefined)?.required !== true
-      || dispatch?.taskId !== taskId || dispatchRevision !== marker.workflowRevision || dispatchCandidate !== marker.candidateDigest
-      || dispatch?.readinessOperationId !== record.operationId || dispatch?.kind !== "CHECKS") {
-      throw agentXError("CALLBACK_FORBIDDEN", "the stored E2E readiness operation, outbox, task, or active fence does not match");
-    }
-    return "READINESS";
-  };
-}
 
 /** State transitions stay under PROJECT_SETUP#setupExecutionId, never WORKSPACE#transportCorrelationId. */
 export interface ProjectSetupDispatchLifecycle {
@@ -230,8 +143,6 @@ export function createDispatcherHandler(dependencies: {
   markDispatching: (record: DurableOutboxRecord) => Promise<boolean | void>;
   markDelivered: (id: string) => Promise<void>;
   markFailed: (record: DurableOutboxRecord, error: string) => Promise<void>;
-  /** Completes only a broker-marked E2E compute-readiness resume after the exact session is READY. */
-  completeWorkflowE2EReadiness?: (record: DurableOutboxRecord, generation: number) => Promise<void>;
   /** Delivers an ec2-ebs record; without it such records fail like any undeliverable one. */
   deliverEc2?: (record: Ec2OutboxRecord, invocation: WorkerInvocation, context?: { remainingTimeMs: () => number }) => Promise<Ec2Delivery>;
   maxAttempts?: number;
@@ -274,13 +185,6 @@ export function createDispatcherHandler(dependencies: {
           if (dependencies.deliverEc2 === undefined) throw new DeliveryRefusal("RUNTIME_UNAVAILABLE", "this dispatcher cannot reach ec2-ebs workers");
           // A record parked until its session is ready is acknowledged without using an attempt.
           const delivery = await dependencies.deliverEc2(record, invocation, { remainingTimeMs });
-          if (typeof delivery === "object") {
-            if (invocation.kind !== "resume" || dependencies.completeWorkflowE2EReadiness === undefined) {
-              throw new DeliveryRefusal("RUNTIME_UNAVAILABLE", "an internal readiness dispatch is not authorized");
-            }
-            await dependencies.completeWorkflowE2EReadiness(record, delivery.readinessGeneration);
-            continue;
-          }
           if (delivery === "DELIVERED") {
             if (setup) await setup.markDelivered(record);
             await dependencies.markDelivered(record.id);
@@ -495,21 +399,7 @@ const deliverEc2 = createEc2Delivery({
   sign: signWithInvokeKey,
   post: postToWorker, verifyMachine: (machine) => machineChecks().verifyMachine(machine), failOperation: (record, error, machine) => machineChecks().failOperation(record, error, machine),
   workerFeatures: (url) => workerPingFeatures(url),
-  // Reads the admission a CHECKS reference names to hold its `kind` to it. Without the artifact bucket (a deployment that has not granted it) only the kind decides.
-  ...(process.env.ARTIFACT_BUCKET_NAME === undefined || process.env.ARTIFACT_BUCKET_NAME === "" ? {} : {
-    workflowE2EAdmissionSchemaVersion: createWorkflowE2EAdmissionSchemaReader({ s3: new S3Client(awsClientConfiguration), bucket: process.env.ARTIFACT_BUCKET_NAME }),
-    workflowE2EAdmissionUsesAgentSteps: createWorkflowE2EAdmissionAgentStepsReader({ s3: new S3Client(awsClientConfiguration), bucket: process.env.ARTIFACT_BUCKET_NAME }),
-    // Task 4.10: a route with a chosen model or the minimal shape is never sent to a worker that predates the model choice.
-    workflowE2EAdmissionNeedsModelChoice: createWorkflowE2EAdmissionModelChoiceReader({
-      s3: new S3Client(awsClientConfiguration), bucket: process.env.ARTIFACT_BUCKET_NAME,
-      readRow: async (key) => (await documentClient.send(new GetCommand({ TableName: tableName ?? requiredEnvironment("STATE_TABLE_NAME"), Key: key, ConsistentRead: true }))).Item as Record<string, unknown> | undefined,
-    }),
-    workflowE2EAdmissionNeedsModelFreeLimits: createWorkflowE2EAdmissionNeedsModelFreeLimitsReader({ s3: new S3Client(awsClientConfiguration), bucket: process.env.ARTIFACT_BUCKET_NAME }),
-  }),
   guardTaskDispatch: taskDispatchGuard,
-  applicationPlanNotNegotiated: createApplicationPlanNegotiationRecorder({ documentClient, ...(tableName === undefined ? {} : { tableName }) }),
-  planQualityNotNegotiated: createPlanQualityNegotiationRecorder({ documentClient, ...(tableName === undefined ? {} : { tableName }) }),
-  validateWorkflowE2EReadiness: createWorkflowE2EReadinessValidator({ documentClient, ...(tableName === undefined ? {} : { tableName }) }),
   guardProjectSetupDispatch,
   async progress(record, message) {
     await appendOperationEvent(documentClient, tableName ?? requiredEnvironment("STATE_TABLE_NAME"), {
@@ -616,7 +506,6 @@ const workflowHandler = createDispatcherHandler({
   async markFailed(record, error) {
     await failOutboxOperation(documentClient, tableName ?? requiredEnvironment("STATE_TABLE_NAME"), record, error);
   },
-  completeWorkflowE2EReadiness: createWorkflowE2EReadinessCompleter({ documentClient, ...(tableName === undefined ? {} : { tableName }) }),
 });
 
 /**
@@ -692,72 +581,6 @@ async function pingWorker(url: string): Promise<SessionWorkerPing | undefined> {
   } catch {
     return undefined;
   }
-}
-
-export function createWorkflowE2EReadinessCompleter(input: { documentClient: DynamoDBDocumentClient; tableName?: string }) {
-  return async (record: DurableOutboxRecord, generation: number): Promise<void> => {
-    const documentClient = input.documentClient;
-    const table = input.tableName ?? requiredEnvironment("STATE_TABLE_NAME");
-    const invocation = record.invocation;
-    if (invocation.kind !== "resume" || record.operationId !== invocation.operationId || record.workspaceId !== invocation.workspaceId) {
-      throw agentXError("CALLBACK_FORBIDDEN", "E2E readiness record identity does not match its stored resume invocation");
-    }
-    const opKey = { pk: `WORKSPACE#${record.workspaceId}`, sk: `OPERATION#${record.operationId}` };
-    const stored = await documentClient.send(new GetCommand({ TableName: table, Key: opKey, ConsistentRead: true }));
-    const operation = stored.Item as { kind?: unknown; status?: unknown; fence?: unknown; workflowE2EReadiness?: {
-      purpose?: unknown; taskId?: unknown; workflowRevision?: unknown; candidateDigest?: unknown; dispatchSk?: unknown; outboxId?: unknown;
-      readyGeneration?: unknown;
-    } } | undefined;
-    const readiness = operation?.workflowE2EReadiness;
-    const outboxMarker = record.workflowE2EReadiness;
-    if (operation?.kind !== "resume" || readiness === undefined || outboxMarker === undefined || operation.status !== "DISPATCHING"
-      || !Number.isInteger(operation.fence) || readiness.outboxId !== record.id || readiness.taskId === undefined
-      || !Number.isInteger(readiness.workflowRevision) || typeof readiness.candidateDigest !== "string"
-      || typeof readiness.dispatchSk !== "string" || readiness.purpose !== "workflow-e2e-readiness"
-      || outboxMarker.purpose !== readiness.purpose || outboxMarker.taskId !== readiness.taskId
-      || outboxMarker.workflowRevision !== readiness.workflowRevision || outboxMarker.candidateDigest !== readiness.candidateDigest
-      || outboxMarker.dispatchSk !== readiness.dispatchSk || operation.fence !== invocation.fence
-      || !Number.isInteger(generation) || generation < 1) {
-      throw agentXError("CALLBACK_FORBIDDEN", "the stored operation is not the exact broker-admitted E2E readiness resume");
-    }
-    const now = new Date().toISOString();
-    await documentClient.send(new TransactWriteCommand({ TransactItems: [
-      { ConditionCheck: { TableName: table, Key: { pk: `DEVTASK#${readiness.taskId}`, sk: "META" },
-        ConditionExpression: "attribute_not_exists(closedAt) AND workflow.revision = :revision AND workflow.#stage = :verify AND workflow.#state = :waiting AND workflow.candidate.digest = :candidate",
-        ExpressionAttributeNames: { "#stage": "stage", "#state": "state" }, ExpressionAttributeValues: {
-          ":revision": readiness.workflowRevision, ":verify": "VERIFY", ":waiting": "WAITING", ":candidate": readiness.candidateDigest,
-        } } },
-      { ConditionCheck: { TableName: table, Key: { pk: "WORKFLOW_DISPATCH", sk: readiness.dispatchSk },
-        ConditionExpression: "taskId = :task AND workflowRevision = :revision AND candidateDigest = :candidate AND readinessOperationId = :operation",
-        ExpressionAttributeValues: { ":task": readiness.taskId, ":revision": readiness.workflowRevision, ":candidate": readiness.candidateDigest,
-          ":operation": record.operationId } } },
-      { ConditionCheck: { TableName: table, Key: workspaceSessionKey(record.workspaceId),
-        ConditionExpression: "#state = :ready AND generation = :generation",
-        ExpressionAttributeNames: { "#state": "state" }, ExpressionAttributeValues: { ":ready": "READY", ":generation": generation } } },
-      { Update: { TableName: table, Key: opKey, UpdateExpression: "SET #status = :succeeded, updatedAt = :now, #result = :result, workflowE2EReadiness = :readiness",
-        ConditionExpression: "#status = :dispatching AND #kind = :resume AND workspaceId = :workspace AND fence = :fence AND workflowE2EReadiness.purpose = :purpose AND workflowE2EReadiness.taskId = :task AND workflowE2EReadiness.workflowRevision = :revision AND workflowE2EReadiness.candidateDigest = :candidate AND workflowE2EReadiness.dispatchSk = :dispatchSk AND workflowE2EReadiness.outboxId = :outbox",
-        ExpressionAttributeNames: { "#status": "status", "#kind": "kind", "#result": "result" }, ExpressionAttributeValues: {
-          ":dispatching": "DISPATCHING", ":succeeded": "SUCCEEDED", ":resume": "resume", ":workspace": record.workspaceId,
-          ":fence": invocation.fence, ":purpose": "workflow-e2e-readiness",
-          ":task": readiness.taskId, ":revision": readiness.workflowRevision, ":candidate": readiness.candidateDigest,
-          ":dispatchSk": readiness.dispatchSk, ":outbox": record.id, ":now": now,
-          ":readiness": { ...readiness, readyGeneration: generation },
-          ":result": { status: "READY", generation },
-        } } },
-      { Update: { TableName: table, Key: { pk: `WORKSPACE#${record.workspaceId}`, sk: "META" },
-        UpdateExpression: "SET #status = :ready, updatedAt = :now REMOVE activeOperationId",
-        ConditionExpression: "#status = :busy AND activeOperationId = :operation AND fence = :fence",
-        ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: {
-          ":ready": "READY", ":busy": "BUSY", ":now": now, ":operation": record.operationId, ":fence": operation.fence,
-        } } },
-      { Update: { TableName: table, Key: { pk: `OUTBOX#${record.id}`, sk: "OUTBOX" },
-        UpdateExpression: "SET #status = :delivered, deliveredAt = :now",
-        ConditionExpression: "(#status = :queued OR #status = :pending) AND operationId = :operation AND workspaceId = :workspace AND workflowE2EReadiness.purpose = :purpose AND workflowE2EReadiness.taskId = :task AND workflowE2EReadiness.workflowRevision = :revision AND workflowE2EReadiness.candidateDigest = :candidate AND workflowE2EReadiness.dispatchSk = :dispatchSk",
-        ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":delivered": "DELIVERED", ":queued": "QUEUED", ":pending": "PENDING", ":now": now,
-          ":operation": record.operationId, ":workspace": record.workspaceId, ":purpose": "workflow-e2e-readiness", ":task": readiness.taskId,
-          ":revision": readiness.workflowRevision, ":candidate": readiness.candidateDigest, ":dispatchSk": readiness.dispatchSk } } },
-    ] }));
-  };
 }
 
 function receiveCount(message: SqsRecord): number {
