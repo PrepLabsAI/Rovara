@@ -1,7 +1,8 @@
 // Team rules in the standing instructions (lessons phase 4): a rule a person made permanent is read at every step from the company's own row, under "How we work", scoped to the step's stage, and a read that
 // fails refuses the step. Also the hosted dispatcher's seam: the same read, for the company the runtime was built for, in one `get`.
-import { describe, expect, it } from "vitest";
-import { AgentXError, companyScoped, type OrgId } from "@agentx/contracts";
+import { randomUUID } from "node:crypto";
+import { describe, expect, it, vi } from "vitest";
+import { AgentXError, KNOWLEDGE_CONTEXT_FEATURE, LEARNED_CONTEXT_FEATURE, companyScoped, type OrgId } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../../packages/broker/src/ports/memory-document-store.js";
 import { createStandingInstructions, TEAM_RULES_UNREADABLE } from "../../../packages/broker/src/core/instructions/step-block.js";
 import { hostedDispatcherFlow } from "../../../packages/broker/src/aws/worker-machines/dispatcher-core.js";
@@ -78,11 +79,17 @@ describe("the hosted dispatcher declares the team-rule seam only where lessons a
     const block = await flow.standingInstructions!.forOperation({ project: "payments", mode: "IMPLEMENT" });
     expect(block?.text).toContain("integer cents");
     expect(writes).toEqual([]);
-    // Not covered (or lessons off): no lessons reader and no team rules; the seam is still there for the company's rules and How we work pinned on the task (L4-HW3), which read nothing of the team rules row.
+    // Not covered (or lessons off): no lessons and no team rules; the seam is still there for the company's rules and How we work pinned on the task (L4-HW3), which read nothing of the team rules row.
+    // SKILLS-TO-WORKERS (DEC 254zzz577 a): the reader IS there (published skills reach plan and build steps whatever the switch says), but it gives no lesson and reads nothing for a lessons-only request.
     for (const [env, company] of [[`on:${A}`, B], ["off", A]] as const) {
       const flow = hostedDispatcherFlow({ ROVARA_CORE_LESSONS: env }, options(store, company))!;
-      expect(flow.learned, env).toBeNull();
+      expect(typeof flow.learned, env).toBe("function");
+      const reads = vi.spyOn(store, "get");
+      reads.mockClear();
       expect(await flow.standingInstructions!.forOperation({ project: "payments", mode: "IMPLEMENT" }), env).toBeUndefined();
+      expect(await flow.learned!({ workspaceId: randomUUID(), operationId: randomUUID(), workflowMode: "PLAN", features: [LEARNED_CONTEXT_FEATURE, KNOWLEDGE_CONTEXT_FEATURE] }), env).toEqual({});
+      expect(reads, `${env}: no team-rule row and nothing else is read`).not.toHaveBeenCalled();
+      reads.mockRestore();
     }
     expect(hostedDispatcherFlow({ ROVARA_CORE_LESSONS: "off" }, options(store, A))!.standingInstructions).not.toBeNull();
     const other = hostedDispatcherFlow({ ROVARA_CORE_LESSONS: `on:${A},${B}`.replace(",", ":") }, options(new MemoryDocumentStore(), B))!;

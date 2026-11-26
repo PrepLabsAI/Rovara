@@ -44,3 +44,12 @@ Same method; 34 tests in the contract file. All KILLED.
 |---|--------|--------|-------------------|
 | 17 | `skillsFor` gated by the install's lessons switch again (`!enabled()` back) | KILLED | "PARITY with the hosted dispatcher's reader", "sends the live skills whatever the install's lessons switch and the project's learning mode say" |
 | 18 | `skillsFor` gated by the project's learning mode again (`resolveLearning` + `modeAllows` back) | KILLED | the same two |
+
+## Round 5: an uncovered or switched-off company gets skills but NO lessons and NO team rules (batch A2 full-gate finding)
+
+`tests/unit/lessons/team-rules-standing.test.ts` + `tests/contract/hosted-skills-reach-worker.test.ts` (40 tests). Both KILLED.
+
+| # | Mutant | Result | Tests that failed |
+|---|--------|--------|-------------------|
+| 19 | `hostedDispatcherFlow`: the standing seam of an uncovered or switched-off company reads the team rules (`standingOf(true)`) | KILLED | "the hosted dispatcher declares the team-rule seam only where lessons are on ...", "the install's CoreLessons switch off ..." (team rule row present, seam must give nothing) |
+| 20 | The reader treats the lessons switch as on for every company (`lessonsOn = true`) | KILLED | the same two, and "with the switch off, a worker that lists only the lessons feature costs the store nothing" |

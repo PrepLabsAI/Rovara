@@ -14,6 +14,7 @@ import { DocumentLessonStore } from "../../packages/broker/src/lessons/document-
 import { setLearnedLessonsGate } from "../../packages/broker/src/lessons/policy.js";
 import { writeLearningMode } from "../../packages/broker/src/lessons/document-settings.js";
 import type { HostedLessonPeople } from "../../packages/broker/src/lessons/hosted-people.js";
+import { addTeamRule } from "../../packages/broker/src/lessons/team-rules.js";
 import { liveSkillsForStep, renderSkill } from "../../packages/broker/src/lessons/skills.js";
 import { taskKey, taskPointerKey, workspaceKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { WorkerCancellationController } from "../../packages/worker/src/cancel.js";
@@ -85,7 +86,7 @@ async function world(opts: { lessons?: boolean; skill?: boolean; /** the install
   if (opts.mode !== undefined) await writeLearningMode(store, { workspaceId: A, project: PROJECT }, opts.mode, now);
   const flow = hostedDispatcherFlow(opts.coreLessons === undefined ? { ROVARA_CORE_LESSONS: `on:${A}` } : opts.coreLessons === "unset" ? {} : { ROVARA_CORE_LESSONS: opts.coreLessons }, options);
   if (flow === undefined || typeof flow.learned !== "function") throw new Error("the hosted dispatcher has no learned reader");
-  return { store, learned: flow.learned };
+  return { store, learned: flow.learned, flow };
 }
 
 async function preparedRoot(): Promise<string> {
@@ -310,10 +311,19 @@ describe("skills are not behind the learning mode or the CoreLessons switch (les
         expect(answer.knowledgeContext, `${coreLessons} ${workflowMode}`).toBeUndefined();
         expect(namesOf(answer), `${coreLessons} ${workflowMode}`).toEqual([SKILL_NAME]);
       }
+      // No team rules either: the project's permanent rule is in the store, and the standing seam gives nothing of it (covered company: it does).
+      await addTeamRule(w.store, A, PROJECT, { lessonId: "les_rule0001", paragraph: "Wrap network calls in withRetry.", stages: ["PLAN", "IMPLEMENT"] }, () => now);
+      expect(await w.flow.standingInstructions!.forOperation({ project: PROJECT, mode: "IMPLEMENT" }), coreLessons).toBeUndefined();
       // The other scoping rules hold with the switch off: no skill for a step that is not plan or build, nor for a worker without the feature.
       expect((await ask(w, "REVIEW")).rovaraSkills, coreLessons).toBeUndefined();
       expect((await ask(w, "PLAN", [LEARNED_CONTEXT_FEATURE, KNOWLEDGE_CONTEXT_FEATURE])).rovaraSkills, coreLessons).toBeUndefined();
     }
+  });
+
+  it("control: with the switch on for the company, the same team rule IS in the standing instructions (so the test above would notice a leak)", async () => {
+    const w = await world();
+    await addTeamRule(w.store, A, PROJECT, { lessonId: "les_rule0001", paragraph: "Wrap network calls in withRetry.", stages: ["PLAN", "IMPLEMENT"] }, () => now);
+    expect((await w.flow.standingInstructions!.forOperation({ project: PROJECT, mode: "IMPLEMENT" }))?.text).toContain("Wrap network calls in withRetry.");
   });
 
   it("with the switch off, a worker that lists only the lessons feature costs the store nothing (no read at all), and a foreign workspace is still refused", async () => {
