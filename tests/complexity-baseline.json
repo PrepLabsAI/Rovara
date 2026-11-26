@@ -523,7 +523,7 @@
     "packages/broker/src/core-host/app/projects.ts": 1,
     "packages/broker/src/core-host/app/proof-index.ts": 8,
     "packages/broker/src/core-host/app/proof-report.ts": 63,
-    "packages/broker/src/core-host/app/session-routes.ts": 87,
+    "packages/broker/src/core-host/app/session-routes.ts": 80,
     "packages/broker/src/core-host/app/task-view.ts": 9,
     "packages/broker/src/plugins/channel/slack/adapter.ts": 11,
     "packages/broker/src/plugins/channel/slack/events.ts": 3,

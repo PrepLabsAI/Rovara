@@ -19,6 +19,7 @@ import type { TaskCaller } from "../../core/task-flow/deps.js";
 import type { TaskFlow } from "../../core/task-flow/flow.js";
 import { readTask, taskViewOf } from "../../core/task-flow/reads.js";
 import { taskLogViewFor } from "../../core/task-log/read.js";
+import { readSessionActivity } from "./session-activity.js";
 import type { BrokerRequest, BrokerResponse } from "../../handler.js";
 import type { createAsk } from "../../core/sessions/ask.js";
 import { followSession, recordPresence, unfollowSession, viewingNow } from "../../core/sessions/followers.js";
@@ -34,7 +35,7 @@ import type { SecondReview } from "../../core/second-review/index.js";
 import { rethrowMembershipReadFailure } from "../../core/membership-read.js";
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
-const SESSIONS = /^\/v1\/app\/sessions(?:\/([A-Za-z0-9_-]{1,100})(?:\/(stop|retry|messages|answers|revise-plan|follow|unfollow|presence|close|log))?)?$/u;
+const SESSIONS = /^\/v1\/app\/sessions(?:\/([A-Za-z0-9_-]{1,100})(?:\/(stop|retry|messages|answers|revise-plan|follow|unfollow|presence|close|log|activity))?)?$/u;
 /** `POST /v1/app/sessions/<id>/ask` asks about a task; `GET /v1/app/sessions/<id>/asks/<askId>` reads it back, for the person who asked. */
 const ASK_PATH = /^\/v1\/app\/sessions\/([A-Za-z0-9_-]{1,100})\/(?:ask|asks\/(ask_[0-9a-z]{20}))$/u;
 
@@ -220,14 +221,8 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
       /** The session as `GET` shows it, for this person, after an action (their access read again). */
       const see = async (after: AgentSessionRecord): Promise<Record<string, unknown>> => view(after, await access.of(caller.principal, after), caller);
       if (action === undefined && request.method === "GET") return json(200, { session: await view(session, you, caller) });
-      // The task's log (B5): whoever holds a level on the session reads it (the check above), as this company's rows of this session's own task. The task id is the session's, never the request's; a session that is not a
-      // task's, or whose task is another company's, reads as the missing session.
-      if (action === "log") {
-        if (request.method !== "GET") throw agentXError("NOT_FOUND", "route not found");
-        const task = session.subject.kind === "task" ? await readTask(flow.deps, session.subject.taskId) : undefined;
-        if (task === undefined || task.companyId !== orgId) throw agentXError("NOT_FOUND", "There is no such session.");
-        return json(200, await taskLogViewFor(store, orgId, task.taskId));
-      }
+      // The task's log (B5) and, #1548, the agent's saved events for `rovara session watch` and the web app: whoever holds a level on the session reads them (the check above).
+      if (action === "log" || action === "activity") return await taskReadAnswer(flow, orgId, session, request, action);
       // Following: the owner follows without an item, so a laptop answers `following: true` and writes nothing; a members adapter's people have items.
       // `DELETE .../follow` is the hosted product's unfollow; this install's HTTP server takes GET and POST only (a hardening choice), so the unfollow is also `POST .../unfollow`.
       if ((action === "follow" && (request.method === "POST" || request.method === "DELETE")) || (action === "unfollow" && request.method === "POST")) {
@@ -304,6 +299,19 @@ export function createSessionRoutes(deps: SessionRoutesDeps): (request: BrokerRe
       taskId, round: typeof body["round"] === "number" ? body["round"] : -1, answers: body["answers"], by: { name: caller.principal.displayName, personId: caller.principal.personId }, source: caller.client === "mcp" || caller.client === "cli" ? caller.client : "app",
     });
   }
+}
+
+/**
+ * A read of the session's own task: its log, or its agent activity. The task id is the session's, never the request's; a session that is not a task's, or whose task is another company's,
+ * reads as the missing session.
+ */
+async function taskReadAnswer(flow: TaskFlow, orgId: OrgId, session: AgentSessionRecord, request: BrokerRequest, action: "log" | "activity"): Promise<BrokerResponse> {
+  if (request.method !== "GET") throw agentXError("NOT_FOUND", "route not found");
+  const task = session.subject.kind === "task" ? await readTask(flow.deps, session.subject.taskId) : undefined;
+  if (task === undefined || task.companyId !== orgId) throw agentXError("NOT_FOUND", "There is no such session.");
+  if (action === "log") return json(200, await taskLogViewFor(flow.deps.store, orgId, task.taskId));
+  const query = new URL(request.path, "http://local").searchParams;
+  return json(200, await readSessionActivity({ store: flow.deps.store, companyId: orgId }, { workspaceId: task.workspaceId, ended: session.endedAt !== undefined, after: query.get("after"), limit: query.get("limit") }));
 }
 
 /** The bridge's existing camel-case flag is the same intent, never a replacement digest. */
