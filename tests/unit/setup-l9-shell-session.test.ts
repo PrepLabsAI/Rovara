@@ -69,24 +69,46 @@ describe("the lines of one group share one shell session", () => {
     expect(results[2]!.stdout.trim()).toBe("db ok .venv");
   }, 120_000);
 
-  it("`cd sub` on one line puts the next line in sub; `cd sub && npm ci` is one line in sub", async () => {
+  it("`cd` does not persist: every line starts at the root; `cd sub && npm ci` is one line in sub; a `cd sub` line followed by `ls` lists the root", async () => {
+    await writeFile(join(root, "repo/app/at-root.txt"), "");
+    await writeFile(join(root, "repo/app/sub/in-sub.txt"), "");
     const session = newShellSession();
     expect(await out(line("cd sub"), session)).toBe("");
-    expect(await out(line("npm ci"), session)).toBe("npm ci in sub");
-    expect(await out(line("pwd"), session)).toBe(join(root, "repo/app/sub"));
-    expect(await out(line("cd sub && npm ci"))).toBe("npm ci in sub");
+    expect(await out(line("ls"), session)).toBe("at-root.txt\nsub");
+    expect(await out(line("pwd"), session)).toBe(join(root, "repo/app"));
+    expect(await out(line("cd sub && npm ci"), session)).toBe("npm ci in sub");
+    expect(await out(line("npm ci"), session)).toBe("npm ci in app");
   });
 
-  it("a command with another saved directory starts there, not where the last line ended", async () => {
+  it("`cd frontend && ...` then `cd backend && ...` both work: each line starts at the root", async () => {
+    await mkdir(join(root, "repo/app/frontend"), { recursive: true });
+    await mkdir(join(root, "repo/app/backend"), { recursive: true });
     const session = newShellSession();
-    await run(line("cd sub"), session);
-    expect(await out(line("pwd", "repo/other"), session)).toBe(join(root, "repo/other"));
+    expect(await out(line("cd frontend && npm ci"), session)).toBe("npm ci in frontend");
+    expect(await out(line("cd backend && npm ci"), session)).toBe("npm ci in backend");
   });
 
-  it("exported variables, shell variables, functions and `unset` carry over; a line's own `exit` ends only that line", async () => {
+  it("a bare `source .venv/bin/activate` line, then a bare `pip install -r requirements.txt` line, works through the carried environment", async () => {
+    await writeFile(join(root, "repo/app/requirements.txt"), "# nothing to install\n");
     const session = newShellSession();
-    await run(line("export FOO=bar; PLAIN=1; greet() { echo hello-$FOO; }"), session);
-    expect(await out(line("greet; echo $PLAIN; printenv FOO"), session)).toBe("hello-bar\n1\nbar");
+    expect((await run(line("python3 -m venv .venv"), session)).exitCode).toBe(0);
+    expect((await run(line("source .venv/bin/activate"), session)).exitCode).toBe(0);
+    expect(await out(line("echo $VIRTUAL_ENV; command -v pip"), session)).toBe(`${join(root, "repo/app/.venv")}\n${join(root, "repo/app/.venv/bin/pip")}`);
+    const installed = await run(line("pip install -r requirements.txt"), session);
+    expect(installed.exitCode, installed.stderr).toBe(0);
+    await closeShellSession(session);
+  }, 120_000);
+
+  it("a variable that is not exported does not carry (as in CI an `export` is needed); an exported one and a function do", async () => {
+    const session = newShellSession();
+    await run(line("PLAIN=1; export EXPORTED=2; fn() { echo fn-ran; }"), session);
+    expect(await out(line(`echo "[\${PLAIN-}][\${EXPORTED-}]"; fn`), session)).toBe("[][2]\nfn-ran");
+  });
+
+  it("exported variables, functions and `unset` carry over; a line's own `exit` ends only that line", async () => {
+    const session = newShellSession();
+    await run(line("export FOO=bar; greet() { echo hello-$FOO; }"), session);
+    expect(await out(line("greet; printenv FOO"), session)).toBe("hello-bar\nbar");
     await run(line("unset FOO"), session);
     expect(await out(line(`echo "[\${FOO-unset}]"`), session)).toBe("[unset]");
     const ended = await run(line("export LAST=1; exit 3"), session);
@@ -119,9 +141,9 @@ describe("the lines of one group share one shell session", () => {
 
   it("a second group does not see the first's lines", async () => {
     const first = newShellSession();
-    await run(line("export FOO=bar; cd sub"), first);
+    await run(line("export FOO=bar"), first);
     const second = newShellSession();
-    expect(await out(line("echo [$FOO]; pwd"), second)).toBe(`[]\n${join(root, "repo/app")}`);
+    expect(await out(line("echo [$FOO]"), second)).toBe("[]");
   });
 
   it("each line runs under `set -e -o pipefail`: it stops at its first failing command, and a failing pipe fails", async () => {

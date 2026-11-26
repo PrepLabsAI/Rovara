@@ -1,18 +1,15 @@
 // SETUP-L9-SHELL (DEC 254zzz562): a saved command is run by a shell, and the lines of one GROUP (a project's setup commands, or its test commands) share one shell SESSION, the way a person's terminal or a CI job's script does:
-// `source .venv/bin/activate` on one line is still in effect on the next, so are `cd sub`, `export FOO=1`, `nvm use` and a function the line defined.
+// `source .venv/bin/activate` on one line is still in effect on the next, so are `export FOO=1`, `nvm use` and a function the line defined (the working directory is not: every line starts at the root).
 //
 // The shell is bash (not sh, not a login shell), started once PER LINE by the same `bash -c` wrapper that runs every command in a container (`runInContainerGroup`: its own process group, a time limit that stops it there, an abort that
 // stops it there). What a line leaves behind is carried to the next line of the session in a small state file in the container's /tmp (see `SHELL_SESSION_SCRIPT`). Why not one long-lived shell process: each line keeps its own
 // time limit, its own exit code and output, its own stop-and-confirm sequence, and a preparation that resumes (or a worker that restarts) loses nothing but the state; and every caller of the one runner (`runContainerCommand`) gets
 // the session without being rewritten.
 //
-// What carries over between the lines of a session: the working directory (see below), every shell and environment variable the line set, changed or unset, and every function it defined. What does not: shell options (`set -e`, `shopt`),
-// traps, aliases, background jobs and open file descriptors. Each line runs under `set -e -o pipefail` (the way a CI `run:` step does): the line fails at its first failing command, and `cmd | tail` fails when `cmd` does.
-// A command's own `env` (a project command's #54 variables, a registry's config paths) is for that command only: it is in the line's starting state, so it is not part of what the line "changed".
-//
-// The working directory: each command has its own saved directory (`cwd`). A line starts in the directory the PREVIOUS line of the session ended in when the two have the same saved directory (so `cd sub` on one line puts the next
-// line in `sub`), and in its own saved directory when they differ (a monorepo's second repository starts at its own root). A line that is written to start at the repository root every time (`cd sub && npm ci`, then
-// `cd other && make`) is therefore wrong in a session: write it as `(cd sub && npm ci)`.
+// What carries over between the lines (like a CI job, DEC 254zzz579): the ENVIRONMENT. Every EXPORTED variable the line set, changed or unset (so an activated virtual environment's PATH and VIRTUAL_ENV, `export FOO=1`, `nvm use`'s PATH), and every
+// function it defined. What does not: the working directory (every line STARTS AT ITS COMMAND'S OWN SAVED DIRECTORY, the repository root: `cd sub` on one line does not move the next), variables that were not exported (as in CI, an
+// `export` is needed), shell options (`set -e`, `shopt`), traps, aliases, background jobs and open file descriptors. Each line runs under `set -e -o pipefail` (the way a CI `run:` step does): the line fails at its first failing command, and
+// `cmd | tail` fails when `cmd` does. A command's own `env` (a project command's #54 variables, a registry's config paths) is for that command only: it is in the line's starting state, so it is not part of what the line "changed".
 //
 // A group has a time limit as well as a limit per line: a line is not started once the group's time has run out, and no line may run past it.
 import { randomUUID } from "node:crypto";
@@ -75,12 +72,11 @@ export async function closeShellSession(session: ShellSession | undefined): Prom
 export const SHELL_SESSION_SCRIPT = String.raw`
 __rv_state=$2
 __rv_line=$3
-__rv_start=$PWD
 __rv_nl=$'\n'
 set --
 __rv_names() {
   local IFS=$' \t\n' __rv_n
-  for __rv_n in $(compgen -v); do
+  for __rv_n in $(compgen -e); do
     case $__rv_n in
       __rv_*|__RV_*|BASH*|FUNCNAME|PIPESTATUS|RANDOM|SRANDOM|SECONDS|LINENO|SHLVL|PPID|UID|EUID|GROUPS|OLDPWD|PWD|SHELLOPTS|DIRSTACK|HOSTNAME|HOSTTYPE|MACHTYPE|OSTYPE|COMP_*|COMPREPLY|EPOCH*|IFS|OPTIND|OPTARG|OPTERR|HISTCMD|_) continue ;;
     esac
@@ -132,14 +128,13 @@ __rv_save() {
       esac
     done
   fi
-  __rv_delta="$__rv_delta$(printf '__RV_SAVED_PWD=%q\n__RV_END_PWD=%q\n' "$__rv_start" "$PWD")$__rv_nl"
+  [ -n "$__rv_delta" ] || return 0
   ( umask 077; printf '%s' "$__rv_delta" >> "$__rv_state" ) 2>/dev/null
   return 0
 }
 if [ -n "$__rv_state" ]; then
   if [ -f "$__rv_state" ]; then
     . "$__rv_state" 2>/dev/null
-    if [ "\${__RV_SAVED_PWD-}" = "$__rv_start" ] && [ -d "\${__RV_END_PWD-}" ]; then cd -- "$__RV_END_PWD" 2>/dev/null; fi
   fi
   __rv_base_vars="$__rv_nl$(__rv_vars)$__rv_nl"
   __rv_base_names="$(__rv_names)"

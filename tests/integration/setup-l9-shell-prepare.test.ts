@@ -112,12 +112,19 @@ describe("a project's saved setup and test lines are run by a shell, in one sess
     expect(manifest?.readinessResults?.[2]?.stdout.trim()).toBe("db ok .venv");
   }, 180_000);
 
-  it("`cd sub && npm ci` runs in sub, and the directory it leaves carries to the next setup line (not to the test group, a session of its own)", async () => {
+  it("`cd sub && npm ci` runs in sub, and the next line starts at the root again (cd does not persist)", async () => {
     const source = await fixtureRepository({ "sub/package.json": "{}\n", "README.md": "app\n" });
     const { home, manifest, error } = await prepare(source, project(lines(["cd sub && npm ci", "npm run build"], ["npm test"])));
     expect(error).toBeUndefined();
     expect(manifest?.complete).toBe(true);
-    expect((await readFile(join(home, "npm.log"), "utf8")).trim().split("\n")).toEqual(["npm ci in sub", "npm run build in sub", "npm test in app"]);
+    expect((await readFile(join(home, "npm.log"), "utf8")).trim().split("\n")).toEqual(["npm ci in sub", "npm run build in app", "npm test in app"]);
+  });
+
+  it("`cd frontend && npm ci` then `cd backend && npm ci` both work: each line starts at the repository root", async () => {
+    const source = await fixtureRepository({ "frontend/package.json": "{}\n", "backend/package.json": "{}\n" });
+    const { home, error } = await prepare(source, project(lines(["cd frontend && npm ci", "cd backend && npm ci"], [])));
+    expect(error).toBeUndefined();
+    expect((await readFile(join(home, "npm.log"), "utf8")).trim().split("\n")).toEqual(["npm ci in frontend", "npm ci in backend"]);
   });
 
   it("a failing middle line stops the group and names that line, with its exit code and its last lines; the lines after it never run", async () => {
