@@ -6,7 +6,8 @@ import { AGENTX_NAME_PATTERN } from "./names.js";
 const project = z.string().regex(AGENTX_NAME_PATTERN);
 const lifecycle = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER - 1);
 const config = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
-export const ReviewedProjectRestoreBodySchema = z.object({ requestId: z.string().uuid(), expectedOrgId: OrgIdSchema.optional(), expectedRevision: lifecycle, expectedProjectRevision: config, acknowledgeNewWorkAllowed: z.literal(true) }).strict();
+/** The confirm. `expectedProjectIncarnation` is the incarnation the preview showed (optional: an older Cloud does not send it, and a pre-rollout project has none). When present and not the project's current one, Code refuses the change and changes nothing. */
+export const ReviewedProjectRestoreBodySchema = z.object({ requestId: z.string().uuid(), expectedOrgId: OrgIdSchema.optional(), expectedRevision: lifecycle, expectedProjectRevision: config, expectedProjectIncarnation: config.optional(), acknowledgeNewWorkAllowed: z.literal(true) }).strict();
 /** Guided onboarding PR 16: what restoring does (optional: Cloud's old reader strips it). The project takes new work again, from its linked Slack channels too. */
 export const ReviewedProjectRestoreImpactSchema = z.object({ allowsNewWork: z.literal(true), linkedSlackChannels: z.number().int().nonnegative().max(10_000) }).strict();
 export const ReviewedProjectRestorePreviewSchema = z.object({ orgId: OrgIdSchema, project, status: z.enum(["active", "archived"]), expectedRevision: lifecycle, expectedProjectRevision: config, expectedProjectIncarnation: config.optional(), checkedAt: z.string().datetime(), prerequisites: z.enum(["checked", "not_required"]), access: z.object({ actions: z.array(z.literal("restore")).max(1) }).strict(), impact: ReviewedProjectRestoreImpactSchema.optional() }).strict();

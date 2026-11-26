@@ -599,8 +599,8 @@ describe("versions (FR-048, R23, ruling S1)", () => {
     expect(await compatibilityChecker(configured("1.2") as unknown as ControlPlaneClient)()).toEqual({ env: "staging", apiVersion: "1.2" });
     // C20: a 25b control plane (1.1) has no share route, so only an AgentX upgrade helps.
     await expect(compatibilityChecker(configured("1.1") as unknown as ControlPlaneClient)()).rejects.toMatchObject({ code: "UPGRADE_REQUIRED", nextStep: UPGRADE_AGENTX_STEP });
-    const newer = await compatibilityChecker(configured("1.6") as unknown as ControlPlaneClient)();
-    expect(newer).toMatchObject({ env: "staging", apiVersion: "1.6" });
+    const newer = await compatibilityChecker(configured("1.9") as unknown as ControlPlaneClient)();
+    expect(newer).toMatchObject({ env: "staging", apiVersion: "1.9" });
     expect(newer.notice).toContain("mcp install");
   });
 
