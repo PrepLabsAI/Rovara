@@ -6,7 +6,7 @@
 // (setup-agent-journal.ts), and a change to a tracked file or to a commit is found by `git` afterwards and ends the run. Text from the repository is quoted as data and never read as instructions.
 import { SETUP_AGENT_LIMITS_MAX, SETUP_COMMAND_MAX_TIMEOUT_SECONDS, SETUP_COMMAND_MIN_TIMEOUT_SECONDS, type SetupAgentLimits, type SetupCarryOver } from "@agentx/contracts";
 import { quotedContextJson, quotedContextText } from "./context-text.js";
-import { setupProposalFormatLines, type SetupDraftRepository } from "./setup-draft.js";
+import { SETUP_SMOKE_CHECK_LABEL, setupProposalFormatLines, type SetupDraftRepository } from "./setup-draft.js";
 
 /** The first line of the final answer when setup cannot work without a change to the repository's own files (a broken lockfile, a missing manifest). The worker reads it in code and ends the run `needs_code_change`. */
 export const SETUP_AGENT_NEEDS_CODE_CHANGE_MARKER = "NEEDS CODE CHANGE:" as const;
@@ -105,6 +105,8 @@ export function setupAgentInstructions(input: SetupAgentInstructionsInput): stri
     "",
     ...setupProposalFormatLines(input.metaRepo),
     "",
+    ...SETUP_AGENT_SMOKE_LINES,
+    "",
     ...SETUP_AGENT_EVAL_LINES,
   ].filter((line, index, all) => line !== "" || all[index - 1] !== "").join("\n");
 }
@@ -117,6 +119,15 @@ export const SETUP_AGENT_TEST_TIME_LINES: readonly string[] = [
   `- A test suite or a build can take ten minutes or more. Do not ask for a shorter time limit than ${String(SETUP_COMMAND_MIN_TIMEOUT_SECONDS / 60)} minutes (${String(SETUP_COMMAND_MIN_TIMEOUT_SECONDS)} s) for one command: Rovara raises a shorter one to ${String(SETUP_COMMAND_MIN_TIMEOUT_SECONDS)} s, and the most is ${String(SETUP_COMMAND_MAX_TIMEOUT_SECONDS)} s.`,
   "- If the full test command is slow or runs out of time, prefer a narrower test command: a single package or workspace, one suite, the unit tests only (the CI unit job, a `-m unit` marker, `jest --selectProjects`, `pytest tests/unit`), found in the repository's own scripts or CI. Do not make up a filter the repository does not support. Propose the narrower command in tests, and say in notes which command you chose instead of the full one and why (what ran out of time or failed, and how long the narrower one took).",
   `- For each tests entry (and each setup entry that is slow), add \`"timeoutSeconds"\`: about twice the longest the command took when you ran it, between ${String(SETUP_COMMAND_MIN_TIMEOUT_SECONDS)} and ${String(SETUP_COMMAND_MAX_TIMEOUT_SECONDS)}. Later runs use that number as the command's time limit, and an admin can change it.`,
+];
+
+/**
+ * SETUP-L2-RUNNABLE (owner Q6): a repository with no tests. The agent may write smoke checks of its own. They are not the project's tests: they go in `checks`, are shown labelled and are off until a person turns them on. The label is code
+ * (`labelSmokeChecks` puts it on whatever the agent wrote); the no-write rule is guidance.
+ */
+export const SETUP_AGENT_SMOKE_LINES: readonly string[] = [
+  `- If the repository has no tests at all, you may propose smoke checks: a check that the project can start to be used (import its package, print its version or help). Put each in \`checks\`, never in \`tests\`, with a name that starts "Smoke check". Rovara labels it "${SETUP_SMOKE_CHECK_LABEL}" and shows it unticked; it is not one of the project's tests.`,
+  "- A smoke check must not write anything: no file, no database, no migration or seed or init command, no network call, no server left running. A Python import check is `.venv/bin/python -B -c \"import src\"` (`-B` writes no bytecode files); a Node one is `node -e \"require('./src')\"`. Do not propose a smoke check that creates a table or a file. When nothing can check it without writing, propose none.",
 ];
 
 /**
