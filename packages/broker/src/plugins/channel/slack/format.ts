@@ -47,7 +47,7 @@ export interface Rendered {
   ephemeralTo?: string;
 }
 
-const OPEN_WORDS = "Open the task on the computer where Rovara runs: `rovara open`.";
+const OPEN_WORDS = "Open the task in Rovara.";
 
 const section = (text: string): unknown => ({ type: "section", text: { type: "mrkdwn", text: cut(escapeText(text), SECTION_MAX) } });
 
@@ -77,7 +77,7 @@ export function renderEvent(event: ChannelEvent, maxLength: number): Rendered | 
         value: JSON.stringify({ r: event.data.requestId, v: event.data.expectedRevision, d: event.data.artifactDigest, o: action.decision } satisfies ButtonValue),
       }));
       const elements = [...buttons, ...open];
-      const where = event.data.taskUrl === undefined && !event.data.text.includes("rovara open") ? [{ type: "context", elements: [{ type: "mrkdwn", text: OPEN_WORDS }] }] : [];
+      const where = event.data.taskUrl === undefined && !event.data.text.includes(OPEN_WORDS) ? [{ type: "context", elements: [{ type: "mrkdwn", text: OPEN_WORDS }] }] : [];
       return { text: text(event.data.text), blocks: [section(event.data.text), ...(elements.length === 0 ? [] : [{ type: "actions", elements }]), ...where] };
     }
   }

@@ -1,6 +1,6 @@
 // Plan and design comments as a learning source (lane L4-LM1a, step 2). A person's request for changes at a plan or design approval step (the gate's REQUEST_CHANGES decision and its `reason`) is a learning
 // subject of its own span kind (`plan_comment`, `design_comment`), read through the same correction filter as a review comment, a STRONG source (a person's direct correction), company and project scoped, only the
-// deciding person's own typed words while they are on the project's roster, framed as untrusted data, and erased with the person (and with the company).
+// deciding person's own typed words while they are on the project's roster, framed as untrusted data, and erased with the person.
 import { randomUUID } from "node:crypto";
 import { OrgIdSchema, type JsonValue, type OrgId } from "@agentx/contracts";
 import { describe, expect, it } from "vitest";
@@ -8,7 +8,6 @@ import { erasePersonLessons } from "../../../packages/broker/src/core-host/lesso
 import { taskOwnerKey } from "../../../packages/broker/src/developer/task-records.js";
 import { PAGE_CHANGES_DEFAULT_REASON } from "../../../packages/broker/src/developer/gate-default-reasons.js";
 import { taskKey } from "../../../packages/broker/src/core/task-flow/keys.js";
-import { runCompanyPurge, requestCompanyPurge, COMPANY_PURGE_COOLING_OFF_MS, type CompanyPurgeDeps } from "../../../packages/broker/src/core/company/purge.js";
 import { DocumentLessonStore } from "../../../packages/broker/src/lessons/document-store.js";
 import type { HostedLessonPeople } from "../../../packages/broker/src/lessons/hosted-people.js";
 import { processDraft, type ProcessDeps } from "../../../packages/broker/src/lessons/process.js";
@@ -21,7 +20,6 @@ import { createLocalLessonSources } from "../../../packages/broker/src/core-host
 import type { LessonRepositories } from "../../../packages/broker/src/core-host/app/lessons-repos.js";
 import { recordEndedTask } from "../../../packages/broker/src/team-record/capture.js";
 import { MemoryDocumentStore } from "../../../packages/broker/src/ports/memory-document-store.js";
-import { DocumentAuditSink } from "../../../packages/broker/src/plugins/audit-sink/document/sink.js";
 import { Alerts, Audit, Clock, KEY, MemoryVectors, ScriptedModel, Spend, candidateJson, draft, embedder, facts, lessonRecord, memberSpan, reply, settings, subject, verifier } from "./lesson-helpers.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
@@ -241,7 +239,7 @@ describe("the draft and suggest flow: a plan comment becomes a suggestion (pendi
   });
 });
 
-describe("erase: the person's lessons that rest on a plan comment go with the person and with the company", () => {
+describe("erase: the person's lessons that rest on a plan comment go with the person", () => {
   const row = (company: string, id: string, authors: string[], readFrom: string[]) => lessonRecord({
     id, workspaceId: company, project: "payments", provenance: { ...draft().provenance, sourceKinds: ["plan_comment"], authors, readFrom, memberSignal: true },
   });
@@ -276,16 +274,4 @@ describe("erase: the person's lessons that rest on a plan comment go with the pe
     expect(await idsOf(store, A)).toEqual([]);
   });
 
-  it("the company purge removes the company's plan-comment lessons and leaves the other company's", async () => {
-    const store = new MemoryDocumentStore();
-    await seed(store);
-    const audit = new DocumentAuditSink({ store: () => store });
-    const clock = { now: Date.parse("2026-11-15T10:00:00.000Z") };
-    const deps: CompanyPurgeDeps = { store, objects: { deleteEveryVersion: async () => true }, audit, now: () => clock.now, companyClosure: async () => ({ closed: true, closeId: "close-1" }) };
-    await requestCompanyPurge(deps, { companyId: A, by: { kind: "operator", operatorId: "ops" }, requestId: "11111111-2222-4333-8444-555555555555" });
-    clock.now += COMPANY_PURGE_COOLING_OFF_MS;
-    for (let call = 0; call < 50; call += 1) { if ((await runCompanyPurge(deps, A, 60_000)).outcome === "done") break; clock.now += 70_000; }
-    expect(await idsOf(store, A)).toEqual([]);
-    expect(await idsOf(store, B)).toEqual(["les_pc000001", "les_pc000002"]);
-  });
 });

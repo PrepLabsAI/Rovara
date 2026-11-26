@@ -3,8 +3,6 @@ import { expect, it } from "vitest";
 import { canonicalJson, IMPLICIT_COMPANY_ID, orgProjectCatalogKey, projectMetaKey, projectRevisionKey } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { registerProject } from "../../packages/broker/src/core-host/app/projects.js";
-import { COMPANY_PURGE_COOLING_OFF_MS, requestCompanyPurge, runCompanyPurge } from "../../packages/broker/src/core/company/purge.js";
-import { DocumentAuditSink } from "../../packages/broker/src/plugins/audit-sink/document/sink.js";
 import { backfillCorePage } from "../../packages/broker/src/aws/core-project-backfill.js";
 import { catalogBackfill } from "../../packages/broker/src/aws/project-catalog-backfill.js";
 import { latestRevisionRowFor } from "../../packages/broker/src/aws/company-layout.js";
@@ -13,19 +11,12 @@ const companyId = "org_aaaaaaaaaaaaaaaaaaaa", project = "web";
 const definition = { name: project, revision: 1, repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "github-app" }], setup: [], readiness: [], orchestratorInstructions: "Delegate work." };
 const hash = (row: unknown) => createHash("sha256").update(canonicalJson(row)).digest("hex");
 const setupCheck = { workspaceId: "workspace", revision: 1, startedAt: "2026-11-21T12:00:00.000Z", startedBy: "owner" };
-async function purge(store: MemoryDocumentStore, company = companyId) {
-  let now = Date.parse("2026-11-21T12:00:00.000Z");
-  const deps = { store, audit: new DocumentAuditSink({ store: () => store }), now: () => now, objects: { deleteEveryVersion: async () => true as const }, companyClosure: async () => ({ closed: true as const, closeId: "close" }) };
-  await requestCompanyPurge(deps, { companyId: company, by: { kind: "operator", operatorId: "ops" }, requestId: "11111111-2222-4333-8444-555555555555" });
-  now += COMPANY_PURGE_COOLING_OFF_MS + 1;
-  for (let page = 0; page < 30; page++) if ((await runCompanyPurge(deps, company, 500)).outcome === "done") break;
-}
-it.each([{ companyId: "org_bbbbbbbbbbbbbbbbbbbb" }, { orgId: "org_bbbbbbbbbbbbbbbbbbbb" }])("purge retains a corrupt ownership tombstone instead of recycling its generation (%j)", async drift => {
+it.each([{ companyId: "org_bbbbbbbbbbbbbbbbbbbb" }, { orgId: "org_bbbbbbbbbbbbbbbbbbbb" }])("registration refuses to recycle a corrupt ownership tombstone's generation (%j)", async drift => {
   const store = new MemoryDocumentStore(), key = projectMetaKey(companyId, project);
   const item = { ...key, entityType: "PROJECT_META", companyId, project, incarnationRevision: 7, status: "deleted", ...drift };
-  await store.put({ item }); await purge(store);
-  expect(await store.get(key)).toEqual(item);
+  await store.put({ item });
   await expect(registerProject(store, companyId, definition)).rejects.toThrow();
+  expect(await store.get(key)).toEqual(item);
 });
 it("implicit mirror undo preserves a witness that refuses a subsequently lost META", async () => {
   const db = new FakeDynamoDb(), company = IMPLICIT_COMPANY_ID, key = projectMetaKey(company, project);
@@ -57,13 +48,6 @@ it("local revisions never overwrite setup state added concurrently", async () =>
   };
   await registerProject(store, companyId, { ...definition, orchestratorInstructions: "Updated." });
   expect(await store.get(key)).toMatchObject({ setupCheck, incarnationRevision: 1 });
-});
-it("purge retires unowned authoritative legacy projects of the implicit company", async () => {
-  const store = new MemoryDocumentStore(), key = projectMetaKey(IMPLICIT_COMPANY_ID, project);
-  const legacy = { pk: "PROJECT#web", sk: "REV#000000000001", entityType: "PROJECT", definition };
-  await store.put({ item: legacy }); await purge(store, IMPLICIT_COMPANY_ID);
-  expect(await store.get(key)).toMatchObject({ incarnationRevision: 1, status: "deleted" });
-  expect(await store.get(legacy)).toBeUndefined();
 });
 it("a retained implicit tombstone hides leftover authoritative legacy revisions", async () => {
   const db = new FakeDynamoDb();

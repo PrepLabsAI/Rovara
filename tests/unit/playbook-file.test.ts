@@ -1,7 +1,7 @@
 // "How we work" in Code is the file `.rovara/playbook.yaml`. These tests read it the way the broker does: strictly, as data from a repository.
 import { describe, expect, it } from "vitest";
 import { PLAYBOOK_FILE_MAX_BYTES, PLAYBOOK_FILE_TEMPLATE, PLAYBOOK_RULE_TEXT_MAX, type PlaybookFile } from "@agentx/contracts";
-import { PLAYBOOK_TAG_MESSAGE, designReviewOfPlaybook, overlayOfPlaybook, parsePlaybookText, playbookIsEmpty } from "../../packages/broker/src/core/playbook/file.js";
+import { PLAYBOOK_TAG_MESSAGE, overlayOfPlaybook, parsePlaybookText, playbookIsEmpty } from "../../packages/broker/src/core/playbook/file.js";
 import { RULE_TEXT_MAX } from "../../packages/broker/src/core/playbook/inert-rule-text.js";
 
 const ok = (text: string): PlaybookFile => {
@@ -64,7 +64,7 @@ describe("reading the playbook file", () => {
 
   it("carries a design review setting as Cloud stores it, and holds who approves to the maintainers", () => {
     const text = (approver: string) => `version: 1\ndesignReview:\n  mode: always\n  tier: thorough\n  allowSkip: false\n  capUsdPerTask: 20\n  highRiskApprover: ${approver}`;
-    expect(designReviewOfPlaybook(ok(text("{ kind: maintainers }")))).toEqual({ mode: "always", tier: "thorough", allowSkip: false, capUsdPerTask: 20, highRiskApprover: { kind: "maintainers" } });
+    expect(ok(text("{ kind: maintainers }")).designReview).toEqual({ mode: "always", tier: "thorough", allowSkip: false, capUsdPerTask: 20, highRiskApprover: { kind: "maintainers" } });
     expect(problems(text("{ kind: people, memberIds: [a] }"))[0]?.path).toBe("designReview.highRiskApprover");
     expect(problems(text("{ kind: group, groupId: g }"))[0]?.path).toBe("designReview.highRiskApprover");
     expect(problems("version: 1\ndesignReview:\n  mode: sometimes")[0]?.path).toMatch(/^designReview/u);

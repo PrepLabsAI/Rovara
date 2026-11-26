@@ -30,7 +30,7 @@ export interface SlackChannelOptions {
   sleep?: ((ms: number) => Promise<void>) | undefined;
 }
 
-const EXPIRED_WORDS = (taskUrl: string | undefined): string => `That button expired. Open the task page to ask for changes${taskUrl === undefined ? " (`rovara open`)." : `: ${taskUrl}`}`;
+const EXPIRED_WORDS = (taskUrl: string | undefined): string => `That button expired. Open the task page to ask for changes${taskUrl === undefined ? " in Rovara." : `: ${taskUrl}`}`;
 const OTHER_PERSON_WORDS = "That box was opened by someone else, so nothing was sent. Press Request changes yourself.";
 const UNREADABLE_WORDS = "That box could not be read, so nothing was sent. Press Request changes again.";
 

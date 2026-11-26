@@ -1,11 +1,9 @@
 // The project wiki store (lead 4, W2): rows only, one partition per company AND project. Two-project and two-company isolation on every read and write; the agents' read; quotes redacted
-// and cut; removed repositories; the person erase step; answer expiry; the company purge removes every wiki row (no purge change).
+// and cut; removed repositories; the person erase step; answer expiry.
 import { describe, expect, it } from "vitest";
 import { WIKI_FLAG_SCAN_MAX, WIKI_QUOTE_MAX, wikiPartition, type OrgId, type StoredDocument, type WikiPageWrite, type WikiStore } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { DocumentAuditSink } from "../../packages/broker/src/plugins/audit-sink/document/sink.js";
 import { WIKI_FORMER_MEMBER, createWikiStore, storedQuote } from "../../packages/broker/src/core/wiki/store.js";
-import { COMPANY_PURGE_COOLING_OFF_MS, requestCompanyPurge, runCompanyPurge, type CompanyPurgeDeps } from "../../packages/broker/src/core/company/purge.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
 const B = "org_bbbbbbbbbbbbbbbbbbbb" as OrgId;
@@ -241,23 +239,6 @@ describe("wiki store: deleting", () => {
     expect(await w.a.readIndex("alpha")).toEqual([]);
   });
 
-  it("the company purge removes every wiki row of the company and leaves the other company's (no purge change)", async () => {
-    const w = world();
-    await w.a.writePage("alpha", page("A"));
-    await w.a.addNote("alpha", { pageId: "overview", text: "n", authorId: "person-1" });
-    await w.a.writeAnswer("alpha", { answerId: "answer-0001", askedBy: "person-1", channel: "slack", question: "q", answer: "a", outcome: "answered", sources: [], pagesRead: [] });
-    await w.b.writePage("alpha", page("B"));
-    const bRows = JSON.stringify((await everything(w.store)).filter((item) => item.pk.startsWith(`ORG#${B}#WIKI#`)));
-    const audit = new DocumentAuditSink({ store: () => w.store });
-    const deps: CompanyPurgeDeps = { store: w.store, objects: { deleteEveryVersion: async () => true }, audit, now: () => w.clock.now, companyClosure: async () => ({ closed: true, closeId: "close-1" }) };
-    await requestCompanyPurge(deps, { companyId: A, by: { kind: "operator", operatorId: "ops_ana" }, requestId: "11111111-2222-4333-8444-555555555555" });
-    w.clock.now += COMPANY_PURGE_COOLING_OFF_MS + 1;
-    let outcome = "";
-    for (let call = 0; call < 50 && outcome !== "done"; call += 1) { outcome = (await runCompanyPurge(deps, A, 60_000)).outcome; w.clock.now += 70_000; }
-    expect(outcome).toBe("done");
-    expect((await everything(w.store)).filter((item) => item.pk.startsWith(`ORG#${A}#WIKI#`))).toEqual([]);
-    expect(JSON.stringify((await everything(w.store)).filter((item) => item.pk.startsWith(`ORG#${B}#WIKI#`)))).toBe(bRows);
-  });
 });
 
 describe("wiki store: person erase and answer expiry", () => {

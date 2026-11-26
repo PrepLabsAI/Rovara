@@ -1,8 +1,8 @@
-// A small world for the automation tests: the document store, a clock, an admission that can refuse, a recording audit sink, a starter that records every unattended start, the owner's approvers, and the stores and
+// A small world for the automation tests: the document store, a clock, an admission that can refuse, a recording audit sink, a starter that records every unattended start, and the stores and
 // dependencies built on them. Nothing here names a provider.
-import { INDEX_EXPIRY_ATTRIBUTE, type Admission, type AdmissionRequest, type ApprovalProof, type AuditEvent, type AuditSink, type OrgId, type ProjectDefinition } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, type Admission, type AdmissionRequest, type AuditEvent, type AuditSink, type OrgId, type ProjectDefinition } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { createLocalOwnerApprovers, localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
+import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
 import type { AutomationSwitch } from "../../packages/broker/src/core/automation/switch.js";
 import type { AutomatedRunRequest, AutomatedRunStarter, UnattendedStartDeps } from "../../packages/broker/src/core/automation/run-seam.js";
 import { AgentStore } from "../../packages/broker/src/core/agents/store.js";
@@ -10,9 +10,6 @@ import type { ProjectRules } from "../../packages/broker/src/core/agents/rules.j
 import type { RosterDependencies } from "../../packages/broker/src/core/agents/roster.js";
 import { ChainStore } from "../../packages/broker/src/core/chains/store.js";
 import type { ChainRunnerDeps } from "../../packages/broker/src/core/chains/runner.js";
-import { TriggerStore } from "../../packages/broker/src/core/triggers/store.js";
-import type { TriggerDispatchDeps } from "../../packages/broker/src/core/triggers/dispatch.js";
-import { SchedulerError, type DueSchedule, type ScheduleEntry, type Scheduler } from "@agentx/contracts";
 import type { UnattendedTasks } from "../../packages/broker/src/core/automation/run-seam.js";
 
 export const COMPANY = "org_00000000000000000000" as OrgId;
@@ -35,7 +32,6 @@ export interface AutomationWorld {
   projects: Map<string, Pick<ProjectDefinition, "actionPolicy"> & { archived?: boolean }>;
   agents: AgentStore;
   chains: ChainStore;
-  triggers: TriggerStore;
   rules: ProjectRules;
   roster: RosterDependencies;
   unattended: UnattendedStartDeps;
@@ -45,9 +41,6 @@ export interface AutomationWorld {
   enforces: { dollars: boolean };
   taskCosts: Map<string, number>;
   tasks: UnattendedTasks;
-  scheduler: Scheduler & { entries: Map<string, ScheduleEntry>; /** When set, `put` is refused with these words (a scheduler that will not run the rule). */ refuse: string | undefined; fire(due: Partial<DueSchedule> & { scheduleId: string }): Promise<void>; handler: ((due: DueSchedule) => Promise<void>) | undefined };
-  dispatch: TriggerDispatchDeps;
-  proofFor(request: { requestId: string; revision: number; artifactDigest: string }, token?: string): ApprovalProof;
   cancelled: string[];
 }
 
@@ -98,7 +91,6 @@ export function createAutomationWorld(options: { on?: boolean } = {}): Automatio
   const idBody = () => { counter += 1; return counter.toString(36).padStart(20, "0"); };
   const agents = new AgentStore({ ...table, audit: auditSink, companyId: COMPANY, newId: () => `agt_${idBody()}` });
   const chains = new ChainStore({ ...table, audit: auditSink, companyId: COMPANY, newId: () => `chn_${idBody()}` as never });
-  const triggers = new TriggerStore({ ...table, newId: () => `ctr_${idBody()}` });
   const roster: RosterDependencies = { store: agents, rules };
   const enforces = { dollars: true };
   const cancelled: string[] = [];
@@ -113,25 +105,8 @@ export function createAutomationWorld(options: { on?: boolean } = {}): Automatio
     ...table, companyId: COMPANY, chains, roster, unattended, cancelTask: (taskId) => tasks.cancel(taskId), log: () => undefined,
     taskOpen: async (taskId) => { const state = taskStates.get(taskId); return state !== undefined && state.end === undefined; }, taskWaiting: async (taskId) => taskStates.get(taskId)?.waiting === true,
   };
-  const approvers = createLocalOwnerApprovers({ verifySession: (token) => token.startsWith("owner-page:") });
-  const scheduler: AutomationWorld["scheduler"] = {
-    entries: new Map(), handler: undefined, refuse: undefined, capabilities: { timezones: ["UTC"], minEveryMinutes: 1, deliversMissed: true },
-    async get(_company: string, scheduleId: string) { return scheduler.entries.get(scheduleId); },
-    async put(entry: ScheduleEntry) { if (scheduler.refuse !== undefined) throw new SchedulerError("refused", scheduler.refuse); scheduler.entries.set(entry.scheduleId, entry); },
-    async remove(_company: string, scheduleId: string) { return scheduler.entries.delete(scheduleId); },
-    subscribe(handler: (due: DueSchedule) => Promise<void>) { scheduler.handler = handler; return { stop: async () => { scheduler.handler = undefined; } }; },
-    async fire(due: Partial<DueSchedule> & { scheduleId: string }) {
-      const entry = scheduler.entries.get(due.scheduleId);
-      await scheduler.handler!({ companyId: COMPANY, scheduledAt: new Date(clock.now).toISOString(), slotId: `slot-${String(clock.now)}`, attempt: 1, target: entry?.target ?? { kind: "trigger", ref: {} }, ...due });
-    },
-  };
-  const requirements = { roster, chains, unattendedCap: () => (enforces.dollars ? undefined : "no dollar cap") };
-  const dispatch: TriggerDispatchDeps = {
-    ...table, companyId: COMPANY, automation, audit: auditSink, approvers, triggers, requirements, scheduler, chainRuns, unattended, owner: { developerId: OWNER.personId }, log: () => undefined,
-  };
   return {
-    clock, store, table, taskStates, taskCosts, enforces, tasks, audit, admissions, get refuseAdmission() { return world.refuseAdmission; }, set refuseAdmission(value) { world.refuseAdmission = value; }, releases, settles, starts, starter, switchOn, projects, agents, chains, triggers, rules, roster, unattended, chainRuns, scheduler, dispatch, cancelled,
-    proofFor: (request, token = "owner-page:session") => ({ proofId: `proof-${String(Math.random()).slice(2)}`, method: "local-session", requestId: request.requestId, revision: request.revision, artifactDigest: request.artifactDigest, token }),
+    clock, store, table, taskStates, taskCosts, enforces, tasks, audit, admissions, get refuseAdmission() { return world.refuseAdmission; }, set refuseAdmission(value) { world.refuseAdmission = value; }, releases, settles, starts, starter, switchOn, projects, agents, chains, rules, roster, unattended, chainRuns, cancelled,
   };
 }
 

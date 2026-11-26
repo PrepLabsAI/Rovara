@@ -1,6 +1,5 @@
 // The `learning` point: in-memory lesson vectors and a tiny fixed embedder, for the conformance suite and for tests of the lessons library that need a learning
-// adapter without a document store. Code's default (`local`, keywords; `ROVARA_LESSONS_EMBEDDER=local` adds the in-process hashing embedder, a loopback address a model served on this machine) is `lessons/local-embedder.ts`,
-// and Code keeps vectors beside the lessons in the document store (`lessons/document-vectors.ts`).
+// adapter without a document store. Code keeps vectors beside the lessons in the document store (`lessons/document-vectors.ts`).
 import type { LearningAdapter, LessonEmbedder, LessonVectors, StoredLessonVector } from "@agentx/contracts";
 
 /** Lesson vectors in a map, keyed by company, project and lesson: one vector per lesson (a new spec replaces the old one). */

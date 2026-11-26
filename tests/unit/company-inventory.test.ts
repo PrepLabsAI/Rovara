@@ -231,7 +231,6 @@ it("pins S3 migration text and every catalog constructor caller, including all w
     "packages/broker/src/aws/setup-registry-mirror.ts": [4, 0], // L4-SF: the hosted setup approval's old-registry mirror: legacy catalog read, check and conditional move in the approval's own transaction, only for the company that owns the old rows
     "packages/broker/src/core-host/lessons.ts": [0, 1],
     "packages/broker/src/core/e2e/hosted-authority.ts": [0, 1], // hosted round authority reads the company-scoped catalog and returns an atomic condition; no catalog write.
-    "packages/broker/src/core/e2e/local-authority.ts": [0, 1],
     "packages/broker/src/core/setup-agent/apply.ts": [0, 2], // core-only approval: condition + fenced latestRevision update
     "packages/broker/src/core/project-incarnation.ts": [0, 1], // retention reads the existing catalogue witness; no catalogue writer
     "packages/broker/src/core/task-flow/project-source.ts": [0, 1],

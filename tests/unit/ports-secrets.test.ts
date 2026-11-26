@@ -6,11 +6,9 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { inspect } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { IMPLICIT_COMPANY_ID, PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, SecretRefSchema, SecretValue, type SecretRef, type SecretStore } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, SecretRefSchema, SecretValue, type SecretStore } from "@agentx/contracts";
 import { createAdapterRegistry, LocalSecretError, asSecretValue, modelKeyReadError, secretsPluginWords, createFileModelKeyStore, createLocalSecretStore, createRegistrySecretStore, createSecretModelKeyStore, SECRET_FILE_MAX_BYTES } from "../../packages/broker/src/ports/index.js";
 import { contextSecretReader } from "../../packages/broker/src/plugins/index.js";
-import { githubTokenCodeHost } from "../../packages/broker/src/plugins/code-host/github/token-code-host.js";
-import { resolveGithubAccess } from "../../packages/broker/src/plugins/code-host/github/token-access.js";
 import { runSecretStoreConformance } from "../support/ports/secret-store-conformance.js";
 
 const folders: string[] = [];
@@ -137,28 +135,7 @@ describe("Code's secrets adapter", () => {
   });
 });
 
-describe("model keys and the GitHub token are read through the socket", () => {
-  /** Records every reference asked, and answers from a map keyed by "kind:value". */
-  function spy(answers: Record<string, string>): { store: SecretStore; asked: SecretRef[] } {
-    const asked: SecretRef[] = [];
-    return {
-      asked,
-      store: { async read(_company, ref) { asked.push(ref); const [kind, name] = Object.entries(ref)[0]!; const found = answers[`${kind}:${name}`]; return found === undefined ? undefined : new SecretValue(found); } },
-    };
-  }
-
-  it("reads the stored GitHub token as { key: \"github\" } (the key file alone), then GH_TOKEN, GITHUB_TOKEN, then the GitHub CLI", async () => {
-    const { store, asked } = spy({ "key:github": "stored" });
-    const access = await resolveGithubAccess({ companyId: IMPLICIT_COMPANY_ID, secrets: store, environment: { GH_TOKEN: "from-env" }, gh: async () => "from-cli" });
-    expect(access?.source).toBe("key-store");
-    expect(access?.token.reveal()).toBe("stored");
-    expect(asked).toEqual([{ key: "github" }]);
-    const none = spy({});
-    expect((await resolveGithubAccess({ companyId: IMPLICIT_COMPANY_ID, secrets: none.store, environment: { GITHUB_TOKEN: "t" }, gh: async () => "from-cli" }))?.source).toBe("environment");
-    // The model-key store's name for provider github (GITHUB_API_KEY) is not a GitHub sign-in.
-    expect(await resolveGithubAccess({ companyId: IMPLICIT_COMPANY_ID, secrets: createLocalSecretStore({ environment: { GITHUB_API_KEY: "x" }, keyFile: createFileModelKeyStore("/not-used/keys.json") }), environment: {}, gh: async () => undefined })).toBeUndefined();
-  });
-
+describe("model keys are read through the socket", () => {
   it("builds a model key store on any secrets adapter (the shape Cloud's will use)", async () => {
     const held = new Map([["key-anthropic", "cloud-key"]]);
     const keys = createSecretModelKeyStore({ secrets: memorySecrets(held), refs: (provider) => [{ named: `key-${provider}` }], providers: ["anthropic"] });
@@ -334,38 +311,5 @@ describe("the owner is shown fixed words when the model keys cannot be read from
     const other = createAdapterRegistry();
     other.register("secrets", "svc", memorySecrets(new Map()));
     expect(secretsPluginWords(other)).toBe('the "svc" secrets plug-in');
-  });
-});
-
-describe("the GitHub token read through a plug-in (review L1)", () => {
-  const host = (secrets: SecretStore, extra: Record<string, unknown> = {}) => githubTokenCodeHost({
-    companyId: IMPLICIT_COMPANY_ID, secrets, environment: {}, gh: async () => undefined, registeredRepositories: () => [], ...extra,
-  });
-
-  it("shows a fixed sentence naming the kind of source, never the plug-in's own text, and does not blame keys.json", async () => {
-    const leaky = "arn:aws:example:::secret/some-name-and-content";
-    const broken: SecretStore = { read: async () => { throw new Error(leaky); } };
-    const found = await host(broken).resolveCredentials!();
-    expect(found.found).toBe(false);
-    const checked = await host(broken).checkAccess!();
-    for (const text of [JSON.stringify(found), JSON.stringify(checked)]) {
-      expect(text).not.toContain(leaky);
-      expect(text).not.toContain("chmod");
-      expect(text).not.toContain("keys.json");
-    }
-    expect(found.summary).toBe("the secrets adapter could not read the GitHub token (source kind: key)");
-  });
-
-  it("still shows Code's own key file sentence with the chmod fix, and names the plug-in as the source when one answers", async () => {
-    const dir = await tempFolder();
-    const path = join(dir, "keys.json");
-    await writeFile(path, "{}", { mode: 0o644 });
-    const local = await githubTokenCodeHost({ companyId: IMPLICIT_COMPANY_ID, secrets: createLocalSecretStore({ environment: {}, keyFile: createFileModelKeyStore(path) }), environment: {}, keyFilePath: path, registeredRepositories: () => [] }).resolveCredentials!();
-    expect(local.summary).toMatch(/readable by other users/);
-    expect(local.fix).toContain(`chmod 600 ${path}`);
-    const answering: SecretStore = { read: async () => new SecretValue("t") };
-    const named = await host(answering, { secretsWords: 'the "svc" secrets plug-in' }).resolveCredentials!();
-    expect(named.found).toBe(true);
-    expect(named.summary).toContain('the "svc" secrets plug-in');
   });
 });

@@ -93,7 +93,7 @@ export interface GitHubAppCredentialProviderOptions {
    */
   tokenReadiness?: GitHubTokenReadinessOptions;
   /**
-   * Port lane L11 (a laptop signed in with the owner's own token, `token-client.ts`): the hooks of a client that has no App identity. Absent for an App client, and then nothing here applies.
+   * Port lane L11 (a client signed in with a person's own token; the laptop's token client was removed with `rovara up`, #1538): the hooks of a client that has no App identity. Absent for an App client, and then nothing here applies.
    *  - `ownComment`: how Rovara's own replies are told from other comments. An App's replies carry its `<slug>[bot]` login; the owner's token writes as the owner, so every reply carries `marker`
    *    (an HTML comment, hidden on the page) and a comment counts as Rovara's own only when its author is `login()` AND it has Rovara's exact reply shape (a line, a blank line, the marker). Anyone else's comment with the marker stays feedback.
    *    If `login()` cannot say who the owner is, the feedback read FAILS (no comments are returned): Rovara's own replies could not be told from the owner's feedback.

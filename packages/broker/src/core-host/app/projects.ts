@@ -4,7 +4,6 @@ import {
   ProjectDefinitionSchema, agentXError, canonicalJson, noAutomatedTestsOf, orgProjectCatalogKey, projectMetaKey, projectRevisionKey, projectPk, when,
   type DocumentStore, type JsonValue, type NoAutomatedTests, type OrgId, type ProjectDefinition,
 } from "@agentx/contracts";
-import { isPlainRepositoryUrl } from "../../plugins/code-host/github/token-access.js";
 import { createStoreProjectSource } from "../../core/task-flow/project-source.js";
 import { planLocalProjectIncarnation, projectMetaSnapshot, projectIncarnationRegistration } from "../../core/project-incarnation.js";
 import { waitingSetupApply } from "../../core/setup-agent/apply.js";
@@ -56,4 +55,13 @@ export async function listProjects(store: DocumentStore, companyId: OrgId): Prom
   const prefix = orgProjectCatalogKey(companyId, "x");
   const page = await store.query({ pk: prefix.pk, limit: 200 });
   return page.items.flatMap((item) => (typeof item["latestRevision"] === "number" && item.sk.startsWith("PROJECT#") ? [{ name: item.sk.slice("PROJECT#".length), latestRevision: item["latestRevision"] }] : []));
+}
+
+/**
+ * A repository address the install registers: plain characters only. A backslash, a space or control character, a percent-encoded backslash or a non-ASCII character is where URL
+ * parsers part ways about the host, so such an address is refused when the project is registered (not only when a token would be handed out).
+ */
+function isPlainRepositoryUrl(repositoryUrl: string): boolean {
+  // eslint-disable-next-line no-control-regex -- control characters are exactly what is refused
+  return !/[\\\s\u0000-\u001f\u007f-\uffff]/u.test(repositoryUrl) && !/%5c/iu.test(repositoryUrl);
 }

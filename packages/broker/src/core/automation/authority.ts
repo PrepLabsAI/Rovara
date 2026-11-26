@@ -29,7 +29,7 @@ export function automationRequest(input: { companyId: string; kind: AutomationAp
  * succeed). Throws `FORBIDDEN` when the approvers do not accept it.
  */
 export async function verifyOwnerProof(approvers: Approvers, request: ApprovalRequest, proof: ApprovalProof | undefined): Promise<{ approver: Principal; method: string; used: TransactItem }> {
-  if (proof === undefined) throw agentXError("FORBIDDEN", "this needs the owner's approval, given on the local page");
+  if (proof === undefined) throw agentXError("FORBIDDEN", "this needs the owner's approval, given in Rovara");
   const verdict = await approvers.verify(request, proof);
   if (!verdict.approved) throw agentXError("FORBIDDEN", `the approval was not accepted: ${verdict.reason}`);
   return { approver: verdict.approver, method: verdict.method, used: putRow(proofUseKey(request.companyId, proof), "AUTOMATION_PROOF", { requestId: request.requestId, kind: request.kind, at: new Date().toISOString() }, when.absent()) };
