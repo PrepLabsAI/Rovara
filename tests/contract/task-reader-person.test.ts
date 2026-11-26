@@ -133,7 +133,7 @@ describe("grantTaskReader: the owner shares with a company member, a project gra
 describe("a failed membership read gives no share and writes none (MEMBERSHIP-READ-FAILS-SAFE)", () => {
   it("taskReaderPerson rethrows the retryable failure; readerShare lets it go up (the read rule rethrows it: see tests/unit/task-read-rule.test.ts); grantTaskReader answers the retryable 503 and writes nothing", async () => {
     const w = layer({ [PERSON]: "read-failed", [OWNER]: TASK_COMPANY });
-    const refused = await w.person(PERSON).catch((error: unknown) => error as AgentXError);
+    const refused = (await w.person(PERSON).catch((error: unknown) => error)) as AgentXError;
     expect([refused.code, refused.message]).toEqual(["RUNTIME_UNAVAILABLE", `RUNTIME_UNAVAILABLE: ${MEMBERSHIP_READ_FAILED_WORDS}`]);
     // The share's own functions over the same real reader.
     const db = w.db;
