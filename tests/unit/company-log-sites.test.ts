@@ -28,7 +28,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { expectLinearScaling } from "./../support/scaling.js";
 const MAX_FILES = 1700, MAX_BYTES = 20 * 1024 * 1024, MAX_MS = 30_000; // Code train 6 holds 1612 sources (room for the next lanes); byte/time bounds and fail-closed scanning stay fixed.
-const roots = ["packages/broker/src", "packages/aws-adapters/src", "packages/local-adapters/src"];
+const roots = ["packages/broker/src", "packages/aws-adapters/src"];
 function scan(sources: readonly { path: string; source: string }[], clock = () => performance.now(), began = clock()): Record<string, number> {
   let bytes = 0;
   if (sources.length > MAX_FILES) throw new Error("unclassifiable");

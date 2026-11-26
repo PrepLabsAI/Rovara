@@ -1,7 +1,6 @@
-import { SqliteDocumentStore } from "../../packages/local-adapters/src/sqlite-document-store.js";
 import { planCanonicalProjectIdentity } from "../../packages/broker/src/aws/core-project-backfill.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
-import { afterEach, expect, it } from "vitest";
+import { expect, it } from "vitest";
 import { orgProjectCatalogKey, projectMetaKey, projectRevisionKey, type StoredDocument } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { registerProject } from "../../packages/broker/src/core-host/app/projects.js";
@@ -32,29 +31,26 @@ it("a lost marker on a stamped live catalogue cannot be reinitialized by erasure
 });
 
 // Exact pre-rollout local rows: no company/project/incarnation fields on META.
-const sqliteStores: SqliteDocumentStore[] = [];
-afterEach(async () => { for (const store of sqliteStores.splice(0)) await store.close(); });
 async function preRollout(meta: StoredDocument = { ...key, entityType: "PROJECT_META", status: "active" }) {
-  const store = SqliteDocumentStore.open({ path: ":memory:", indexes: [], sweepIntervalMs: 0, changeFeed: false });
-  sqliteStores.push(store);
+  const store = new MemoryDocumentStore();
   await store.put({ item: { ...projectRevisionKey(company, "web", 1), entityType: "PROJECT", definition } });
   await store.put({ item: { ...orgProjectCatalogKey(company, "web"), entityType: "PROJECT_CATALOG", latestRevision: 1 } });
   await store.put({ item: meta });
   return store;
 }
 
-it("SQLite identical pre-rollout re-send returns duplicate without initializing or writing", async () => {
+it("Identical pre-rollout re-send returns duplicate without initializing or writing", async () => {
   const store = await preRollout(), before = await store.get(key);
   store.transact = async () => { throw new Error("duplicate must not write"); };
   expect(await registerProject(store, company, definition)).toEqual({ project: "web", revision: 1, duplicate: true });
   expect(await store.get(key)).toEqual(before);
 });
-it("SQLite duplicate is checked before identity even when that identity cannot authorize a revision", async () => {
+it("Duplicate is checked before identity even when that identity cannot authorize a revision", async () => {
   const store = await preRollout({ ...key, entityType: "UNEXPECTED", status: "active" });
   expect(await registerProject(store, company, definition)).toEqual({ project: "web", revision: 1, duplicate: true });
   await expect(registerProject(store, company, { ...definition, orchestratorInstructions: "Changed." })).rejects.toMatchObject({ code: "PROJECT_REVISION_MISMATCH" });
 });
-it("SQLite initializes a known pre-rollout project once in its registration transaction; replay writes nothing", async () => {
+it("Initializes a known pre-rollout project once in its registration transaction; replay writes nothing", async () => {
   const store = await preRollout();
   const changed = { ...definition, orchestratorInstructions: "Changed." };
   expect(await registerProject(store, company, changed)).toEqual({ project: "web", revision: 2, duplicate: false });
@@ -63,14 +59,14 @@ it("SQLite initializes a known pre-rollout project once in its registration tran
   store.transact = async () => { throw new Error("replay must not write"); };
   expect(await registerProject(store, company, changed)).toEqual({ project: "web", revision: 2, duplicate: true });
 });
-it.each([{ entityType: "UNEXPECTED" }, { companyId: "org_bbbbbbbbbbbbbbbbbbbb" }, { status: "deleted" }, { expiresAt: 123 }, { incarnationRevision: 0 }])("SQLite refuses unexpected unstamped META %j without changing registration rows", async extra => {
+it.each([{ entityType: "UNEXPECTED" }, { companyId: "org_bbbbbbbbbbbbbbbbbbbb" }, { status: "deleted" }, { expiresAt: 123 }, { incarnationRevision: 0 }])("Refuses unexpected unstamped META %j without changing registration rows", async extra => {
   const store = await preRollout({ ...key, entityType: "PROJECT_META", status: "active", ...extra });
   const before = await store.query({ pk: key.pk });
   await expect(registerProject(store, company, { ...definition, orchestratorInstructions: "Changed." })).rejects.toMatchObject({ code: "PROJECT_REVISION_MISMATCH" });
   expect(await store.query({ pk: key.pk })).toEqual(before);
   expect(await store.get(orgProjectCatalogKey(company, "web"))).toMatchObject({ latestRevision: 1 });
 });
-it.each(["meta", "catalog"])("SQLite initialization fences the %s snapshot in the same transaction", async target => {
+it.each(["meta", "catalog"])("Initialization fences the %s snapshot in the same transaction", async target => {
   const store = await preRollout(), original = store.transact.bind(store);
   store.transact = async items => {
     if (target === "meta") await store.put({ item: { ...key, entityType: "UNEXPECTED", status: "active" } });

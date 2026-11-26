@@ -1,10 +1,7 @@
 // L4-E7: where the stand-in writer's sample data is kept, and the setup callback that takes it from the worker. Two companies and two projects share ONE document store and ONE bucket on purpose: nothing of one may reach another.
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { FolderObjectStorage } from "../../packages/local-adapters/src/folder-object-storage.js";
+import { describe, expect, it } from "vitest";
+import { MemoryObjectStorage } from "../support/memory-object-storage.js";
 import { ObjectConflictError } from "@agentx/contracts";
 import {
   STANDIN_LIMITS, StandInWriterInputSchema, parseStandInWriterOutput, standInSetDigest, type ObjectStorage, type StandInWriterSet, type TestEnvProdDeny,
@@ -21,8 +18,6 @@ import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-c
 
 const A = COMPANY_A.orgId; const B = COMPANY_B.orgId;
 const NO_DENY: TestEnvProdDeny = { accountIds: [], hosts: [], arnPrefixes: [] };
-const dirs: string[] = [];
-afterEach(() => { for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true }); });
 
 const REQUEST = StandInWriterInputSchema.parse({
   tables: [{ name: "creators", rows: 3, columns: [{ name: "id", kind: "integer", key: true, writable: false }, { name: "bio", kind: "text", key: false, writable: true, maxChars: 200 }, { name: "followers", kind: "integer", key: false, writable: true }] }],
@@ -37,10 +32,8 @@ const setOf = (over: { bio?: string; followers?: number } = {}): StandInWriterSe
   return read.set;
 };
 
-function bucket(): { storage: ObjectStorage; raw: FolderObjectStorage } {
-  const root = mkdtempSync(join(tmpdir(), "standin-objects-"));
-  dirs.push(root);
-  const raw = new FolderObjectStorage({ root: join(root, "store"), maxObjectBytes: 1_000_000 });
+function bucket(): { storage: ObjectStorage; raw: MemoryObjectStorage } {
+  const raw = new MemoryObjectStorage({ maxObjectBytes: 1_000_000 });
   return { storage: raw, raw };
 }
 function world(options: { deny?: () => Promise<TestEnvProdDeny>; storage?: ObjectStorage } = {}) {

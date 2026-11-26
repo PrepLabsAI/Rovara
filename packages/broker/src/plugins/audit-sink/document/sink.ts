@@ -4,7 +4,7 @@
 //
 // The row's key is the event id, and the step's condition is "absent, or the same facts": a retry of a committed event is harmless, and the same event id used for DIFFERENT facts makes the step
 // fail (the caller's transaction is refused; it is never silently dropped). The facts exclude the time, so a retry at a later moment is the same record.
-// Moved out of `@agentx/local-adapters` (issue #1538): the hosted product registers this sink too, and imports nothing of the laptop's adapters.
+// Moved out of the retired `@agentx/local-adapters` (issue #1538): the hosted product registers this sink.
 import { AuditLogError, auditRow, change, when, type AuditEvent, type AuditSink, type DocumentStore, type StoredDocument, type TransactItem, type UpdateOp } from "@agentx/contracts";
 
 /**

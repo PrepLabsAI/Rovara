@@ -1,6 +1,6 @@
 // Port lane P6 (item L2): the `audit-sink` plug-in "document" for the W0 registry: Code's transactional audit sink (`DocumentAuditSink`), writing its rows to the registry's `storage` adapter. Config entry:
 //   { "point": "audit-sink", "name": "document", "module": "@agentx/broker/plugins/audit-sink-document" }
-// It takes no settings. The hosted product and `rovara up` register the same sink as their default. Moved out of `@agentx/local-adapters/audit-sink` (issue #1538).
+// It takes no settings. The hosted product registers it as its default (moved out of the retired `@agentx/local-adapters`, issue #1538).
 import { PluginRegistryError, type PluginModule } from "@agentx/contracts";
 import { DocumentAuditSink } from "./sink.js";
 

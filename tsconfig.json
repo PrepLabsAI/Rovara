@@ -8,7 +8,6 @@
     { "path": "packages/gateway" },
     { "path": "packages/model-gateway" },
     { "path": "packages/broker" },
-    { "path": "packages/local-adapters" },
     { "path": "packages/testing" },
     { "path": "packages/aws-adapters" },
     { "path": "packages/worker" },

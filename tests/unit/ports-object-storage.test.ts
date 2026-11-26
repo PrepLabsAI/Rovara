@@ -1,26 +1,10 @@
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { ObjectConflictError, ObjectKeyError, PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, isAllowedModuleSpecifier, isValidObjectKey, type ObjectStorage } from "@agentx/contracts";
-import { createAdapterRegistry, loadAdapters, parsePluginConfig, type ModuleImporter } from "../../packages/broker/src/ports/adapter-registry.js";
+import { describe, expect, it } from "vitest";
+import { ObjectConflictError, isValidObjectKey } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { DOCUMENT_BLOB_MAX_BYTES, createDocumentEvidenceBlobStore, createDocumentObjectStorage } from "../../packages/broker/src/core/proof/evidence-blob-store.js";
-import { FolderHardLinksUnsupportedError, FolderObjectStorage, spellPart, unspellPart } from "../../packages/local-adapters/src/folder-object-storage.js";
-import * as folderModule from "../../packages/local-adapters/src/object-storage-plugin.js";
-import { evidencePrefixesOf, eraseTaskEvidence } from "../../packages/broker/src/core/proof/evidence-erase.js";
+import { MemoryObjectStorage } from "../support/memory-object-storage.js";
 import { storeEvidenceArtifacts } from "../../packages/broker/src/core/proof/evidence-artifacts.js";
 import { runObjectStorageConformance } from "../support/ports/object-storage-conformance.js";
-
-const folders: string[] = [];
-afterEach(async () => {
-  for (const folder of folders.splice(0)) await rm(folder, { recursive: true, force: true });
-});
-async function tempFolder(): Promise<string> {
-  const folder = await mkdtemp(join(tmpdir(), "object-storage-"));
-  folders.push(folder);
-  return folder;
-}
 
 const COMPANY = "org_00000000000000000000";
 const DAY = 86_400_000;
@@ -38,12 +22,11 @@ runObjectStorageConformance("document store", {
   },
 });
 
-runObjectStorageConformance("folder", {
+runObjectStorageConformance("memory (the tests' S3 stand-in)", {
   async create() {
     let now = Date.parse("2026-11-09T00:00:00.000Z");
-    const root = await tempFolder();
     return {
-      store: new FolderObjectStorage({ root: join(root, "store"), maxObjectBytes: 100_000, now: () => now, retentionDays: { "evidence-std": 30 } }),
+      store: new MemoryObjectStorage({ maxObjectBytes: 100_000, now: () => now, retentionDays: { "evidence-std": 30 } }),
       tooBigBytes: 100_001,
       fitsBytes: 100_000,
       expire: async () => { now += 31 * DAY; },
@@ -56,134 +39,6 @@ describe("the object keys", () => {
     expect(isValidObjectKey("private/0123abcd/ws-1/evidence/t-1/" + "a".repeat(64))).toBe(true);
     expect(isValidObjectKey("a")).toBe(true);
     for (const bad of ["", "/a", "a/", "a//b", "a/..", "./a", "a/b c", "a\\b", "ä"]) expect(isValidObjectKey(bad), bad).toBe(false);
-  });
-
-  it("spell as file names that read back as the same part, and never as . or ..", () => {
-    for (const part of ["abc", "Abc", "ABC", "a.b", "a=b", "x:y@z+q,r~s", "A-B_C", ".hidden", "..x", "-"]) {
-      const spelled = spellPart(part);
-      expect(spelled).not.toBe(".");
-      expect(spelled).not.toBe("..");
-      expect(spelled).toMatch(/^[a-z0-9._=%^-]+$/);
-      expect(unspellPart(spelled)).toBe(part);
-    }
-    expect(spellPart("Aa")).not.toBe(spellPart("aa"));
-    expect(unspellPart("A")).toBeUndefined();
-    expect(unspellPart("%zz")).toBeUndefined();
-  });
-});
-
-describe("the folder adapter", () => {
-
-  it("reads nothing from a file whose header does not match its bytes (a torn or foreign file)", async () => {
-    const root = join(await tempFolder(), "store");
-    const store = new FolderObjectStorage({ root });
-    await store.put("k", new Uint8Array([1, 2, 3, 4]), { contentType: "x/y", metadata: {}, retention: "r" });
-    const file = join(root, "objects", "F_k");
-    const whole = await readFile(file);
-    await writeFile(file, whole.subarray(0, whole.length - 1));
-    expect(await store.get("k", 10)).toBeUndefined();
-    expect(await store.stat("k")).toBeUndefined();
-    await writeFile(file, "not a header\nbytes");
-    expect(await store.get("k", 10)).toBeUndefined();
-  });
-
-  it("does not follow a link planted inside the store", async () => {
-    const outside = await tempFolder();
-    await writeFile(join(outside, "secret"), "outside data");
-    const root = join(await tempFolder(), "store");
-    const store = new FolderObjectStorage({ root });
-    await store.put("seed", new Uint8Array([1]), { contentType: "x/y", metadata: {}, retention: "r" });
-    // A folder that is a link to somewhere else, and a file that is a link to a file somewhere else.
-    await symlink(outside, join(root, "objects", "D_link"));
-    await symlink(join(outside, "secret"), join(root, "objects", "F_leak"));
-    await expect(store.put("link/x", new Uint8Array([1]), { contentType: "x/y", metadata: {}, retention: "r" })).rejects.toThrow(/outside the store/);
-    expect(await readdir(outside)).toEqual(["secret"]);
-    expect(await store.get("link/x", 10)).toBeUndefined();
-    expect(await store.get("leak", 100)).toBeUndefined();
-    expect(await store.stat("leak")).toBeUndefined();
-    // Deleting through the link deletes nothing outside either.
-    await store.delete("link/x");
-    expect(await store.deletePrefix("link/")).toBe(true);
-    expect(await readdir(outside)).toEqual(["secret"]);
-  });
-
-  it("refuses a store root that is a link", async () => {
-    const real = await tempFolder();
-    const holder = await tempFolder();
-    await symlink(real, join(holder, "store"));
-    const store = new FolderObjectStorage({ root: join(holder, "store") });
-    await expect(store.put("k", new Uint8Array([1]), { contentType: "x/y", metadata: {}, retention: "r" })).rejects.toThrow(/not a link/);
-    await mkdir(join(real, "unused"), { recursive: true });
-  });
-
-});
-
-describe("the folder plug-in", () => {
-  const importer: ModuleImporter = async (specifier) => {
-    if (specifier !== "@agentx/local-adapters/object-storage") throw new Error("no such module");
-    return folderModule;
-  };
-
-  it("is a point with one adapter, an allowed module name, and loads from a config entry", async () => {
-    expect(PLUGIN_POINTS).toContain("object-storage");
-    expect(PLUGIN_POINT_CARDINALITY["object-storage"]).toBe("one");
-    expect(isAllowedModuleSpecifier("@agentx/local-adapters/object-storage")).toBe(true);
-    const root = join(await tempFolder(), "objects");
-    const registry = createAdapterRegistry();
-    await loadAdapters(parsePluginConfig({ version: 1, plugins: [{ point: "object-storage", name: "folder", module: "@agentx/local-adapters/object-storage", settings: { path: root, maxObjectMiB: 2, retentionDays: { "evidence-std": 7 } } }] }), { registry, importModule: importer });
-    const store: ObjectStorage = registry.require("object-storage");
-    await store.put("k", new Uint8Array([1, 2]), { contentType: "x/y", metadata: {}, retention: "evidence-std" });
-    expect(Array.from((await store.get("k", 10))!)).toEqual([1, 2]);
-    expect(await readdir(root)).toContain("objects");
-    await expect(store.put("big", new Uint8Array(2 * 1_048_576 + 1), { contentType: "x/y", metadata: {}, retention: "r" })).rejects.toThrow(/does not fit/);
-  });
-
-  it("names a setting it does not know, and refuses a bad number of days", async () => {
-    const registry = createAdapterRegistry();
-    const load = (settings: Record<string, unknown>) => loadAdapters(parsePluginConfig({ version: 1, plugins: [{ point: "object-storage", name: "folder", module: "@agentx/local-adapters/object-storage", settings }] }), { registry, importModule: importer });
-    await expect(load({ pth: "/x" })).rejects.toThrow(/could not be created/);
-    await expect(load({ retentionDays: { x: 0 } })).rejects.toThrow(/could not be created/);
-    expect(registry.names("object-storage")).toEqual([]);
-  });
-});
-
-describe("the folder adapter after the review (L6, L7)", () => {
-  const META = { contentType: "x/y", metadata: {}, retention: "r" };
-
-  it("accepts every id the evidence erase accepts, and erases with it", async () => {
-    const owner = "a".repeat(128);
-    const workspace = `W${"0".repeat(127)}`;
-    const prefixes = evidencePrefixesOf({ ownerKey: owner, workspaceId: workspace, taskId: "t".repeat(128) })!;
-    expect(prefixes).toHaveLength(2);
-    for (const make of [async () => new FolderObjectStorage({ root: join(await tempFolder(), "store") }), async () => createDocumentObjectStorage(new MemoryDocumentStore(), { companyId: COMPANY })]) {
-      const store = await make();
-      const key = `${prefixes[1]!}${"c".repeat(64)}`;
-      await store.put(key, new Uint8Array([1]), META);
-      expect(await eraseTaskEvidence(store, { ownerKey: owner, workspaceId: workspace, taskId: "t".repeat(128) })).toBe(true);
-      expect(await store.get(key, 10)).toBeUndefined();
-    }
-  });
-
-  it("refuses, as a bad key, a long part of capitals that would not fit one file name, and puts nothing on disk", async () => {
-    const root = join(await tempFolder(), "store");
-    const store = new FolderObjectStorage({ root });
-    const key = `p/${"A".repeat(128)}/x`;
-    await expect(store.put(key, new Uint8Array([1]), META)).rejects.toBeInstanceOf(ObjectKeyError);
-    await expect(store.get(key, 10)).rejects.toBeInstanceOf(ObjectKeyError);
-    await expect(store.stat(key)).rejects.toBeInstanceOf(ObjectKeyError);
-    await expect(store.delete(key)).rejects.toBeInstanceOf(ObjectKeyError);
-    expect(await readdir(join(root, "objects")).catch(() => [])).toEqual([]);
-  });
-
-  it("refuses a folder other users can write to, where links could be planted", async () => {
-    const parent = await tempFolder();
-    const root = join(parent, "store");
-    await mkdir(root, { mode: 0o700 });
-    await chmod(root, 0o777);
-    const store = new FolderObjectStorage({ root });
-    await expect(store.put("k", new Uint8Array([1]), META)).rejects.toThrow(/not be writable by others/);
-    await chmod(root, 0o700);
-    await store.put("k", new Uint8Array([1]), META);
   });
 });
 
@@ -199,22 +54,6 @@ describe("objects are immutable by default (L9-wire review O3)", () => {
     const again = await storeEvidenceArtifacts({ blobs }, owner, [{ kind: "jpeg", bytes: jpeg }]);
     expect(again.size).toBe(1);
     await expect(blobs.put([...again.keys()].map((digest) => `private/owner-1/ws-1/evidence/t-1/${digest}`)[0]!, jpeg, META)).rejects.toBeInstanceOf(ObjectConflictError);
-  });
-
-});
-
-describe("a folder on a file system without hard links", () => {
-  const META = { contentType: "x/y", metadata: {}, retention: "r" };
-  it("says so with a typed error, stores nothing and leaves nothing behind, for every error a missing link feature gives", async () => {
-    for (const code of ["EPERM", "ENOTSUP", "EOPNOTSUPP", "EXDEV"]) {
-      const root = join(await tempFolder(), "store");
-      const store = new FolderObjectStorage({ root, linkFile: async () => { throw Object.assign(new Error("no links here"), { code }); } });
-      const failure = await store.put("k", new Uint8Array([1]), META).catch((error: unknown) => error);
-      expect(failure, code).toBeInstanceOf(FolderHardLinksUnsupportedError);
-      expect((failure as Error).message).toMatch(/does not support hard links/);
-      expect(await store.get("k", 10)).toBeUndefined();
-      expect(await readdir(join(root, "tmp"))).toEqual([]);
-    }
   });
 
 });

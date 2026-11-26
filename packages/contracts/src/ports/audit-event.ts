@@ -1,5 +1,5 @@
 // Port lane P6 (item L2): what every part of Code's audit trail agrees on: how an event is checked, the digest that says two records are the same facts, and the key and shape of an event's `AUDIT#` row.
-// Pure rules over the `audit-sink` port's event, so the document sink (`@agentx/broker/plugins/audit-sink-document`) and the laptop's append-only copy (`@agentx/local-adapters`) share one definition (issue #1538).
+// Pure rules over the `audit-sink` port's event, so every part of the trail (the document sink, `@agentx/broker/plugins/audit-sink-document`) shares one definition (issue #1538).
 import { createHash } from "node:crypto";
 import { canonicalJson } from "../canonical-json.js";
 import type { AuditEvent } from "./audit-sink.js";

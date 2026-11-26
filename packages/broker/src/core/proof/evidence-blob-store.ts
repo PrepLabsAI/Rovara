@@ -5,8 +5,7 @@ import { when, assertObjectKey, assertObjectMeta, assertObjectPrefix, companySco
 
 /**
  * Port lane L9a (provisional, owner decision 58): the evidence blob store IS the `object-storage` port now (`ObjectStorage` in
- * @agentx/contracts). These names stay so the proof code and its tests need no change; the folder adapter lives in
- * @agentx/local-adapters and the document-store adapter below is the default.
+ * @agentx/contracts). These names stay so the proof code and its tests need no change; the document-store adapter below is the default.
  */
 export interface EvidenceBlobMeta extends ObjectMeta {
   /** Decides how long it is kept; `evidence-record` is stored as `evidence-std` (the pack expires with the tails). */

@@ -1,7 +1,7 @@
 // The learning point: how a host makes lessons comparable. The lessons themselves live in the `storage` point (a document store), their model calls go through `model-provider`, their spend through
 // `admission` and `metering`, their audit through `audit-sink` and their approvals through `approvers`; what is left that differs between installs is the text similarity. That is the whole interface:
-// an optional embedder (text to a vector) and an optional place to keep a lesson's vector. With neither, lessons are compared on keywords and cited paths alone, which is what a laptop with no
-// model service does; Code also ships a small embedder that runs in the process (`@agentx/local-adapters`, no network, no model download).
+// an optional embedder (text to a vector) and an optional place to keep a lesson's vector. With neither, lessons are compared on keywords and cited paths alone, which is what an install with no
+// model service does.
 
 /** One embedding call's own limit: `deadline` is an absolute time (Date.now milliseconds). The call never waits past it and starts no retry that could not finish by it. */
 export interface EmbedderCall { deadline?: number }
