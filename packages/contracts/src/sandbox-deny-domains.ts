@@ -10,7 +10,7 @@
 //
 // S3 (L4-NETG follow-up, owner DEC 254zzz90): every Amazon S3 name form is in SANDBOX_S3_DENY_ROWS. S3 is on the install's VPC list (`s3.<region>`, `*.s3.<region>`: the artifact buckets and the ECR layer bucket, which the HOST uses), but a path-style or
 // virtual-hosted request there reaches ANY bucket of ANY account in the region: an upload exit. Sandboxes have no AWS credentials and nothing in them needs S3 today (checked: the only S3 calls in the worker are the worker container's own,
-// on the host network: e2e-model-canary-cli.ts, swebench/reporter.ts; package installs use PyPI, npm, Maven, Debian, none of them S3 names). Unlike a registry, a project's package installs can genuinely need an exact S3 host, so the S3 rows are
+// on the host network: e2e-model-canary-cli.ts; package installs use PyPI, npm, Maven, Debian, none of them S3 names). Unlike a registry, a project's package installs can genuinely need an exact S3 host, so the S3 rows are
 // the ONLY rows a project can lift, bucket host by bucket host (`projectAllowedS3Hosts`), through its own allowed websites (the existing audited, role- and company-checked flow, customer-approved; no Rovara staff step is added). A registry row is never liftable.
 // Scope, said plainly (REVIEW-S3-1 M1, M2): a lifted bucket host is region-wide S3 for that project's sandboxes (the gateway sees the TLS name, S3 routes by the Host header inside TLS), and for the install's own region the VPC list already allows `*.s3.<region>`, so no staff step holds it.
 //

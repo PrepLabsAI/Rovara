@@ -48,11 +48,9 @@ import { answerSlackTaskAction, isSlackTaskActionEvent } from "./slack-core-task
 import { handleSlackRovara, isSlackRovaraEvent, SlackRovaraEventSchema, slackSignInUrlOf } from "./slack-rovara-command.js";
 import { createSlackWorkspaceBindings, isSlackWorkspaceOperatorEvent, SlackWorkspaceOperatorEventSchema } from "./slack-workspace-binding.js";
 import { isSlackWorkspaceRemovedEvent, SlackWorkspaceRemovedEventSchema } from "./slack-workspace-removal.js";
-import { handleSwebenchCallback, isSwebenchCallbackPath } from "./swebench.js";
 
 import { channelAdapterDependencies, channelLinkRouteDependencies, json, parseBody } from "./broker-primitives.js";
 import { isSlackIntakeRecordEvent, isSlackStopTaskEvent, isSlackTaskAuthorizationEvent, isSlackTaskPeopleChangeEvent, isSlackTaskPeopleConfirmEvent, isSlackTaskPeopleReadEvent, isSlackTaskPeopleTakeOwnershipEvent, isSlackThreadNoteEvent, isSlackWorkflowCloseEvent, isSlackWorkflowDecisionEvent, isSlackWorkflowFeedbackFindingsDecisionEvent, isSlackWorkflowFeedbackNoteEvent, isSlackWorkflowFeedbackReviewRetryEvent, isSlackWorkflowKeepPullRequestsEvent, isSlackWorkflowPublishRetryEvent, isSlackWorkflowResolveFindingsEvent, isSlackWorkflowRetryEvent, isSlackWorkflowReviewRetryEvent, isSlackWorkflowSendBackEvent, isSlackWorkflowStartEvent, slackIngressThreadTeam, type SlackIntakeRecordEvent, type SlackStopTaskEvent, type SlackTaskAuthorizationEvent, type SlackTaskPeopleChangeEvent, type SlackTaskPeopleConfirmEvent, type SlackTaskPeopleReadEvent, type SlackTaskPeopleTakeOwnershipEvent, type SlackThreadNoteEvent, type SlackWorkflowStartEvent, type SlackThread } from "./slack-broker-events.js";
-import { routeEvalBatch, routeStartEvalBatch, routeSwebenchChannel, swebenchDependencies } from "./broker-swebench-routes.js";
 import { RETIRED_SCHEDULE_ANSWER, isRetiredScheduleEvent } from "./retired-schedules.js";
 import { SLACK_RETIRED_BUTTON_CODE, SLACK_RETIRED_BUTTON_WORDS } from "./slack-retired-buttons.js";
 import type { AwsBrokerDependencies, AwsBrokerInput } from "./broker-types.js";
@@ -391,10 +389,6 @@ export async function dispatchPreAuthHttpRoute(
     return linearWebhookResponse(await handleLinearAppWebhook(dependencies.linearWebhook, { rawBody: request.body, headers: request.headers }), request.requestId);
   }
   if (url.pathname === "/v1/github/webhooks") return hooks.routeGithubWebhook(dependencies, request);
-  const evalCallback = isSwebenchCallbackPath(url.pathname);
-  if (request.method === "POST" && evalCallback !== undefined) {
-    return json(await handleSwebenchCallback(swebenchDependencies(dependencies), request.headers["x-agentx-callback-capability"], evalCallback.runId, evalCallback.action, parseBody(request.body)), request.requestId);
-  }
   return dispatchProjectSetupInternalRoute(dependencies, request, url, hooks);
 }
 
@@ -592,27 +586,6 @@ async function dispatchAdminChannelsAndEvals(
     const actor = ActorRefSchema.safeParse({ channel: decodeURIComponent(adminLink[1]!), tenant: decodeURIComponent(adminLink[2]!), userId: decodeURIComponent(adminLink[3]!) });
     if (!actor.success || actor.data.channel === SLACK_CHANNEL) throw agentXError("NOT_FOUND", "link not found");
     return json(await removeLink(links, actor.data, undefined), request.requestId);
-  }
-  return dispatchAdminEvalRoutes(dependencies, identity, request, url, body);
-}
-
-async function dispatchAdminEvalRoutes(
-  dependencies: AwsBrokerDependencies,
-  identity: AuthenticatedIdentity,
-  request: AdaptedHttpRequest,
-  url: URL,
-  body: unknown,
-): Promise<BrokerHttpResponse | undefined> {
-  if (url.pathname === "/v1/admin/evals/batches" && request.method === "POST") return json(await routeStartEvalBatch(dependencies, identity, body), request.requestId);
-  const evalBatch = /^\/v1\/admin\/evals\/batches\/([0-9a-f-]{36})(?:\/(stop|results))?$/.exec(url.pathname);
-  if (evalBatch?.[1]) {
-    const action = evalBatch[2];
-    if ((action === undefined || action === "results") && request.method === "GET") return json(await routeEvalBatch(dependencies, identity, evalBatch[1], action ?? "show"), request.requestId);
-    if (action === "stop" && request.method === "POST") return json(await routeEvalBatch(dependencies, identity, evalBatch[1], "stop"), request.requestId);
-  }
-  const evalChannel = /^\/v1\/admin\/evals\/channels\/([^/]+)\/([^/]+)$/.exec(url.pathname);
-  if (evalChannel?.[1] && evalChannel[2] && (request.method === "PUT" || request.method === "DELETE" || request.method === "GET")) {
-    return json(await routeSwebenchChannel(dependencies, identity, request.method, evalChannel[1], evalChannel[2], body), request.requestId);
   }
   return undefined;
 }

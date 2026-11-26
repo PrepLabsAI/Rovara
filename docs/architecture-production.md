@@ -203,9 +203,6 @@ such field is a model's thinking level (spec 053):
   the control plane. That is harmless: no project stored before this release has a level, and an
   administrator would have to set one within those minutes.
 
-Eval runs use a separately released runner image (`docs/swebench-eval.md`). The broker sends that
-image a level only when `eval/runner-features` names it.
-
 ## Deployment safety
 
 Both production stacks have CloudFormation termination protection. The KMS key and flow-log group

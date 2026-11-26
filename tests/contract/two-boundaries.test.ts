@@ -189,11 +189,11 @@ describe("the census covers every context-gated stack (a new flag cannot hide a 
     expect(Object.keys(GATE_FLAGS_ON).filter((key) => !read.includes(key))).toEqual([]);
   });
 
-  it("really synthesizes the gated stacks and resources with the flags on (the installer, the CI runner and eval stacks; the requalify machine and the qualification transport)", () => {
+  it("really synthesizes the gated stacks and resources with the flags on (the installer and CI runner stacks; the requalify machine and the qualification transport)", () => {
     const app = censusApp();
     const censusStacks = app.node.children.filter((child): child is Stack => Stack.isStack(child));
     const names = censusStacks.map((stack) => stack.stackName);
-    expect(names).toEqual(expect.arrayContaining(["AgentXInstaller", "AgentXCiRunner", "agentx-staging-eval", "agentx-staging-control-plane"]));
+    expect(names).toEqual(expect.arrayContaining(["AgentXInstaller", "AgentXCiRunner", "agentx-staging-control-plane"]));
     const controlPlane = JSON.stringify(Template.fromStack(censusStacks.find((stack) => stack.stackName === "agentx-staging-control-plane")!).toJSON());
     expect(controlPlane).toContain("RuntimeRequalify");
     expect(controlPlane).toContain("E2eQualificationTransport");

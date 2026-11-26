@@ -1,5 +1,5 @@
 // The callback signing key the way a Lambda gets it: the environment names the secret, and the key is the answer to a GetSecretValue on that name. A test that runs a deployed handler
-// (broker.ts, eval-batch-tick.ts) calls this first; nothing here puts the key in the environment.
+// (broker.ts) calls this first; nothing here puts the key in the environment.
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { vi } from "vitest";
 import { CALLBACK_SIGNING_KEY_SECRET_VARIABLE, forgetCallbackSigningKey } from "../../packages/broker/src/aws/callback-signing-key.js";

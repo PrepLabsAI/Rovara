@@ -165,10 +165,9 @@ describe("EC2 session lifecycle infrastructure (issue #83)", () => {
     const roleId = (broker.Properties.Role as { "Fn::GetAtt": [string] })["Fn::GetAtt"][0];
     const starts = roleStatements(roleId).filter((st) => [st.Action].flat().includes("states:StartExecution"));
     expect(JSON.stringify(starts.map((st) => st.Resource))).toContain("SessionsDeleter");
-    // Never the provisioner, in any statement. The only other machine is spec 043's SWE-bench eval.
+    // Never the provisioner, in any statement, and no other machine.
     expect(JSON.stringify(starts.map((st) => st.Resource))).not.toContain("SessionsProvisioner");
-    expect(starts.map((st) => JSON.stringify(st.Resource)).filter((resource) => !resource.includes("SessionsDeleter")))
-      .toEqual([expect.stringContaining(":stateMachine:agentx-production-swebench-eval") as unknown]);
+    expect(starts.map((st) => JSON.stringify(st.Resource)).filter((resource) => !resource.includes("SessionsDeleter"))).toEqual([]);
     // The broker stays outside the VPC.
     expect(broker.Properties.VpcConfig).toBeUndefined();
   });

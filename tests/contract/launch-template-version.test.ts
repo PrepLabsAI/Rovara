@@ -6,7 +6,6 @@ import { describe, expect, it } from "vitest";
 // instance-type allow-list refused it. A mix would also check one version and launch another.
 const SITES = [
   "infra/lib/session-state-machines.ts",
-  "infra/lib/swebench-eval-definition.ts",
   "packages/broker/src/aws/runtime-requalify-steps.ts",
   "packages/contracts/src/qualification-launch.ts",
   "scripts/test-qualify-runtime.ts",

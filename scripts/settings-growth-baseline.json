@@ -124,8 +124,6 @@
     "infra/lib/slack-orchestrator.ts::ThreadSessionBucketName": 1,
     "infra/lib/slack-orchestrator.ts::TurnRecordsTableName": 1,
     "infra/lib/slack-orchestrator.ts::VpcId": 1,
-    "infra/lib/swebench-eval.ts::PrivateSubnetIds": 1,
-    "infra/lib/swebench-eval.ts::name": 1,
     "infra/lib/worker-settings.ts::E2eAgentModelId": 1,
     "infra/lib/worker-settings.ts::ExecutorImageUri": 1,
     "infra/lib/worker-settings.ts::ModelFallback": 1,

@@ -11,7 +11,6 @@ export const GATE_FLAGS_ON: Readonly<Record<string, string>> = {
   "agentx:e2eQualificationTransport": "enabled",
   agentxInstaller: "enabled",
   agentxCiRunner: "enabled",
-  agentxEval: "enabled",
 };
 /** Keys that only carry a value (a name, a region, a setting, a number) or select another app mode: they gate no role of the environment's stacks, so the census leaves them at their default. */
 export const VALUE_KEYS: readonly string[] = [

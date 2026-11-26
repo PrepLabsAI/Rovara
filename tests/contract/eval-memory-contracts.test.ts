@@ -1,7 +1,7 @@
 // L7 / W1: the memory arm of an eval batch (contracts/src/eval-memory.ts). Contract only: the quality-suite batch that will carry it is not on this branch.
 import { describe, expect, it } from "vitest";
 import {
-  EvalBatchFileSchema, EvalMemoryDimensionSchema, MemoryInputSchema, compareMemoryArms, evalMemoryArmCount, evalMemoryArms, memoryInputForArm, type MemoryArmRow,
+  EvalMemoryDimensionSchema, MemoryInputSchema, compareMemoryArms, evalMemoryArmCount, evalMemoryArms, memoryInputForArm, type MemoryArmRow,
 } from "@agentx/contracts";
 
 const SNAPSHOT = `snp_${"0123456789abcdef0123"}`;
@@ -20,12 +20,6 @@ describe("the memory dimension", () => {
     expect(evalMemoryArmCount(["off", "on"])).toBe(2);
     expect(evalMemoryArmCount(["on"])).toBe(1);
     expect(() => evalMemoryArms(["on", "on"])).toThrow();
-  });
-
-  it("is not accepted by today's batch file: nothing runs it yet, so a file that names it is refused rather than run without it", () => {
-    const base = { benchmark: "verified", tasks: ["django__django-11099", "astropy__astropy-12907"], models: [{ provider: "anthropic", modelId: "claude-sonnet-4-6", thinkingLevel: "medium" }], costCapUsd: 50 };
-    expect(EvalBatchFileSchema.safeParse(base).success).toBe(true);
-    expect(EvalBatchFileSchema.safeParse({ ...base, memory: ["off", "on"] }).success).toBe(false);
   });
 });
 

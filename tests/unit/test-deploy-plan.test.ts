@@ -476,7 +476,7 @@ describe("liftSynthArguments", () => {
 
 
 const ALL_IDS = [
-  "BrokerE1355FD6", "ChannelApiEventSenderDECD5203", "ChannelApiIngress9235D30E", "DeveloperSignInFunction10B62B05", "DeveloperTaskNotifierFunction551419CC", "DispatcherD4A12972", "EvalBatchTickA4585B04",
+  "BrokerE1355FD6", "ChannelApiEventSenderDECD5203", "ChannelApiIngress9235D30E", "DeveloperSignInFunction10B62B05", "DeveloperTaskNotifierFunction551419CC", "DispatcherD4A12972",
   "OutboxPublisherD572F72E", "SessionsReaper8FEF958E", "SessionsInstanceStateChangeFunctionB24AEB67", "SessionsReconciler4316A0A2", "SessionsSteps3B98DD2B", "SlackIngress5C88FFA0",
 ];
 
