@@ -164,6 +164,16 @@ describe("the lines of one group share one shell session", () => {
     expect(next.stdout).not.toContain("after");
   });
 
+  it("a command stored before shell lines existed as `bash -c <line>` runs as the program it is: no set -e, no pipefail (byte for byte as before)", async () => {
+    const stored: ProjectCommand = { cwd: "repo/app", executable: "bash", args: ["-c", "false; echo after"], timeoutSeconds: 30 };
+    const session = newShellSession();
+    const result = await run(stored, session);
+    expect({ exitCode: result.exitCode, stdout: result.stdout.trim() }).toEqual({ exitCode: 0, stdout: "after" });
+    expect(session.stateful).toBe(false);
+    const piped = await run({ ...stored, args: ["-c", "false | cat"] }, session);
+    expect(piped.exitCode).toBe(0);
+  });
+
   it("closing a session removes its state file", async () => {
     const session = newShellSession();
     await run(line("export FOO=1"), session);
@@ -184,8 +194,10 @@ describe("time limits and failures of a line", () => {
 
   it("a group's time is a limit too: a line is stopped when the group's time runs out, and the next is not started", async () => {
     expect(SHELL_GROUP_TIMEOUT_SECONDS).toBeGreaterThanOrEqual(2_700);
-    expect(groupLimitSeconds([{ timeoutSeconds: 900 }])).toBe(SHELL_GROUP_TIMEOUT_SECONDS);
-    expect(groupLimitSeconds([{ timeoutSeconds: 9_000 }])).toBe(9_000);
+    expect(groupLimitSeconds([line("echo a && echo b", "repo/app", 900)])).toBe(SHELL_GROUP_TIMEOUT_SECONDS);
+    expect(groupLimitSeconds([line("echo a && echo b", "repo/app", 9_000), line("npm ci")])).toBe(9_000);
+    // A group of programs alone has no group limit: it runs as it always did, with each line's own.
+    expect(groupLimitSeconds([line("npm ci", "repo/app", 900), line("npm test", "repo/app", 9_000)])).toBeUndefined();
     const session = newShellSession({ limitSeconds: 2 });
     const slow = await run(line("sleep 30", "repo/app", 600), session);
     expect(slow).toMatchObject({ timedOut: true, stoppedBy: "group_limit" });

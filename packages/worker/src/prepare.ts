@@ -496,6 +496,7 @@ async function prepareWorkspaceOnce(options: PrepareWorkspaceOptions): Promise<P
     try {
       readiness = await evaluateReadiness(
         { rootPath: canonicalRoot, commands: project.readiness },
+        // A sealed check runs in a sandbox of its own (one per test check), so there is no shell state to carry between those checks: a test line there is self-contained (`source .venv/bin/activate && pytest`).
         services?.sealedReadiness((command, index, root) => run(command, index, root, readinessSession)) ?? ((command, index, root) => run(command, index, root, readinessSession)),
       );
     } finally {

@@ -690,7 +690,9 @@ async function runReadinessCommands(
 
 /** Adds a line saying how a check ended, when a timeout or a signal ended it (#170). */
 function withEnding(stderr: string, index: number, timeoutSeconds: number, result: CommandResult): string {
-  const ending = result.timedOut === true
+  const ending = result.stoppedBy === "group_limit"
+    ? `readiness command ${index} was stopped: the time for its group of commands ran out`
+    : result.timedOut === true
     ? `readiness command ${index} timed out after ${timeoutSeconds} s`
     : result.signal !== undefined
       ? `readiness command ${index} was killed by ${result.signal}`

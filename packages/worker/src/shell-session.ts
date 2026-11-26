@@ -13,6 +13,7 @@
 //
 // A group has a time limit as well as a limit per line: a line is not started once the group's time has run out, and no line may run past it.
 import { randomUUID } from "node:crypto";
+import { shellLineOf, type ProjectCommand } from "@agentx/contracts";
 
 /** The longest a group of lines (the setup commands, or the test commands) may run in all, unless one line's own limit is longer (then that line's). */
 export const SHELL_GROUP_TIMEOUT_SECONDS = 2_700;
@@ -34,7 +35,7 @@ export interface ShellSession {
 }
 
 /** A new session for one group. `limitSeconds` is the group's time limit (default: none), counted from now. */
-export function newShellSession(options: { limitSeconds?: number; now?: () => number } = {}): ShellSession {
+export function newShellSession(options: { limitSeconds?: number | undefined; now?: () => number } = {}): ShellSession {
   const id = randomUUID();
   const now = options.now ?? Date.now;
   return {
@@ -46,8 +47,12 @@ export function newShellSession(options: { limitSeconds?: number; now?: () => nu
   };
 }
 
-/** The group limit for a list of commands: `SHELL_GROUP_TIMEOUT_SECONDS`, or the longest limit of one of the commands when that is longer (a group limit never cuts a line below its own). */
-export function groupLimitSeconds(commands: ReadonlyArray<{ timeoutSeconds: number }>): number {
+/**
+ * The group limit for a list of commands: `SHELL_GROUP_TIMEOUT_SECONDS`, or the longest limit of one of the commands when that is longer (a group limit never cuts a line below its own). A group with no shell line has none (undefined):
+ * a group of programs alone runs exactly as it always did, with only each line's own limit.
+ */
+export function groupLimitSeconds(commands: ReadonlyArray<Pick<ProjectCommand, "executable" | "args" | "timeoutSeconds">>): number | undefined {
+  if (!commands.some((command) => shellLineOf(command) !== undefined)) return undefined;
   return Math.max(SHELL_GROUP_TIMEOUT_SECONDS, ...commands.map((command) => command.timeoutSeconds));
 }
 

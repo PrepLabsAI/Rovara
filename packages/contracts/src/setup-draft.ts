@@ -29,7 +29,8 @@ const HIDDEN = /[\p{Cc}\p{Cf}]/u;
 //   - sources or substitutes a download (`bash <(curl ..)`, `sh -c "$(curl ..)"`, backticks);
 //   - runs a `-c`/`-e` script that downloads, substitutes a command, decodes base64 or evaluates (`bash -c '.. | sh'`, `python -c "..urlopen.."`, `node -e "fetch(..)"`);
 //   - downloads and then runs what it fetched (`curl -o f && sh f`, `wget x; chmod +x x`);
-//   - hands a shell a URL (`sh https://..`).
+//   - hands a shell a URL (`sh https://..`);
+//   - (a line is read by a shell, SETUP-L9-SHELL) once it fetches something, pipes into, or follows with, a word only a shell can resolve (`| "sh"`, `| $SHELL`, `; . ./f`, `&& "$SHELL" f`).
 
 const FETCH_TOOL = String.raw`(?:curl|wget|fetch|aria2c|iwr|irm|invoke-webrequest|invoke-restmethod)`;
 /** Programs that run what they are given; the path in front of any of them is allowed (`/usr/bin/env`, `/bin/sh`). */
@@ -51,6 +52,11 @@ const REMOTE_CODE_PATTERNS: readonly RegExp[] = [
   new RegExp(String.raw`(?<![\w-])${FETCH_TOOL}(?![\w-])[^\n]*(?:&&|;|\|\|)\s*(?:${INTERPRETER}\s|chmod\s+\+x\b|\.\/)`, "iu"),
   // sh https://...
   new RegExp(String.raw`(?<![\w-])(?:\S*\/)?(?:ba|z|da|k|c|fi|a)?sh\s+(?:-\S+\s+)*https?:\/\/`, "iu"),
+  // SETUP-L9-SHELL: a line is now read by a shell, so a name that only a shell can resolve counts as an interpreter once the line fetches something: a pipe into a quoted, expanded, escaped or globbed word
+  // (`curl u | "sh"`, `| s""h`, `| $SHELL`, `| \sh`, `| /bin/b?sh`) ...
+  new RegExp(String.raw`(?<![\w-])${FETCH_TOOL}(?![\w-])[^\n]*(?<!\|)\|&?\s*(?:\S*[*?\[\x60"']|\$|\\)`, "iu"),
+  // ... and a fetch followed (after \`;\`, \`&&\` or \`||\`) by the same kind of word, or by a dot-source of what it fetched (`curl u -o f; . ./f`, `curl u > f && "$SHELL" f`)
+  new RegExp(String.raw`(?<![\w-])${FETCH_TOOL}(?![\w-])[^\n]*(?:&&|;|\|\|)\s*(?:\.\s+\S|\S*[*?\[\x60"'$\\])`, "iu"),
 ];
 
 /** `REMOTE_CODE_REASON` when the command fetches code from the internet and runs it (by the rule above), else undefined. */

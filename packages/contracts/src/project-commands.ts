@@ -21,6 +21,11 @@ export function agentxRepositoryName(githubName: string): string {
  * runs EVERY saved command, shell or not, in a bash session (see worker/src/shell-session.ts).
  */
 export const SHELL_PROGRAM = "bash";
+/**
+ * The arguments before the line: `-e -o pipefail -c`. A shell line is stored with the options it runs under (a CI step's `bash -e -o pipefail`), so a command stored BEFORE shell lines existed, a hand-stored `bash -c "<line>"`, stays
+ * what it was byte for byte and is run as the program it is: only a line this parser wrote gets them.
+ */
+export const SHELL_ARGS_PREFIX: readonly string[] = ["-e", "-o", "pipefail", "-c"];
 
 /** Characters that mean something to a shell when they are not quoted: operators, redirections, groups, expansions, globs, escapes, comments. */
 const SHELL_SPECIAL = new Set(["&", "|", ";", "<", ">", "(", ")", "{", "}", "$", "`", "\\", "*", "?", "[", "]", "!"]);
@@ -29,6 +34,7 @@ const SHELL_FIRST_WORDS: ReadonlySet<string> = new Set([
   "cd", "source", ".", "export", "unset", "set", "alias", "unalias", "eval", "exec", "ulimit", "umask", "hash", "declare", "local", "typeset", "readonly", "shift", "trap", "wait", "read", "return", "exit", "pushd", "popd",
   "dirs", "shopt", "builtin", "command", "type", "if", "for", "while", "until", "case", "function", "select", "[[", "!", "{", "}",
 ]);
+const HIDDEN_CHARACTER = /[\p{Cc}\p{Cf}]/u;
 const ASSIGNMENT_WORD = /^[A-Za-z_][A-Za-z0-9_]*=/u;
 
 interface LineReading { words: string[]; shell: boolean; unclosedQuote: boolean }
@@ -72,10 +78,27 @@ export function needsShell(line: string): boolean {
   return readLine(line).shell;
 }
 
+/**
+ * The `NAME=value` words a shell line puts in a command's environment inline: `FOO=1 make`, `export FOO=1 && make`, `env FOO=1 make`, `a; BAR=2 b`. Read statement by statement (split at `&&`, `||`, `;`, `|`, `&`, `(`; a split inside a quote only
+ * reads more, never less), conservative on purpose: setup risk treats such an entry like a command's `env` (a secret, a cloud account or a credential can ride on it).
+ */
+export function inlineEnvEntries(line: string): string[] {
+  const found: string[] = [];
+  for (const statement of line.split(/&&|\|\||[;&|(]/u)) {
+    const words = statement.trim().replace(/^(?:export|env|declare\s+-x)\s+/u, "").split(/\s+/u);
+    for (const word of words) {
+      if (!ASSIGNMENT_WORD.test(word)) break;
+      found.push(word);
+    }
+  }
+  return found;
+}
+
 /** The line a command runs as a SHELL line (stored as `bash -c <line>`), or undefined for a command that is one program and its arguments. */
 export function shellLineOf(command: Pick<ProjectCommand, "executable" | "args">): string | undefined {
-  const line = command.args[1];
-  return command.executable === SHELL_PROGRAM && command.args.length === 2 && command.args[0] === "-c" && line !== undefined && line === line.trim() && needsShell(line) ? line : undefined;
+  const line = command.args[SHELL_ARGS_PREFIX.length];
+  return command.executable === SHELL_PROGRAM && command.args.length === SHELL_ARGS_PREFIX.length + 1 && SHELL_ARGS_PREFIX.every((arg, at) => command.args[at] === arg)
+    && line !== undefined && line === line.trim() && needsShell(line) ? line : undefined;
 }
 
 export function parseCommandLine(line: string, cwd: string, timeoutSeconds: number): ProjectCommand {
@@ -85,9 +108,9 @@ export function parseCommandLine(line: string, cwd: string, timeoutSeconds: numb
   if (unclosedQuote && !(shell && text.includes("\\"))) throw agentXError("CONFIG_INVALID", "the command has an unclosed quote");
   if (words.length === 0) throw agentXError("CONFIG_INVALID", "the command is empty");
   if (shell) {
-    // One line, so the person who approves it reads all of it.
-    if (/[\n\r]/u.test(text) || text.includes("\0")) throw agentXError("CONFIG_INVALID", "a command is one line");
-    return { cwd, executable: SHELL_PROGRAM, args: ["-c", text], timeoutSeconds };
+    // One line of text the person who approves it can read whole: no line break, no control or format character (an escape, a bidirectional override, a zero-width character) that would show a line other than the one that runs.
+    if (HIDDEN_CHARACTER.test(text)) throw agentXError("CONFIG_INVALID", "a command is one line of plain text");
+    return { cwd, executable: SHELL_PROGRAM, args: [...SHELL_ARGS_PREFIX, text], timeoutSeconds };
   }
   const [executable, ...args] = words as [string, ...string[]];
   return { cwd, executable, args, timeoutSeconds };
