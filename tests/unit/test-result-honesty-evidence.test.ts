@@ -26,7 +26,7 @@ async function world(pin?: { reason: "dependencies_unavailable_workers" | "depen
   await store.put({ item: { ...projectRevisionKey(ORG, PROJECT, 1), entityType: "PROJECT", definition: { name: PROJECT, revision: 1, repositories: [{ name: "r", url: "https://example.invalid/r.git", path: "r", defaultBranch: "main", credentialRef: "c" }] } } });
   if (pin !== undefined) {
     const item = testEnvPinItem({ orgId: ORG, project: PROJECT, taskId: "task-1", nowMs: NOW, unused: { revision: 2, digest: "d".repeat(64), reason: pin.reason } });
-    await store.put({ item: (item as { item: never }).item });
+    await store.put({ item: (item as unknown as { item: never }).item });
   }
   const evidence = createLocalEvidence({ flow: { store, companyId: ORG, log: () => undefined }, blobs });
   const keep = async (checks: CheckEntry[]) => {

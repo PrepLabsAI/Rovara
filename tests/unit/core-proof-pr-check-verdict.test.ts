@@ -64,7 +64,8 @@ describe("TEST-RESULT-HONESTY: the heading of a task without a Testing view says
     const context = scenario.inputs.context;
     const proof = context.proof!;
     const evidence = proof.evidence!;
-    const noView = { ...context, testing: undefined, proof: { ...proof, evidence: { ...evidence, pack: { ...evidence.pack, notTested: [...evidence.pack.notTested, ...items] } } } };
+    const pack = evidence.pack!;
+    const noView = { ...context, testing: undefined, proof: { ...proof, evidence: { ...evidence, pack: { ...pack, notTested: [...pack.notTested, ...items] } } } };
     return workflowPullRequestCheckVerdict(SCENARIO_TASK, scenario.inputs.workflow, SCENARIO_PLAN_TEXT(), noView, scenario.inputs.proofLines)!;
   };
   it("no skip items: the fixed words", () => {
