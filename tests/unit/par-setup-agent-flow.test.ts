@@ -19,8 +19,6 @@ import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.j
 import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
 import { locateWorkspace } from "../../packages/broker/src/core/task-flow/workspace-location.js";
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
-import { Command } from "commander";
-import { registerSetupAgentCommands } from "../../packages/cli/src/up/setup-agent.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 import { formBody, formOf, raw } from "../support/local-pages-fakes.js";
 
@@ -94,14 +92,7 @@ async function launch(extra: { environment?: NodeJS.ProcessEnv } = {}) {
     }
     throw new Error("the flow did not hand a job to the worker");
   };
-  const cli = async (...argv: string[]): Promise<string> => {
-    const out: string[] = [];
-    const program = new Command().exitOverride().option("--json", "", false);
-    registerSetupAgentCommands(program, { home: root, fetch, stdout: { write: (text: string) => { out.push(text); return true; } } });
-    await program.parseAsync(["node", "rovara", ...argv, "--state-dir", stateDirectory]);
-    return out.join("");
-  };
-  return { runtime, api, browse, page, post, callback, nextJob, store, machines, host, cli, opened };
+  return { runtime, api, browse, page, post, callback, nextJob, store, machines, host, opened };
 }
 type Harness = Awaited<ReturnType<typeof launch>>;
 
@@ -509,22 +500,6 @@ describe("a setup run, from the owner's request to the use of what it found", ()
     await h.callback(second, "result", { status: "SUCCEEDED", result: {} });
     expect((await h.api("/v1/app/projects/payments/setup-check")).body).toMatchObject({ status: "ready" });
     expect((await h.api("/v1/dev/tasks", { method: "POST", body: { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint" } })).status).toBe(201);
-  });
-
-  it("is driven from the terminal too: start, status, journal, stop and open, with the person's command, a website and the approval left to the page", async () => {
-    const h = await launch();
-    await h.api("/v1/admin/projects", { method: "POST", body: PROJECT });
-    expect(await h.cli("setup-agent", "start", "payments")).toContain("Rovara is setting payments up.");
-    expect(await h.cli("setup-agent", "status", "payments")).toContain("setup run: running");
-    expect(await h.cli("setup-agent", "journal", "payments")).toContain("Nothing was run yet.");
-    const json = JSON.parse(await h.cli("--json", "setup-agent", "status", "payments")) as { ok: boolean; data: { setupAgent: { status: string } } };
-    expect(json).toMatchObject({ ok: true, data: { setupAgent: { status: "running" } } });
-    expect(await h.cli("setup-agent", "stop", "payments")).toContain("setup run: failed");
-    const before = h.opened.length;
-    expect(await h.cli("setup-agent", "open", "payments")).toContain("Opened the setup page");
-    expect(h.opened.length).toBe(before + 1);
-    await expect(h.cli("setup-agent", "status", "../etc")).rejects.toThrow(/not a project name/u);
-    await expect(h.cli("setup-agent", "command", "payments")).rejects.toThrow();
   });
 
   /** What the owner's page signs for exactly one request, revision and digest: the proof a decision of the owner's page carries. */

@@ -1,19 +1,17 @@
 // How we work on `rovara up`, end to end on the fakes: the project's playbook file is read through the code host, the company's rules file is read from the state folder, and a task's first steps carry both
-// in the worker's invocation. The routes, the page and `rovara playbook` answer from the same running install. Docker and the host are simulated.
+// in the worker's invocation. The routes and the page answer from the same running install (`rovara playbook check | init` is tests/unit/playbook-cli.test.ts). Docker and the host are simulated.
 import { request as httpRequest } from "node:http";
-import { lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Command } from "commander";
 import { afterEach, describe, expect, it } from "vitest";
-import { PLAYBOOK_FILE_PATH, STANDING_INSTRUCTIONS_FEATURE, UNDERSTAND_ARTIFACT_NAME, WORKER_INVOCATION_FEATURES, type WorkerInvocation } from "@agentx/contracts";
+import { PLAYBOOK_FILE_PATH, UNDERSTAND_ARTIFACT_NAME, WORKER_INVOCATION_FEATURES, type WorkerInvocation } from "@agentx/contracts";
 import { defaultStateDirectory } from "../../packages/broker/src/local/state-directory.js";
 import { locateWorkspace } from "../../packages/broker/src/core/task-flow/workspace-location.js";
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
 import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
 import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
-import { registerPlaybookCommands } from "../../packages/cli/src/up/playbook.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 import { formBody, formOf, raw } from "../support/local-pages-fakes.js";
 
@@ -67,16 +65,9 @@ async function launch(options: { file?: string | undefined; rules?: string } = {
     }
     throw new Error("the flow did not hand a job to the worker");
   };
-  const cli = async (...argv: string[]): Promise<string> => {
-    const out: string[] = [];
-    const program = new Command().exitOverride().option("--json", "", false);
-    registerPlaybookCommands(program, { home, cwd: join(home, "project"), fetch, stdout: { write: (text: string) => { out.push(text); return true; } } });
-    await program.parseAsync(["node", "rovara", ...argv]);
-    return out.join("");
-  };
   await api("/v1/admin/projects", { method: "POST", body: PROJECT });
   await mkdir(join(home, "project"), { recursive: true });
-  return { home, runtime, model, api, callback, nextJob, cli, opened, token, stateDirectory };
+  return { home, runtime, model, api, callback, nextJob, opened, token, stateDirectory };
 }
 
 const instructionsOf = (invocation: WorkerInvocation) => (invocation as { payload: { standingInstructions?: { text: string; company?: { text: string } } } }).payload.standingInstructions;
@@ -142,65 +133,5 @@ describe("the page", () => {
     const draft = await raw(h.runtime.pagesUrl, { method: "POST", path: form.action, body: formBody({ ...form.fields, text: "version: 1\nrules: ONLY-IN-THE-DRAFT" }), headers: { host: pages.host, origin: h.runtime.pagesUrl, "content-type": "application/x-www-form-urlencoded" } });
     expect(draft.body).toContain("ONLY-IN-THE-DRAFT");
     expect((await h.api("/v1/app/projects/payments/how-we-work")).body.rules).toEqual([{ value: "PROJECT-RULE: always mention the ticket.", source: "project", locked: false }]);
-  });
-});
-
-describe("rovara playbook", () => {
-  it("show prints what the project runs now, and --json the same as data", async () => {
-    const h = await launch({ file: FILE });
-    const text = await h.cli("playbook", "show", "payments");
-    expect(text).toContain(".rovara/playbook.yaml in demo at ");
-    expect(text).toContain("Rules for the whole process:");
-    expect(text).toContain("PROJECT-RULE: always mention the ticket.");
-    expect(text).toContain("Plan:\n  PLAN-RULE: name every file.");
-    expect(text.match(/PROJECT-RULE/gu)).toHaveLength(1);
-    const json = JSON.parse(await h.cli("--json", "playbook", "show", "payments")) as { ok: boolean; data: { file: { status: string } } };
-    expect(json).toMatchObject({ ok: true, data: { file: { status: "ok" } } });
-    await expect(h.cli("playbook", "show", "ghost")).rejects.toThrow(/not registered/u);
-    await expect(h.cli("playbook", "show", "../x")).rejects.toThrow(/not a project name/u);
-  });
-
-  it("show says when there is no file, and when the file cannot be used", async () => {
-    const none = await launch();
-    expect(await none.cli("playbook", "show", "payments")).toContain("Rovara Code runs as it is");
-    const bad = await launch({ file: "version: 1\nstages:\n  check:\n    instructions: x" });
-    const text = await bad.cli("playbook", "show", "payments");
-    expect(text).toContain("cannot be used, so no step of this project starts");
-    expect(text).toContain("stages.check: Rules for this stage aren't used yet.");
-  });
-
-  it("init writes the starter once and never over a file; check reads it without anything running", async () => {
-    const h = await launch();
-    const project = join(h.home, "project");
-    await h.runtime.stop();
-    expect(await h.cli("playbook", "init")).toContain("Wrote .rovara/playbook.yaml");
-    expect((await readFile(join(project, PLAYBOOK_FILE_PATH), "utf8"))).toContain("version: 1");
-    await expect(h.cli("playbook", "init")).rejects.toThrow(/already here/u);
-    expect(await h.cli("playbook", "check")).toContain("can be used. It sets nothing yet");
-    await writeFile(join(project, PLAYBOOK_FILE_PATH), FILE);
-    expect(await h.cli("playbook", "check")).toContain("It sets rules for the whole process, rules for plan.");
-    expect(JSON.parse(await h.cli("--json", "playbook", "check"))).toEqual({ ok: true, data: { valid: true, rules: true, stages: ["plan"], designReview: null } });
-    await writeFile(join(project, PLAYBOOK_FILE_PATH), "version: 1\nstages:\n  pull_request:\n    instructions: x");
-    await expect(h.cli("playbook", "check")).rejects.toThrow(/stages\.pull_request: Rules for this stage aren't used yet\./u);
-  });
-
-  it("check and init refuse a link and a folder, never follow them", async () => {
-    const h = await launch();
-    const project = join(h.home, "project");
-    await mkdir(join(project, ".rovara"), { recursive: true });
-    await writeFile(join(project, "elsewhere.yaml"), FILE);
-    await symlink(join(project, "elsewhere.yaml"), join(project, PLAYBOOK_FILE_PATH));
-    await expect(h.cli("playbook", "check")).rejects.toThrow(/regular file/u);
-    await expect(h.cli("playbook", "init")).rejects.toThrow();
-    expect((await lstat(join(project, PLAYBOOK_FILE_PATH))).isSymbolicLink()).toBe(true);
-    await expect(h.cli("playbook", "check", ".rovara")).rejects.toThrow(/regular file/u);
-    await expect(h.cli("playbook", "check", "missing.yaml")).rejects.toThrow(/there is no/u);
-  });
-
-  it("open asks the running install to open the page", async () => {
-    const h = await launch();
-    expect(await h.cli("playbook", "open", "payments")).toContain("Opened How we work");
-    expect(new URL(h.opened.at(-1)!).pathname).toMatch(/^\/s\/once\//u);
-    expect(STANDING_INSTRUCTIONS_FEATURE).toBe("task.standingInstructions.v1");
   });
 });

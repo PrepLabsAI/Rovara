@@ -85,12 +85,7 @@ import { registerDoctorCommand } from "./doctor/cli.js";
 import type { DoctorServices } from "./doctor/checks.js";
 import { addSignInOptions, definedEntries, registerSigninCommands, secretSource, signInFlags, type SignInCommandOptions } from "./signin/cli.js";
 import { registerDestroyCommand } from "./destroy/cli.js";
-import { registerDesignReviewCommand, registerConnectionsCommand, registerModelsCommand, registerDiagnosisCommand, registerIntakeCommand, registerOpenCommand, registerSecondReviewCommand, registerUpCommand, type UpCommandContext } from "./up/cli.js";
-import { registerTestEnvCommand } from "./up/test-env-command.js";
-import { registerTokenCommands } from "./up/token.js";
-import { registerPlaybookCommands } from "./up/playbook.js";
-import { registerChatCommands } from "./up/chat.js";
-import { registerSetupAgentCommands } from "./up/setup-agent.js";
+import { registerPlaybookCommands } from "./playbook/cli.js";
 import type { DestroyDependencies } from "./destroy/run.js";
 import { registerUpgradeCommand } from "./upgrade/cli.js";
 import type { UpgradeDependencies } from "./upgrade/run.js";
@@ -163,8 +158,6 @@ export interface CliDependencies {
   doctor?: { store?: ParameterStore; services?: (settings: EnvironmentSettings) => DoctorServices };
   /** `agentx upgrade` overrides, for tests: never touch AWS or GitHub. */
   upgrade?: Partial<UpgradeDependencies>;
-  /** `rovara up` overrides, for tests: never start a server, touch Docker or reach GitHub. */
-  up?: Partial<UpCommandContext>;
   /** `agentx destroy` overrides, for tests: never touch AWS. */
   destroy?: Partial<DestroyDependencies>;
   /** `agentx workspaces` overrides, for tests: never reach the control plane or open a browser. */
@@ -494,22 +487,8 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       return session === undefined ? undefined : { controlPlaneUrl: session.baseUrl, accessToken: session.accessToken };
     },
   });
-  registerUpCommand(program, {
-    home, version: CLI_VERSION, fetch: services.fetchImplementation, stdout: services.stdout, stderr: services.stderr, ...dependencies.up,
-  });
-  registerOpenCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
-  registerTestEnvCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
-  registerTokenCommands(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
   registerLessonsReplayCommand(program, { home, tokenStore: services.tokenStore, fetch: services.fetchImplementation, stdout: services.stdout });
-  registerPlaybookCommands(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
-  registerSecondReviewCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
-  registerConnectionsCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
-  registerModelsCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
-  registerDesignReviewCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
-  registerDiagnosisCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
-  registerIntakeCommand(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
-  registerChatCommands(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
-  registerSetupAgentCommands(program, { home, fetch: services.fetchImplementation, stdout: services.stdout });
+  registerPlaybookCommands(program, { stdout: services.stdout });
   registerUpgradeCommand(program, {
     ...(dependencies.upgrade === undefined ? {} : { overrides: dependencies.upgrade }),
     ...(dependencies.deploy === undefined ? {} : { deploy: dependencies.deploy }),

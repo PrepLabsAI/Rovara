@@ -4,9 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { IMPLICIT_COMPANY_ID, WORKER_INVOCATION_FEATURES, intakeItemIdOf, type CodeMilestone, type OrgId } from "@agentx/contracts";
-import { Command } from "commander";
 import { afterEach, describe, expect, it } from "vitest";
-import { registerIntakeCommand } from "../../packages/cli/src/up/cli.js";
 import { sessionBindingsOf } from "../../packages/broker/src/core/sessions/bindings.js";
 import { taskSessionId } from "../../packages/broker/src/core/sessions/create.js";
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
@@ -117,55 +115,5 @@ describe("a ticket on rovara up", () => {
 
   it("refuses a config that links an account in a shape that is not the neutral one", async () => {
     await expect(launch({ linkedAccounts: [{ provider: "linear", accountId: "u1" }] })).rejects.toThrow();
-  });
-});
-
-describe("rovara intake", () => {
-  const run = async (h: Awaited<ReturnType<typeof launch>>, printed: string[], ...args: string[]) => {
-    const program = new Command().exitOverride().option("--json");
-    registerIntakeCommand(program, { home: h.root, fetch, stdout: { write: (text: string) => { printed.push(text); return true; } } });
-    await program.parseAsync(["node", "rovara", ...args, "--state-dir", h.stateDirectory]);
-  };
-
-  it("names where a project's work is asked for, lists what waits, and starts or drops a ticket", async () => {
-    const h = await launch();
-    const printed: string[] = [];
-    await run(h, printed, "intake", "add", "web", FAKE_TRACKER_KIND, "--label", "rovara");
-    expect(printed.join("")).toContain("asks 1 place");
-    h.tracker.asked = [h.asked("T-2", "u-stranger"), h.asked("T-3", "u-stranger")];
-    await h.runtime.tick();
-    printed.length = 0;
-    await run(h, printed, "intake", "list", "web");
-    expect(printed.join("")).toContain("2 tickets wait for you");
-    expect(printed.join("")).toContain(`label "rovara"`);
-    const ids = [intakeItemIdOf(FAKE_TRACKER_KIND, "T-2"), intakeItemIdOf(FAKE_TRACKER_KIND, "T-3")];
-    printed.length = 0;
-    await run(h, printed, "intake", "start", "web", ids[0]!);
-    expect(printed.join("")).toContain("Its plan waits for your approval");
-    expect(((await h.api("/v1/dev/tasks")).body["tasks"] as unknown[])).toHaveLength(1);
-    printed.length = 0;
-    await run(h, printed, "intake", "dismiss", "web", ids[1]!);
-    expect(printed.join("")).toContain("Dropped.");
-    printed.length = 0;
-    await run(h, printed, "--json", "intake", "list", "web");
-    expect(JSON.parse(printed.join(""))).toMatchObject({ ok: true, data: { items: [], sources: [{ failing: false }] } });
-    printed.length = 0;
-    await run(h, printed, "intake", "clear", "web");
-    expect(((await h.api("/v1/app/projects/web/intake")).body["sources"] as unknown[])).toHaveLength(0);
-  });
-
-  it("changes what is written back, and refuses a ticket named any other way than by its id", async () => {
-    const h = await launch();
-    const printed: string[] = [];
-    await run(h, printed, "intake", "updates", "web", "--status", "on");
-    expect(printed.join("")).toContain("Status changes: on");
-    // Rovara says where a comment can be seen: a Linear comment is visible to everyone who can see the ticket.
-    expect(printed.join("")).toContain("visible to everyone who can see the ticket");
-    printed.length = 0;
-    await run(h, printed, "intake", "updates", "web", "--comments", "off");
-    expect(printed.join("")).toContain("Comments on the ticket: off");
-    await expect(run(h, [], "intake", "start", "web", "../../x")).rejects.toThrow(/by its id/u);
-    await expect(run(h, [], "intake", "updates", "web", "--comments", "maybe")).rejects.toThrow(/on or off/u);
-    await expect(run(h, [], "intake", "add", "web", "linear")).rejects.toThrow(/--label/u);
   });
 });

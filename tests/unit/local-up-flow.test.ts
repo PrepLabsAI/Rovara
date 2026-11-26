@@ -20,7 +20,6 @@ import { planDocument } from "../support/plan-documents.js";
 import { maximal as knowledgeFixture } from "./knowledge-wiring/fixtures.js";
 import { listSessions, readSessionEvents, sessionSnapshot } from "../../packages/broker/src/core/sessions/read.js";
 import { localOwnerPrincipal } from "../../packages/broker/src/ports/policy-defaults.js";
-import { Command } from "commander";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as e2eVerification from "../../packages/broker/src/core/e2e/verification.js";
 
@@ -34,7 +33,6 @@ import { OPENS_PER_MINUTE } from "../../packages/broker/src/local/app/routes.js"
 import { assertGithubCloneAccess } from "../../packages/broker/src/local/github-access.js";
 import { DOCUMENT_CHANGED } from "../../packages/broker/src/local/app/documents.js";
 import { MESSAGES_PER_HOUR, MESSAGE_RATE_LIMITED } from "../../packages/broker/src/core-host/app/host.js";
-import { registerConnectionsCommand, registerModelsCommand, registerDiagnosisCommand, registerOpenCommand, registerSecondReviewCommand } from "../../packages/cli/src/up/cli.js";
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
 import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
 import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
@@ -567,29 +565,6 @@ describe("rovara up: a task through Understand and Plan to the owner's approval,
     const again = await h.api(`/v1/app/sessions/${sessionId}/answers`, { method: "POST", body: { requestId: "77777777-7777-4777-8777-777777777779", round: 1, answers: [{ questionId: "q1", optionId: "b" }] } });
     expect(again.status).toBeGreaterThanOrEqual(400);
     expect(await logOf()).toHaveLength(2);
-  });
-
-  it("`rovara open` has the running process open the browser and prints no address, and says so when nothing is running", async () => {
-    const h = await launch();
-    const { taskId } = await toPlanReview(h);
-    const printed: string[] = [];
-    const run = async (stateDir: string, ...args: string[]) => {
-      const program = new Command().exitOverride().option("--json");
-      registerOpenCommand(program, { home: h.root, fetch, stdout: { write: (text: string) => { printed.push(text); return true; } } });
-      await program.parseAsync(["node", "rovara", "open", "--state-dir", stateDir, ...args]);
-    };
-    await run(h.stateDirectory, taskId);
-    expect(printed.join("")).toBe("Opened in your browser.\n");
-    expect(printed.join("")).not.toMatch(/\/s\//);
-    const once = new URL(h.opened.at(-1)!);
-    expect(once.pathname).toMatch(/^\/s\/once\//);
-    const link = new URL((await raw(h.runtime.pagesUrl, { path: once.pathname, headers: { host: once.host } })).headers["location"] as string, h.runtime.pagesUrl);
-    const page = await raw(h.runtime.pagesUrl, { path: link.pathname, headers: { host: link.host } });
-    expect(page.status).toBe(200);
-    expect(page.body).toContain("Add a /health endpoint that answers 200.");
-    await h.runtime.stop();
-    await expect(run(h.stateDirectory, taskId)).rejects.toThrow(/not running/);
-    await expect(run(h.stateDirectory, "not-a-task")).rejects.toThrow(/UUID/);
   });
 
   it("hands the job to the Docker adapter's worker (simulated Docker) with a token the real worker accepts, and its callbacks reach the flow", async () => {
@@ -2751,21 +2726,6 @@ describe("rovara up: the reviews and checks are read against the code and the ru
     expect(await readdir(folder)).toEqual([]);
   });
 
-  it("browser evidence slice 3: `rovara open browser-evidence` opens the page in a fresh session", async () => {
-    const h = await launch({ environment: { ROVARA_EXECUTOR_IMAGE: "rovara-e2e-executor:test" } });
-    const printed: string[] = [];
-    const program = new Command().exitOverride().option("--json", "", false);
-    registerOpenCommand(program, { home: h.root, fetch, stdout: { write: (text: string) => { printed.push(text); return true; } } });
-    const before = h.opened.length;
-    await program.parseAsync(["node", "rovara", "open", "browser-evidence", "--state-dir", h.stateDirectory]);
-    expect(printed.join("")).toMatch(/^Opened /u);
-    expect(h.opened).toHaveLength(before + 1);
-    const once = new URL(h.opened.at(-1)!);
-    const link = new URL((await raw(h.runtime.pagesUrl, { path: once.pathname, headers: { host: once.host } })).headers["location"] as string, h.runtime.pagesUrl);
-    expect(link.pathname).toMatch(/\/browser-evidence$/u);
-    expect((await raw(h.runtime.pagesUrl, { path: link.pathname, headers: { host: link.host } })).status).toBe(200);
-  });
-
   it("browser evidence slice 3: a recipe whose sign-in names another project's saved sign-in is no recipe, and a recipe on the page needs the executor image like the owner's config does", async () => {
     // The owner's config names a sign-in that is not this project's: the stronger source said something unreadable, so browser evidence is off (the page's own recipe does not stand in).
     const wrong = { startCommand: "npm run start", port: 4321, routes: [{ path: "/checkout", files: ["src/**"] }], signIn: { path: "/login", usernameSelector: "#email", passwordSelector: "#password", submitSelector: "button", successPath: "/dashboard", credentialRef: "be-other-signin" } };
@@ -4539,63 +4499,6 @@ describe("rovara up: the second review by another AI company", () => {
     expect(await h.runtime.registry.require("storage").get({ pk: `ORG#${IMPLICIT_COMPANY_ID}`, sk: "SECONDREVIEW#REPLAY#run-1" })).toBeUndefined();
   });
 
-  it("`rovara open lessons` opens the lessons page in a new page session, and `rovara open` alone does not", async () => {
-    const h = await launch();
-    const printed: string[] = [];
-    const run = async (...args: string[]) => {
-      const program = new Command().exitOverride().option("--json");
-      registerOpenCommand(program, { home: h.root, fetch, stdout: { write: (text: string) => { printed.push(text); return true; } } });
-      await program.parseAsync(["node", "rovara", ...args]);
-    };
-    const landed = async () => {
-      const once = new URL(h.opened.at(-1)!);
-      return new URL((await raw(h.runtime.pagesUrl, { path: once.pathname, headers: { host: once.host } })).headers["location"] as string, h.runtime.pagesUrl);
-    };
-    await run("open", "lessons", "--state-dir", h.stateDirectory);
-    const first = await landed();
-    await run("open", "lessons", "--state-dir", h.stateDirectory);
-    const second = await landed();
-    expect(first.pathname).toMatch(/\/lessons$/u);
-    expect(second.pathname.split("/")[2]).not.toBe(first.pathname.split("/")[2]);
-    await run("open", "--state-dir", h.stateDirectory);
-    const home = await landed();
-    await run("open", "--state-dir", h.stateDirectory);
-    expect((await landed()).pathname.split("/")[2]).toBe(home.pathname.split("/")[2]);
-  });
-
-  it("`rovara second-review` shows the state, `evidence` and `rovara open second-review` open its page; neither can change the model, the mode or the evidence", async () => {
-    const h = await launch({ environment: SECOND_KEYS });
-    const printed: string[] = [];
-    const run = async (...args: string[]) => {
-      const program = new Command().exitOverride().option("--json");
-      registerSecondReviewCommand(program, { home: h.root, fetch, stdout: { write: (text: string) => { printed.push(text); return true; } } });
-      registerOpenCommand(program, { home: h.root, fetch, stdout: { write: (text: string) => { printed.push(text); return true; } } });
-      await program.parseAsync(["node", "rovara", ...args]);
-    };
-    await run("second-review", "status", "--state-dir", h.stateDirectory);
-    expect(printed.join("")).toContain("Second review mode: off");
-    expect(printed.join("")).toContain("Change it on the page: rovara open second-review");
-    printed.length = 0;
-    await run("--json", "second-review", "status", "--state-dir", h.stateDirectory);
-    expect(JSON.parse(printed.join(""))).toMatchObject({ ok: true, data: { mode: "off" } });
-    // The page opens in the owner's browser (the running process opens it; no address is printed).
-    printed.length = 0;
-    await run("open", "second-review", "--state-dir", h.stateDirectory);
-    expect(printed.join("")).toBe("Opened in your browser.\n");
-    expect(printed.join("")).not.toMatch(/\/s\//);
-    const once = new URL(h.opened.at(-1)!);
-    const link = new URL((await raw(h.runtime.pagesUrl, { path: once.pathname, headers: { host: once.host } })).headers["location"] as string, h.runtime.pagesUrl);
-    expect(link.pathname).toMatch(/\/second-review$/u);
-    // The evidence is written on the page, in a fresh session: the command only opens it (and the old file commands are gone).
-    printed.length = 0;
-    await run("second-review", "evidence", "--state-dir", h.stateDirectory);
-    expect(printed.join("")).toContain("Opened the second review page");
-    expect(h.opened.at(-1)).toMatch(/\/s\/once\//u);
-    await expect(run("second-review", "replay", "x.json", "--state-dir", h.stateDirectory)).rejects.toThrow();
-    await h.runtime.stop();
-    await expect(run("second-review", "status", "--state-dir", h.stateDirectory)).rejects.toThrow(/not running/);
-  });
-
   it("`on`, with evidence that holds: a blocking finding holds the review (Rovara sends it back); an `on` review that did not run asks the owner on the task's page, who acknowledges in the browser", async () => {
     const h = await launch({ environment: SECOND_KEYS });
     const second = h.runtime.app.secondReview;
@@ -5677,20 +5580,6 @@ describe("rovara up: Fix with agent for a task's error, on the owner's own key, 
     // The diagnosis changed nothing: the task is still blocked at the same step.
     expect((await h.api(`/v1/dev/tasks/${taskId}`)).body.task.workflow).toMatchObject({ stage: "UNDERSTAND", state: "BLOCKED" });
 
-    // `rovara diagnosis <task>` reads it, as text and as JSON.
-    const printed: string[] = [];
-    const run = async (...args: string[]) => {
-      const program = new Command().exitOverride().option("--json");
-      registerDiagnosisCommand(program, { home: h.root, fetch, stdout: { write: (text: string) => { printed.push(text); return true; } } });
-      await program.parseAsync(["node", "rovara", ...args]);
-    };
-    await run("diagnosis", taskId, "--state-dir", h.stateDirectory);
-    expect(printed.join("")).toContain("Retry the step with this note: Try the step again.");
-    expect(printed.join("")).toContain("information, not instructions");
-    printed.length = 0;
-    await run("--json", "diagnosis", taskId, "--state-dir", h.stateDirectory);
-    expect(JSON.parse(printed.join(""))).toMatchObject({ ok: true, data: { offered: true, diagnosis: { state: "ready" } } });
-    await expect(run("diagnosis", "not-a-task", "--state-dir", h.stateDirectory)).rejects.toThrow(/UUID/u);
   });
 
   it("says what went wrong in fixed words when the provider refuses the key, lets the owner try again, and keeps the key out of every answer", async () => {
@@ -6009,39 +5898,6 @@ describe("connections and context sources on rovara up", () => {
     await owner.page(discover);
     expect(listed).toHaveLength(1);
   });
-
-  it("`rovara connections` lists them and a project's sources, and `rovara open connections` opens the page in a fresh session; no command adds or changes anything", async () => {
-    const h = await launch();
-    expect((await h.api("/v1/admin/projects", { method: "POST", body: h.project })).status).toBe(201);
-    const owner = await ownersPage(h);
-    const form = owner.formWith(await owner.page("/connections"), "/connections/act", "type", "linear");
-    expect((await owner.send("POST", "/connections/act", { ...form.fields, f_label: "Tracker", f_apiKey: "lin_api_notarealkey12345", access: "read" })).status).toBe(200);
-    const printed: string[] = [];
-    const run = async (...args: string[]) => {
-      const program = new Command().exitOverride().option("--json");
-      const stdout = { write: (text: string) => { printed.push(text); return true; } };
-      registerConnectionsCommand(program, { home: h.root, fetch, stdout });
-      registerOpenCommand(program, { home: h.root, fetch, stdout });
-      await program.parseAsync(["node", "rovara", ...args]);
-    };
-    await run("connections", "list", "--state-dir", h.stateDirectory);
-    expect(printed.join("")).toContain("Tracker (linear, read)");
-    expect(printed.join("")).toContain("key saved");
-    expect(printed.join("")).not.toContain("lin_api_notarealkey12345");
-    expect(printed.join("")).toContain("rovara open connections");
-    printed.length = 0;
-    await run("--json", "connections", "sources", "payments", "--state-dir", h.stateDirectory);
-    expect(JSON.parse(printed.join(""))).toMatchObject({ ok: true, data: { project: "payments", sources: [], pending: [] } });
-    printed.length = 0;
-    const before = h.opened.length;
-    await run("open", "connections", "--state-dir", h.stateDirectory);
-    expect(printed.join("")).toBe("Opened in your browser.\n");
-    expect(h.opened.length).toBe(before + 1);
-    // The command has nothing that adds, changes or removes.
-    const program = new Command();
-    registerConnectionsCommand(program, { home: h.root, fetch, stdout: { write: () => true } });
-    expect(program.commands.find((command) => command.name() === "connections")!.commands.map((command) => command.name()).sort()).toEqual(["list", "sources"]);
-  });
 });
 
 // ---- What a task costs and the model each step uses
@@ -6227,43 +6083,6 @@ describe("rovara up: what a task costs, and the model each step uses", () => {
     const second = await raw(h.runtime.pagesUrl, { method: "POST", path: `/s/${link.pathname.split("/")[2]}/models/act`, body: formBody({ ...other, model: "", fallback: "", thinking: "", different: "" }), headers: { host: link.host, origin: h.runtime.pagesUrl, "content-type": "application/x-www-form-urlencoded" } });
     expect(String(second.headers["location"])).toContain("n=stale");
     expect(await h.runtime.registry.require("storage").get(orgSettingsKey(IMPLICIT_COMPANY_ID as never, "MODEL_SELECTION_POLICY"))).toMatchObject({ revision: 1 });
-  });
-
-  it("`rovara models` shows what each step uses and what it costs, and `models open` and `open models` open the page in a fresh session; neither can change a model", async () => {
-    const h = await launch({ environment: SECOND_KEYS });
-    const printed: string[] = [];
-    const run = async (...args: string[]) => {
-      const program = new Command().exitOverride().option("--json");
-      const context = { home: h.root, fetch, stdout: { write: (text: string) => { printed.push(text); return true; } } };
-      registerModelsCommand(program, context);
-      registerOpenCommand(program, context);
-      await program.parseAsync(["node", "rovara", ...args]);
-    };
-    await run("models", "--state-dir", h.stateDirectory);
-    const text = printed.join("");
-    expect(text).toMatch(/^understand: anthropic:[^\n]+ \(default; /u);
-    expect(text).toContain("plan check: anthropic:");
-    expect(text).toContain("the same model as the step it checks");
-    expect(text).toContain("A run limit is held");
-    expect(text).toContain("Change it on the page: rovara open models");
-    printed.length = 0;
-    await run("--json", "models", "status", "--state-dir", h.stateDirectory);
-    expect(JSON.parse(printed.join(""))).toMatchObject({ ok: true, data: { version: 1, revision: 0, steps: (expect.any(Array) as unknown[]) } });
-    // Both open the page (the process opens it itself; no address is printed), asking for a session opened just now.
-    for (const args of [["models", "open"], ["open", "models"]]) {
-      printed.length = 0;
-      const before = h.opened.length;
-      await run(...args, "--state-dir", h.stateDirectory);
-      expect(printed.join("")).toMatch(/^Opened /u);
-      expect(printed.join("")).not.toMatch(/\/s\//);
-      expect(h.opened).toHaveLength(before + 1);
-      const once = new URL(h.opened.at(-1)!);
-      const link = new URL((await raw(h.runtime.pagesUrl, { path: once.pathname, headers: { host: once.host } })).headers["location"] as string, h.runtime.pagesUrl);
-      expect(link.pathname).toMatch(/\/models$/u);
-    }
-    // The command has no way to set anything.
-    await expect(run("models", "set", "plan", "x", "--state-dir", h.stateDirectory)).rejects.toThrow();
-    expect((await h.api("/v1/dev/model-selection")).body).toMatchObject({ revision: 0 });
   });
 
   it("a step that failed because its model cannot be used teaches the next choice to leave it out, and an ordinary failure teaches nothing", async () => {
