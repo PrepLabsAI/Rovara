@@ -224,4 +224,18 @@ describe("what the shell can see", () => {
     const seen = await out(line('echo "[$#][$0]"; env | grep -c "__rv_" || true'));
     expect(seen).toBe("[0][bash]\n0");
   });
+
+  // PRE-REVIEW MUST 1 (SETUP-L9-SHELL-PRE-REVIEW-SONNET.md): a line that turns on `set -x` (a common CI idiom) leaves xtrace on while `__rv_save` runs, so the wrapper's own code traces every exported variable's value (and its
+  // `__rv_` internals) to stderr, after the line's own output: it shows values the line never printed, and buries the failing line's last lines (what `describeCommandFailure` keeps) under the trace. Expected to FAIL until `__rv_save` turns xtrace off.
+  it("a line that turns on `set -x` does not make the session code trace the environment or bury the line's own last lines", async () => {
+    const probe = "env-value-the-line-never-printed-4711";
+    const session = newShellSession();
+    const result = await runContainerCommand(container({ SESSION_PROBE_VALUE: probe }), root, line("set -x; export FOO=1; echo traced-line >&2; false"), undefined, { session });
+    expect(result.exitCode).not.toBe(0);
+    const stderr = result.stderr;
+    expect(stderr).toContain("echo traced-line");
+    expect(stderr).not.toContain(probe);
+    expect(stderr).not.toContain("__rv_");
+    expect(stderr.trim().split("\n").at(-1)).not.toMatch(/__rv_|set \+e/);
+  });
 });
