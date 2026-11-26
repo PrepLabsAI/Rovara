@@ -1,10 +1,7 @@
 // Engine host (lane E2): adapter modules over fakes, for the deployed composition root's tests. Each module fills one point the way a deployed adapter will; nothing here touches a cloud provider.
 // Ported from the monolith's host-root fake world, over Code's own ports and fakes only.
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { IMPLICIT_COMPANY_ID, WORKER_INVOCATION_FEATURES, type Admission, type AuditEvent, type AuditSink, type DocumentStore, type ObjectStorage, type QueueService, type SecretStore, type TransactItem } from "@agentx/contracts";
-import { FolderObjectStorage } from "../../packages/local-adapters/src/folder-object-storage.js";
+import { MemoryObjectStorage } from "./memory-object-storage.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { MemoryQueueService } from "../../packages/broker/src/ports/memory-queue.js";
 import { FakeWorkerMachines, type FakeWorkerMachinesOptions } from "../../packages/broker/src/ports/fake-worker-machines.js";
@@ -56,9 +53,9 @@ function recordingAudit(events: AuditEvent[]): AuditSink {
   };
 }
 
-/** S3's stand-in: Code's folder object storage in a temp folder. */
-function folderObjects(): ObjectStorage {
-  return new FolderObjectStorage({ root: join(mkdtempSync(join(tmpdir(), "core-host-objects-")), "store"), maxObjectBytes: 10_000_000 });
+/** S3's stand-in: an object store in memory that passes the port's conformance suite. */
+function memoryObjects(): ObjectStorage {
+  return new MemoryObjectStorage({ maxObjectBytes: 10_000_000 });
 }
 
 export interface FakeWorldOptions {
@@ -99,7 +96,7 @@ export function createFakeWorld(options: FakeWorldOptions = {}): FakeWorld {
     coreAdapter({ point: "audit-sink", name: "deployed", owner: "fake", create: () => recordingAudit(audit) }),
     coreAdapter({ point: "approvers", name: "deployed", owner: "fake", create: () => createLocalOwnerApprovers({ now }) }),
     coreAdapter({ point: "identity", name: "deployed", owner: "fake", create: () => createLocalOwnerIdentity({ companyId: IMPLICIT_COMPANY_ID }) }),
-    coreAdapter({ point: "object-storage", name: "s3", owner: "fake", create: () => options.objects ?? folderObjects() }),
+    coreAdapter({ point: "object-storage", name: "s3", owner: "fake", create: () => options.objects ?? memoryObjects() }),
     coreAdapter({ point: "code-host", name: host.kind, owner: "fake", create: () => host }),
     coreAdapter({ point: "check-runner", name: "fake-checks", owner: "fake", create: () => ({ kind: "fake-checks", create: () => new FakeCheckRunner(hostModel) }) }),
     coreAdapter({ point: "model-keys", name: "secrets-manager", owner: "fake", create: () => createMemoryModelKeyStore({}) }),

@@ -48,7 +48,7 @@ describe("DynamoDB expressions name reserved words through aliases", () => {
   });
 
   it("everything under packages/*/src", () => {
-    const all = ["broker", "aws-adapters", "worker", "contracts", "code-api", "orchestrator", "gateway", "slack-service", "local-adapters", "verifier", "mcp", "cli", "model-runtime"].flatMap((name) => sources(`packages/${name}/src`)).flatMap((path) => literalExpressions(path));
+    const all = ["broker", "aws-adapters", "worker", "contracts", "code-api", "orchestrator", "gateway", "slack-service", "verifier", "mcp", "cli", "model-runtime"].flatMap((name) => sources(`packages/${name}/src`)).flatMap((path) => literalExpressions(path));
     expect(all.length).toBeGreaterThan(200);
     expect(unaliased(all)).toEqual([]);
   });

@@ -1,14 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
-import { IMPLICIT_COMPANY_ID, companyScoped, type DueSchedule, type JsonValue, type ScheduleEntry } from "@agentx/contracts";
+import { IMPLICIT_COMPANY_ID, type ScheduleEntry } from "@agentx/contracts";
 import { createFakeScheduler } from "../../packages/broker/src/ports/fake-scheduler.js";
-import { createIntervalScheduler } from "../../packages/local-adapters/src/interval-scheduler.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { handleNightlyFire } from "../../packages/broker/src/core/test-env/nightly.js";
 import { nightlyWorld, ORG } from "../support/nightly-world.js";
 const A = IMPLICIT_COMPANY_ID, B = `org_${"b".repeat(20)}`;
 const entry = (companyId = A): ScheduleEntry => ({ companyId, scheduleId: "shared", when: { kind: "every", minutes: 1 }, enabled: true, target: { kind: "test", ref: {} } });
-for (const kind of ["fake", "interval"] as const) describe(`${kind} schedule ownership`, () => {
-  const build = () => kind === "fake" ? createFakeScheduler() : createIntervalScheduler({ store: new MemoryDocumentStore(), timer: false });
+describe("schedule ownership", () => {
+  const build = () => createFakeScheduler();
   it("refuses malformed companies and target company mismatches with fixed text", async () => {
     const scheduler = build();
     for (const companyId of ["", "bad-canary", null, undefined, 3]) await expect(scheduler.put({ ...entry(), companyId } as ScheduleEntry)).rejects.toMatchObject({ code: "refused", message: "invalid schedule company" });
@@ -23,22 +22,6 @@ for (const kind of ["fake", "interval"] as const) describe(`${kind} schedule own
     const scheduler = build();
     for (const spec of [{ ...entry(), when: { kind: "unknown", minutes: 1 } }, { ...entry(), target: null }, { ...entry(), when: null }]) await expect(scheduler.put(spec as ScheduleEntry)).rejects.toMatchObject({ code: "refused" });
   });
-});
-it("stored key/entry mismatches never fire or return, and log only the key company", async () => {
-  const store = new MemoryDocumentStore(); let now = 0; const lines: unknown[] = [];
-  const scheduler = createIntervalScheduler({ store, now: () => now, timer: false, log: (line) => { lines.push(line); } });
-  const due: DueSchedule[] = []; scheduler.subscribe(async (d) => { due.push(d); });
-  await scheduler.put(entry());
-  const key = { pk: companyScoped(A, "SCHEDULER"), sk: "SCHEDULE#shared" };
-  const row = (await store.get(key))!;
-  for (const changed of [{ ...entry(B) }, { ...entry(), scheduleId: "foreign-canary" }]) {
-    await store.put({ item: { ...row, entry: JSON.parse(JSON.stringify(changed)) as JsonValue } }); now += 60_000;
-    expect(await scheduler.get(A, "shared")).toBeUndefined(); await scheduler.tick();
-  }
-  expect(due).toEqual([]); expect(lines.length).toBeGreaterThan(0);
-  expect(JSON.stringify(lines)).not.toContain(B); expect(JSON.stringify(lines)).not.toContain("foreign-canary");
-  for (const line of lines) expect(line).toEqual({ companyId: A, event: "scheduler.row_invalid" });
-  await scheduler.close?.();
 });
 it("fails closed: nightly missing project and resolver failure never read or retry", async () => {
   for (const projectCompany of [async () => undefined, async () => { throw new Error("secret-canary"); }, async () => "bad-canary"]) {

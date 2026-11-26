@@ -100,7 +100,7 @@ function sharedGroupOf(file: string): string {
   if (own) packages.add(own);
   if (packages.has("broker")) return BROKER_WORKFLOWS_AND_SLACK.test(posix.basename(file)) ? "broker-workflows-and-slack" : "broker-core";
   if (["worker", "model-runtime", "verifier", "mcp", "orchestrator"].some((name) => packages.has(name))) return "worker";
-  if (["cli", "aws-adapters", "local-adapters", "gateway", "slack-service"].some((name) => packages.has(name))) return "cli-and-install";
+  if (["cli", "aws-adapters", "gateway", "slack-service"].some((name) => packages.has(name))) return "cli-and-install";
   return "contracts-and-tools";
 }
 export const sharedGroupNames = ["broker-core", "broker-workflows-and-slack", "worker", "cli-and-install", "contracts-and-tools"] as const;

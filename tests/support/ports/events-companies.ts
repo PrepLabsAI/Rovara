@@ -1,10 +1,6 @@
 import { companyChangeFeed, companyLog, companyScoped, type ChangeSubscription, type JsonValue, type DocumentStore, type DueSchedule, type OutboundEventInput, type RegistryView } from "@agentx/contracts";
 import { SHARED_RAW_IDS, TWO_COMPANIES, type IsolationSurface, type TwoCompanyIsolation } from "../../../packages/testing/src/isolation/two-company.js";
 import { MemoryDocumentStore } from "../../../packages/broker/src/ports/memory-document-store.js";
-import { SqliteDocumentStore } from "../../../packages/local-adapters/src/sqlite-document-store.js";
-import { SqliteAuditLog } from "../../../packages/local-adapters/src/sqlite-audit-log.js";
-import { DocumentAuditSink } from "../../../packages/broker/src/plugins/audit-sink/document/sink.js";
-import { startAuditCopy } from "../../../packages/local-adapters/src/audit-copy.js";
 import { workEventRow, listWorkEvents } from "../../../packages/broker/src/core/work-events/work-events.js";
 import { createFakeScheduler } from "../../../packages/broker/src/ports/fake-scheduler.js";
 import { createInProcessRealtime } from "../../../packages/broker/src/ports/realtime.js";
@@ -17,10 +13,9 @@ import { testEnvDigest } from "@agentx/contracts";
 import { testEnvLatestKey, testEnvRevisionKey } from "../../../packages/broker/src/core/test-env/environment.js";
 const at = "2026-11-10T00:00:00.000Z";
 
-function feedSurface(backend: "memory" | "sqlite" | "dynamo"): IsolationSurface {
-  const sqlite = backend === "sqlite" ? SqliteDocumentStore.open({ path: ":memory:" }) : undefined;
+function feedSurface(backend: "memory" | "dynamo"): IsolationSurface {
   const dynamo = backend === "dynamo" ? dynamoWorld() : undefined;
-  const memory = new MemoryDocumentStore(); const store = sqlite ?? dynamo?.store ?? memory;
+  const memory = new MemoryDocumentStore(); const store = dynamo?.store ?? memory;
   const seen = new Map<string, unknown[]>(); const subs: ChangeSubscription[] = [];
   return {
     name: `change feed ${backend}`, kind: "event",
@@ -29,14 +24,13 @@ function feedSurface(backend: "memory" | "sqlite" | "dynamo"): IsolationSurface 
       subs.push(await companyChangeFeed(store.changes!, me.orgId).subscribe(me.orgId, async (batch) => { seen.get(me.orgId)!.push(...batch); }));
       await store.put({ item: { pk: companyScoped(me.orgId, SHARED_RAW_IDS.documentName), sk: "same", companyId: me.orgId, marker: me.canary } });
     },
-    async observe(me) { if (dynamo) await dynamo.settled(); else if (sqlite) await sqlite.settled(); else await memory.settled(); return seen.get(me.orgId); },
-    async teardown() { for (const sub of subs) await sub.stop(); await sqlite?.close(); },
+    async observe(me) { if (dynamo) await dynamo.settled(); else await memory.settled(); return seen.get(me.orgId); },
+    async teardown() { for (const sub of subs) await sub.stop(); },
   };
 }
 
 /** Each surface has a fresh world; both owners use that same world's real adapters and the kit's raw ids. */
 export function eventsCompanies(): TwoCompanyIsolation {
-  const auditStore = new MemoryDocumentStore(); const auditLogs = new Map<string, SqliteAuditLog>();
   const events = new MemoryDocumentStore();
   const scheduler = createFakeScheduler(); const fires: DueSchedule[] = [];
   scheduler.subscribe(async (due) => { fires.push(due); });
@@ -45,18 +39,7 @@ export function eventsCompanies(): TwoCompanyIsolation {
   const outbound: OutboundEventInput[] = [];
   const nightlyStore = new MemoryDocumentStore(); const nights = new Map<string, unknown[]>();
   return { surfaces: [
-    ...(["memory", "sqlite", "dynamo"] as const).map(feedSurface),
-    {
-      name: "audit copy", kind: "read",
-      async plant(me) {
-        const log = SqliteAuditLog.open({ path: ":memory:" }); auditLogs.set(me.orgId, log);
-        const sub = await startAuditCopy({ store: auditStore, log, companyId: me.orgId });
-        try { for (const company of TWO_COMPANIES) await new DocumentAuditSink({ store: () => auditStore }).record({ companyId: company.orgId, eventId: `${company.label}-${me.label}`, at, actor: { type: "person", id: SHARED_RAW_IDS.user }, action: "task.started", details: { marker: company.canary } }); await auditStore.settled(); }
-        finally { await sub?.stop(); }
-      },
-      async observe(me) { return TWO_COMPANIES.flatMap((company) => auditLogs.get(me.orgId)!.read({ companyId: company.orgId })); },
-      async teardown() { for (const log of auditLogs.values()) log.close(); },
-    },
+    ...(["memory", "dynamo"] as const).map(feedSurface),
     {
       name: "work events", kind: "list",
       async plant(me) { await events.put({ item: workEventRow({ version: 1, id: `wev_${"a".repeat(32)}`, kind: "task_started", orgId: me.orgId, project: SHARED_RAW_IDS.project, taskId: "12579b4b-eaa7-4bf2-87bc-6da86b97c9e6", at, actor: { kind: "person", personId: me.canary } }) }); },

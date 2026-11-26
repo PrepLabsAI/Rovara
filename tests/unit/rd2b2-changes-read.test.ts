@@ -28,10 +28,7 @@ import { createCoreDevRoutes, type CompanyMembership, type CoreDevWiring, type D
 import { FAKE_COMPANY, createFakeWorld, type FakeWorld } from "../support/core-host-fakes.js";
 import { readsAsRow } from "../support/code-api-row-read.js";
 import { planDocument } from "../support/plan-documents.js";
-import { FolderObjectStorage } from "../../packages/local-adapters/src/folder-object-storage.js";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { MemoryObjectStorage } from "../support/memory-object-storage.js";
 
 /** A key-shaped string the redaction must hide, built at run time (never a literal in the source). */
 const FAKE_KEY = ["sk", "live", "0123456789abcdef0123"].join("-");
@@ -342,7 +339,7 @@ async function register(world: FakeWorld, companyId: string): Promise<void> {
 }
 
 async function host(wiring: Partial<CoreDevWiring> = {}) {
-  const objects = new FolderObjectStorage({ root: join(mkdtempSync(join(tmpdir(), "rd2b2-objects-")), "store"), maxObjectBytes: 10_000_000 });
+  const objects = new MemoryObjectStorage({ maxObjectBytes: 10_000_000 });
   const world = createFakeWorld({ objects });
   await register(world, FAKE_COMPANY); await register(world, OTHER);
   const app = appOver(world);

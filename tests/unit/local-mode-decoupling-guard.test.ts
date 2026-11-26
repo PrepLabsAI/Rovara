@@ -1,13 +1,13 @@
 // Issue #1538: `rovara up` (local laptop mode) is gone. Its runtime (`packages/broker/src/local/`) and its pages (`packages/broker/src/core/local-pages/`) were deleted in phase 3, after phase 1 made
-// the hosted product and the core import nothing of them. Held by reading the code itself: the folders stay deleted, the `@agentx/broker/local` export stays gone, and no source file outside the
-// local adapters package imports `@agentx/local-adapters` (phase 4 retires that package).
+// the hosted product and the core import nothing of them; phase 4 retired `packages/local-adapters`. Held by reading the code itself: the folders stay deleted, the `@agentx/broker/local`
+// export stays gone, and no source file imports `@agentx/local-adapters`.
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, relative, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const REPO = resolve(import.meta.dirname, "../..");
 const PACKAGES = join(REPO, "packages");
-const DELETED_DIRS = ["packages/broker/src/local", "packages/broker/src/core/local-pages"];
+const DELETED_DIRS = ["packages/broker/src/local", "packages/broker/src/core/local-pages", "packages/local-adapters"];
 const LOCAL_SPECIFIER = /^@agentx\/(?:local-adapters|broker\/local)(?:\/|$)/u;
 const SPECIFIER = /(?:\bfrom\s*|\bimport\s*\(\s*|^\s*import\s+)["']([^"']+)["']/gmu;
 
@@ -23,7 +23,7 @@ function sources(dir: string): string[] {
 
 const rel = (path: string): string => relative(REPO, path).split("\\").join("/");
 const all = readdirSync(PACKAGES, { withFileTypes: true }).filter((entry) => entry.isDirectory()).flatMap((entry) => sources(join(PACKAGES, entry.name, "src")));
-const checked = all.filter((file) => !rel(file).startsWith("packages/local-adapters/"));
+const checked = all;
 
 describe("local mode stays removed (#1538)", () => {
   it("reads the sources (the walk finds the hosted roots)", () => {
