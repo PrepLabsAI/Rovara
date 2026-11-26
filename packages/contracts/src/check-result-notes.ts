@@ -35,3 +35,8 @@ export function checkResultNote(check: Pick<CheckEntry, "after" | "output">): Ch
 
 /** Whether a check report's text already opens with a test-result verdict ("Passed, 3 tests skipped ...", "Not tested: ..."): a surface that adds its own "Checks passed." lead leaves it off, so the two never disagree. */
 export const opensWithTestResult = (text: string): boolean => text.startsWith("Passed, ") || text.startsWith(TEST_RESULT_WORDS.allSkipped);
+
+const CHECK_REPORT_LEADS = { passed: "Checks passed.", failed: "Checks failed.", unknown: "Checks have not finished." } as const;
+
+/** A check report as a chat message: its status as a lead, unless the text opens with its own result (the two would disagree). */
+export const checkReportWords = (report: { status: keyof typeof CHECK_REPORT_LEADS; text: string }): string => (opensWithTestResult(report.text) ? report.text : `${CHECK_REPORT_LEADS[report.status]} ${report.text}`);

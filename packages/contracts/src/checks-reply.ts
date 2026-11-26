@@ -26,30 +26,34 @@ function testResultLines(report: CheckReport): string[] {
   });
 }
 
+/** The verdict of a report whose checks all rerun without a regression. Only checks that passed now count: not already-failing, failing-with-no-earlier-result or not-rerun ones. */
+function verifiedLine(report: CheckReport): string {
+  const rerun = report.checks.filter((check) => check.class !== "not_rerun").length;
+  const passing = report.checks.filter(passesNow);
+  const count = passing.length;
+  // A check whose output says every test was skipped tested nothing: it is not a pass, and tests skipped in the others are said (TEST-RESULT-HONESTY).
+  const skips = passing.map((check) => checkResultNote(check).skipped);
+  const skipped = skips.reduce((sum, skip) => sum + (skip?.all === true ? 0 : skip?.skipped ?? 0), 0);
+  const ran = count - skips.filter((skip) => skip?.all === true).length;
+  // General fakes (DEC 234): checks a Rovara-made fake answered are counted apart, in fixed words, never as plain passes.
+  const made = passing.filter((check) => check.madeByRovara === true).length;
+  const madeWords = made === 0 ? "" : `${made} ${EVIDENCE_TRUST_CLASS_WORDS.made_by_rovara}, never change proof`;
+  const what = report.source === "agent_commands" ? `${count} of the agent's own test commands, rerun by AgentX` : `${count} project ${count === 1 ? "check" : "checks"}`;
+  // With nothing passing (only checks that fail with no earlier result), "Checks passed" would mislead.
+  if (count === 0) return "No regression found, but no check passes yet.";
+  if (ran === 0) return `${TEST_RESULT_WORDS.allSkipped} (${what}${madeWords === "" ? "" : `; ${madeWords}`}).`;
+  // Ruling Z (I-2): a success headline only when every rerun check passes now.
+  if (ran < rerun) return `Checks: ${ran} of ${rerun} pass${madeWords === "" ? "" : ` (${madeWords})`}${skipped === 0 ? "" : `; ${TEST_RESULT_WORDS.skipped(skipped)}`}.`;
+  const detail = `${what}${madeWords === "" ? "" : `; ${madeWords}`}`;
+  return skipped === 0 ? `Checks passed (${detail}).` : `${TEST_RESULT_WORDS.passedWithSkips(skipped)} (${detail}).`;
+}
+
 function reportLines(report: CheckReport): string[] {
   const lines: string[] = [];
   if (report.status === "regression") {
     for (const label of labels(report, "regression")) lines.push(`Not done: ${label} passed before and fails now.`);
   } else if (report.status === "verified") {
-    // Only checks that passed now count: not already-failing, failing-with-no-earlier-result or not-rerun ones.
-    const rerun = report.checks.filter((check) => check.class !== "not_rerun").length;
-    const passing = report.checks.filter(passesNow);
-    const count = passing.length;
-    // A check whose output says every test was skipped tested nothing: it is not a pass, and tests skipped in the others are said (TEST-RESULT-HONESTY).
-    const skips = passing.map((check) => checkResultNote(check).skipped);
-    const untested = skips.filter((skip) => skip?.all === true).length;
-    const skipped = skips.reduce((sum, skip) => sum + (skip?.all === true ? 0 : skip?.skipped ?? 0), 0);
-    const ran = count - untested;
-    // General fakes (DEC 234): checks a Rovara-made fake answered are counted apart, in fixed words, never as plain passes.
-    const made = report.checks.filter((check) => check.madeByRovara === true && (check.class === "passing" || check.class === "fixed")).length;
-    const madeWords = made === 0 ? "" : `; ${made} ${EVIDENCE_TRUST_CLASS_WORDS.made_by_rovara}, never change proof`;
-    const what = report.source === "agent_commands" ? `${count} of the agent's own test commands, rerun by AgentX${madeWords}` : `${count} project ${count === 1 ? "check" : "checks"}${madeWords}`;
-    // With nothing passing (only checks that fail with no earlier result), "Checks passed" would mislead.
-    if (count === 0) lines.push("No regression found, but no check passes yet.");
-    else if (ran === 0) lines.push(`${TEST_RESULT_WORDS.allSkipped} (${what}).`);
-    // Ruling Z (I-2): a success headline only when every rerun check passes now.
-    else if (ran < rerun) lines.push(`Checks: ${ran} of ${rerun} pass${made === 0 ? "" : ` (${made} ${EVIDENCE_TRUST_CLASS_WORDS.made_by_rovara}, never change proof)`}${skipped === 0 ? "" : `; ${TEST_RESULT_WORDS.skipped(skipped)}`}.`);
-    else lines.push(skipped === 0 ? `Checks passed (${what}).` : `${TEST_RESULT_WORDS.passedWithSkips(skipped)} (${what}).`);
+    lines.push(verifiedLine(report));
   } else if (report.notVerifiedReason === "no_checks" && report.source === "none") {
     // Only a project with no checks at all gets this advice; a round that could not rerun its checks is "stopped".
     lines.push("Not verified: no checks ran. Add readiness checks to the project so AgentX can check the agent's work.");

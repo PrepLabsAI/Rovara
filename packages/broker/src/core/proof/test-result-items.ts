@@ -1,11 +1,14 @@
 // TEST-RESULT-HONESTY: the pack's "not tested" items that a check's own output states, so the pull request and the Evidence tab say what a pass did not test. A check whose every test was skipped is a `check` item (the verdict
 // reads it as "a planned check did not run", never "Verified"); some skipped tests and a service the test could not reach are listed beside it. Words come from the contracts' fixed table; only the check's label is
 // the project's own, and it is flattened to one plain line here (the pull request shows it through `inertLine`).
-import { TEST_RESULT_WORDS, checkResultNote, type CheckEntry, type EvidenceNotTested } from "@agentx/contracts";
+import { SANDBOX_MODEL_HOSTS_ITEM_ID, TEST_RESULT_WORDS, checkResultNote, type CheckEntry, type EvidenceNotTested } from "@agentx/contracts";
 
 /** Ids of the items below: `skipped:<check id>` and `needs_<service>`. The verdict tells them from the worker's own "not tested" items by these. */
 export const SKIPPED_ITEM_PREFIX = "skipped:";
 export const NEEDS_SERVICE_ITEM_PREFIX = "needs_";
+
+/** The environment notes the broker writes itself, in fixed words: shown with the result, never a sign that test details could not be read (the model-hosts line, and "looks like a check needs <service>"). */
+export const isFixedEnvironmentNote = (id: string): boolean => id === SANDBOX_MODEL_HOSTS_ITEM_ID || id.startsWith(NEEDS_SERVICE_ITEM_PREFIX);
 
 const plain = (text: string, max: number): string => text.replace(/[\p{Cc}\p{Cf}]+/gu, " ").replace(/\s+/gu, " ").trim().slice(0, max);
 

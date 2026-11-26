@@ -9,6 +9,7 @@ export type TestService = (typeof TEST_SERVICES)[number];
 export interface SkippedTests { skipped: number; all: boolean }
 
 const SUMMARY_LINES = 40;
+// eslint-disable-next-line no-control-regex -- the escape character is what colour codes start with
 const ANSI = /\u001b\[[0-9;?]*[ -/]*[@-~]/gu;
 
 const tailLines = (output: string): string[] => output.replace(ANSI, "").split(/\r?\n/u).slice(-SUMMARY_LINES);
