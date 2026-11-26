@@ -15,9 +15,11 @@
 //           whom, from which company; DEC 254zzz33, 254zzz39).
 //   relink  (DEC 254zzz39) a kept unlinked identity is linked again by the same finish, in place: to the person it was unlinked from or another person of
 //           that company, never another company's; never one an admin turned off or one with a membership of its own. Its own sessions end; logged as a relink.
+//   adopt   (SLACK-LINK-L2) the same finish adopts a never-used company-less record of the identity (its own earlier sign-in attempt: one sign-in, no membership, never merged) by the same
+//           merge (`adoptableCompanyLessRecord`, `adoptWrite`); logged as an adoption. Any other existing record keeps the identity taken.
 //
 // Refusals: one fixed answer (`refused`) for every reason a link cannot be made: the identity is already someone's (any existing record but a kept
-// unlinked one of this company, or a membership row), a Slack identity from a workspace that proves nothing for this company (never linked by email: DEC 254h), the company's own
+// unlinked one of this company or an unused company-less one that is adopted, or a membership row), a Slack identity from a workspace that proves nothing for this company (never linked by email: DEC 254h), the company's own
 // sign-in refuses the method, a revoked person or member, the person already has that method, or a used, expired or foreign link. Logs carry
 // fixed reasons and opaque ids only; never a code, a token, an email address or a provider's words.
 import { randomBytes, timingSafeEqual } from "node:crypto";
@@ -105,6 +107,74 @@ function relinkWrite(tableName: string, linkedId: string, personId: string, comp
       kept.unlinkedCompany === undefined ? "attribute_not_exists(unlinkedCompany)" : "unlinkedCompany = :company"}`,
     ExpressionAttributeValues: { ":person": personId, ":at": at, ":false": false, ":true": true, ":method": identity.method, ":unlinkedAt": kept.unlinkedAt, ":from": kept.unlinkedFrom,
       ...(kept.unlinkedCompany === undefined ? {} : { ":company": companyId }), ...(slackUserId === undefined ? {} : { ":su": slackUserId }), ...(identity.slackTeamId === undefined ? {} : { ":team": identity.slackTeamId }) } } };
+}
+
+/** The sign-in table's row reader the adopt check uses (`read` in createSignInLinks): a consistent GetItem by key. */
+export type RecordReader = (key: { pk: string; sk: string }) => Promise<Record<string, unknown> | undefined>;
+/** Why an unused company-less record may not be adopted: fixed reasons, for the log only (the person's answer never says which). */
+export type AdoptRefusalReason = "not_the_identitys_record" | "wrong_method" | "turned_off" | "not_company_less" | "already_connected" | "has_membership" | "used_more_than_once";
+/** The record fields an adoption's write is conditioned on again, in the transaction. */
+export interface AdoptableRecord { firstSignInAt: string }
+
+/**
+ * DEC 550 / SLACK-LINK-L2: whether the record found under an identity is an UNUSED company-less record that a signed-in person may adopt (their own sign-in attempt that never
+ * got anywhere), instead of the identity being refused as taken. ONE function, so every caller applies the very same checks (the identity join reuses it). Any doubt: no.
+ * It adopts only a record that is ALL of:
+ *   1. the identity's own, a `DEVELOPER` row of the wanted method whose issuer and subject hash to the key it was read under (the key and `provider` are the identity's, `ownerKeyForSubject`), not turned off;
+ *   2. flagged company-less (`companyless` = true, set when a person first signs in with no company; server.ts `companylessMayMint`). The flag is NEVER cleared when the person later creates or joins a company, so it proves nothing
+ *      by itself: a real person (even a company owner) carries it. It is necessary here, never sufficient: check 4 (no membership row) is what makes the record unused;
+ *   3. never merged, linked or unlinked: no `mergedInto`, `linkedAt`, `linkedBy`, `linkedSlackUserId`, `unlinkedAt`, `unlinkedFrom`, `unlinkedCompany` (a kept unlinked record has its own relink path);
+ *   4. no membership row at all, not even a revoked one (`membershipKey`, the one place grants, roles and tasks hang from: a project grant or a task needs a member, so none can exist without one);
+ *   5. used by exactly ONE sign-in (`firstSignInAt` = `lastSignInAt`, both written by every sign-in's upsert): one sign-in is one session, so no other session exists; and its name was never chosen by the person.
+ * The caller writes the adoption with `adoptWrite`, which conditions the record on the same facts again.
+ */
+export async function adoptableCompanyLessRecord(input: { read: RecordReader; linkedId: string; record: Record<string, unknown>; method?: LinkableSignInMethod }): Promise<{ ok: true; record: AdoptableRecord } | { ok: false; reason: AdoptRefusalReason }> {
+  const { read, linkedId, record, method } = input;
+  const no = (reason: AdoptRefusalReason) => ({ ok: false as const, reason });
+  if (record.pk !== `DEVELOPER#${linkedId}` || record.sk !== "META" || record.entityType !== "DEVELOPER" || (record.developerId !== undefined && record.developerId !== linkedId)
+    || typeof record.issuer !== "string" || typeof record.subject !== "string" || ownerKeyForSubject(record.issuer, record.subject) !== linkedId) return no("not_the_identitys_record");
+  if (record.provider !== "slack" && record.provider !== "github") return no("wrong_method");
+  if (method !== undefined && record.provider !== method) return no("wrong_method");
+  if (record.revoked !== false) return no("turned_off");
+  if (record.companyless !== true) return no("not_company_less");
+  for (const field of ["mergedInto", "linkedAt", "linkedBy", "linkedSlackUserId", "unlinkedAt", "unlinkedFrom", "unlinkedCompany"]) if (record[field] !== undefined) return no("already_connected");
+  if (await read(membershipKey(linkedId)) !== undefined) return no("has_membership");
+  const first = record.firstSignInAt;
+  if (typeof first !== "string" || !Number.isFinite(Date.parse(first)) || record.lastSignInAt !== first || record.displayNameChosen !== undefined) return no("used_more_than_once");
+  return { ok: true, record: { firstSignInAt: first } };
+}
+
+/**
+ * The adoption itself: the existing merge (`mergedInto`) of the unused record toward the signed-in person, in place, as `relinkWrite` does for a kept one (its own session from the sign-in that
+ * made it ends; it carries no email, as a linked record never does, and no `companyless` flag: it is a person's linked sign-in now, and an unlink sets the flag again, DEC 254zzz33). Conditioned on exactly what `adoptableCompanyLessRecord` read: still nobody's, on, company-less, never connected,
+ * signed in once (the same first-sign-in time, and no later one), its name not chosen.
+ */
+function adoptWrite(tableName: string, linkedId: string, personId: string, adopted: AdoptableRecord, identity: Proved, at: string): Write {
+  const slackUserId = identity.method === "slack" ? identity.slackUserId : undefined;
+  const set = ["mergedInto = :person", "linkedAt = :at", "linkedBy = :person", "sessionsEndedAt = :at", ...(slackUserId === undefined ? [] : ["slackUserId = :su"]), ...(identity.slackTeamId === undefined ? [] : ["slackTeamId = :team"])];
+  const remove = ["companyless", "firstSignInMark", "email", "slackTeamName", ...(slackUserId === undefined ? ["slackUserId"] : []), ...(identity.slackTeamId === undefined ? ["slackTeamId"] : [])];
+  return { Update: { TableName: tableName, Key: { pk: `DEVELOPER#${linkedId}`, sk: "META" },
+    UpdateExpression: `SET ${set.join(", ")} REMOVE ${remove.join(", ")}`,
+    ConditionExpression: "attribute_exists(pk) AND revoked = :false AND companyless = :true AND provider = :method AND firstSignInAt = :first AND lastSignInAt = :first AND attribute_not_exists(displayNameChosen) AND attribute_not_exists(mergedInto) "
+      + "AND attribute_not_exists(linkedAt) AND attribute_not_exists(linkedBy) AND attribute_not_exists(linkedSlackUserId) AND attribute_not_exists(unlinkedAt) AND attribute_not_exists(unlinkedFrom) AND attribute_not_exists(unlinkedCompany)",
+    ExpressionAttributeValues: { ":person": personId, ":at": at, ":false": false, ":true": true, ":method": identity.method, ":first": adopted.firstSignInAt,
+      ...(slackUserId === undefined ? {} : { ":su": slackUserId }), ...(identity.slackTeamId === undefined ? {} : { ":team": identity.slackTeamId }) } } };
+}
+
+/** What stands in the way of an identity being linked: nothing (a new record is written), a kept unlinked record (linked again), an unused company-less record (adopted), or someone else's (taken). */
+type Claim = { kind: "new" } | { kind: "relink"; relink: { unlinkedAt: string; unlinkedFrom: string; unlinkedCompany?: string } } | { kind: "adopt"; adopt: AdoptableRecord } | { kind: "taken" };
+/** The marks the company log row of a link carries for a relink (the person it was unlinked from) or an adoption (the adopted record's own opaque id, its owner key: the connected-method row that names it goes on an unlink). */
+const claimMarks = (claim: Claim, linkedId: string) => (claim.kind === "relink" ? { relink: true, previousPersonId: claim.relink.unlinkedFrom } : claim.kind === "adopt" ? { adopted: true, adoptedId: linkedId } : {});
+/** The write of the linked identity's own record for each kind of claim (a new record, the kept one linked again, or the unused one adopted). */
+function identityWrite(tableName: string, claim: Claim, linkedId: string, personId: string, companyId: string, identity: Proved, at: string): Write {
+  if (claim.kind === "adopt") return adoptWrite(tableName, linkedId, personId, claim.adopt, identity, at);
+  if (claim.kind === "relink") return relinkWrite(tableName, linkedId, personId, companyId, claim.relink, identity, at);
+  const slackUserId = identity.method === "slack" ? identity.slackUserId : undefined;
+  return { Put: { TableName: tableName, ConditionExpression: "attribute_not_exists(pk)", Item: {
+    pk: `DEVELOPER#${linkedId}`, sk: "META", entityType: "DEVELOPER", developerId: linkedId, provider: identity.method, issuer: identity.issuer, subject: identity.subject,
+    displayName: identity.displayName, revoked: false, firstSignInAt: at, lastSignInAt: at, mergedInto: personId, linkedAt: at, linkedBy: personId,
+    ...(slackUserId === undefined ? {} : { slackUserId }), ...(identity.slackTeamId === undefined ? {} : { slackTeamId: identity.slackTeamId }),
+  } } };
 }
 
 const ENTITIES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
@@ -203,6 +273,19 @@ export function createSignInLinks(options: SignInLinkOptions) {
     }
   }
 
+  /** The identity's claim (see `Claim`): read from its own record, the kept-unlinked rules first, then the adopt checks. */
+  async function claimOf(linkedId: string, method: LinkableSignInMethod, personId: string, companyId: string): Promise<Claim> {
+    const row = await read({ pk: `DEVELOPER#${linkedId}`, sk: "META" });
+    if (row === undefined) return { kind: "new" };
+    const kept = KeptRecord.safeParse(row);
+    if (row.pk === `DEVELOPER#${linkedId}` && row.sk === "META" && kept.success && kept.data.developerId === linkedId && kept.data.provider === method
+      && (kept.data.unlinkedCompany === undefined ? kept.data.unlinkedFrom === personId : kept.data.unlinkedCompany === companyId)) {
+      return { kind: "relink", relink: { unlinkedAt: kept.data.unlinkedAt, unlinkedFrom: kept.data.unlinkedFrom, ...(kept.data.unlinkedCompany === undefined ? {} : { unlinkedCompany: kept.data.unlinkedCompany }) } };
+    }
+    const adoptable = await adoptableCompanyLessRecord({ read, linkedId, record: row, method });
+    return adoptable.ok ? { kind: "adopt", adopt: adoptable.record } : { kind: "taken" };
+  }
+
   const operations = {
     async start(event: unknown): Promise<SignInLinkStartResponse> {
       const parsed = SignInLinkStartRequestSchema.safeParse(event);
@@ -266,14 +349,9 @@ export function createSignInLinks(options: SignInLinkOptions) {
       // The identity is nobody's yet: no record of its own (a person, a merged or revoked sign-in) and no membership. Checked again in the transaction.
       // DEC 254zzz39: or its record is one an unlink kept (DEC 254zzz33): unlinked, nobody's, on, never a person of a company, and unlinked from this company (a record unlinked
       // before the company was kept: only by the person it was unlinked from). It is linked again in place; every condition is checked again in the transaction.
-      const { pk: keptPk, sk: keptSk, ...keptFields } = await read({ pk: `DEVELOPER#${linkedId}`, sk: "META" }) ?? {};
-      let relink: { unlinkedAt: string; unlinkedFrom: string; unlinkedCompany?: string } | undefined;
-      if (keptPk !== undefined) {
-        const kept = KeptRecord.safeParse(keptFields);
-        if (keptPk !== `DEVELOPER#${linkedId}` || keptSk !== "META" || !kept.success || kept.data.developerId !== linkedId || kept.data.provider !== link.method
-          || !(kept.data.unlinkedCompany === undefined ? kept.data.unlinkedFrom === developerId : kept.data.unlinkedCompany === member.companyId)) return refuse("signin.link_refused", developerId, "identity_taken");
-        relink = { unlinkedAt: kept.data.unlinkedAt, unlinkedFrom: kept.data.unlinkedFrom, ...(kept.data.unlinkedCompany === undefined ? {} : { unlinkedCompany: kept.data.unlinkedCompany }) };
-      }
+      // SLACK-LINK-L2: or it is an unused company-less record of the identity's own sign-in attempt, adopted by the person (`adoptableCompanyLessRecord`); anything else stays taken.
+      const claim = await claimOf(linkedId, link.method, developerId, member.companyId);
+      if (claim.kind === "taken") return refuse("signin.link_refused", developerId, "identity_taken");
       const slackUserId = identity.method === "slack" ? identity.slackUserId : undefined;
       if (slackUserId !== undefined && ((person.slackUserId !== undefined && person.slackUserId !== slackUserId) || person.linkedSlackUserId !== undefined)) {
         return refuse("signin.link_refused", developerId, "other_slack");
@@ -282,13 +360,7 @@ export function createSignInLinks(options: SignInLinkOptions) {
       const writes: Write[] = [
         { Update: { TableName: tableName, Key: { pk: `SIGNIN_LINK#${linkId}`, sk: "META" }, UpdateExpression: "SET finishedAt = :at",
           ConditionExpression: "attribute_not_exists(finishedAt) AND attemptAt = :attempt", ExpressionAttributeValues: { ":at": at, ":attempt": attemptAt } } },
-        relink === undefined
-          ? { Put: { TableName: tableName, ConditionExpression: "attribute_not_exists(pk)", Item: {
-            pk: `DEVELOPER#${linkedId}`, sk: "META", entityType: "DEVELOPER", developerId: linkedId, provider: identity.method, issuer: identity.issuer, subject: identity.subject,
-            displayName: identity.displayName, revoked: false, firstSignInAt: at, lastSignInAt: at, mergedInto: developerId, linkedAt: at, linkedBy: developerId,
-            ...(slackUserId === undefined ? {} : { slackUserId }), ...(identity.slackTeamId === undefined ? {} : { slackTeamId: identity.slackTeamId }),
-          } } }
-          : relinkWrite(tableName, linkedId, developerId, member.companyId, relink, identity, at),
+        identityWrite(tableName, claim, linkedId, developerId, member.companyId, identity, at),
         slackUserId === undefined
           ? { ConditionCheck: { TableName: tableName, Key: { pk: `DEVELOPER#${developerId}`, sk: "META" },
             ConditionExpression: "attribute_exists(pk) AND revoked = :false AND attribute_not_exists(mergedInto) AND provider <> :method",
@@ -306,7 +378,7 @@ export function createSignInLinks(options: SignInLinkOptions) {
         { Put: { TableName: tableName, ConditionExpression: "attribute_not_exists(pk)", Item: {
           pk: companyScoped(OrgIdSchema.parse(member.companyId), "COMPANY_LOG"), sk: `${at}#${randomBytes(16).toString("hex")}`, entityType: "COMPANY_LOG", event: "company-signin-link",
           companyId: member.companyId, personId: developerId, createdBy: developerId, createdAt: at, method: link.method,
-          ...(relink === undefined ? {} : { relink: true, previousPersonId: relink.unlinkedFrom }),
+          ...claimMarks(claim, linkedId),
         } } },
       ];
       try { await documentClient.send(new TransactWriteCommand({ TransactItems: writes })); }
@@ -314,7 +386,7 @@ export function createSignInLinks(options: SignInLinkOptions) {
         if (conditionFailed(error)) return refuse("signin.link_refused", developerId, "changed_meanwhile");
         throw error;
       }
-      options.log({ event: "signin.linked", developerId, method: link.method, ...(relink === undefined ? {} : { relink: true }) });
+      options.log({ event: "signin.linked", developerId, method: link.method, ...(claim.kind === "relink" ? { relink: true } : {}), ...(claim.kind === "adopt" ? { adopted: true } : {}) });
       return { ok: true, method: link.method };
     },
 
