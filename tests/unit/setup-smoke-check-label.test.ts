@@ -74,4 +74,11 @@ describe("what the setup agent is told", () => {
     expect(rules).toContain("shell lines, in order, in one session");
     expect(rules).toContain("npm run lint && npm test");
   });
+  it("the rules state the directory and environment rule: a cd does not carry over, exported environment does, and a cd on its own line does not change the next line's directory", () => {
+    const rules = setupProposalFormatLines(undefined).join("\n");
+    expect(rules).toContain("a `cd` does not, and neither does a variable that is not exported");
+    expect(rules).toContain("exported environment from an earlier line carries over to later lines");
+    expect(rules).toContain("write `cd web && npm ci` on one line");
+    expect(rules).toContain("a `cd` on its own line does not change where the next line runs");
+  });
 });
