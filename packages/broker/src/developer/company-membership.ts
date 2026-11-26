@@ -134,7 +134,7 @@ export class CompanySignInStore {
       } });
       try { await this.input.documentClient.send(new TransactWriteCommand({ TransactItems: writes })); }
       catch (error) {
-        if (!conditional(error)) return refused();
+        if (!conditional(error)) throw error;
         const won = await this.membership(input.personId);
         return won === undefined ? refused() : this.memberResult(won, input.companyId);
       }

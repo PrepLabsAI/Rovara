@@ -8,6 +8,7 @@ import { CompanySignInStore } from "../../packages/broker/src/developer/company-
 import { CompanyInviteStore } from "../../packages/broker/src/developer/company-invites.js";
 import { companyMayMint } from "../../packages/broker/src/developer/session-mint.js";
 import { isMembershipReadFailure } from "../../packages/broker/src/core/membership-read.js";
+import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const failMembershipReadsOnce = (h: { db: { injectFault(fault: { command?: string; match?: (input: Record<string, unknown>) => boolean; error: { name: string; message?: string }; times?: number }): void } }) =>
@@ -40,6 +41,26 @@ describe("the mint check", () => {
     await expect(invites.companylessEligible(person)).rejects.toSatisfy(isMembershipReadFailure);
     db.set({ pk: `COMPANY_MEMBER#${person}`, sk: "COMPANY", entityType: "COMPANY_MEMBERSHIP", personId: person, companyId: COMPANY_A.orgId, role: "member", joinedAt: "2026-11-01T00:00:00.000Z" });
     expect(await invites.companylessEligible(person), "a person who has a membership row is not companyless").toBe(false);
+  });
+
+  it("a legacy-seat person at a refresh: a THROTTLED seat write is the retryable failure (never 'may not mint', which revokes); a lost race is the refusal it always was", async () => {
+    const now = () => Date.UTC(2026, 10, 25);
+    const legacy = (db: FakeDynamoDb, subject: string) => {
+      const person = ownerKeyForSubject("https://x.example", subject);
+      db.set({ pk: `DEVELOPER#${person}`, sk: "META", entityType: "DEVELOPER", provider: "oidc", issuer: "https://x.example", subject, revoked: false, firstSignInAt: "2026-11-01T00:00:00.000Z", lastSignInAt: "2026-11-01T00:00:00.000Z" });
+      return person;
+    };
+    const db = new FakeDynamoDb({ seed: 3 });
+    const company = new CompanySignInStore({ documentClient: db, tableName: "signin", now });
+    const deps = { company, slackCompany: async () => undefined, companyless: async () => false };
+    expect(await companyMayMint(deps, legacy(db, "control"), "oidc", IMPLICIT_COMPANY_ID, undefined, true), "control: the seat is written").toBe(true);
+    const throttled = legacy(db, "throttled");
+    db.injectFault({ command: "TransactWriteCommand", error: { name: "ProvisionedThroughputExceededException", message: "throttled" }, times: 1 });
+    await expect(companyMayMint(deps, throttled, "oidc", IMPLICIT_COMPANY_ID, undefined, true)).rejects.toSatisfy(isMembershipReadFailure);
+    expect(await companyMayMint(deps, throttled, "oidc", IMPLICIT_COMPANY_ID, undefined, true), "the retry seats the person").toBe(true);
+    const raced = legacy(db, "raced");
+    db.injectFault({ command: "TransactWriteCommand", error: { name: "ConditionalCheckFailedException", message: "lost the race" }, times: 1 });
+    expect(await companyMayMint(deps, raced, "oidc", IMPLICIT_COMPANY_ID, undefined, true), "a lost race re-reads and finds no seat: refused").toBe(false);
   });
 
   it("a legacy-seat person at a refresh: a failed read or write inside the join is the retryable failure, never 'may not mint'", async () => {
