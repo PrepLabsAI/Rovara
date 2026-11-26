@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM, call, issuer } from "../support/slack-broker.js";
+import { membershipReadFailed } from "../../packages/broker/src/core/membership-read.js";
 import { ADMIN_NAME_COLLISION_MESSAGE } from "../../packages/broker/src/aws/admin-name-collision.js";
 
 // DEC 254zzz6 D2 (rows 3651/3655): the old /v1/admin project routes find an administrator's grant by project NAME only. (1) A name-only admin route refuses, with one
@@ -136,5 +137,34 @@ describe("D2 (2): the admin reads are given the company reader production sets",
     // With no workspace of the caller's company, the company-scoped read refuses instead of listing the install team's bindings.
     expect(scoped.status).not.toBe(200);
     expect(JSON.stringify(scoped.body)).not.toContain(SLACK_CHANNEL);
+  });
+});
+
+// MEMBERSHIP-READ-FAILS-SAFE (re-check SHOULD, mutant row 26): the task-company check of the admin task routes (broker.ts administratorOfTaskCompany).
+describe("an administrator's task route reads their company: a failed read is the retryable 503, never the 'not an administrator' 403", () => {
+  const TASK = "11111111-2222-4333-8444-555555555555";
+  const replay = (broker: Awaited<ReturnType<typeof world>>) => call(broker.handler, { method: "POST", path: `/v1/admin/tasks/${TASK}/e2e-replay`, user: ADMIN, body: { requestId: randomUUID(), roundId: "round-1" } });
+  const seeded = async (held: Held) => {
+    // The company reader answers while the world is set up, and gives `held` (an answer, no company, or a failure) when the route asks.
+    const open: { [ownerKey: string]: Held } = { [ADMIN_KEY]: IMPLICIT_COMPANY_ID };
+    const broker = await world(open);
+    open[ADMIN_KEY] = held;
+    broker.db.set({ pk: `MEMBER#${ADMIN_KEY}`, sk: "PROJECT#payments", entityType: "MEMBERSHIP", projectName: "payments", role: "administrator" });
+    broker.db.set({ pk: `DEVTASK#${TASK}`, sk: "META", entityType: "DEVTASK", taskId: TASK, project: "payments" });
+    return broker;
+  };
+
+  it("a read that FAILED (marked) answers 503 RUNTIME_UNAVAILABLE; a read that says no company, or an unmarked error, is still the 403", async () => {
+    const failed = await replay(await seeded(membershipReadFailed()));
+    expect(failed, JSON.stringify(failed.body)).toMatchObject({ status: 503, body: { error: { code: "RUNTIME_UNAVAILABLE" } } });
+    for (const held of [undefined, new Error("not a membership read")] as const) {
+      const refused = await replay(await seeded(held));
+      expect(refused, JSON.stringify(refused.body)).toMatchObject({ status: 403, body: { error: { code: "FORBIDDEN", message: "administrator project membership is required" } } });
+    }
+  });
+
+  it("control: the administrator of the task's own company passes the check (the answer is not the 403)", async () => {
+    const answer = await replay(await seeded(IMPLICIT_COMPANY_ID));
+    expect(answer.status, JSON.stringify(answer.body)).not.toBe(403);
   });
 });
