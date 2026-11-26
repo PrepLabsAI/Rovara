@@ -49,11 +49,11 @@ function createSealedCheckRunners(rootPath: string, seam: SealedSeam): CheckRunn
   canonicalRoot.catch(() => undefined);
   return {
     kind: "sealed",
-    async runProjectCommand(command, signal) {
+    async runProjectCommand(command, signal, session) {
       if (signal.aborted) throw new Error("aborted");
       const root = await canonicalRoot;
       try {
-        const result = await runContainerCommand(seam.exec, root, command, signal, commandOptions);
+        const result = await runContainerCommand(seam.exec, root, command, signal, session === undefined ? commandOptions : { ...commandOptions, session });
         if (signal.aborted) throw new Error("aborted");
         return { exitCode: result.exitCode, timedOut: result.timedOut === true, stdout: seam.redact(result.stdout), stderr: seam.redact(result.stderr) };
       } catch (error) {

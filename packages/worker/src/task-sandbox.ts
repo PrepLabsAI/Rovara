@@ -8,6 +8,7 @@ import { agentXError, type ProjectCommand } from "@agentx/contracts";
 import { createLocalBashOperations, type BashOperations } from "@earendil-works/pi-coding-agent";
 import { nodePathPrefixFor } from "./node-runtime.js";
 import { containerBashOperations, runContainerCommand, type ContainerCommandOptions, type ContainerExec } from "./devcontainer.js";
+import type { ShellSession } from "./shell-session.js";
 import { fileOpsExec, type FileOpsTarget } from "./file-ops-exec.js";
 import type { CommandResult } from "./readiness.js";
 import { hiddenWorkspaceDirectories } from "./workspace-state.js";
@@ -450,9 +451,9 @@ export class TaskSandbox {
     };
   }
 
-  /** A project command (setup, readiness) in the sandbox. */
-  runCommand(command: ProjectCommand, signal?: AbortSignal): Promise<CommandResult> {
-    return runContainerCommand(this.exec, this.options.rootPath, command, signal, this.commandOptions());
+  /** A project command (setup, readiness) in the sandbox. `session`: the group of lines it belongs to (shell-session.ts), whose shell lines share one shell session. */
+  runCommand(command: ProjectCommand, signal?: AbortSignal, session?: ShellSession): Promise<CommandResult> {
+    return runContainerCommand(this.exec, this.options.rootPath, command, signal, session === undefined ? this.commandOptions() : { ...this.commandOptions(), session });
   }
 
   /** Removes the container. Safe to call again, and when nothing started. */

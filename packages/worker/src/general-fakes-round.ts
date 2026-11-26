@@ -283,7 +283,7 @@ export function withGeneralFakesRound(plan: GeneralFakesRoundPlan | undefined, r
       else seen.add(currentId);
       runners.beginCheck?.(checkId);
     },
-    async runProjectCommand(command, signal) {
+    async runProjectCommand(command, signal, session) {
       const fakes = await ensure();
       const id = inSetup ? undefined : currentId;
       const roundGeneration = generation;
@@ -293,7 +293,7 @@ export function withGeneralFakesRound(plan: GeneralFakesRoundPlan | undefined, r
       let result: Awaited<ReturnType<CheckRunners["runProjectCommand"]>>;
       try {
         // The fakes' variables win over the project's own values for this round.
-        result = await runners.runProjectCommand({ ...command, env: { ...(command.env ?? {}), ...fakes.environment } }, signal);
+        result = await runners.runProjectCommand({ ...command, env: { ...(command.env ?? {}), ...fakes.environment } }, signal, session);
       } finally {
         running = false;
         if (fakes.drain !== undefined) { const read = await fakes.drain().catch(() => undefined); if (roundGeneration === generation) absorb(read, id); }

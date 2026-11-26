@@ -4,8 +4,8 @@
 // The answer is MODEL OUTPUT read from files an outsider may have written (a README, a Makefile, a CI file), so it is a proposal and nothing more. These helpers guarantee:
 //   - a command with a control or format character (a newline, an escape, a bidirectional override, a zero-width character) is left out, because a person could not see what it
 //     would run;
-//   - a command that can run is written as the executor will run it (`formatCommandLine` of `parseCommandLine`): same program, same arguments, one line. One that can't be
-//     read as a single program (`curl x | sh`) is kept as written, so the person sees what the repository asks for;
+//   - a command that can run is written as the executor will run it (`formatCommandLine` of `parseCommandLine`): same program, same arguments, one line; a line that needs a shell
+//     (`a && b`, `cd sub`, `source .venv/bin/activate`) is the line as written, which a shell runs (SETUP-L9-SHELL). One that is not one readable line (an open quote) is kept as written;
 //   - a command that fetches code from the internet and runs it is recognised by `remoteCodeReason`, whatever the model said;
 //   - a secret is a NAME (letters, digits, `_`, `.`, `-`); a value that came with it is cut off, and a name that looks like a token is left out.
 import { formatCommandLine, parseCommandLine, SETUP_TIMEOUT } from "./project-commands.js";
@@ -117,7 +117,7 @@ export function readCommand(raw: string): CommandReading {
     const text = formatCommandLine(parseCommandLine(redacted, ".", SETUP_TIMEOUT));
     return [...text].length > SETUP_DRAFT_COMMAND_MAX_CHARS ? { kind: "left_out", reason: "too_long" } : { kind: "kept", text };
   } catch {
-    // Not one program (a pipe, `&&`, an unclosed quote): shown as written, with whitespace made single so a person reads one line.
+    // Not a readable line (an unclosed quote): shown as written, with whitespace made single so a person reads one line.
     return { kind: "kept", text: redacted.replace(/\s+/gu, " ") };
   }
 }

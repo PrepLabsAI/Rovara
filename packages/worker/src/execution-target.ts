@@ -14,6 +14,7 @@
 import { RunnerIdSchema, agentXError, type ProjectCommand } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import type { CommandResult } from "./readiness.js";
+import type { ShellSession } from "./shell-session.js";
 import type { TaskSandbox } from "./task-sandbox.js";
 
 export type ExecutionTarget = { readonly kind: "sandbox" } | { readonly kind: "runner"; readonly id: string };
@@ -40,7 +41,7 @@ export function formatExecutionTarget(target: ExecutionTarget): string {
 /** The two ways commands start today: the agent's shell (a command line, as pi's bash tool gives it) and a project command (an executable and its arguments). */
 export interface TargetCommands {
   bashOperations(): BashOperations;
-  runCommand(command: ProjectCommand, signal?: AbortSignal): Promise<CommandResult>;
+  runCommand(command: ProjectCommand, signal?: AbortSignal, session?: ShellSession): Promise<CommandResult>;
 }
 
 /** What a target needs to be reached. Only the sandbox exists today. */
@@ -68,9 +69,9 @@ export function executionFor(target: ExecutionTarget, bindings: ExecutionBinding
 }
 
 /** What Prove's `runCommand` port returns for a command that ran on a target (the same fields the checks keep). */
-export function proveCommandPort(commands: TargetCommands): (command: ProjectCommand, signal: AbortSignal) => Promise<{ exitCode: number | null; timedOut: boolean; stdout: string; stderr: string }> {
-  return async (command, signal) => {
-    const result = await commands.runCommand(command, signal);
+export function proveCommandPort(commands: TargetCommands): (command: ProjectCommand, signal: AbortSignal, session?: ShellSession) => Promise<{ exitCode: number | null; timedOut: boolean; stdout: string; stderr: string }> {
+  return async (command, signal, session) => {
+    const result = await commands.runCommand(command, signal, session);
     return { exitCode: result.exitCode, timedOut: result.timedOut === true, stdout: result.stdout, stderr: result.stderr };
   };
 }
