@@ -154,6 +154,111 @@ async function pressedBy(deps: TaskFlowDeps, input: Pick<StepInput, "task" | "by
   return typeof row?.["by"] === "string" ? row["by"] : undefined;
 }
 
+type StepAcceptInput = Parameters<typeof buildOperation>[1];
+type StepOptionalFields = Pick<
+  StepAcceptInput,
+  | "operationId"
+  | "workflowMode"
+  | "programStepId"
+  | "workflowRevision"
+  | "publication"
+  | "maintenance"
+  | "workflowDependencies"
+  | "workflowE2EAdmission"
+  | "firstEvent"
+  | "secondReviewPlan"
+  | "designReview"
+  | "modelSourceId"
+>;
+
+function extendCapabilityList(base: readonly string[] | undefined, extra: string, include: boolean): string[] | undefined {
+  if (base === undefined && !include) return undefined;
+  const list = base === undefined ? [] : [...base];
+  if (include) list.push(extra);
+  return list;
+}
+
+async function stepUsesContextSources(deps: TaskFlowDeps, input: StepInput, operationKind: "task" | "publish" | "maintain"): Promise<boolean> {
+  // A stage that may read the project's sources and has some gets the capability to ask for them, and only on a worker that can use them. Build never does.
+  // (A design review reviewer reads its packet, which already holds the project's source items, so it gets no capability of its own.)
+  if (operationKind !== "task" || input.workflowMode === undefined || deps.contextSources === undefined) return false;
+  if (!isContextSourceStage(input.workflowMode) || input.designReview !== undefined) return false;
+  return deps.contextSources.stageHasSources({ project: input.task.project }, input.workflowMode);
+}
+
+function stepOperationOptions(input: StepInput, workflowRevision: number | undefined): StepOptionalFields {
+  const options: StepOptionalFields = { ...applicationAdmissionFields(input) };
+  if (input.operationId !== undefined) options.operationId = input.operationId;
+  if (input.workflowMode !== undefined) options.workflowMode = input.workflowMode;
+  if (input.programStepId !== undefined) options.programStepId = input.programStepId;
+  if (workflowRevision !== undefined) options.workflowRevision = workflowRevision;
+  if (input.publication !== undefined) options.publication = input.publication;
+  if (input.maintenance !== undefined) options.maintenance = input.maintenance;
+  if (input.workflowDependencies !== undefined) options.workflowDependencies = input.workflowDependencies;
+  if (input.firstEvent !== undefined) options.firstEvent = input.firstEvent;
+  if (input.secondReviewPlan !== undefined) options.secondReviewPlan = input.secondReviewPlan;
+  if (input.designReview !== undefined) options.designReview = input.designReview;
+  if (input.modelSourceId !== undefined) options.modelSourceId = input.modelSourceId;
+  return options;
+}
+
+function stepDispatchSpec(input: StepInput, operationKind: "task" | "publish" | "maintain", prompt: string, withSources: boolean): DispatchSpec {
+  const payload: Record<string, JsonValue> = operationKind !== "task"
+    ? { ...input.payload }
+    : {
+        conversationId: input.conversationId ?? input.task.conversationId,
+        prompt,
+        ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }),
+        ...input.payload,
+        ...(withSources ? { contextSources: true } : {}),
+      };
+  const requires = extendCapabilityList(input.requires, "task.contextSources.v1", withSources);
+  const extraActions = extendCapabilityList(input.extraActions, "context-tools", withSources);
+  return {
+    kind: operationKind,
+    projectRevision: input.workspace.projectRevision,
+    payload,
+    ...(requires === undefined ? {} : { requires }),
+    ...(extraActions === undefined ? {} : { extraActions }),
+  };
+}
+
+function stepTaskUpdateItem(deps: TaskFlowDeps, input: StepInput, now: string): TransactItem {
+  const fed = input.notes === undefined ? undefined : notesFedUpdate(input.notes);
+  const workflowWrite = input.workflow === undefined ? undefined : workflowWriteOps(input.workflow.current, input.workflow.next, { ownsFlow: true });
+  const ops: ChangeOp[] = [];
+  if (workflowWrite !== undefined) ops.push(...workflowWrite.ops);
+  ops.push(change.set("updatedAt", now));
+  if (fed !== undefined) ops.push(...fed.ops);
+  const conditions: Condition[] = [when.eq("companyId", deps.companyId), when.notExists("closedAt"), when.notExists("closeOperationId")];
+  if (input.workflow !== undefined && workflowWrite !== undefined) {
+    conditions.push(when.eq(["workflow", "revision"], input.workflow.current.revision), ...workflowWrite.guard);
+  }
+  if (fed !== undefined) conditions.push(fed.condition);
+  return { kind: "update", key: taskKey(input.task.taskId), ops, condition: when.and(...conditions) };
+}
+
+function stepTransactionItems(
+  deps: TaskFlowDeps,
+  input: StepInput,
+  built: ReturnType<typeof buildOperation>,
+  commentItems: readonly TransactItem[],
+  permittedItems: readonly TransactItem[] | undefined,
+  now: string,
+): TransactItem[] {
+  const items: TransactItem[] = combinedChecks([
+    stepTaskUpdateItem(deps, input, now),
+    holdWorkspaceItem(input.workspace, built.operation.id, now),
+    ...built.items,
+    ...commentItems,
+    ...(permittedItems ?? []),
+    ...(input.extra ?? []),
+  ]);
+  // The work events of the step's own transition (slice A4): extra items of the same transaction, left out when off or when they do not fit.
+  if (input.workflow !== undefined) items.push(...flowWorkEventItems({ enabled: deps.workEvents, orgId: deps.companyId, project: input.task.project, before: input.workflow.current, after: input.workflow.next, room: TRANSACTION_ITEMS_MAX - items.length }));
+  return items;
+}
+
 /** Accepts the operation for one step. `STALE` and `WAITING` write nothing. */
 export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<{ result: StepStart; operation?: OperationRecord }> {
   assertPromptFits(input.prompt);
@@ -172,58 +277,24 @@ export async function acceptStep(deps: TaskFlowDeps, input: StepInput): Promise<
     if (task.workflow !== undefined) await blockTaskWorkflow(deps, task.taskId, task.workflow.revision, permitted.message);
     return { result: "STALE" };
   }
-  // A stage that may read the project's sources and has some gets the capability to ask for them, and only on a worker that can use them. Build never does.
-  // (A design review reviewer reads its packet, which already holds the project's source items, so it gets no capability of its own.)
-  const withSources = operationKind === "task" && input.workflowMode !== undefined && deps.contextSources !== undefined && isContextSourceStage(input.workflowMode)
-    && input.designReview === undefined
-    && await deps.contextSources.stageHasSources({ project: task.project }, input.workflowMode);
+  const withSources = await stepUsesContextSources(deps, input, operationKind);
   const comments = await commentsForPlanningStep(deps, input);
   const prompt = `${input.prompt}${comments.suffix}`;
   assertPromptFits(prompt);
   const now = iso(deps);
-  const fed = input.notes === undefined ? undefined : notesFedUpdate(input.notes);
   const workflowRevision = input.workflow?.next.revision ?? task.workflow?.revision;
   const built = buildOperation(deps, {
     workspace: { pk: workspace.pk, id: workspace.id, ownerKey: workspace.ownerKey, fence: workspace.fence + 1 },
-    kind: operationKind, requestId: input.requestId, now, ...(input.operationId === undefined ? {} : { operationId: input.operationId }), ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }),
+    kind: operationKind,
+    requestId: input.requestId,
+    now,
     conversationId: input.conversationId ?? task.conversationId,
-    ...(input.programStepId === undefined ? {} : { programStepId: input.programStepId }),
-    ...(workflowRevision === undefined ? {} : { workflowRevision }),
-    ...(input.publication === undefined ? {} : { publication: input.publication }),
-    ...(input.maintenance === undefined ? {} : { maintenance: input.maintenance }),
-    ...(input.workflowDependencies === undefined ? {} : { workflowDependencies: input.workflowDependencies }),
-    ...applicationAdmissionFields(input),
-    ...(input.firstEvent === undefined ? {} : { firstEvent: input.firstEvent }),
-    ...(input.secondReviewPlan === undefined ? {} : { secondReviewPlan: input.secondReviewPlan }),
-    ...(input.designReview === undefined ? {} : { designReview: input.designReview }),
-    ...(input.modelSourceId === undefined ? {} : { modelSourceId: input.modelSourceId }),
-    dispatch: {
-      kind: operationKind, projectRevision: workspace.projectRevision,
-      payload: operationKind !== "task"
-        ? { ...input.payload }
-        : { conversationId: input.conversationId ?? task.conversationId, prompt, ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }), ...input.payload, ...(withSources ? { contextSources: true } : {}) },
-      ...(input.requires === undefined && !withSources ? {} : { requires: [...(input.requires ?? []), ...(withSources ? ["task.contextSources.v1"] : [])] }),
-      ...(input.extraActions === undefined && !withSources ? {} : { extraActions: [...(input.extraActions ?? []), ...(withSources ? ["context-tools"] : [])] }),
-    },
+    ...stepOperationOptions(input, workflowRevision),
+    dispatch: stepDispatchSpec(input, operationKind, prompt, withSources),
     // The step runs for, and is charged to, the task's CURRENT owner when the host's check names one (a task handed over or taken over); else its starter, as before.
     requester: { personId: permitted.owner?.personId ?? task.developerId, provider: task.provider },
   });
-  const workflowWrite = input.workflow === undefined ? undefined : workflowWriteOps(input.workflow.current, input.workflow.next, { ownsFlow: true });
-  const items: TransactItem[] = combinedChecks([
-    {
-      kind: "update",
-      key: taskKey(task.taskId),
-      ops: [...(workflowWrite === undefined ? [] : workflowWrite.ops), change.set("updatedAt", now), ...(fed === undefined ? [] : fed.ops)],
-      condition: when.and(when.eq("companyId", deps.companyId), when.notExists("closedAt"), when.notExists("closeOperationId"), ...(input.workflow === undefined ? [] : [when.eq(["workflow", "revision"], input.workflow.current.revision), ...(workflowWrite?.guard ?? [])]), ...(fed === undefined ? [] : [fed.condition])),
-    },
-    holdWorkspaceItem(workspace, built.operation.id, now),
-    ...built.items,
-    ...comments.items,
-    ...(permitted.items ?? []),
-    ...(input.extra ?? []),
-  ]);
-  // The work events of the step's own transition (slice A4): extra items of the same transaction, left out when off or when they do not fit.
-  if (input.workflow !== undefined) items.push(...flowWorkEventItems({ enabled: deps.workEvents, orgId: deps.companyId, project: task.project, before: input.workflow.current, after: input.workflow.next, room: TRANSACTION_ITEMS_MAX - items.length }));
+  const items = stepTransactionItems(deps, input, built, comments.items, permitted.items, now);
   const applied = await deps.store.transact(items);
   if (applied.applied) {
     // Handed to its queue now; a relay from a timer does it too if this one is lost, so a failure here never fails the step.
@@ -343,8 +414,128 @@ export async function planContextOf(deps: Pick<TaskFlowDeps, "artifacts">, workf
   return { earlier, ...(previous === undefined ? {} : { previous }) };
 }
 
+type DispatchRowTarget = Pick<DispatchRowRecord, "taskId" | "workflowRevision" | "kind" | "firstEvent">;
+type ReadyIntentAssessment = Extract<NonNullable<NonNullable<WorkflowSnapshot["intent"]>["assessment"]>, { kind: "ready" }>;
+
+interface PreparedDispatchStep {
+  next: WorkflowSnapshot;
+  prompt: string;
+  mode: "UNDERSTAND" | "PLAN";
+  requestId: string;
+  /** A structured planning run says so in its payload, so the worker reads its answer as a plan document and the broker reads the same. */
+  dispatched?: ReturnType<typeof structuredPlanDispatch>;
+}
+
+function isDispatchVersionSupported(workflow: WorkflowSnapshot, kind: DispatchRowRecord["kind"]): boolean {
+  if (workflow.definitionVersion === "1.1.0") return true;
+  // Only the Understand step needs a 1.1.0 workflow: with Understand off (1.0.0) the owner's request for changes still plans again, from the request and their words.
+  return workflow.definitionVersion === "1.0.0" && (kind === "PLAN" || kind === "REPLAN");
+}
+
+function prepareUnderstandDispatch(deps: TaskFlowDeps, task: TaskRecord, workflow: WorkflowSnapshot): PreparedDispatchStep | undefined {
+  if (workflow.stage !== "UNDERSTAND" || workflow.state !== "READY") return undefined;
+  const prompts = deps.prompts ?? DEFAULT_PROMPTS;
+  return {
+    next: startWorkflowUnderstand(workflow, iso(deps)),
+    prompt: prompts.understand({ requestText: task.requestText ?? "", intent: workflow.intent }),
+    mode: "UNDERSTAND",
+    requestId: workflowRequestId("agentx-understand", task.taskId, workflow.revision),
+  };
+}
+
+async function prepareReplanDispatch(
+  deps: TaskFlowDeps,
+  task: TaskRecord,
+  workflow: WorkflowSnapshot,
+  row: DispatchRowTarget,
+): Promise<PreparedDispatchStep | undefined> {
+  // The planner's automatic second run: planning is RUNNING with no live run, one revision on; the row carries what the planner is told (the plan's problems, or what could not be read).
+  const planPrompt = (row as Partial<DispatchRowRecord>).planPrompt ?? fromDocument<DispatchRowRecord>(await deps.store.get(dispatchRowKey(deps.companyId, row.taskId, row.workflowRevision)))?.planPrompt;
+  // With Understand off there is no assessment to wait for: the run is told the request and the owner's words.
+  if (planPrompt === undefined || workflow.stage !== "PLAN" || workflow.state !== "RUNNING") return undefined;
+  if (workflow.definitionVersion === "1.1.0" && workflow.intent?.assessment?.kind !== "ready") return undefined;
+  const structured = await structuredPlanContextOf(deps, task, workflow);
+  // The second run is told the owner's change notes again: the plan it revises was written after them, and the run may be a new conversation.
+  const feedback = await planFeedbackOf(deps, task.taskId);
+  const prompts = deps.prompts ?? DEFAULT_PROMPTS;
+  return {
+    next: { ...workflow, revision: workflow.revision + 1, updatedAt: iso(deps) },
+    prompt: prompts.plan({
+      requestText: task.requestText ?? "", path: workflow.path, phase: workflow.reviewPhase, intent: workflow.intent, revision: planPrompt,
+      ...(feedback.length === 0 ? {} : { feedback }),
+      ...(structured === undefined ? {} : { structured }),
+    }),
+    dispatched: structuredPlanDispatch(structured, workflow),
+    mode: "PLAN",
+    requestId: workflowRequestId("agentx-auto-plan-revision", task.taskId, workflow.revision, createHash("sha256").update(planPrompt, "utf8").digest("hex")),
+  };
+}
+
+async function buildPlanDispatchPrompt(
+  deps: TaskFlowDeps,
+  task: TaskRecord,
+  workflow: WorkflowSnapshot,
+  understood: ReadyIntentAssessment | undefined,
+): Promise<{ prompt: string; dispatched: ReturnType<typeof structuredPlanDispatch> }> {
+  const feedback = await planFeedbackOf(deps, task.taskId);
+  const context = await planContextOf(deps, workflow);
+  const structured = await structuredPlanContextOf(deps, task, workflow);
+  const prompts = deps.prompts ?? DEFAULT_PROMPTS;
+  const planInput: Parameters<typeof prompts.plan>[0] = {
+    requestText: task.requestText ?? "", path: workflow.path, phase: workflow.reviewPhase, intent: workflow.intent,
+  };
+  if (understood !== undefined) { planInput.restatement = understood.restatement; planInput.assumptions = understood.assumptions; }
+  if (feedback.length > 0) planInput.feedback = feedback;
+  if (context.earlier.length > 0) planInput.earlier = context.earlier;
+  if (context.previous !== undefined) planInput.previous = context.previous;
+  if (structured !== undefined) {
+    planInput.structured = structured;
+    // Retry planning after an answer Rovara could not read: the planner is told what was wrong with it.
+    if (task.planUnreadable !== undefined) planInput.revision = planUnreadablePrompt(task.planUnreadable.errors);
+  }
+  const basePrompt = prompts.plan(planInput);
+  const designInstructions = deps.designReview?.planInstructions(workflow);
+  return {
+    prompt: designInstructions === undefined ? basePrompt : `${basePrompt}\n\n${designInstructions}`,
+    dispatched: structuredPlanDispatch(structured, workflow),
+  };
+}
+
+async function preparePlanDispatch(deps: TaskFlowDeps, task: TaskRecord, workflow: WorkflowSnapshot): Promise<PreparedDispatchStep | undefined> {
+  if (workflow.stage !== "PLAN" || workflow.state !== "READY") return undefined;
+  const assessment = workflow.intent?.assessment;
+  // Understand on: planning reads its assessment. Understand off (a 1.0.0 task, where the owner asked for changes to a plan): there is none, so the planner gets the request and what the owner asked to change.
+  const understood = assessment?.kind === "ready" ? assessment : undefined;
+  if (understood === undefined && workflow.definitionVersion !== "1.0.0") return undefined;
+  const next = understood === undefined ? startWorkflowPlanWithoutUnderstand(workflow, iso(deps)) : startWorkflowPlanAfterUnderstand(workflow, iso(deps));
+  const { prompt, dispatched } = await buildPlanDispatchPrompt(deps, task, workflow, understood);
+  return {
+    next,
+    prompt,
+    dispatched,
+    mode: "PLAN",
+    requestId: workflowRequestId(understood === undefined ? "agentx-plan-after-changes" : "agentx-plan-after-understand", task.taskId, workflow.revision),
+  };
+}
+
+async function prepareReadingDispatch(
+  deps: TaskFlowDeps,
+  task: TaskRecord,
+  workflow: WorkflowSnapshot,
+  row: DispatchRowTarget,
+): Promise<PreparedDispatchStep | undefined> {
+  try {
+    if (row.kind === "UNDERSTAND") return prepareUnderstandDispatch(deps, task, workflow);
+    if (row.kind === "REPLAN") return await prepareReplanDispatch(deps, task, workflow, row);
+    return await preparePlanDispatch(deps, task, workflow);
+  } catch (error) {
+    if (error instanceof WorkflowTransitionError) return undefined;
+    throw error;
+  }
+}
+
 /** Cloud's `startTaskWorkflowUnderstandFromSystem` and `startTaskWorkflowPlanFromSystem`, on the ports. */
-export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRecord, "taskId" | "workflowRevision" | "kind" | "firstEvent">): Promise<StepStart> {
+export async function runDispatchRow(deps: TaskFlowDeps, row: DispatchRowTarget): Promise<StepStart> {
   // Any step after the plan (coding, reviews, the publication, a sync of the branch, Rovara's own fix of a block) is the build step's (lane L10).
   if (!READING_DISPATCH_KINDS.includes(row.kind)) {
     if (deps.buildSteps === undefined) throw agentXError("CONFIG_INVALID", "this install has no steps after the plan");
@@ -358,73 +549,16 @@ export async function runDispatchRow(deps: TaskFlowDeps, row: Pick<DispatchRowRe
     return "STALE";
   };
   if (task === undefined || task.closeOperationId !== undefined || task.closedAt !== undefined || workflow === undefined || workflow.revision !== row.workflowRevision) return stale();
-  // Only the Understand step needs a 1.1.0 workflow: with Understand off (1.0.0) the owner's request for changes still plans again, from the request and their words (below).
-  if (workflow.definitionVersion !== "1.1.0" && !(workflow.definitionVersion === "1.0.0" && (row.kind === "PLAN" || row.kind === "REPLAN"))) return stale();
+  if (!isDispatchVersionSupported(workflow, row.kind)) return stale();
   const workspace = await readWorkspace(deps, task.workspaceId);
   if (workspace === undefined || workspace.status === "CLOSED" || workspace.status === "PREPARATION_FAILED") return stale();
-  const prompts = deps.prompts ?? DEFAULT_PROMPTS;
-  let next: WorkflowSnapshot;
-  let prompt: string;
-  let mode: "UNDERSTAND" | "PLAN";
-  let requestId: string;
-  /** A structured planning run says so in its payload, so the worker reads its answer as a plan document and the broker reads the same. */
-  let dispatched: ReturnType<typeof structuredPlanDispatch> | undefined;
-  try {
-    if (row.kind === "UNDERSTAND") {
-      if (workflow.stage !== "UNDERSTAND" || workflow.state !== "READY") return stale();
-      next = startWorkflowUnderstand(workflow, iso(deps));
-      prompt = prompts.understand({ requestText: task.requestText ?? "", intent: workflow.intent });
-      mode = "UNDERSTAND";
-      requestId = workflowRequestId("agentx-understand", task.taskId, workflow.revision);
-    } else if (row.kind === "REPLAN") {
-      // The planner's automatic second run: planning is RUNNING with no live run, one revision on; the row carries what the planner is told (the plan's problems, or what could not be read).
-      const planPrompt = (row as Partial<DispatchRowRecord>).planPrompt ?? fromDocument<DispatchRowRecord>(await deps.store.get(dispatchRowKey(deps.companyId, row.taskId, row.workflowRevision)))?.planPrompt;
-      // With Understand off there is no assessment to wait for: the run is told the request and the owner's words.
-      if (planPrompt === undefined || workflow.stage !== "PLAN" || workflow.state !== "RUNNING" || (workflow.definitionVersion === "1.1.0" && workflow.intent?.assessment?.kind !== "ready")) return stale();
-      const structured = await structuredPlanContextOf(deps, task, workflow);
-      // The second run is told the owner's change notes again: the plan it revises was written after them, and the run may be a new conversation.
-      const feedback = await planFeedbackOf(deps, task.taskId);
-      next = { ...workflow, revision: workflow.revision + 1, updatedAt: iso(deps) };
-      prompt = prompts.plan({
-        requestText: task.requestText ?? "", path: workflow.path, phase: workflow.reviewPhase, intent: workflow.intent, revision: planPrompt,
-        ...(feedback.length === 0 ? {} : { feedback }),
-        ...(structured === undefined ? {} : { structured }),
-      });
-      dispatched = structuredPlanDispatch(structured, workflow);
-      mode = "PLAN";
-      requestId = workflowRequestId("agentx-auto-plan-revision", task.taskId, workflow.revision, createHash("sha256").update(planPrompt, "utf8").digest("hex"));
-    } else {
-      const assessment = workflow.intent?.assessment;
-      if (workflow.stage !== "PLAN" || workflow.state !== "READY") return stale();
-      // Understand on: planning reads its assessment. Understand off (a 1.0.0 task, where the owner asked for changes to a plan): there is none, so the planner gets the request and what the owner asked to change.
-      const understood = assessment?.kind === "ready" ? assessment : undefined;
-      if (understood === undefined && workflow.definitionVersion !== "1.0.0") return stale();
-      next = understood === undefined ? startWorkflowPlanWithoutUnderstand(workflow, iso(deps)) : startWorkflowPlanAfterUnderstand(workflow, iso(deps));
-      const feedback = await planFeedbackOf(deps, task.taskId);
-      const context = await planContextOf(deps, workflow);
-      const structured = await structuredPlanContextOf(deps, task, workflow);
-      prompt = prompts.plan({
-        requestText: task.requestText ?? "", path: workflow.path, phase: workflow.reviewPhase, ...(understood === undefined ? {} : { restatement: understood.restatement, assumptions: understood.assumptions }), intent: workflow.intent,
-        ...(feedback.length === 0 ? {} : { feedback }), ...(context.earlier.length === 0 ? {} : { earlier: context.earlier }), ...(context.previous === undefined ? {} : { previous: context.previous }),
-        ...(structured === undefined ? {} : { structured }),
-        // Retry planning after an answer Rovara could not read: the planner is told what was wrong with it.
-        ...(structured === undefined || task.planUnreadable === undefined ? {} : { revision: planUnreadablePrompt(task.planUnreadable.errors) }),
-      });
-      dispatched = structuredPlanDispatch(structured, workflow);
-      const designInstructions = deps.designReview?.planInstructions(workflow);
-      if (designInstructions !== undefined) prompt = `${prompt}\n\n${designInstructions}`;
-      mode = "PLAN";
-      requestId = workflowRequestId(understood === undefined ? "agentx-plan-after-changes" : "agentx-plan-after-understand", task.taskId, workflow.revision);
-    }
-  } catch (error) {
-    if (error instanceof WorkflowTransitionError) return stale();
-    throw error;
-  }
+  const prepared = await prepareReadingDispatch(deps, task, workflow, row);
+  if (prepared === undefined) return stale();
   // The machine is still being set up (or another step holds the workspace): the step runs when it is ready, not before.
   if (workspace.status === "PREPARING") return "WAITING";
   const accepted = await acceptStepWithNotes(deps, {
-    task, workspace, requestId, prompt, workflowMode: mode, workflow: { current: workflow, next }, extra: [resolve()],
-    requires: dispatched?.requires ?? ["task.workflowMode"], ...(dispatched?.payload === undefined ? {} : { payload: dispatched.payload }),
+    task, workspace, requestId: prepared.requestId, prompt: prepared.prompt, workflowMode: prepared.mode, workflow: { current: workflow, next: prepared.next }, extra: [resolve()],
+    requires: prepared.dispatched?.requires ?? ["task.workflowMode"], ...(prepared.dispatched?.payload === undefined ? {} : { payload: prepared.dispatched.payload }),
   });
   if (accepted.result === "DUPLICATE") await deps.store.transact([resolve()]);
   return accepted.result;
@@ -445,45 +579,58 @@ async function blockDispatchFailure(deps: TaskFlowDeps, row: DispatchRowRecord, 
 
 export interface DispatchSweepReport { started: number; waiting: number; stale: number; failed: number; blocked: number }
 
+async function recordDispatchRowError(deps: TaskFlowDeps, row: DispatchRowRecord, error: unknown, report: DispatchSweepReport): Promise<void> {
+  const attempts = row.attempts + 1;
+  const message = error instanceof Error ? error.message : "unknown";
+  log(deps, { event: "task_flow.dispatch_row_failed", taskId: row.taskId, kind: row.kind, attempts, error: error instanceof AgentXError ? error.code : "unknown", cause: message.slice(0, 300) });
+  try {
+    if (attempts >= DISPATCH_ROW_ATTEMPTS_MAX) {
+      // Fixed plain words for the person; the raw cause (`message`: a store or machine error) stays in the dispatch row and the log, never in the block reason.
+      const reason = row.kind === "REVIEW" ? WORKFLOW_BLOCK_REASONS.reviewsCouldNotStart : `Rovara could not start the ${STEP_NAMES[row.kind]}. Press Retry.`;
+      await blockDispatchFailure(deps, row, reason);
+      await deps.store.transact([resolveRowItem(deps, row.taskId, row.workflowRevision)]);
+      report.blocked += 1;
+      return;
+    }
+    await deps.store.transact([rescheduleRowItem(row, later(deps, backoffSeconds(attempts)), attempts, message)]);
+    report.failed += 1;
+  } catch (storeError) {
+    // The store is failing too: this row is tried again by the next sweep; the rest of this sweep goes on.
+    log(deps, { event: "task_flow.dispatch_row_bookkeeping_failed", taskId: row.taskId, error: storeError instanceof Error ? storeError.name : "unknown" });
+    report.failed += 1;
+  }
+}
+
+async function processDueDispatchRow(deps: TaskFlowDeps, row: DispatchRowRecord, report: DispatchSweepReport): Promise<void> {
+  try {
+    const result = await runDispatchRow(deps, row);
+    if (result === "STARTED" || result === "DUPLICATE") {
+      report.started += 1;
+      return;
+    }
+    if (result === "STALE") {
+      report.stale += 1;
+      return;
+    }
+    if (Date.parse(iso(deps)) - Date.parse(row.createdAt) > WAIT_ROW_MAX_SECONDS * 1_000) {
+      // The workspace never became free for this step: it is not going to without help, so the owner is told instead of the row waiting for ever.
+      await blockDispatchFailure(deps, row, "Rovara could not start the next step because the workspace did not become ready; retry it.");
+      await deps.store.transact([resolveRowItem(deps, row.taskId, row.workflowRevision)]);
+      report.blocked += 1;
+      return;
+    }
+    report.waiting += 1;
+    await deps.store.transact([rescheduleRowItem(row, later(deps, WAIT_SECONDS), row.attempts)]);
+  } catch (error) {
+    await recordDispatchRowError(deps, row, error, report);
+  }
+}
+
 /** The recovery sweep for rows left behind (and the way a row becomes due after a backoff). Safe to run from a timer; a repeat of a step is the first one's duplicate. */
 export async function runDueDispatches(deps: TaskFlowDeps, options: { limit?: number } = {}): Promise<DispatchSweepReport> {
   const report: DispatchSweepReport = { started: 0, waiting: 0, stale: 0, failed: 0, blocked: 0 };
   const rows = await dueDispatchRows(deps.store, deps.companyId, iso(deps), options.limit ?? 20);
-  for (const row of rows) {
-    try {
-      const result = await runDispatchRow(deps, row);
-      if (result === "STARTED" || result === "DUPLICATE") report.started += 1;
-      else if (result === "STALE") report.stale += 1;
-      else if (Date.parse(iso(deps)) - Date.parse(row.createdAt) > WAIT_ROW_MAX_SECONDS * 1_000) {
-        // The workspace never became free for this step: it is not going to without help, so the owner is told instead of the row waiting for ever.
-        await blockDispatchFailure(deps, row, "Rovara could not start the next step because the workspace did not become ready; retry it.");
-        await deps.store.transact([resolveRowItem(deps, row.taskId, row.workflowRevision)]);
-        report.blocked += 1;
-      } else {
-        report.waiting += 1;
-        await deps.store.transact([rescheduleRowItem(row, later(deps, WAIT_SECONDS), row.attempts)]);
-      }
-    } catch (error) {
-      const attempts = row.attempts + 1;
-      const message = error instanceof Error ? error.message : "unknown";
-      log(deps, { event: "task_flow.dispatch_row_failed", taskId: row.taskId, kind: row.kind, attempts, error: error instanceof AgentXError ? error.code : "unknown", cause: message.slice(0, 300) });
-      try {
-        if (attempts >= DISPATCH_ROW_ATTEMPTS_MAX) {
-          // Fixed plain words for the person; the raw cause (`message`: a store or machine error) stays in the dispatch row and the log, never in the block reason.
-          await blockDispatchFailure(deps, row, row.kind === "REVIEW" ? WORKFLOW_BLOCK_REASONS.reviewsCouldNotStart : `Rovara could not start the ${STEP_NAMES[row.kind]}. Press Retry.`);
-          await deps.store.transact([resolveRowItem(deps, row.taskId, row.workflowRevision)]);
-          report.blocked += 1;
-        } else {
-          await deps.store.transact([rescheduleRowItem(row, later(deps, backoffSeconds(attempts)), attempts, message)]);
-          report.failed += 1;
-        }
-      } catch (storeError) {
-        // The store is failing too: this row is tried again by the next sweep; the rest of this sweep goes on.
-        log(deps, { event: "task_flow.dispatch_row_bookkeeping_failed", taskId: row.taskId, error: storeError instanceof Error ? storeError.name : "unknown" });
-        report.failed += 1;
-      }
-    }
-  }
+  for (const row of rows) await processDueDispatchRow(deps, row, report);
   return report;
 }
 
@@ -539,7 +686,265 @@ async function pauseInstallTask(deps: TaskFlowDeps, task: TaskRecord, operation:
   return true;
 }
 
-export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationRecord, ended: { status: "SUCCEEDED" | "FAILED" | "CANCELLED" | "INTERRUPTED"; error?: string | undefined; outcome?: StepOutcome | undefined }): Promise<void> {
+type EndedOperation = { status: "SUCCEEDED" | "FAILED" | "CANCELLED" | "INTERRUPTED"; error?: string | undefined; outcome?: StepOutcome | undefined };
+type UnderstoodOutcome = Extract<StepOutcome, { kind: "understood" }>;
+type PlannedOutcome = Extract<StepOutcome, { kind: "planned" }>;
+
+const BUILD_STEP_MODES = new Set<Operation["workflowMode"]>(["IMPLEMENT", "CHECKS", "REVIEW", "FEEDBACK_REVIEW", "PLAN_CRITIQUE"]);
+
+function isBuildStepOperation(operation: OperationRecord): boolean {
+  return operation.kind === "publish" || operation.kind === "maintain" || (operation.workflowMode !== undefined && BUILD_STEP_MODES.has(operation.workflowMode));
+}
+
+function liveSteerDeps(deps: TaskFlowDeps) {
+  return { store: deps.store, ...(deps.now === undefined ? {} : { now: deps.now }), ...(deps.log === undefined ? {} : { log: deps.log }) };
+}
+
+async function handleSpecialPurposeEnd(deps: TaskFlowDeps, task: TaskRecord, operation: OperationRecord, ended: EndedOperation): Promise<boolean> {
+  const failedPrepare = operation.kind === "prepare" && ended.status !== "SUCCEEDED";
+  // A setup run's own operation, or its preparation failing, ends the run with what the broker reads of the worker's answer (idempotent: a repeat finds the result kept and changes nothing).
+  if (task.purpose === "setup_agent" && ((operation.kind === "task" && operation.workflowMode === "SETUP_AGENT") || failedPrepare)) {
+    await endSetupAgentTask(deps, task, operation, ended);
+    return true;
+  }
+  // A wiki build's own operation, or its preparation failing, ends the run (idempotent: the first end word stands) and gives the workspace back.
+  if (task.purpose === "wiki_build" && ((operation.kind === "task" && operation.workflowMode === "WIKI_BUILD") || failedPrepare)) {
+    await endWikiBuildTask(deps, task, operation.kind === "prepare" ? { error: ended.error } : undefined);
+    return true;
+  }
+  return false;
+}
+
+async function handlePrepareEnded(deps: TaskFlowDeps, task: TaskRecord, pointer: TaskPointerRecord, operation: OperationRecord, ended: EndedOperation): Promise<void> {
+  if (ended.status !== "SUCCEEDED") return;
+  // The meta repository's commit is the one the broker chose for this preparation, kept only when the worker reports exactly it (a worker or an old manifest never decides it).
+  if (ended.outcome?.kind === "prepared" && task.knowledgeCommit === undefined) {
+    const chosen = (operation.dispatch.payload["meta"] as { commit?: unknown } | undefined)?.commit;
+    const keep = knowledgeCommitToStore(typeof chosen === "string" ? chosen : undefined, { knowledgeCommit: ended.outcome.knowledgeCommit });
+    if (keep !== undefined) await deps.store.update({ key: taskKey(task.taskId), ops: [change.set("knowledgeCommit", keep), change.set("updatedAt", iso(deps))], condition: when.notExists("knowledgeCommit") });
+  }
+  if (ended.outcome?.kind === "prepared" && ended.outcome.base !== undefined && task.preparedBase === undefined) {
+    await deps.store.update({ key: taskKey(task.taskId), ops: [change.set("preparedBase", toDocument(ended.outcome.base)), change.set("updatedAt", iso(deps))], condition: when.notExists("preparedBase") });
+  }
+  if (pointer.pendingPrompt !== undefined) {
+    await queueFirstRun(deps, task);
+    return;
+  }
+  if (task.workflow !== undefined) {
+    const row = await deps.store.get(dispatchRowKey(deps.companyId, task.taskId, task.workflow.revision));
+    if (row !== undefined) await runDispatchRow(deps, row as unknown as DispatchRowRecord);
+  }
+}
+
+async function delegatePostPrepareEnd(deps: TaskFlowDeps, task: TaskRecord, operation: OperationRecord, ended: EndedOperation): Promise<boolean> {
+  // The design review's own operations: a round of reviewers (plan-check mode), and the planner's answer to their findings.
+  if (deps.designReview !== undefined && (operation.workflowMode === "PLAN_CRITIQUE" || deps.designReview.isResolveRun(task.workflow, operation))) {
+    if (await deps.designReview.onEnded(deps, task, operation, ended)) return true;
+  }
+  // The steps after the plan: coding, a rerun of the checks, the reviews, the publication and the push of a fix (lane L10).
+  if (isBuildStepOperation(operation)) {
+    if (deps.buildSteps !== undefined) await deps.buildSteps.onEnded(deps, task, operation, ended);
+    return true;
+  }
+  return false;
+}
+
+async function handleWorkflowStepFailure(
+  deps: TaskFlowDeps,
+  task: TaskRecord,
+  workflow: WorkflowSnapshot,
+  operation: OperationRecord,
+  ended: EndedOperation,
+): Promise<void> {
+  if (ended.status === "CANCELLED") return;
+  const what = operation.workflowMode === "UNDERSTAND" ? "reading the request" : "planning";
+  // The step stopped because the owner's live message asks for a change outside the approved plan: the owner decides (Retry plans again with that message), and each message says so on its row.
+  const reapproval = isReapprovalStop(ended.error);
+  const detail = ended.error === undefined ? "" : `: ${ended.error}`;
+  const reason = reapproval ? WORKFLOW_BLOCK_REASONS.liveSteerReapproval : redactBlockReason(`Rovara stopped while ${what}${detail}`, 500);
+  await blockTaskWorkflow(deps, task.taskId, workflow.revision, reason);
+  if (reapproval) await settleLiveSteerReapproval(liveSteerDeps(deps), task, ended.error);
+}
+
+function understandQuestionLogItems(task: TaskRecord, next: WorkflowSnapshot, now: string): TransactItem[] {
+  // Understand's questions go in the task log in the same commit (a person is asked: every surface that draws the log can say so).
+  if (next.stage !== "UNDERSTAND" || next.state !== "WAITING" || next.intent?.assessment?.kind !== "questions") return [];
+  const asked = next.intent.assessment.questions;
+  if (asked.length === 0) return [];
+  // The log never stands in the way of the person's own change: an entry that cannot be made is left out.
+  try {
+    return taskLogItems({ orgId: task.companyId, taskId: task.taskId, entries: questionEntriesOf({ round: next.intent.rounds ?? 0, at: now, questions: asked }) });
+  } catch {
+    return [];
+  }
+}
+
+async function handleUnderstoodOutcome(deps: TaskFlowDeps, task: TaskRecord, workflow: WorkflowSnapshot, outcome: UnderstoodOutcome): Promise<void> {
+  const now = iso(deps);
+  const isAnswer = typeof outcome.assessment === "object" && outcome.assessment !== null && (outcome.assessment as { kind?: unknown }).kind === "answer";
+  if (isAnswer) {
+    if (outcome.answerArtifact === undefined) throw new WorkflowTransitionError("an answer needs the file it was read from");
+    await commitWorkflow(deps, task, answerWorkflowIntent(workflow, { expectedRevision: workflow.revision, assessment: outcome.assessment, artifact: outcome.answerArtifact, now }));
+    return;
+  }
+  const assessed = recordIntentAssessment(workflow, { expectedRevision: workflow.revision, assessment: outcome.assessment, now });
+  let next = assessed;
+  // The design review: a ready reading that needs a design (or that the person asked to have reviewed) switches it on, which forces the Full path.
+  if (deps.designReview !== undefined) next = await deps.designReview.afterUnderstand(deps, task, next, outcome.assessment, now);
+  // The lighter flow: a request whose named files make it exactly small does not get the design review (or the Full path) a project default would give it; the skip and its record are in this commit.
+  if (deps.lighterFlow === true && assessed.intent?.assessment !== undefined) {
+    next = afterUnderstand({ assessed, considered: next, requestText: task.requestText, assessment: assessed.intent.assessment, explicitPath: isExplicitPath(workflow), at: now });
+  }
+  // A ready request goes on to planning with no one asking: the row commits with the transition, and is run right after.
+  const toPlan = next.stage === "PLAN" && next.state === "READY";
+  const logged = understandQuestionLogItems(task, next, now);
+  const committed = await commitWorkflow(deps, task, next, [...(toPlan ? [dispatchRowItem(deps, task.taskId, next.revision, "PLAN", now)] : []), ...logged]);
+  if (committed && logged.length > 0) await deps.taskLog?.changed(task.taskId);
+  if (committed && toPlan) await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: next.revision, kind: "PLAN" });
+}
+
+async function evaluateLighterPlanRoute(
+  deps: TaskFlowDeps,
+  task: TaskRecord,
+  workflow: WorkflowSnapshot,
+  submitted: WorkflowSnapshot,
+  outcome: PlannedOutcome,
+): Promise<{ lighter: boolean; routed: ReturnType<typeof smallPlanRoute> | undefined; skippedHere: boolean }> {
+  // The change tier's ESTIMATE, before any code exists: from the files the plan names and the words of the request. It is replaced by the diff's tier after the build.
+  // With the lighter flow on it also picks the steps: exactly small (the files of the plan, the request and Understand's reading) skips the plan check and the approval, in this same commit.
+  const hadUnderstandSkip = (workflow.flow?.skippedSteps ?? []).some((step) => UNDERSTAND_SKIPS.includes(step));
+  const lighter = workflowDocumentType(submitted) === "plan" && (deps.lighterFlow === true || hadUnderstandSkip);
+  if (!lighter) return { lighter: false, routed: undefined, skippedHere: false };
+  const planText = (await loadWorkflowDocument(textReaderOf(deps.artifacts), outcome.artifact, {}).catch(() => undefined))?.markdown;
+  const costHighUsd = (await planRunEstimate(deps, task, submitted))?.highUsd;
+  const routed = smallPlanRoute({ submitted, plan: outcome.cites?.plan, requestText: task.requestText, noChangeNeeded: outcome.noChangeNeeded === true, at: iso(deps), planText, costHighUsd });
+  // The plan skips its own steps only with the switch on; steps Understand skipped for a change the plan shows is not small come back (whatever the switch says now).
+  const skippedHere = deps.lighterFlow === true && (routed?.skipped.length ?? 0) > 0;
+  return { lighter: true, routed, skippedHere };
+}
+
+async function maybeRestorePlanningSteps(
+  deps: TaskFlowDeps,
+  task: TaskRecord,
+  workflow: WorkflowSnapshot,
+  routedFlow: WorkflowSnapshot["flow"],
+): Promise<boolean> {
+  const restore = restoredForPlanning(workflow, routedFlow ?? workflow.flow, iso(deps));
+  if (restore === undefined) return false;
+  let ready = restore.workflow;
+  if (restore.restored.includes("design_review") && deps.designReview !== undefined && ready.intent?.assessment !== undefined) {
+    ready = await deps.designReview.afterUnderstand(deps, task, ready, ready.intent.assessment, iso(deps));
+  }
+  if (ready.designReview === undefined && restore.restored.includes("requirements_approval")) ready = toFull(ready);
+  const committedRestore = await commitWorkflow(deps, task, ready, [dispatchRowItem(deps, task.taskId, ready.revision, "PLAN", iso(deps))]);
+  log(deps, { event: "task_flow.planning_restored", taskId: task.taskId, level: ready.flow?.tier?.level, restored: restore.restored, designReview: ready.designReview !== undefined });
+  if (committedRestore) await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: ready.revision, kind: "PLAN" });
+  return true;
+}
+
+function planCommitTaskOps(task: TaskRecord, estimate: RunEstimate | undefined, sizeOps: readonly ChangeOp[]): ChangeOp[] {
+  const ops: ChangeOp[] = [];
+  if (task.planUnreadable !== undefined) ops.push(change.remove("planUnreadable"));
+  if (estimate !== undefined) ops.push(change.set("runEstimate", estimate as unknown as JsonValue));
+  ops.push(...sizeOps);
+  return ops;
+}
+
+async function runAfterPlanCommit(
+  deps: TaskFlowDeps,
+  task: TaskRecord,
+  next: WorkflowSnapshot,
+  outcome: PlannedOutcome,
+  follow: { toCheck: boolean; toCode: boolean },
+): Promise<void> {
+  if (follow.toCheck) await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: next.revision, kind: "CRITIQUE" });
+  if (follow.toCode) {
+    log(deps, { event: "task_flow.planning_skipped", taskId: task.taskId, level: next.flow?.tier?.level, kinds: next.flow?.tier?.kinds, skipped: next.flow?.skippedSteps, reasons: next.flow?.tier?.reasons.map((reason) => reason.code) });
+    await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: next.revision, kind: "IMPLEMENT" });
+  }
+  // The code the plan cites is read after the plan is committed, so a slow or failing code host never holds the plan up.
+  if (outcome.cites !== undefined) {
+    await deps.afterPlanStored?.({ task, workflow: next, artifactId: outcome.artifact.id, artifactSha256: outcome.artifact.sha256, plan: outcome.cites.plan, prefix: outcome.cites.prefix })
+      .catch((error: unknown) => log(deps, { event: "task_flow.after_plan_stored_failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" }));
+  }
+}
+
+async function handlePlannedOutcome(deps: TaskFlowDeps, task: TaskRecord, workflow: WorkflowSnapshot, outcome: PlannedOutcome): Promise<void> {
+  const submitted = submitWorkflowArtifact(workflow, {
+    expectedRevision: workflow.revision, artifact: outcome.artifact, now: iso(deps),
+    ...(outcome.proposal === undefined ? {} : { proposal: outcome.proposal }),
+    ...(outcome.noChangeNeeded === true ? { noChangeNeeded: true } : {}),
+  });
+  const { lighter, routed, skippedHere } = await evaluateLighterPlanRoute(deps, task, workflow, submitted, outcome);
+  if (lighter && !skippedHere && await maybeRestorePlanningSteps(deps, task, workflow, routed?.workflow.flow)) return;
+  const routedNext = skippedHere || deps.lighterFlow === true ? routed?.workflow : undefined;
+  const next = routedNext ?? withTierEstimate(submitted, outcome.cites?.plan, task.requestText, iso(deps));
+  const toCode = skippedHere && next.stage === "IMPLEMENT" && next.state === "READY";
+  // A version 2 coding plan is read by a second step before a person sees it: the check is a row like every automatic step, written with the plan.
+  const toCheck = next.stage === "PLAN_CRITIQUE" && next.state === "READY";
+  // What the run is expected to cost, from the cost of the project's earlier runs (or the default for the path), kept on the task beside the plan: the plan page, the decision card's risk, the session and the tools read it. SF-1a: beside it, how big a Quick plan looks (`quickSize`, record only: nothing offers from it yet), written in the same commit.
+  const estimate = await planRunEstimate(deps, task, next);
+  const sizeOps = await quickSizeOps(deps, task, next, { artifact: outcome.artifact, plan: outcome.cites?.plan });
+  const extra: TransactItem[] = [];
+  if (toCheck) extra.push(dispatchRowItem(deps, task.taskId, next.revision, "CRITIQUE", iso(deps)));
+  else if (toCode) extra.push(dispatchRowItem(deps, task.taskId, next.revision, "IMPLEMENT", iso(deps)));
+  const committed = await commitWorkflow(deps, task, next, extra, planCommitTaskOps(task, estimate, sizeOps));
+  if (committed) await runAfterPlanCommit(deps, task, next, outcome, { toCheck, toCode });
+}
+
+async function applyReadingStepOutcome(
+  deps: TaskFlowDeps,
+  task: TaskRecord,
+  workflow: WorkflowSnapshot,
+  mode: Operation["workflowMode"],
+  outcome: StepOutcome | undefined,
+): Promise<boolean> {
+  if (mode === "UNDERSTAND" && outcome?.kind === "understood") {
+    await handleUnderstoodOutcome(deps, task, workflow, outcome);
+    return true;
+  }
+  if (mode === "PLAN" && outcome?.kind === "planned") {
+    await handlePlannedOutcome(deps, task, workflow, outcome);
+    return true;
+  }
+  if (mode === "PLAN" && outcome?.kind === "plan_unreadable") {
+    // The answer could not be read and the automatic second run is spent: planning blocks, with the problems kept for Retry planning (and a fixed category for the owner's message).
+    const next = blockWorkflow(workflow, WORKFLOW_BLOCK_REASONS.planUnreadable, iso(deps));
+    await commitWorkflow(deps, task, next, [], [change.set("planUnreadable", toDocument({ workflowRevision: next.revision, errors: outcome.errors, category: outcome.category, ...(outcome.autoRetried === true ? { autoRetried: true } : {}) }))]);
+    return true;
+  }
+  if (mode === "PLAN" && outcome?.kind === "plan_again") {
+    // Nothing is shown to the owner: planning stays RUNNING one revision on, and a row starts the planner again with what was wrong (Cloud's REPLAN row).
+    const now = iso(deps);
+    const next = WorkflowSnapshotSchema.parse({ ...workflow, revision: workflow.revision + 1, updatedAt: now });
+    const committed = await commitWorkflow(deps, task, next, [dispatchRowItem(deps, task.taskId, next.revision, "REPLAN", now, now, undefined, outcome.prompt)], [change.set("planSelfCheck", toDocument(outcome.selfCheck))]);
+    if (committed) await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: next.revision, kind: "REPLAN" });
+    return true;
+  }
+  return false;
+}
+
+async function handleReadingStepSuccess(
+  deps: TaskFlowDeps,
+  task: TaskRecord,
+  workflow: WorkflowSnapshot,
+  mode: Operation["workflowMode"],
+  outcome: StepOutcome | undefined,
+): Promise<void> {
+  try {
+    if (await applyReadingStepOutcome(deps, task, workflow, mode, outcome)) return;
+  } catch (error) {
+    if (!(error instanceof WorkflowTransitionError)) throw error;
+    await blockTaskWorkflow(deps, task.taskId, workflow.revision, "Rovara could not read the result of this step; retry it.");
+    return;
+  }
+  // A result with no outcome the step understands: the step ended without what it was asked for.
+  if (mode === "UNDERSTAND" || mode === "PLAN") {
+    await blockTaskWorkflow(deps, task.taskId, workflow.revision, "Rovara could not read the result of this step; retry it.");
+  }
+}
+
+export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationRecord, ended: EndedOperation): Promise<void> {
   const pointer = fromDocument<TaskPointerRecord>(await deps.store.get((await workspaceKeys(deps, operation.workspaceId)).taskPointerKey()));
   if (pointer === undefined) {
     // A workspace with no task is a project's setup check: its preparation ended, so its workspace and machine are closed.
@@ -548,163 +953,22 @@ export async function onOperationEnded(deps: TaskFlowDeps, operation: OperationR
   }
   const task = await readTask(deps, pointer.taskId);
   if (task === undefined || task.closeOperationId !== undefined || task.closedAt !== undefined || await pauseInstallTask(deps, task, operation, ended)) return;
-  const succeeded = ended.status === "SUCCEEDED";
-
-  // A setup run's own operation, or its preparation failing, ends the run with what the broker reads of the worker's answer (idempotent: a repeat finds the result kept and changes nothing).
-  if (task.purpose === "setup_agent" && ((operation.kind === "task" && operation.workflowMode === "SETUP_AGENT") || (operation.kind === "prepare" && !succeeded))) {
-    await endSetupAgentTask(deps, task, operation, ended);
-    return;
-  }
-
-  // A wiki build's own operation, or its preparation failing, ends the run (idempotent: the first end word stands) and gives the workspace back.
-  if (task.purpose === "wiki_build" && ((operation.kind === "task" && operation.workflowMode === "WIKI_BUILD") || (operation.kind === "prepare" && !succeeded))) {
-    await endWikiBuildTask(deps, task, operation.kind === "prepare" ? { error: ended.error } : undefined);
-    return;
-  }
-
+  if (await handleSpecialPurposeEnd(deps, task, operation, ended)) return;
   if (operation.kind === "prepare") {
-    if (!succeeded) return;
-    // The meta repository's commit is the one the broker chose for this preparation, kept only when the worker reports exactly it (a worker or an old manifest never decides it).
-    if (ended.outcome?.kind === "prepared" && task.knowledgeCommit === undefined) {
-      const chosen = (operation.dispatch.payload["meta"] as { commit?: unknown } | undefined)?.commit;
-      const keep = knowledgeCommitToStore(typeof chosen === "string" ? chosen : undefined, { knowledgeCommit: ended.outcome.knowledgeCommit });
-      if (keep !== undefined) await deps.store.update({ key: taskKey(task.taskId), ops: [change.set("knowledgeCommit", keep), change.set("updatedAt", iso(deps))], condition: when.notExists("knowledgeCommit") });
-    }
-    if (ended.outcome?.kind === "prepared" && ended.outcome.base !== undefined && task.preparedBase === undefined) {
-      await deps.store.update({ key: taskKey(task.taskId), ops: [change.set("preparedBase", toDocument(ended.outcome.base)), change.set("updatedAt", iso(deps))], condition: when.notExists("preparedBase") });
-    }
-    if (pointer.pendingPrompt !== undefined) await queueFirstRun(deps, task);
-    else if (task.workflow !== undefined) {
-      const row = await deps.store.get(dispatchRowKey(deps.companyId, task.taskId, task.workflow.revision));
-      if (row !== undefined) await runDispatchRow(deps, row as unknown as DispatchRowRecord);
-    }
+    await handlePrepareEnded(deps, task, pointer, operation, ended);
     return;
   }
-
+  const succeeded = ended.status === "SUCCEEDED";
   // A step that took live messages and did not succeed runs again without them: their notes stop saying "already given" so the re-run reads them as new (scoped to this attempt; never throws).
-  if (!succeeded && operation.kind === "task") await clearLiveDeliveredSince({ store: deps.store, ...(deps.now === undefined ? {} : { now: deps.now }), ...(deps.log === undefined ? {} : { log: deps.log }) }, task.taskId, operation.createdAt);
-  // The design review's own operations: a round of reviewers (plan-check mode), and the planner's answer to their findings.
-  if (deps.designReview !== undefined && (operation.workflowMode === "PLAN_CRITIQUE" || deps.designReview.isResolveRun(task.workflow, operation))) {
-    if (await deps.designReview.onEnded(deps, task, operation, ended)) return;
-  }
-
-  // The steps after the plan: coding, a rerun of the checks, the reviews, the publication and the push of a fix (lane L10).
-  if (operation.kind === "publish" || operation.kind === "maintain" || operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "CHECKS" || operation.workflowMode === "REVIEW" || operation.workflowMode === "FEEDBACK_REVIEW" || operation.workflowMode === "PLAN_CRITIQUE") {
-    if (deps.buildSteps !== undefined) await deps.buildSteps.onEnded(deps, task, operation, ended);
-    return;
-  }
-
+  if (!succeeded && operation.kind === "task") await clearLiveDeliveredSince(liveSteerDeps(deps), task.taskId, operation.createdAt);
+  if (await delegatePostPrepareEnd(deps, task, operation, ended)) return;
   const workflow = task.workflow;
   if (workflow === undefined || operation.workflowMode === undefined || operation.workflowRevision === undefined || workflow.revision !== operation.workflowRevision) return;
-
   if (!succeeded) {
-    if (ended.status === "CANCELLED") return;
-    const what = operation.workflowMode === "UNDERSTAND" ? "reading the request" : "planning";
-    // The step stopped because the owner's live message asks for a change outside the approved plan: the owner decides (Retry plans again with that message), and each message says so on its row.
-    const reapproval = isReapprovalStop(ended.error);
-    await blockTaskWorkflow(deps, task.taskId, workflow.revision, reapproval ? WORKFLOW_BLOCK_REASONS.liveSteerReapproval : redactBlockReason(`Rovara stopped while ${what}${ended.error === undefined ? "" : `: ${ended.error}`}`, 500));
-    if (reapproval) await settleLiveSteerReapproval({ store: deps.store, ...(deps.now === undefined ? {} : { now: deps.now }), ...(deps.log === undefined ? {} : { log: deps.log }) }, task, ended.error);
+    await handleWorkflowStepFailure(deps, task, workflow, operation, ended);
     return;
   }
-  const outcome = ended.outcome;
-  try {
-    if (operation.workflowMode === "UNDERSTAND" && outcome?.kind === "understood") {
-      const now = iso(deps);
-      const isAnswer = typeof outcome.assessment === "object" && outcome.assessment !== null && (outcome.assessment as { kind?: unknown }).kind === "answer";
-      if (isAnswer) {
-        if (outcome.answerArtifact === undefined) throw new WorkflowTransitionError("an answer needs the file it was read from");
-        await commitWorkflow(deps, task, answerWorkflowIntent(workflow, { expectedRevision: workflow.revision, assessment: outcome.assessment, artifact: outcome.answerArtifact, now }));
-        return;
-      }
-      const assessed = recordIntentAssessment(workflow, { expectedRevision: workflow.revision, assessment: outcome.assessment, now });
-      let next = assessed;
-      // The design review: a ready reading that needs a design (or that the person asked to have reviewed) switches it on, which forces the Full path.
-      if (deps.designReview !== undefined) next = await deps.designReview.afterUnderstand(deps, task, next, outcome.assessment, now);
-      // The lighter flow: a request whose named files make it exactly small does not get the design review (or the Full path) a project default would give it; the skip and its record are in this commit.
-      if (deps.lighterFlow === true && assessed.intent?.assessment !== undefined) {
-        next = afterUnderstand({ assessed, considered: next, requestText: task.requestText, assessment: assessed.intent.assessment, explicitPath: isExplicitPath(workflow), at: now });
-      }
-      // A ready request goes on to planning with no one asking: the row commits with the transition, and is run right after.
-      const toPlan = next.stage === "PLAN" && next.state === "READY";
-      // Understand's questions go in the task log in the same commit (a person is asked: every surface that draws the log can say so).
-      const asked = next.stage === "UNDERSTAND" && next.state === "WAITING" && next.intent?.assessment?.kind === "questions" ? next.intent.assessment.questions : [];
-      // The log never stands in the way of the person's own change: an entry that cannot be made is left out.
-      const logged = (() => { try { return asked.length === 0 ? [] : taskLogItems({ orgId: task.companyId, taskId: task.taskId, entries: questionEntriesOf({ round: next.intent?.rounds ?? 0, at: now, questions: asked }) }); } catch { return []; } })();
-      const committed = await commitWorkflow(deps, task, next, [...(toPlan ? [dispatchRowItem(deps, task.taskId, next.revision, "PLAN", now)] : []), ...logged]);
-      if (committed && logged.length > 0) await deps.taskLog?.changed(task.taskId);
-      if (committed && toPlan) await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: next.revision, kind: "PLAN" });
-      return;
-    }
-    if (operation.workflowMode === "PLAN" && outcome?.kind === "planned") {
-      const submitted = submitWorkflowArtifact(workflow, {
-        expectedRevision: workflow.revision, artifact: outcome.artifact, now: iso(deps),
-        ...(outcome.proposal === undefined ? {} : { proposal: outcome.proposal }),
-        ...(outcome.noChangeNeeded === true ? { noChangeNeeded: true } : {}),
-      });
-      // The change tier's ESTIMATE, before any code exists: from the files the plan names and the words of the request. It is replaced by the diff's tier after the build.
-      // With the lighter flow on it also picks the steps: exactly small (the files of the plan, the request and Understand's reading) skips the plan check and the approval, in this same commit.
-      const lighter = workflowDocumentType(submitted) === "plan" && (deps.lighterFlow === true || (workflow.flow?.skippedSteps ?? []).some((step) => UNDERSTAND_SKIPS.includes(step)));
-      const planText = lighter ? (await loadWorkflowDocument(textReaderOf(deps.artifacts), outcome.artifact, {}).catch(() => undefined))?.markdown : undefined;
-      const costHighUsd = lighter ? (await planRunEstimate(deps, task, submitted))?.highUsd : undefined;
-      const routed = lighter
-        ? smallPlanRoute({ submitted, plan: outcome.cites?.plan, requestText: task.requestText, noChangeNeeded: outcome.noChangeNeeded === true, at: iso(deps), planText, costHighUsd }) : undefined;
-      // The plan skips its own steps only with the switch on; steps Understand skipped for a change the plan shows is not small come back (whatever the switch says now).
-      const skippedHere = deps.lighterFlow === true && (routed?.skipped.length ?? 0) > 0;
-      if (lighter && !skippedHere) {
-        const restore = restoredForPlanning(workflow, routed?.workflow.flow ?? workflow.flow, iso(deps));
-        if (restore !== undefined) {
-          let ready = restore.workflow;
-          if (restore.restored.includes("design_review") && deps.designReview !== undefined && ready.intent?.assessment !== undefined) ready = await deps.designReview.afterUnderstand(deps, task, ready, ready.intent.assessment, iso(deps));
-          if (ready.designReview === undefined && restore.restored.includes("requirements_approval")) ready = toFull(ready);
-          const committedRestore = await commitWorkflow(deps, task, ready, [dispatchRowItem(deps, task.taskId, ready.revision, "PLAN", iso(deps))]);
-          log(deps, { event: "task_flow.planning_restored", taskId: task.taskId, level: ready.flow?.tier?.level, restored: restore.restored, designReview: ready.designReview !== undefined });
-          if (committedRestore) await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: ready.revision, kind: "PLAN" });
-          return;
-        }
-      }
-      const next = (skippedHere || deps.lighterFlow === true ? routed?.workflow : undefined) ?? withTierEstimate(submitted, outcome.cites?.plan, task.requestText, iso(deps));
-      const toCode = skippedHere && next.stage === "IMPLEMENT" && next.state === "READY";
-      // A version 2 coding plan is read by a second step before a person sees it: the check is a row like every automatic step, written with the plan.
-      const toCheck = next.stage === "PLAN_CRITIQUE" && next.state === "READY";
-      // What the run is expected to cost, from the cost of the project's earlier runs (or the default for the path), kept on the task beside the plan: the plan page, the decision card's risk, the session and the tools read it. SF-1a: beside it, how big a Quick plan looks (`quickSize`, record only: nothing offers from it yet), written in the same commit.
-      const estimate = await planRunEstimate(deps, task, next); const sizeOps = await quickSizeOps(deps, task, next, { artifact: outcome.artifact, plan: outcome.cites?.plan });
-      const row = toCheck ? dispatchRowItem(deps, task.taskId, next.revision, "CRITIQUE", iso(deps)) : toCode ? dispatchRowItem(deps, task.taskId, next.revision, "IMPLEMENT", iso(deps)) : undefined;
-      const committed = await commitWorkflow(deps, task, next, row === undefined ? [] : [row], [...(task.planUnreadable === undefined ? [] : [change.remove("planUnreadable")]), ...(estimate === undefined ? [] : [change.set("runEstimate", estimate as unknown as JsonValue)]), ...sizeOps]);
-      if (committed && toCheck) await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: next.revision, kind: "CRITIQUE" });
-      if (committed && toCode) {
-        log(deps, { event: "task_flow.planning_skipped", taskId: task.taskId, level: next.flow?.tier?.level, kinds: next.flow?.tier?.kinds, skipped: next.flow?.skippedSteps, reasons: next.flow?.tier?.reasons.map((reason) => reason.code) });
-        await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: next.revision, kind: "IMPLEMENT" });
-      }
-      // The code the plan cites is read after the plan is committed, so a slow or failing code host never holds the plan up.
-      if (committed && outcome.cites !== undefined) {
-        await deps.afterPlanStored?.({ task, workflow: next, artifactId: outcome.artifact.id, artifactSha256: outcome.artifact.sha256, plan: outcome.cites.plan, prefix: outcome.cites.prefix })
-          .catch((error: unknown) => log(deps, { event: "task_flow.after_plan_stored_failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" }));
-      }
-      return;
-    }
-    if (operation.workflowMode === "PLAN" && outcome?.kind === "plan_unreadable") {
-      // The answer could not be read and the automatic second run is spent: planning blocks, with the problems kept for Retry planning (and a fixed category for the owner's message).
-      const next = blockWorkflow(workflow, WORKFLOW_BLOCK_REASONS.planUnreadable, iso(deps));
-      await commitWorkflow(deps, task, next, [], [change.set("planUnreadable", toDocument({ workflowRevision: next.revision, errors: outcome.errors, category: outcome.category, ...(outcome.autoRetried === true ? { autoRetried: true } : {}) }))]);
-      return;
-    }
-    if (operation.workflowMode === "PLAN" && outcome?.kind === "plan_again") {
-      // Nothing is shown to the owner: planning stays RUNNING one revision on, and a row starts the planner again with what was wrong (Cloud's REPLAN row).
-      const now = iso(deps);
-      const next = WorkflowSnapshotSchema.parse({ ...workflow, revision: workflow.revision + 1, updatedAt: now });
-      const committed = await commitWorkflow(deps, task, next, [dispatchRowItem(deps, task.taskId, next.revision, "REPLAN", now, now, undefined, outcome.prompt)], [change.set("planSelfCheck", toDocument(outcome.selfCheck))]);
-      if (committed) await runDispatchRow(deps, { taskId: task.taskId, workflowRevision: next.revision, kind: "REPLAN" });
-      return;
-    }
-  } catch (error) {
-    if (!(error instanceof WorkflowTransitionError)) throw error;
-    await blockTaskWorkflow(deps, task.taskId, workflow.revision, "Rovara could not read the result of this step; retry it.");
-    return;
-  }
-  // A result with no outcome the step understands: the step ended without what it was asked for.
-  if (operation.workflowMode === "UNDERSTAND" || operation.workflowMode === "PLAN") {
-    await blockTaskWorkflow(deps, task.taskId, workflow.revision, "Rovara could not read the result of this step; retry it.");
-  }
+  await handleReadingStepSuccess(deps, task, workflow, operation.workflowMode, ended.outcome);
 }
 
 /** The workflow with the change tier's estimate written, for a coding plan; a task whose tier already comes from a diff keeps it (the estimate never replaces a real tier). */
