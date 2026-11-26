@@ -720,6 +720,15 @@ export async function taskOwnerDevelopers(deps: Pick<TaskPeopleDependencies, "do
   return people?.people.filter((person) => person.role === "owner").map((person) => person.developerId);
 }
 
+/**
+ * What a writer who is not on the task's People list is bound to when they act on it (a stored share's comment): the list's current revision (the access fence of the write, so a list that changes under them fails the write) and its
+ * owners, or neither when the task has no list. A list that cannot be read throws, as every People read does.
+ */
+export async function taskListBinding(deps: Pick<TaskPeopleDependencies, "documentClient" | "tableName">, task: Pick<DeveloperTaskRecord, "taskId">): Promise<{ peopleRevision?: number; ownerActorIds?: readonly string[] }> {
+  const people = await loadPeople(deps, task.taskId);
+  return people === undefined ? {} : { peopleRevision: people.revision, ownerActorIds: people.people.filter((person) => person.role === "owner").map((person) => taskOwnerKey(person.developerId, task.taskId)) };
+}
+
 /** The no-checker exception is confined to the hosted creator's unchanged, sole-owner list. */
 function hostedCreatorOnly(task: DeveloperTaskRecord, people: TaskPeople): boolean {
   const creator = people.people[0];

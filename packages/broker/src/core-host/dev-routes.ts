@@ -54,6 +54,7 @@ import type { TaskRecord } from "../core/task-flow/records.js";
 import { loadOwnedTask, readTask, taskViewOf } from "../core/task-flow/reads.js";
 import { decideTaskRead, maySeeTaskMoney as roleMaySeeTaskMoney, type TaskRead, type TaskReadDecision, type TaskReadSeams } from "../core/task-flow/read-rule.js";
 import { coreTaskRuleOf } from "./task-rule-paths.js";
+import { readTaskEvidenceFile, taskEvidenceFileRoute } from "./task-evidence-file-routes.js";
 import { routeTaskScreen, taskScreenRoute } from "./task-screen-routes.js";
 import { involvedListOptions, listInvolvedTasks, wantsInvolved } from "../core/task-flow/involved.js";
 import type { TaskActionsOptions } from "../core/task-flow/owner-round.js";
@@ -270,6 +271,8 @@ export interface CoreDevWiring {
     holdsOwnTask?(input: { person: { developerId: string; name: string }; companyId: OrgId; task: Record<string, unknown> }): Promise<boolean>;
     /** DEC 254zzz44 (a): the person's stored share (spec 067) on this task: its role as stored, while they are still a member of its project, read live. The read rule (core/task-flow/read-rule.ts) decides what it shows. */
     sharedReader(input: { person: { developerId: string; name: string }; companyId: OrgId; task: Record<string, unknown> }): Promise<{ role: string } | undefined>;
+    /** The old People page rule (the plan comments' and the diff's), as the read rule's seam: resolves when it admits, throws its refusal when it does not, says `viaChannelShare` for a person who reads only because the task is shared into their Slack channel. The rule asks it for the Slack channel share on every part of the page (owner decision 254zzz558). Absent: no channel share. */
+    peoplePage?(input: { person: { developerId: string; name: string }; companyId: OrgId; task: Record<string, unknown> }): Promise<void | { holdsOwnTask: true } | { viaChannelShare: true }>;
   };
   /** L4-U5b: what the inbox's project notices (`GET /v1/app/inbox/project-notices`) are checked against, live: whether the person still administers the project, and the project's open repair card. Absent: that route lists nothing. */
   projectNotices?: { administers(orgId: string, developerId: string, project: string): Promise<boolean>; setupRead?(orgId: string, project: string): Promise<{ key: string; failedStep: string; fixReady: boolean } | undefined> } | undefined;
@@ -340,7 +343,7 @@ function owns(path: string, method: string, query: string): boolean {
   if (path === AGENT_MODELS_PATH) return method === "GET" || method === "POST";
   if (isSetupRunPath(path, method) || isSetupCheckPath(path, method) || isWikiMapPath(path, method) || isReportPath(path, method)) return true;
   if (isKnownFailingPath(path, method) || isWikiPath(path, method) || isWikiCorrectionPath(path, method) || isWikiBuildPath(path, method) || isAnswersPath(path, method) || isStartSuggestPath(path, method) || isUpkeepPath(path, method) || isEvalCheckPath(path, method) || isBrowserTestingPath(path, method) || isAgentDirectoryPath(path, method) || isSystemRunsPath(path, method) || isPackageRegistriesPath(path, method) || isTicketUpdatesPath(path, method) || isIntakePath(path, method)) return true;
-  return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path) || parityTaskRoute(path, method) !== undefined || isPrFeedbackPath(path, method) || taskScreenRoute(path, method) !== undefined;
+  return SESSIONS.test(path) || DECISIONS.test(path) || SCRIPT_TOKENS.test(path) || parityTaskRoute(path, method) !== undefined || isPrFeedbackPath(path, method) || taskScreenRoute(path, method) !== undefined || taskEvidenceFileRoute(path, method) !== undefined;
 }
 /** Neither decisions surface relies on sign-in time or methods (DEC 254zzz73). */
 function decisionCallerOf(caller: DeployedCaller, companyId: string): DeployedDecisionCaller {
@@ -379,19 +382,13 @@ async function sessionAnswer(target: Mounted, request: BrokerRequest, caller: Ta
 
 
 /**
- * What the answers read may know of a task, for this asker: the task the one read rule shows them, and (option B, pending the owner's Q1) none of its plan, design or requirements text when the person was only shared the
- * task's summary. The set lives for one request.
+ * What the answers read may know of a task, for this asker: the task the one read rule shows them. A person the task is shared with sees the whole task page (the owner's decision 254zzz558), the plan included, so
+ * nothing of the task's documents is withheld from the scripted answer for them (it was, while Q1 was open: "option B").
  */
 function answerTasks(target: Mounted, caller: DeployedCaller, role: OrgRole): NonNullable<Parameters<typeof routeHostedAnswers>[0]["tasks"]> {
-  const withheld = new Set<string>();
   return {
     artifacts: target.runtime.flow.deps.artifacts,
-    read: async (_personId, taskId) => {
-      const decision = await decideRead(target, caller, role, { read: "answers", taskId });
-      if (decision.sharedRole !== undefined) withheld.add(decision.task.taskId);
-      return decision.task;
-    },
-    documentsWithheld: (taskId) => withheld.has(taskId),
+    read: async (_personId, taskId) => (await decideRead(target, caller, role, { read: "answers", taskId })).task,
   };
 }
 
@@ -423,6 +420,8 @@ function decideRead(target: Mounted, caller: DeployedCaller, role: OrgRole | und
   const rules = target.wiring.taskRules;
   const seams: TaskReadSeams = {
     ...(rules === undefined ? {} : { sharedReader: (person, task) => rules.sharedReader({ person, companyId: target.runtime.companyId, task }) }),
+    // The People page rule, for the ways in that ask it (the diff, the comments, and the Slack channel share on the rest of the page); a caller's own seam of the same name (the aws routes') takes its place.
+    ...(rules?.peoplePage === undefined ? {} : { peoplePage: (task) => rules.peoplePage!({ person: { developerId: caller.principal.personId, name: caller.principal.displayName }, companyId: target.runtime.companyId, task }) }),
     // The person's current project grant IN THE TASK'S COMPANY (the company the mount checked their live membership of), re-read for every way in: a person moved to another company between two reads never has that
     // company's same-named grant counted.
     ...liveGrantSeam(target),
@@ -618,7 +617,11 @@ function taskSurfaceAnswer(target: Mounted, request: BrokerRequest, taskCaller: 
   if (isPrFeedbackPath(path, request.method)) return feedbackAnswer(target, request, taskCaller, caller, membership);
   // RD-2.0: the task page's new reads (spec, checks, changes, timeline), one mount; each answers ROUTE_NOT_SERVED until its lane fills its handler (task-screen-routes.ts).
   const screen = taskScreenRoute(path, request.method);
-  if (screen !== undefined) return routeTaskScreen({ flow: target.runtime.flow, blobs: target.blobs, caller: taskCaller, request, decide: (read) => decideRead(target, caller, membership.role, { read, taskId: screen.taskId }) }, screen);
+  if (screen !== undefined) return routeTaskScreen({ flow: target.runtime.flow, blobs: target.blobs, caller: taskCaller, request, ...(target.wiring.taskRules === undefined ? {} : { taskRules: target.wiring.taskRules }), authorize: (read, task, seams) => decideRead(target, caller, membership.role, { read, task, ...(seams === undefined ? {} : { seams }) }), decide: (read) => decideRead(target, caller, membership.role, { read, taskId: screen.taskId }) }, screen);
+  // RD-2d: the file behind a link of the checks read (GET /v1/app/tasks/{taskId}/evidence/{sha256}): task-evidence-file-routes.ts holds every rule.
+  const file = taskEvidenceFileRoute(path, request.method);
+  // The one read rule decides who may read it (a share is not shown the checks, so not their files); the route is given the decision and holds no access rule of its own.
+  if (file !== undefined) return decideRead(target, caller, membership.role, { read: "evidenceFile", taskId: file.taskId }).then((decision) => readTaskEvidenceFile({ flow: target.runtime.flow, blobs: target.blobs, caller: taskCaller, audit: auditOf(target, caller), now: () => nowOf(target), decision, ...file }));
   const parity = parityTaskRoute(path, request.method);
   if (parity === undefined) return undefined;
   return routeParityTask({
@@ -736,7 +739,7 @@ export function createCoreDevRoutes(options: CoreDevRoutesOptions): CoreDevRoute
       if (caller.scriptToken !== undefined && TASK_ANSWERS.test(path)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
       // A script token reaches task reads or the two scoped wiki reads; never sessions, decisions, playbooks or token management.
       // An owner's move on a task is never a script token's, and its answer must not tell a token which task ids exist: it reads like a missing task (the boundary's own answer).
-      if (caller.scriptToken !== undefined && (feedbackOrParity(path, request.method) || TASK_ACTION.test(path) || TASK_CANCEL.test(path) || TASK_PAGE_FINDINGS.test(path) || isHostedMergePath(path, request.method) || coreTaskRuleOf(path, request.method) !== undefined)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
+      if (caller.scriptToken !== undefined && (feedbackOrParity(path, request.method) || TASK_ACTION.test(path) || TASK_CANCEL.test(path) || TASK_PAGE_FINDINGS.test(path) || isHostedMergePath(path, request.method) || taskEvidenceFileRoute(path, request.method) !== undefined || coreTaskRuleOf(path, request.method) !== undefined)) return errorAnswer(agentXError("NOT_FOUND", "route not found"));
       // A task's proof index is refused to a script token too, but only AFTER the task is looked up (below): refusing it here, by path alone, told another company's token that the id is a real task (403) where an
       // id with no task reads as a missing task (404). Every other path left here names no task id.
       if (caller.scriptToken !== undefined && !TASK_READ.test(path) && !TASK_EVIDENCE.test(path) && scriptTokenRoute(request.method, path)?.permission !== "wiki") return errorAnswer(agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS));

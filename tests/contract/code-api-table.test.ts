@@ -14,9 +14,10 @@ describe("the one route table", () => {
   it("holds the rows it held in dev-route-scopes.ts, in the same order", () => {
     // R1 + L1 6.2b (Code API 1.3): the three waiting-ticket rows moved from /v1/dev/projects/{project}/intake* to /v1/app/projects/{project}/intake* (179/108 became 176/111).
     // RD-2.0 (Code API 1.5): four rows for the task page's new reads (spec, checks, changes, timeline) after the proof index (176 became 180).
-    expect([DEV_ROUTES.length, APP_ROUTES.length]).toEqual([180, 111]);
+    // RD-2d: one app row for the file behind a link of the checks read, GET /v1/app/tasks/{taskId}/evidence/{sha}, after the merge rows (111 became 112). It carries only its scope: no schema, no version bump.
+    expect([DEV_ROUTES.length, APP_ROUTES.length]).toEqual([180, 112]);
     expect(digest(DEV_ROUTES.map(keyOf))).toBe("7041723dc483e5627c885115dbe6c5b6a2dc3d8c6b9b4c6e482d4c25fcd0c699");
-    expect(digest(APP_ROUTES.map(keyOf))).toBe("421490346858df2db699d93b15c2508795e4a4c561a2daf6fc4d1f25cc392aca");
+    expect(digest(APP_ROUTES.map(keyOf))).toBe("eb8d562ca509716ec37d2d6594a3f4ef86fde68633cd8a047a1bc559a7f065c4");
   });
 
   it("is the developer rows then the app rows, each row once, and only the rows that carry a schema carry more than method, path and scope (F2-B: `tasks.read`; RD-2.0: the ten task reads)", () => {

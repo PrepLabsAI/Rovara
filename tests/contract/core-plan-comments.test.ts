@@ -15,6 +15,8 @@ import { acceptStep, commitWorkflow, runDispatchRow, runDueDispatches } from "..
 import { startCriticRevision } from "../../packages/broker/src/core/plan/check.js";
 import { dispatchRowItem } from "../../packages/broker/src/core/task-flow/dispatch-rows.js";
 import { OMAR, PRIYA, SAM, pagePlan, pageTask } from "../support/page-tasks.js";
+import { authorizeFor } from "../support/read-rule-authorize.js";
+import { HOSTED_IDENTITY_PROVIDER } from "../../packages/broker/src/core-host/hosted-modules.js";
 
 const COMPANY = "org_corehost00000000000a";
 const OTHER = "org_corehost00000000000b";
@@ -41,6 +43,36 @@ describe("plan comment parity on core", () => {
     const reply = JSON.parse((await call("POST", { requestId: "reply", document: "plan", text: "Agreed", replyTo: first.comment.commentId })).body) as { comment: { commentId: string } };
     expect(h.db.get(`DEVTASK#${h.taskId}`, `COMMENT#${reply.comment.commentId}`)).toMatchObject({ parentId: first.comment.commentId, target: { kind: "claim", id: "2.1" } });
     expect(JSON.parse((await call("GET")).body)).toMatchObject({ comments: [{ text: "Above" }, { text: "Agreed" }] });
+  });
+
+  // Owner decision 254zzz558 (a WRITE permission): a person the task is shared with by the stored share ("Can view") can comment, as the Slack channel share does. Judged by the one read rule's decision for this person, never by the share row alone.
+  it("a person the task is shared with (the stored share, still a project member, a role the code knows) comments; a person with no share, a lapsed member and an unknown role are refused as before, and nothing is written for them", async () => {
+    const SHARED = "9".repeat(64);
+    const principalOf = (developerId: string) => ({ companyId: COMPANY as never, personId: developerId, displayName: "Reader", roles: ["member" as const], provider: HOSTED_IDENTITY_PROVIDER });
+    const attempt = async (developerId: string, options: { role?: string; projectMember?: boolean } = {}) => {
+      const h = corePage();
+      if (options.role !== undefined) h.db.set({ pk: `DEVTASK#${h.taskId}`, sk: `READER#${developerId}`, role: options.role });
+      const routes = createCoreTaskRuleRoutes(() => ({ ...h.deps, taskReaderPerson: async () => ({ name: "Reader", projectMember: options.projectMember ?? true }) }));
+      const path = `/v1/dev/tasks/${h.taskId}/comments`;
+      const call = async (method: string, body?: unknown) => {
+        try {
+          return await routes.route({ request: { method, path, headers: {}, ...(body === undefined ? {} : { body: JSON.stringify(body) }) }, path, person: { developerId, name: "Reader" }, companyId: COMPANY, task: h.row(), store: { query: async () => ({ items: [] }) },
+            authorize: authorizeFor(routes, { companyId: COMPANY, principal: principalOf(developerId), task: h.row() }) });
+        } catch (error) { return { statusCode: 404, body: JSON.stringify({ error: { code: (error as { code?: string }).code } }) }; }
+      };
+      const before = h.rows();
+      const posted = await call("POST", { requestId: "shared-comment", document: "plan", text: "Looks right to me.", anchor: "claim:2.1" });
+      return { h, call, posted, written: h.rows() !== before };
+    };
+    const shared = await attempt(SHARED, { role: "viewer" });
+    expect(shared.posted.statusCode).toBe(200);
+    expect(JSON.parse(shared.posted.body)).toMatchObject({ comment: { text: "Looks right to me.", author: { developerId: SHARED } } });
+    expect(JSON.parse((await shared.call("GET")).body)).toMatchObject({ comments: [{ text: "Looks right to me." }] });
+    // No share, a member who lapsed from the project, a role the code does not know: the refusal the People rule always gave, and no row.
+    for (const [name, outcome] of [["no share", await attempt(SHARED)], ["lapsed member", await attempt(SHARED, { role: "viewer", projectMember: false })], ["unknown role", await attempt(SHARED, { role: "editor" })]] as const) {
+      expect([outcome.posted.statusCode, (JSON.parse(outcome.posted.body) as { error: { code: string } }).error.code], name).toEqual([404, "TASK_NOT_FOUND"]);
+      expect(outcome.written, `${name}: nothing written`).toBe(false);
+    }
   });
 
   it("the existing page create, edit, delete and poll use core access and optimistic revisions", async () => {

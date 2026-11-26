@@ -224,6 +224,10 @@ describe("the core's handlers on the deployed API", () => {
   describe("the task page's new reads (RD-2.0)", () => {
     const READS = ["spec", "checks", "changes", "timeline"] as const;
     const notServed = { error: { code: "ROUTE_NOT_SERVED", message: ROUTE_NOT_SERVED_MESSAGE } };
+    // A read leaves the stub list when its lane fills the handler; each lane adds its name here and keeps the others (union).
+    // RD-2a: spec (tests/unit/rd2a-spec-read.test.ts is its oracle), RD-2b1: checks (rd2b1-checks-read.test.ts), RD-2b2: changes (rd2b2-changes-read.test.ts).
+    const FILLED: readonly string[] = ["spec", "checks", "changes"];
+    const STUBS = READS.filter((read) => !FILLED.includes(read));
 
     it("answers a reader of the task ROUTE_NOT_SERVED, the row's own example refusal; a missing task and another company's are the same missing-task answer; nothing is written", async () => {
       const { world, app, companyOf, remember } = await world2();
@@ -232,7 +236,7 @@ describe("the core's handlers on the deployed API", () => {
       const runtime = await app.runtimeFor(FAKE_COMPANY);
       const { task } = await runtime.flow.start({ principal: own.principal, origin: "app", client: "test" }, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint", workflow: true, workflowPath: "QUICK" });
       const before = await world.store.get(taskKey(task.taskId));
-      for (const read of READS) {
+      for (const read of STUBS) {
         const row = ROUTES.find((candidate) => routeIdOf(candidate) === `tasks.${read}`)!;
         const answers = [
           await routes.route(get(`/v1/dev/tasks/${task.taskId}/${read}`), own),
@@ -249,6 +253,16 @@ describe("the core's handlers on the deployed API", () => {
         expect(answers[0]!.body, read).not.toContain(task.taskId);
         expect(row.errors).toContainEqual({ code: "ROUTE_NOT_SERVED", status: 404 });
       }
+      expect(await world.store.get(taskKey(task.taskId))).toEqual(before);
+      // The spec read is filled: a real task of its owner answers its spec, and the missing task's and another company's answers are the same "no such task".
+      const served = await routes.route(get(`/v1/dev/tasks/${task.taskId}/spec`), own);
+      expect(served?.statusCode).toBe(200);
+      expect(JSON.parse(served!.body)).toMatchObject({ spec: { taskId: task.taskId, path: "quick", layers: [{ layer: "steps", state: "not_written" }] } });
+      const missing = await routes.route(get(`/v1/dev/tasks/${randomUUID()}/spec`), own);
+      const crossed = await routes.route(get(`/v1/dev/tasks/${task.taskId}/spec`), remember(OTHER));
+      expect(missing?.statusCode).toBe(404);
+      expect((JSON.parse(missing!.body) as { error: { code: string } }).error.code).toBe("TASK_NOT_FOUND");
+      expect(crossed).toEqual(missing);
       expect(await world.store.get(taskKey(task.taskId))).toEqual(before);
     });
 

@@ -217,13 +217,16 @@ describe("plan comments and People on a core task (the old routes' own functions
     expect(comments.find((comment) => comment.replyTo === root.commentId)).toMatchObject({ anchor: "claim:2.1" });
     await h.dev(MAYA, "PUT", `/v1/dev/tasks/${h.task.taskId}/readers/${TESS.developerId}`, { requestId: randomUUID(), role: "viewer" });
     const before = h.rows();
-    for (const who of [OMAR, SAM, TESS]) {
+    for (const who of [OMAR, SAM]) {
       const body = { requestId: "refused", document: "plan", text: "Must refuse", replyTo: root.commentId };
       const response = await h.dev(who, "POST", path, body);
       expect(response.status).toBe(404);
       expect(response).toEqual(await h.missing(who, "POST", "/comments", body));
     }
     expect(h.rows()).toBe(before);
+    // Owner decision 254zzz558 (a write permission): a person the task is shared with ("Can view", the stored share TESS holds) comments; before it, this was refused.
+    expect(await h.dev(TESS, "POST", path, { requestId: "shared", document: "plan", text: "Looks right to me.", replyTo: root.commentId })).toMatchObject({ status: 200, body: { comment: { replyTo: root.commentId, text: "Looks right to me." } } });
+    expect(h.rows()).not.toBe(before);
   });
 
   it("the owner lists the plan comments; a member with no part and another company's caller read no such task", async () => {
