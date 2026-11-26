@@ -139,7 +139,7 @@ describe("identity stack", () => {
     });
 
     it("keeps the attributes a federated identity provider maps writable, and only those", () => {
-      // No provider is configured today. Cognito writes mapped attributes at federated sign-in and fails the sign-in if the client cannot write them.
+      // No provider is configured today. Cognito writes mapped attributes at federated sign-in. Whether a mapped attribute the client cannot write fails the sign-in or is skipped is unverified (the docs disagree).
       expect(cliWriteAttributes().attributes()).toEqual(expect.not.arrayContaining(["email_verified"]));
       const mapped = (names: readonly IdpMappedAttribute[]) => (resourcesOf(identityTemplate("staging", names), "AWS::Cognito::UserPoolClient")[0]!.Properties.WriteAttributes as string[]);
       expect(mapped(["email_verified"])).toEqual(expect.arrayContaining(["email", "email_verified"]));
