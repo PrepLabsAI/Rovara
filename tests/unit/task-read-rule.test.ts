@@ -6,6 +6,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { AgentXError, agentXError } from "@agentx/contracts";
+import { membershipReadFailed } from "../../packages/broker/src/core/membership-read.js";
 import { pageRule } from "../../packages/broker/src/aws/core-task-rule-routes.js";
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import type { DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
@@ -400,6 +401,16 @@ describe("the one read rule: what the decision carries", () => {
     expect(log.mock.calls.map(([entry]) => (entry as { event: string }).event)).toEqual(["developer.task_reader_unknown_role", "developer.task_reader_unknown_role"]);
     expect(String((log.mock.calls[0]![0] as { role: string }).role).length).toBeLessThanOrEqual(40);
     expect(log.mock.calls[0]![0]).toMatchObject({ taskId: w.taskId });
+  });
+
+  it("a stored-share lookup whose MEMBERSHIP read failed is the retryable 503 (MEMBERSHIP-READ-FAILS-SAFE): never a share, never 'no such task', and no lookup-failed log", async () => {
+    const w = await readRuleWorld();
+    const log = vi.fn();
+    const failed = { sharedReader: async (): Promise<never> => { throw membershipReadFailed(); } };
+    for (const read of ["task", "events", "plan"] as const) {
+      await expect(decideAs(w, personaOf("shared reader"), read, { deps: { log }, seams: failed }), read).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    }
+    expect(log).not.toHaveBeenCalled();
   });
 
   it("a failing lookup of the stored share is 'no' and is logged once, in fixed words with no person and no task", async () => {

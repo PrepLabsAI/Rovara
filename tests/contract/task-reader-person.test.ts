@@ -56,6 +56,9 @@ describe("taskReaderPerson: the stored share's person now (rule 1)", () => {
     const bare = layer({}, { companies: false });
     expect(await bare.person(PERSON)).toEqual({ name: "Person b", projectMember: false, companyMember: false });
     expect(await bare.person(GRANTED)).toMatchObject({ projectMember: true, companyMember: true });
+    // The task's own person asking (`ownTask`) gets the same `companyMember`, not a hard-coded true (Opus NIT 1).
+    expect(await taskReaderPerson(bare.deps, PERSON, "payments", TASK_COMPANY, { ownTask: true })).toEqual({ name: "Person b", projectMember: false, companyMember: false, mayStart: false });
+    expect(await taskReaderPerson(bare.deps, GRANTED, "payments", TASK_COMPANY, { ownTask: true })).toEqual({ name: "Person c", projectMember: true, companyMember: true, mayStart: true });
   });
 });
 
@@ -125,10 +128,10 @@ describe("grantTaskReader: the owner shares with a company member, a project gra
   });
 });
 
-// READ-RULE-SHARE-B on top of MEMBERSHIP-READ-FAILS-SAFE: a membership read that FAILED (the store threw) is not "not a member". It goes up as the retryable 503, so a share lookup is "no share" with the failure logged (never a leaked 404, never a share granted),
+// READ-RULE-SHARE-B on top of MEMBERSHIP-READ-FAILS-SAFE: a membership read that FAILED (the store threw) is not "not a member". It goes up as the retryable 503, so a share lookup is the retryable 503 through the read rule (never a leaked 404, never a share granted),
 // and a share write is the retryable answer with nothing written. (Any throw of the company reader is a failed membership read: `resolveCompany` marks it.)
 describe("a failed membership read gives no share and writes none (MEMBERSHIP-READ-FAILS-SAFE)", () => {
-  it("taskReaderPerson rethrows the retryable failure; readerShare lets it go up (the rule logs it and answers no share); grantTaskReader answers the retryable 503 and writes nothing", async () => {
+  it("taskReaderPerson rethrows the retryable failure; readerShare lets it go up (the read rule rethrows it: see tests/unit/task-read-rule.test.ts); grantTaskReader answers the retryable 503 and writes nothing", async () => {
     const w = layer({ [PERSON]: "read-failed", [OWNER]: TASK_COMPANY });
     const refused = await w.person(PERSON).catch((error: unknown) => error as AgentXError);
     expect([refused.code, refused.message]).toEqual(["RUNTIME_UNAVAILABLE", `RUNTIME_UNAVAILABLE: ${MEMBERSHIP_READ_FAILED_WORDS}`]);
