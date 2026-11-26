@@ -165,6 +165,7 @@ export { PROJECT_SETUP_CAPTURE_POLICY, NAMED_COMPANY_CANDIDATE_WAITING, type Reg
 export { type SlackStopTaskEvent, type SlackWorkflowStartEvent, type SlackWorkflowDecisionEvent, type SlackWorkflowRetryEvent, type SlackWorkflowSendBackEvent, type SlackWorkflowResolveFindingsEvent, type SlackWorkflowCloseEvent, type SlackWorkflowReviewRetryEvent, type SlackWorkflowFeedbackFindingsDecisionEvent, type SlackWorkflowFeedbackNoteEvent, type SlackTaskAuthorizationEvent, type SlackTaskPeopleConfirmEvent, type SlackTaskPeopleReadEvent, type SlackTaskPeopleChangeEvent, type SlackTaskPeopleTakeOwnershipEvent, isSlackTaskPeopleReadEvent, isSlackTaskPeopleChangeEvent, isSlackTaskPeopleTakeOwnershipEvent, isSlackTaskPeopleConfirmEvent, isSlackTaskAuthorizationEvent, isSlackWorkflowStartEvent, type SlackIntakeRecordEvent, isSlackIntakeRecordEvent, isSlackWorkflowDecisionEvent, isSlackWorkflowRetryEvent, isSlackWorkflowSendBackEvent, isSlackWorkflowResolveFindingsEvent, isSlackWorkflowCloseEvent, isSlackWorkflowReviewRetryEvent, type SlackWorkflowPublishRetryEvent, isSlackWorkflowPublishRetryEvent, type SlackWorkflowKeepPullRequestsEvent, isSlackWorkflowKeepPullRequestsEvent, isSlackWorkflowFeedbackFindingsDecisionEvent, isSlackWorkflowFeedbackNoteEvent, type SlackWorkflowFeedbackReviewRetryEvent, isSlackWorkflowFeedbackReviewRetryEvent, type SlackThreadNoteEvent, isSlackThreadNoteEvent, isSlackStopTaskEvent } from "./slack-broker-events.js";
 export { channelLinkRouteDependencies } from "./broker-primitives.js";
 import { answerSlackCorePress, isSlackCorePressEvent } from "./slack-core-decision.js";
+import { rethrowMembershipReadFailure } from "../core/membership-read.js";
 import { recordRetiredSlackButtonNote } from "./slack-retired-buttons.js";
 import { RETIRED_SLACK_BUTTON_ANSWER } from "./slack-retired-buttons.js";
 export const NAMED_COMPANY_SETUP_APPROVAL_REFUSED = "a company's browser testing is set up on the project's Browser testing page, and the rest of its setup goes through the project's setup flow, not through a setup approval sent with registration";
@@ -519,66 +520,140 @@ async function routeSetupProposal(dependencies: AwsBrokerDependencies, request: 
   return json({ proposalRef, proposalSha256: artifactDigest, candidateDigest: candidate.digest, commitSha: snapshot.commitSha, treeSha: snapshot.treeSha, proposal, policy, aiNavigation, aiNavigationUntested }, request.requestId);
 }
 
-/** POST /v1/admin/projects/setup-approvals (#1315: moved out of the event handler unchanged): records an administrator's decision on a stored setup proposal, after checking its digest and owner again. */
-async function routeSetupApproval(dependencies: AwsBrokerDependencies, request: BrokerHttpRequest, identity: BrokerCallerIdentity, body: unknown): Promise<ReturnType<typeof json>> {
-  if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
-  const approvalInput = z.object({ projectName: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/), proposalRef: z.string().min(1).max(512), proposalSha256: z.string().regex(/^[a-f0-9]{64}$/), decision: z.enum(["approve", "decline"]) }).strict().parse(body);
-  const expectedPrefix = `project-setup-proposals/${identity.ownerKey}/`;
-  if (!approvalInput.proposalRef.startsWith(expectedPrefix) || approvalInput.proposalRef !== `${expectedPrefix}${approvalInput.proposalSha256}.json`) throw agentXError("FORBIDDEN", "setup proposal reference is outside the authenticated administrator scope");
+function parseStoredSetupSources(rawSources: unknown): Array<{ path: string; sha256: string; bytes: Buffer; kind: "blob" }> {
+  if (!Array.isArray(rawSources)) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup source inventory is invalid");
+  return rawSources.map((raw) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup source item is invalid");
+    const source = raw as Record<string, unknown>;
+    if (typeof source.path !== "string" || typeof source.sha256 !== "string" || typeof source.bytesBase64 !== "string" || source.kind !== "blob") {
+      throw agentXError("RUNTIME_UNAVAILABLE", "stored setup source item is invalid");
+    }
+    return { path: source.path, sha256: source.sha256, bytes: Buffer.from(source.bytesBase64, "base64"), kind: "blob" as const };
+  });
+}
+
+async function loadStoredSetupProposalArtifact(
+  dependencies: AwsBrokerDependencies,
+  identity: BrokerCallerIdentity,
+  approvalInput: { proposalRef: string; proposalSha256: string },
+) {
   const stored = await readStoredText(dependencies.s3, dependencies.artifactBucketName, approvalInput.proposalRef, MAX_SETUP_PROPOSAL_BYTES);
-  if (!stored || createHash("sha256").update(stored, "utf8").digest("hex") !== approvalInput.proposalSha256) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup proposal is missing or its digest changed");
+  if (!stored || createHash("sha256").update(stored, "utf8").digest("hex") !== approvalInput.proposalSha256) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "stored setup proposal is missing or its digest changed");
+  }
   let artifact: Record<string, unknown>;
   try {
     const decoded: unknown = JSON.parse(stored);
     if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) throw new Error("invalid");
     artifact = decoded as Record<string, unknown>;
   } catch { throw agentXError("RUNTIME_UNAVAILABLE", "stored setup proposal is unreadable"); }
-  if (artifact.schemaVersion !== "project-setup-source-proposal/v1" || artifact.issuerOwnerKey !== identity.ownerKey) throw agentXError("FORBIDDEN", "stored setup proposal belongs to another administrator");
+  if (artifact.schemaVersion !== "project-setup-source-proposal/v1" || artifact.issuerOwnerKey !== identity.ownerKey) {
+    throw agentXError("FORBIDDEN", "stored setup proposal belongs to another administrator");
+  }
   const storedSnapshot = artifact.snapshot;
-  if (!storedSnapshot || typeof storedSnapshot !== "object" || Array.isArray(storedSnapshot)) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup source snapshot is missing");
+  if (!storedSnapshot || typeof storedSnapshot !== "object" || Array.isArray(storedSnapshot)) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "stored setup source snapshot is missing");
+  }
   const snapshotObject = storedSnapshot as Record<string, unknown>;
-  const rawSources = snapshotObject.sources;
-  if (!Array.isArray(rawSources)) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup source inventory is invalid");
-  const sources = rawSources.map((raw) => {
-    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup source item is invalid");
-    const source = raw as Record<string, unknown>;
-    if (typeof source.path !== "string" || typeof source.sha256 !== "string" || typeof source.bytesBase64 !== "string" || source.kind !== "blob") throw agentXError("RUNTIME_UNAVAILABLE", "stored setup source item is invalid");
-    return { path: source.path, sha256: source.sha256, bytes: Buffer.from(source.bytesBase64, "base64"), kind: "blob" as const };
-  });
+  const sources = parseStoredSetupSources(snapshotObject.sources);
   const snapshot = { ...snapshotObject, sources } as unknown as E2ESourceSnapshot;
   const candidate = snapshot.candidate;
-  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup candidate is invalid");
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "stored setup candidate is invalid");
+  }
   verifyE2ESourceSnapshot(snapshot, candidate);
   const inspection = inspectE2ERepository(snapshot, candidate).inspection;
   const proposal = verifyE2ESetupProposal(E2ESetupProposalSchema.parse(artifact.proposal), snapshot, candidate);
-  const agentRoute = await plannedAgentRoute(dependencies);
-  const policy = projectSetupPolicy(proposal, agentRoute);
-  if (!sameJsonContent(artifact.policy, policy)) {
-    // A proposal made under an earlier default is not approvable now, but a decision already recorded for it is still answered the same way (an idempotent retry).
-    const decided = await getItem<Record<string, unknown>>(dependencies, { pk: `PROJECT_SETUP#${approvalInput.projectName}`, sk: `PROPOSAL#${approvalInput.proposalSha256}` });
-    if (decided) {
-      if (decided.ownerKey !== identity.ownerKey || decided.decision !== approvalInput.decision) throw agentXError("PROJECT_REVISION_MISMATCH", "setup proposal already has a different immutable decision");
-      return json({ proposalRef: approvalInput.proposalRef, proposalSha256: approvalInput.proposalSha256, decision: approvalInput.decision, duplicate: true }, request.requestId);
-    }
-    // The only difference is the AI navigation route: the installation's provider, model, secret or OpenRouter policy changed (or another approval moved the registry) since the proposal.
-    if (sameJsonContent({ ...(artifact.policy as Record<string, unknown>), modelRouteRevision: null, limits: null }, { ...policy, modelRouteRevision: null, limits: null })) {
-      // With no route now, the settings were not read or no longer give a usable route; they have not been shown to have changed.
-      if (agentRoute === undefined) {
-        const untested = await untestedAgentRouteNote(dependencies);
-        throw agentXError("RUNTIME_UNAVAILABLE", `${E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved}: ${untested !== null ? `${untested.sentence}; run the driving test, then propose the setup again`
-          : "The AI navigation settings of this installation could not be read, or no longer give a usable route; propose the setup again once they can be"}`);
-      }
-      throw agentXError("RUNTIME_UNAVAILABLE", `${E2E_MODEL_ROUTE_CHANGED_REAPPROVE}: The AI navigation settings changed; propose the setup again, then approve the new proposal`);
-    }
-    throw agentXError("RUNTIME_UNAVAILABLE", "this setup proposal was made under an earlier default policy and can no longer be approved: propose the setup again (re-propose the setup), then approve the new proposal");
+  return { stored, artifact, snapshotObject, sources, snapshot, candidate, inspection, proposal };
+}
+
+async function handleSetupApprovalPolicyMismatch(
+  dependencies: AwsBrokerDependencies,
+  identity: BrokerCallerIdentity,
+  request: BrokerHttpRequest,
+  approvalInput: { projectName: string; proposalRef: string; proposalSha256: string; decision: "approve" | "decline" },
+  artifact: Record<string, unknown>,
+  policy: ReturnType<typeof projectSetupPolicy>,
+  agentRoute: Awaited<ReturnType<typeof plannedAgentRoute>>,
+): Promise<ReturnType<typeof json>> {
+  // A proposal made under an earlier default is not approvable now, but a decision already recorded for it is still answered the same way (an idempotent retry).
+  const decided = await getItem<Record<string, unknown>>(dependencies, { pk: `PROJECT_SETUP#${approvalInput.projectName}`, sk: `PROPOSAL#${approvalInput.proposalSha256}` });
+  if (decided) {
+    if (decided.ownerKey !== identity.ownerKey || decided.decision !== approvalInput.decision) throw agentXError("PROJECT_REVISION_MISMATCH", "setup proposal already has a different immutable decision");
+    return json({ proposalRef: approvalInput.proposalRef, proposalSha256: approvalInput.proposalSha256, decision: approvalInput.decision, duplicate: true }, request.requestId);
   }
+  // The only difference is the AI navigation route: the installation's provider, model, secret or OpenRouter policy changed (or another approval moved the registry) since the proposal.
+  if (sameJsonContent({ ...(artifact.policy as Record<string, unknown>), modelRouteRevision: null, limits: null }, { ...policy, modelRouteRevision: null, limits: null })) {
+    // With no route now, the settings were not read or no longer give a usable route; they have not been shown to have changed.
+    if (agentRoute === undefined) {
+      const untested = await untestedAgentRouteNote(dependencies);
+      throw agentXError("RUNTIME_UNAVAILABLE", `${E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved}: ${untested !== null ? `${untested.sentence}; run the driving test, then propose the setup again`
+        : "The AI navigation settings of this installation could not be read, or no longer give a usable route; propose the setup again once they can be"}`);
+    }
+    throw agentXError("RUNTIME_UNAVAILABLE", `${E2E_MODEL_ROUTE_CHANGED_REAPPROVE}: The AI navigation settings changed; propose the setup again, then approve the new proposal`);
+  }
+  throw agentXError("RUNTIME_UNAVAILABLE", "this setup proposal was made under an earlier default policy and can no longer be approved: propose the setup again (re-propose the setup), then approve the new proposal");
+}
+
+function verifySetupProposalIdentityAndBytes(
+  artifact: Record<string, unknown>,
+  snapshotObject: Record<string, unknown>,
+  sources: Array<{ path: string; sha256: string; bytes: Buffer; kind: "blob" }>,
+  snapshot: E2ESourceSnapshot,
+  candidate: E2ESourceSnapshot["candidate"],
+  inspection: ReturnType<typeof inspectE2ERepository>["inspection"],
+  proposal: E2ESetupProposal,
+  stored: string,
+): Record<string, unknown> {
   const identityMapping = artifact.identityMapping;
   if (!identityMapping || typeof identityMapping !== "object" || Array.isArray(identityMapping)
     || (identityMapping as Record<string, unknown>).schemaVersion !== "github-source-to-agentx-registration/v1"
     || (identityMapping as Record<string, unknown>).sourceRepositoryId !== candidate.repositories[0]?.repositoryId
-    || typeof (identityMapping as Record<string, unknown>).registeredRepositoryId !== "string") throw agentXError("RUNTIME_UNAVAILABLE", "stored setup repository identity mapping is invalid");
+    || typeof (identityMapping as Record<string, unknown>).registeredRepositoryId !== "string") {
+    throw agentXError("RUNTIME_UNAVAILABLE", "stored setup repository identity mapping is invalid");
+  }
   const canonicalArtifact = { ...artifact, snapshot: { ...snapshotObject, sources: sources.map(source => ({ path: source.path, sha256: source.sha256, kind: source.kind, bytesBase64: source.bytes.toString("base64") })) }, proposal };
-  if (canonicalJson(canonicalArtifact) !== stored || proposeE2ESetup({ inspection, snapshot, expectedCandidate: candidate }).candidateDigest !== proposal.candidateDigest) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup proposal does not match its source-derived bytes");
+  if (canonicalJson(canonicalArtifact) !== stored || proposeE2ESetup({ inspection, snapshot, expectedCandidate: candidate }).candidateDigest !== proposal.candidateDigest) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "stored setup proposal does not match its source-derived bytes");
+  }
+  return identityMapping as Record<string, unknown>;
+}
+
+async function approvePinnedSetupAgentRoute(
+  dependencies: AwsBrokerDependencies,
+  identity: BrokerCallerIdentity,
+  projectName: string,
+  modelRouteRevision: NonNullable<ReturnType<typeof projectSetupPolicy>["modelRouteRevision"]>,
+): Promise<void> {
+  const unreadable = () => agentXError("RUNTIME_UNAVAILABLE", `${E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved}: The AI navigation settings of this installation could not be read; propose the setup again once they can be`);
+  if (dependencies.e2eAgentInstallation === undefined) throw unreadable();
+  let installation: E2EAgentInstallation;
+  try { installation = await dependencies.e2eAgentInstallation(); } catch { throw unreadable(); }
+  try {
+    // The revision row records who approved it and for which project (audit; the installation's route is one for every project).
+    await approveE2EAgentRoute({ documentClient: dependencies.documentClient, tableName: dependencies.tableName }, installation, modelRouteRevision,
+      { approvedBy: identity.ownerKey, projectName });
+  } catch (error) {
+    if (error instanceof E2EModelRouteError) throw agentXError("RUNTIME_UNAVAILABLE", error.message);
+    throw error;
+  }
+}
+
+/** POST /v1/admin/projects/setup-approvals (#1315: moved out of the event handler unchanged): records an administrator's decision on a stored setup proposal, after checking its digest and owner again. */
+async function routeSetupApproval(dependencies: AwsBrokerDependencies, request: BrokerHttpRequest, identity: BrokerCallerIdentity, body: unknown): Promise<ReturnType<typeof json>> {
+  if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+  const approvalInput = z.object({ projectName: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/), proposalRef: z.string().min(1).max(512), proposalSha256: z.string().regex(/^[a-f0-9]{64}$/), decision: z.enum(["approve", "decline"]) }).strict().parse(body);
+  const expectedPrefix = `project-setup-proposals/${identity.ownerKey}/`;
+  if (!approvalInput.proposalRef.startsWith(expectedPrefix) || approvalInput.proposalRef !== `${expectedPrefix}${approvalInput.proposalSha256}.json`) {
+    throw agentXError("FORBIDDEN", "setup proposal reference is outside the authenticated administrator scope");
+  }
+  const { stored, artifact, snapshotObject, sources, snapshot, candidate, inspection, proposal } = await loadStoredSetupProposalArtifact(dependencies, identity, approvalInput);
+  const agentRoute = await plannedAgentRoute(dependencies);
+  const policy = projectSetupPolicy(proposal, agentRoute);
+  if (!sameJsonContent(artifact.policy, policy)) {
+    return await handleSetupApprovalPolicyMismatch(dependencies, identity, request, approvalInput, artifact, policy, agentRoute);
+  }
+  const identityMapping = verifySetupProposalIdentityAndBytes(artifact, snapshotObject, sources, snapshot, candidate, inspection, proposal, stored);
   const approvalKey = { pk: `PROJECT_SETUP#${approvalInput.projectName}`, sk: `PROPOSAL#${approvalInput.proposalSha256}` };
   const existing = await getItem<Record<string, unknown>>(dependencies, approvalKey);
   if (existing) {
@@ -588,18 +663,7 @@ async function routeSetupApproval(dependencies: AwsBrokerDependencies, request: 
   // The approval that pins a route records it first: revision n+1 only when the route's digest changed, conditionally, never overwriting a revision. A route that is no
   // longer the one the proposal showed is refused here, before the approval is recorded.
   if (approvalInput.decision === "approve" && policy.modelRouteRevision !== null) {
-    const unreadable = () => agentXError("RUNTIME_UNAVAILABLE", `${E2E_AGENT_UNAVAILABLE_REASONS.routeNotApproved}: The AI navigation settings of this installation could not be read; propose the setup again once they can be`);
-    if (dependencies.e2eAgentInstallation === undefined) throw unreadable();
-    let installation: E2EAgentInstallation;
-    try { installation = await dependencies.e2eAgentInstallation(); } catch { throw unreadable(); }
-    try {
-      // The revision row records who approved it and for which project (audit; the installation's route is one for every project).
-      await approveE2EAgentRoute({ documentClient: dependencies.documentClient, tableName: dependencies.tableName }, installation, policy.modelRouteRevision,
-        { approvedBy: identity.ownerKey, projectName: approvalInput.projectName });
-    } catch (error) {
-      if (error instanceof E2EModelRouteError) throw agentXError("RUNTIME_UNAVAILABLE", error.message);
-      throw error;
-    }
+    await approvePinnedSetupAgentRoute(dependencies, identity, approvalInput.projectName, policy.modelRouteRevision);
   }
   await dependencies.documentClient.send(new PutCommand({ TableName: dependencies.tableName, Item: {
     ...approvalKey, entityType: "PROJECT_SETUP_APPROVAL", ownerKey: identity.ownerKey, projectName: approvalInput.projectName,
@@ -610,64 +674,25 @@ async function routeSetupApproval(dependencies: AwsBrokerDependencies, request: 
   return json({ proposalRef: approvalInput.proposalRef, proposalSha256: approvalInput.proposalSha256, decision: approvalInput.decision, duplicate: false }, request.requestId);
 }
 
-// The hosted Slack orchestrator's /v1/service/* routes (#1315): it authenticates with its IAM role and acts only as a Slack thread owner.
-async function routeServiceRequest(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, request: BrokerHttpRequest, url: URL): Promise<ReturnType<typeof json>> {
-  const serviceUrl = new URL(`/v1${url.pathname.slice("/v1/service".length)}${url.search}`, "https://agentx.invalid");
-  // Spec 052 Task 6: the batch watcher's list is the whole Slack service's, not one thread's.
-  if (request.method === "GET" && serviceUrl.pathname === "/v1/evals/batches/active") {
-    requireSlackServiceRole(dependencies, request);
-    if (dependencies.swebench === undefined) return json({ batches: [], dropped: [] }, request.requestId);
-    return json(await listWatchedBatches(swebenchDependencies(dependencies), async (teamId, channelId) => (await getSlackBinding(dependencies, teamId, channelId))?.projectName), request.requestId);
-  }
-  const identity = await slackServiceIdentity(dependencies, request);
-  if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace") {
-    return json(await ensureThreadWorkspace(dependencies, identity, parseBody(request.body)), request.requestId);
-  }
-  if (request.method === "POST" && serviceUrl.pathname === "/v1/tasks/thread-notes/answered") {
-    return json(await markThreadNoteAnswered(dependencies, identity, parseBody(request.body)), request.requestId);
-  }
-  // Decision 134: a clear small change starts Quick on its own, after the broker's own check of the text.
-  if (request.method === "POST" && serviceUrl.pathname === "/v1/workflows/quick-start") {
-    return json(await startQuickFromIntake(dependencies, tasks, identity, parseBody(request.body)), request.requestId);
-  }
-  // DEC 254zzz79 (3): how this thread's chat and routing model calls are made (the company's AI through the gateway, never Rovara-paid; slack-model-access.ts).
-  if (request.method === "POST" && serviceUrl.pathname === SLACK_MODEL_ACCESS_SERVICE_PATH) {
-    const bindings = createSlackWorkspaceBindings({ client: dependencies.documentClient, tableName: dependencies.tableName, legacyTeamId: dependencies.slackWorkspaceLegacyTeamId });
-    return json(await askSlackModelAccessForIdentity({
-      companyMode: dependencies.workspaces !== undefined || (dependencies as SlackCompanyDependencies).slackInstallTeamOnly !== undefined, companyOf: (team) => bindings.companyOf(team),
-      env: dependencies.slackModelAccess?.env ?? {}, taskTokens: dependencies.slackModelAccess?.taskTokens,
-    }, identity), request.requestId);
-  }
-  // Lead 4 J2: the smart Just answer for a Slack thread (slack-answers.ts). Who may ask and which project is decided there from the verified thread and member, never from the body.
-  if (request.method === "POST" && serviceUrl.pathname === SLACK_ANSWER_SERVICE_PATH) {
-    const view = identity.slack === undefined ? dependencies : await namedInstallTeamView(dependencies, identity.slack.thread.teamId);
-    return json(await askSlackAnswerForIdentity({ company: view, core: view.developer?.coreApp }, identity, parseBody(request.body)), request.requestId);
-  }
-  if (request.method === "POST" && serviceUrl.pathname === "/v1/tasks/comments/answered") {
-    return json(await markCommentAnswered(dependencies, identity, parseBody(request.body)), request.requestId);
-  }
-  if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace/prepare") {
-    return json(await prepareThreadWorkspace(dependencies, identity, parseBody(request.body)), request.requestId);
-  }
-  if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace/close") {
-    return json(await startThreadWorkspaceClose(dependencies, identity, parseBody(request.body)), request.requestId, 202);
-  }
-  if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace/close/complete") {
-    return json(await completeThreadWorkspaceClose(dependencies, identity, parseBody(request.body)), request.requestId);
-  }
-  if (request.method === "GET" && serviceUrl.pathname === "/v1/project/models") {
-    return json(await getProjectModels(dependencies, identity), request.requestId);
-  }
-  if (request.method === "PUT" && serviceUrl.pathname === "/v1/project/model") {
-    return json(await putProjectModel(dependencies, identity, parseBody(request.body)), request.requestId);
-  }
-  if (request.method === "POST" && serviceUrl.pathname === "/v1/evals/swebench") {
-    return json(await startSwebenchRun(swebenchDependencies(dependencies), swebenchSlackContext(dependencies, identity), parseBody(request.body)), request.requestId);
-  }
-  // Spec 052 FR-002 and Task 6: the Slack batch form, and the watcher's thread and posts for one batch.
-  if (request.method === "POST" && serviceUrl.pathname === "/v1/evals/batches") {
-    return json(await startSlackBatch(swebenchDependencies(dependencies), swebenchSlackContext(dependencies, identity), parseBody(request.body)), request.requestId);
-  }
+async function handleSlackModelAccessService(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, requestId: string): Promise<ReturnType<typeof json>> {
+  const bindings = createSlackWorkspaceBindings({ client: dependencies.documentClient, tableName: dependencies.tableName, legacyTeamId: dependencies.slackWorkspaceLegacyTeamId });
+  return json(await askSlackModelAccessForIdentity({
+    companyMode: dependencies.workspaces !== undefined || (dependencies as SlackCompanyDependencies).slackInstallTeamOnly !== undefined, companyOf: (team) => bindings.companyOf(team),
+    env: dependencies.slackModelAccess?.env ?? {}, taskTokens: dependencies.slackModelAccess?.taskTokens,
+  }, identity), requestId);
+}
+
+async function handleSlackAnswerService(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, request: BrokerHttpRequest): Promise<ReturnType<typeof json>> {
+  const view = identity.slack === undefined ? dependencies : await namedInstallTeamView(dependencies, identity.slack.thread.teamId);
+  return json(await askSlackAnswerForIdentity({ company: view, core: view.developer?.coreApp }, identity, parseBody(request.body)), request.requestId);
+}
+
+async function routeServiceEvalRegex(
+  dependencies: AwsBrokerDependencies,
+  request: BrokerHttpRequest,
+  serviceUrl: URL,
+  identity: AuthenticatedIdentity,
+): Promise<ReturnType<typeof json> | undefined> {
   const watchedBatch = /^\/v1\/evals\/batches\/([0-9a-f-]{36})\/(thread|watch|drop)$/.exec(serviceUrl.pathname);
   if (request.method === "POST" && watchedBatch?.[1] && watchedBatch[2]) {
     const slack = identity.slack;
@@ -686,6 +711,42 @@ async function routeServiceRequest(dependencies: AwsBrokerDependencies, tasks: D
     if (!thread) throw agentXError("FORBIDDEN", "Slack thread context is required");
     return json({ run: await getSwebenchRunForThread(swebenchDependencies(dependencies), thread, evalRun[1]) }, request.requestId);
   }
+  return undefined;
+}
+
+// The hosted Slack orchestrator's /v1/service/* routes (#1315): it authenticates with its IAM role and acts only as a Slack thread owner.
+async function routeServiceRequest(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, request: BrokerHttpRequest, url: URL): Promise<ReturnType<typeof json>> {
+  const serviceUrl = new URL(`/v1${url.pathname.slice("/v1/service".length)}${url.search}`, "https://agentx.invalid");
+  // Spec 052 Task 6: the batch watcher's list is the whole Slack service's, not one thread's.
+  if (request.method === "GET" && serviceUrl.pathname === "/v1/evals/batches/active") {
+    requireSlackServiceRole(dependencies, request);
+    if (dependencies.swebench === undefined) return json({ batches: [], dropped: [] }, request.requestId);
+    return json(await listWatchedBatches(swebenchDependencies(dependencies), async (teamId, channelId) => (await getSlackBinding(dependencies, teamId, channelId))?.projectName), request.requestId);
+  }
+  const identity = await slackServiceIdentity(dependencies, request);
+  const exactRoutes: ReadonlyArray<readonly [string, string, () => Promise<ReturnType<typeof json>>]> = [
+    ["POST", "/v1/threads/workspace", async () => json(await ensureThreadWorkspace(dependencies, identity, parseBody(request.body)), request.requestId)],
+    ["POST", "/v1/tasks/thread-notes/answered", async () => json(await markThreadNoteAnswered(dependencies, identity, parseBody(request.body)), request.requestId)],
+    // Decision 134: a clear small change starts Quick on its own, after the broker's own check of the text.
+    ["POST", "/v1/workflows/quick-start", async () => json(await startQuickFromIntake(dependencies, tasks, identity, parseBody(request.body)), request.requestId)],
+    // DEC 254zzz79 (3): how this thread's chat and routing model calls are made (the company's AI through the gateway, never Rovara-paid; slack-model-access.ts).
+    ["POST", SLACK_MODEL_ACCESS_SERVICE_PATH, async () => await handleSlackModelAccessService(dependencies, identity, request.requestId)],
+    // Lead 4 J2: the smart Just answer for a Slack thread (slack-answers.ts). Who may ask and which project is decided there from the verified thread and member, never from the body.
+    ["POST", SLACK_ANSWER_SERVICE_PATH, async () => await handleSlackAnswerService(dependencies, identity, request)],
+    ["POST", "/v1/tasks/comments/answered", async () => json(await markCommentAnswered(dependencies, identity, parseBody(request.body)), request.requestId)],
+    ["POST", "/v1/threads/workspace/prepare", async () => json(await prepareThreadWorkspace(dependencies, identity, parseBody(request.body)), request.requestId)],
+    ["POST", "/v1/threads/workspace/close", async () => json(await startThreadWorkspaceClose(dependencies, identity, parseBody(request.body)), request.requestId, 202)],
+    ["POST", "/v1/threads/workspace/close/complete", async () => json(await completeThreadWorkspaceClose(dependencies, identity, parseBody(request.body)), request.requestId)],
+    ["GET", "/v1/project/models", async () => json(await getProjectModels(dependencies, identity), request.requestId)],
+    ["PUT", "/v1/project/model", async () => json(await putProjectModel(dependencies, identity, parseBody(request.body)), request.requestId)],
+    ["POST", "/v1/evals/swebench", async () => json(await startSwebenchRun(swebenchDependencies(dependencies), swebenchSlackContext(dependencies, identity), parseBody(request.body)), request.requestId)],
+    // Spec 052 FR-002 and Task 6: the Slack batch form, and the watcher's thread and posts for one batch.
+    ["POST", "/v1/evals/batches", async () => json(await startSlackBatch(swebenchDependencies(dependencies), swebenchSlackContext(dependencies, identity), parseBody(request.body)), request.requestId)],
+  ];
+  const exact = exactRoutes.find(([method, path]) => request.method === method && serviceUrl.pathname === path);
+  if (exact !== undefined) return await exact[2]();
+  const evalHandled = await routeServiceEvalRegex(dependencies, request, serviceUrl, identity);
+  if (evalHandled !== undefined) return evalHandled;
   return await observeConnectorRoute(request.method, serviceUrl.pathname, () => routeWorkspaceRequest(dependencies, request, serviceUrl, identity));
 }
 
@@ -881,6 +942,44 @@ const SLACK_PRESS_NOT_SAVED = "I couldn't save that. Try again.";
 /** The words a refused Stop press hears (what the old Slack workflow said to a person who is not the task's owner). */
 const SLACK_STOP_NOT_OWNER_WORDS = "Only the task owner can do that.";
 
+function corePressRefusalMessage(error: AgentXError): string | undefined {
+  if (error.code === "FORBIDDEN") return SLACK_STOP_NOT_OWNER_WORDS;
+  if (error.code === "TASK_NOT_FOUND") return "This task can't be changed from Slack. Continue it where it was started, or start a new request.";
+  if (error.code === "NOT_FOUND" && error.message.includes(NOT_ON_THE_CORE_YET)) return "This action is not available on this install yet.";
+  if (error.code === "WORKSPACE_BUSY" || error.code === "TASK_BUSY") return "AgentX is still working on the previous step. Try again when it posts.";
+  if (error.code === "CONFIG_INVALID" || error.code === "IDEMPOTENCY_CONFLICT") return WORKFLOW_BUTTON_OUT_OF_DATE;
+  return undefined;
+}
+
+async function handleCoreTaskLegacyPressError(
+  dependencies: AwsBrokerDependencies,
+  event: { taskId: string; userId: string; thread: SlackThread; requestId: string },
+  attemptId: string,
+  error: unknown,
+  refuse: (message: string) => Promise<{ statusCode: number; headers: Record<string, string>; body: string }>,
+): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> {
+  if (error instanceof AgentXError) {
+    const message = corePressRefusalMessage(error);
+    console.log(JSON.stringify({ component: "broker", event: "slack.core_press_refused", taskId: event.taskId, requestId: event.requestId, errorCode: error.code }));
+    if (message !== undefined) return await refuse(message);
+    await recordRetiredSlackButtonNote(dependencies, event, attemptId, undefined, SLACK_PRESS_NOT_SAVED, false);
+    return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode >= 500 ? error.statusCode : 500);
+  }
+  console.log(JSON.stringify({ component: "broker", event: "slack.core_press_failed", taskId: event.taskId, requestId: event.requestId, errorName: error instanceof Error ? error.name : "unknown" }));
+  await recordRetiredSlackButtonNote(dependencies, event, attemptId, undefined, SLACK_PRESS_NOT_SAVED, false);
+  const answer = unexpectedErrorAnswer(error, "slack-ingress");
+  return answer.statusCode >= 500 ? answer : { ...answer, statusCode: 500 };
+}
+
+async function verifyCompanySlackPressAccess(
+  dependencies: AwsBrokerDependencies,
+  event: { thread: SlackThread; userId: string },
+): Promise<{ statusCode: number; headers: Record<string, string>; body: string } | undefined> {
+  if (dependencies.workspaces === undefined) return undefined;
+  try { await companySlackCaller(dependencies, event.thread, event.userId); return undefined; }
+  catch { return json({ refused: true, message: SLACK_WEB_SIGNIN_NOTICE }, "slack-ingress"); }
+}
+
 /**
  * A legacy-event press (the invoke path, used where the channel path is off) whose task carries the core's mark, answered as it was before D1: the Stop button is the core's own stop, Keep the pull
  * request is the core's Keep route, as the pressing person; every other of the ten buttons was refused for a core task ("Only the task owner can do that.") and still is. `undefined`: the task has
@@ -892,10 +991,8 @@ async function answerCoreTaskLegacyPress(
   awsRequestId: string | undefined,
 ): Promise<{ statusCode: number; headers: Record<string, string>; body: string } | undefined> {
   if (dependencies.developer === undefined || !await isCoreTask(dependencies, event.taskId)) return undefined;
-  if (dependencies.workspaces !== undefined) {
-    try { await companySlackCaller(dependencies, event.thread, event.userId); }
-    catch { return json({ refused: true, message: SLACK_WEB_SIGNIN_NOTICE }, "slack-ingress"); }
-  }
+  const signInNotice = await verifyCompanySlackPressAccess(dependencies, event);
+  if (signInNotice !== undefined) return signInNotice;
   const attemptId = awsRequestId !== undefined && SLACK_REFUSAL_ID.test(awsRequestId) ? awsRequestId : randomUUID();
   const refuse = async (message: string) => { await recordRetiredSlackButtonNote(dependencies, event, attemptId, undefined, message, false); return json({ refused: true, message }, "slack-ingress"); };
   const callerOf = async () => {
@@ -915,21 +1012,7 @@ async function answerCoreTaskLegacyPress(
     // The other eight buttons: a core task was never served by these events (its cards act through the channel path); the refusal is the one it always got.
     return await refuse(SLACK_STOP_NOT_OWNER_WORDS);
   } catch (error) {
-    if (error instanceof AgentXError) {
-      const message = error.code === "FORBIDDEN" ? SLACK_STOP_NOT_OWNER_WORDS
-        : error.code === "TASK_NOT_FOUND" ? "This task can't be changed from Slack. Continue it where it was started, or start a new request."
-        : error.code === "NOT_FOUND" && error.message.includes(NOT_ON_THE_CORE_YET) ? "This action is not available on this install yet."
-        : error.code === "WORKSPACE_BUSY" || error.code === "TASK_BUSY" ? "AgentX is still working on the previous step. Try again when it posts."
-        : error.code === "CONFIG_INVALID" || error.code === "IDEMPOTENCY_CONFLICT" ? WORKFLOW_BUTTON_OUT_OF_DATE : undefined;
-      console.log(JSON.stringify({ component: "broker", event: "slack.core_press_refused", taskId: event.taskId, requestId: event.requestId, errorCode: error.code }));
-      if (message !== undefined) return await refuse(message);
-      await recordRetiredSlackButtonNote(dependencies, event, attemptId, undefined, SLACK_PRESS_NOT_SAVED, false);
-      return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode >= 500 ? error.statusCode : 500);
-    }
-    console.log(JSON.stringify({ component: "broker", event: "slack.core_press_failed", taskId: event.taskId, requestId: event.requestId, errorName: error instanceof Error ? error.name : "unknown" }));
-    await recordRetiredSlackButtonNote(dependencies, event, attemptId, undefined, SLACK_PRESS_NOT_SAVED, false);
-    const answer = unexpectedErrorAnswer(error, "slack-ingress");
-    return answer.statusCode >= 500 ? answer : { ...answer, statusCode: 500 };
+    return await handleCoreTaskLegacyPressError(dependencies, event, attemptId, error, refuse);
   }
 }
 
@@ -981,71 +1064,88 @@ function unexpectedErrorAnswer(error: unknown, requestId: string): { statusCode:
   return json({ error: { code: "CONFIG_INVALID", message: UNEXPECTED_REQUEST_MESSAGE } }, requestId, 400);
 }
 
-async function routeWorkspaceRequest(
+function matchesConnectorVerb(method: string, action: string | undefined): boolean {
+  return (method === "GET" && action === "tools") || (method === "POST" && action === "call");
+}
+
+async function handleWorkspaceGitHubMcpRoute(
   dependencies: AwsBrokerDependencies,
   request: AdaptedHttpRequest,
   url: URL,
   identity: AuthenticatedIdentity,
+  workspaceId: string,
+  body: unknown,
 ): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> {
-  const body = parseBody(request.body);
-  const githubMcp = /^\/v1\/workspaces\/([0-9a-f-]+)\/github\/(tools|call)$/.exec(url.pathname);
-  if (githubMcp?.[1] && ((request.method === "GET" && githubMcp[2] === "tools") || (request.method === "POST" && githubMcp[2] === "call"))) {
-    // Feature 007 shapes, kept for Slack services from before feature 013.
-    const { workspace, project, github } = await authorizeGitHubConnector(dependencies, identity, githubMcp[1]);
-    if (!dependencies.githubMcp) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub MCP is not configured");
-    const parsed = request.method === "POST" ? GitHubMcpRequestSchema.safeParse(body) : undefined;
-    if (parsed && !parsed.success) throw agentXError("CONFIG_INVALID", "invalid GitHub MCP request");
-    const repositoryName = parsed?.success ? parsed.data.repository : url.searchParams.get("repository");
-    const repository = github.repositories.find((entry) => entry.name === repositoryName);
-    if (!repository) throw agentXError("NOT_FOUND", "registered repository not found");
-    await requireGithubProjectBinding(dependencies, project, repository.url);
-    const revision = project.definition.revision;
-    if (!parsed?.success) {
-      const types = dependencies.connectorTypes ?? BUILT_IN_CONNECTOR_TYPES;
-      const discovery = await discoverLegacyGitHubScope({
-        connectors: resolveConnectors(project.definition, connectorTypeContext(dependencies, project), types),
-        githubTypeKnown: Object.hasOwn(types, "github"),
-        connectorName: github.name, repository: repository.name, projectName: workspace.projectName,
-        context: connectorContext(identity, workspace, project), catalogs: dependencies.catalogs,
-      });
-      return json({ catalog: toGitHubCatalog(discovery) }, request.requestId);
-    }
-    const attribution = attributionText(identity, github);
-    const result = await executeGitHubTool(parsed.data, gitHubContext(identity, workspace, project, github, repository), {
-      ...withoutDeploymentAttribution(dependencies.githubMcp),
-      ...(attribution === undefined ? {} : { attribution }),
-      onAttributionDropped: attributionDroppedLog(workspace.projectName, revision, github.name, repository.name, parsed.data.requestId),
-      store: new DynamoConnectorLedger(dependencies.documentClient, dependencies.tableName, workspace.id, GITHUB_LEDGER, github.name),
-      onDefinitionChanged: () => dependencies.catalogs.delete(connectorCatalogKey(workspace.projectName, revision, github.name, repository.name)),
+  // Feature 007 shapes, kept for Slack services from before feature 013.
+  const { workspace, project, github } = await authorizeGitHubConnector(dependencies, identity, workspaceId);
+  if (!dependencies.githubMcp) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub MCP is not configured");
+  const parsed = request.method === "POST" ? GitHubMcpRequestSchema.safeParse(body) : undefined;
+  if (parsed && !parsed.success) throw agentXError("CONFIG_INVALID", "invalid GitHub MCP request");
+  const repositoryName = parsed?.success ? parsed.data.repository : url.searchParams.get("repository");
+  const repository = github.repositories.find((entry) => entry.name === repositoryName);
+  if (!repository) throw agentXError("NOT_FOUND", "registered repository not found");
+  await requireGithubProjectBinding(dependencies, project, repository.url);
+  const revision = project.definition.revision;
+  if (!parsed?.success) {
+    const types = dependencies.connectorTypes ?? BUILT_IN_CONNECTOR_TYPES;
+    const discovery = await discoverLegacyGitHubScope({
+      connectors: resolveConnectors(project.definition, connectorTypeContext(dependencies, project), types),
+      githubTypeKnown: Object.hasOwn(types, "github"),
+      connectorName: github.name, repository: repository.name, projectName: workspace.projectName,
+      context: connectorContext(identity, workspace, project), catalogs: dependencies.catalogs,
     });
-    return json({ result }, request.requestId);
+    return json({ catalog: toGitHubCatalog(discovery) }, request.requestId);
   }
+  const attribution = attributionText(identity, github);
+  const result = await executeGitHubTool(parsed.data, gitHubContext(identity, workspace, project, github, repository), {
+    ...withoutDeploymentAttribution(dependencies.githubMcp),
+    ...(attribution === undefined ? {} : { attribution }),
+    onAttributionDropped: attributionDroppedLog(workspace.projectName, revision, github.name, repository.name, parsed.data.requestId),
+    store: new DynamoConnectorLedger(dependencies.documentClient, dependencies.tableName, workspace.id, GITHUB_LEDGER, github.name),
+    onDefinitionChanged: () => dependencies.catalogs.delete(connectorCatalogKey(workspace.projectName, revision, github.name, repository.name)),
+  });
+  return json({ result }, request.requestId);
+}
 
-  const connectorRoute = /^\/v1\/workspaces\/([0-9a-f-]+)\/connectors\/([a-z][a-z0-9-]{0,19})\/(tools|call)$/.exec(url.pathname);
-  if (connectorRoute?.[1] && connectorRoute[2] && ((request.method === "GET" && connectorRoute[3] === "tools") || (request.method === "POST" && connectorRoute[3] === "call"))) {
-    const { workspace, project } = await authorizeWorkspaceConnectors(dependencies, identity, connectorRoute[1]);
-    const connector = resolveConnectors(project.definition, connectorTypeContext(dependencies, project), dependencies.connectorTypes)
-      .find((entry) => entry.name === connectorRoute[2]);
-    if (!connector) throw agentXError("NOT_FOUND", "connector not found");
-    const parsed = request.method === "POST" ? ConnectorCallRequestSchema.safeParse(body) : undefined;
-    if (parsed && !parsed.success) throw agentXError("CONFIG_INVALID", "invalid connector request");
-    const context = connectorContext(identity, workspace, project);
-    if (!parsed?.success) {
-      // Only a caller that sends x-agentx-include: gate gets the action gate's fields (feature 014); they are not secret.
-      const includeGateFields = request.headers["x-agentx-include"]?.split(",").map((entry) => entry.trim()).includes("gate") === true;
-      return json({ catalog: await discoverConnector({
-        connector, workspace, context, catalogs: dependencies.catalogs, refresh: url.searchParams.get("refresh") === "1", includeGateFields,
-      }) }, request.requestId);
-    }
-    const attribution = attributionText(identity, connector);
-    const result = await callConnector({
-      connector, request: parsed.data, workspace, context, catalogs: dependencies.catalogs,
-      ...(attribution === undefined ? {} : { attribution }),
-      ledger: new DynamoConnectorLedger(dependencies.documentClient, dependencies.tableName, workspace.id, connector.ledger, connector.name),
-    });
-    return json({ result }, request.requestId);
+async function handleWorkspaceConnectorRoute(
+  dependencies: AwsBrokerDependencies,
+  request: AdaptedHttpRequest,
+  url: URL,
+  identity: AuthenticatedIdentity,
+  workspaceId: string,
+  connectorName: string,
+  body: unknown,
+): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> {
+  const { workspace, project } = await authorizeWorkspaceConnectors(dependencies, identity, workspaceId);
+  const connector = resolveConnectors(project.definition, connectorTypeContext(dependencies, project), dependencies.connectorTypes)
+    .find((entry) => entry.name === connectorName);
+  if (!connector) throw agentXError("NOT_FOUND", "connector not found");
+  const parsed = request.method === "POST" ? ConnectorCallRequestSchema.safeParse(body) : undefined;
+  if (parsed && !parsed.success) throw agentXError("CONFIG_INVALID", "invalid connector request");
+  const context = connectorContext(identity, workspace, project);
+  if (!parsed?.success) {
+    // Only a caller that sends x-agentx-include: gate gets the action gate's fields (feature 014); they are not secret.
+    const includeGateFields = request.headers["x-agentx-include"]?.split(",").map((entry) => entry.trim()).includes("gate") === true;
+    return json({ catalog: await discoverConnector({
+      connector, workspace, context, catalogs: dependencies.catalogs, refresh: url.searchParams.get("refresh") === "1", includeGateFields,
+    }) }, request.requestId);
   }
+  const attribution = attributionText(identity, connector);
+  const result = await callConnector({
+    connector, request: parsed.data, workspace, context, catalogs: dependencies.catalogs,
+    ...(attribution === undefined ? {} : { attribution }),
+    ledger: new DynamoConnectorLedger(dependencies.documentClient, dependencies.tableName, workspace.id, connector.ledger, connector.name),
+  });
+  return json({ result }, request.requestId);
+}
 
+async function routeWorkspaceResourceRequest(
+  dependencies: AwsBrokerDependencies,
+  request: AdaptedHttpRequest,
+  url: URL,
+  identity: AuthenticatedIdentity,
+  body: unknown,
+): Promise<{ statusCode: number; headers: Record<string, string>; body: string } | undefined> {
   const resolve = /^\/v1\/projects\/([^/]+)\/workspace$/.exec(url.pathname);
   if (request.method === "GET" && resolve?.[1]) {
     const revision = Number.parseInt(url.searchParams.get("revision") ?? "", 10);
@@ -1054,68 +1154,75 @@ async function routeWorkspaceRequest(
       request.requestId,
     );
   }
-
   const conversations = /^\/v1\/workspaces\/([0-9a-f-]+)\/conversations$/.exec(url.pathname);
   if (request.method === "POST" && conversations?.[1]) {
-    return json(
-      { conversation: await createConversation(dependencies, identity, conversations[1]) },
-      request.requestId,
-      201,
-    );
+    return json({ conversation: await createConversation(dependencies, identity, conversations[1]) }, request.requestId, 201);
   }
-
   const tasks = /^\/v1\/workspaces\/([0-9a-f-]+)\/tasks$/.exec(url.pathname);
   if (request.method === "POST" && tasks?.[1]) {
     return json(await acceptTask(dependencies, identity, tasks[1], body, channelOperation(dependencies, identity)), request.requestId, 202);
   }
-
   const pullRequests = /^\/v1\/workspaces\/([0-9a-f-]+)\/pull-requests$/.exec(url.pathname);
   if (request.method === "POST" && pullRequests?.[1]) {
     return json(await acceptPullRequest(dependencies, identity, pullRequests[1], body, channelOperation(dependencies, identity)), request.requestId, 202);
   }
   const pullRequestActions = /^\/v1\/workspaces\/([0-9a-f-]+)\/pull-request-actions$/.exec(url.pathname);
   if (request.method === "POST" && pullRequestActions?.[1]) {
-    return json(
-      await acceptPullRequestLifecycle(dependencies, identity, pullRequestActions[1], body, channelOperation(dependencies, identity)),
-      request.requestId,
-      202,
-    );
+    return json(await acceptPullRequestLifecycle(dependencies, identity, pullRequestActions[1], body, channelOperation(dependencies, identity)), request.requestId, 202);
   }
+  return undefined;
+}
 
+async function routeWorkspaceOperationRequest(
+  dependencies: AwsBrokerDependencies,
+  request: AdaptedHttpRequest,
+  url: URL,
+  identity: AuthenticatedIdentity,
+): Promise<{ statusCode: number; headers: Record<string, string>; body: string } | undefined> {
   const operation = /^\/v1\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)$/.exec(url.pathname);
   if (request.method === "GET" && operation?.[1] && operation[2]) {
-    return json(
-      { operation: await getAuthorizedOperation(dependencies, identity, operation[1], operation[2]) },
-      request.requestId,
-    );
+    return json({ operation: await getAuthorizedOperation(dependencies, identity, operation[1], operation[2]) }, request.requestId);
   }
-
   const events = /^\/v1\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/events$/.exec(url.pathname);
   if (request.method === "GET" && events?.[1] && events[2]) {
     return json(
       await pageEvents(dependencies, identity, events[1], events[2], {
         limit: Number.parseInt(url.searchParams.get("limit") ?? "100", 10),
-        ...(url.searchParams.get("cursor") === null
-          ? {}
-          : { cursor: url.searchParams.get("cursor")! }),
+        ...(url.searchParams.get("cursor") === null ? {} : { cursor: url.searchParams.get("cursor")! }),
       }),
       request.requestId,
     );
   }
-
   const artifact = /^\/v1\/workspaces\/([0-9a-f-]+)\/artifacts\/([0-9a-f-]+)$/.exec(url.pathname);
   if (request.method === "GET" && artifact?.[1] && artifact[2]) {
-    return json(
-      { artifact: await getArtifact(dependencies, identity, artifact[1], artifact[2]) },
-      request.requestId,
-    );
+    return json({ artifact: await getArtifact(dependencies, identity, artifact[1], artifact[2]) }, request.requestId);
   }
-
   const cancel = /^\/v1\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/cancel$/.exec(url.pathname);
   if (request.method === "POST" && cancel?.[1] && cancel[2]) {
     return json(await acceptCancellation(dependencies, identity, cancel[1], cancel[2]), request.requestId, 202);
   }
+  return undefined;
+}
 
+async function routeWorkspaceRequest(
+  dependencies: AwsBrokerDependencies,
+  request: AdaptedHttpRequest,
+  url: URL,
+  identity: AuthenticatedIdentity,
+): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> {
+  const body = parseBody(request.body);
+  const githubMcp = /^\/v1\/workspaces\/([0-9a-f-]+)\/github\/(tools|call)$/.exec(url.pathname);
+  if (githubMcp?.[1] && matchesConnectorVerb(request.method, githubMcp[2])) {
+    return await handleWorkspaceGitHubMcpRoute(dependencies, request, url, identity, githubMcp[1], body);
+  }
+  const connectorRoute = /^\/v1\/workspaces\/([0-9a-f-]+)\/connectors\/([a-z][a-z0-9-]{0,19})\/(tools|call)$/.exec(url.pathname);
+  if (connectorRoute?.[1] && connectorRoute[2] && matchesConnectorVerb(request.method, connectorRoute[3])) {
+    return await handleWorkspaceConnectorRoute(dependencies, request, url, identity, connectorRoute[1], connectorRoute[2], body);
+  }
+  const resource = await routeWorkspaceResourceRequest(dependencies, request, url, identity, body);
+  if (resource !== undefined) return resource;
+  const operation = await routeWorkspaceOperationRequest(dependencies, request, url, identity);
+  if (operation !== undefined) return operation;
   throw agentXError("NOT_FOUND", "route not found");
 }
 
@@ -1273,6 +1380,330 @@ async function registrationChecks(dependencies: AwsBrokerDependencies, identity:
   return { report: result.report, warnings: result.warnings };
 }
 
+async function resolveSetupRuntimeAdmission(
+  dependencies: AwsBrokerDependencies,
+  runtimeBinding: RegisteredProjectRecord["runtimeBinding"],
+): Promise<ReturnType<typeof admitProjectSetupRuntime>> {
+  if (!dependencies.projectSetupRuntimeCatalogId || runtimeBinding.deploymentMode !== "ec2-ebs") return undefined;
+  const bindingDigest = projectSetupBindingDigest(runtimeBinding);
+  const runtimeKey = projectSetupRuntimeKey(dependencies.projectSetupRuntimeCatalogId, bindingDigest);
+  const catalogItem = await dependencies.documentClient.send(new GetCommand({
+    TableName: dependencies.tableName,
+    Key: runtimeKey,
+    ConsistentRead: true,
+  }));
+  const parsedCatalog = ProjectSetupRuntimeRecordSchema.safeParse(projectSetupRuntimeRecord(catalogItem.Item, runtimeKey));
+  if (!parsedCatalog.success) return undefined;
+  return admitProjectSetupRuntime(parsedCatalog.data, {
+    runtimeCatalogId: dependencies.projectSetupRuntimeCatalogId, binding: runtimeBinding,
+    scope: "source-interface", now: Date.now(),
+  });
+}
+
+function assertSetupApprovalMatchesDefinition(
+  definition: ProjectDefinition,
+  setupApproval: NonNullable<ReturnType<typeof parseRegistrationInput>["setupApproval"]>,
+  approval: Record<string, unknown>,
+): void {
+  const repository = definition.repositories[0];
+  const mapping = approval.identityMapping;
+  if (!repository || !mapping || typeof mapping !== "object" || Array.isArray(mapping)
+    || (mapping as Record<string, unknown>).registeredRepositoryId !== repository.name
+    || typeof approval.repositoryUrl !== "string" || approval.repositoryUrl.toLowerCase() !== repository.url.toLowerCase()) {
+    throw agentXError("PROJECT_REVISION_MISMATCH", "registered repository identity does not match the source-backed setup decision");
+  }
+  if (setupApproval.decision === "approve") {
+    if (definition.e2e === undefined || !sameJsonContent(definition.e2e, approval.policy)) {
+      throw agentXError("PROJECT_REVISION_MISMATCH", "E2E policy does not match the approved source-backed setup proposal");
+    }
+  } else if (definition.e2e !== undefined) {
+    throw agentXError("FORBIDDEN", "declined setup decision cannot register an E2E policy");
+  }
+}
+
+async function resolveRegistrationSetupApproval(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  definition: ProjectDefinition,
+  runtimeBinding: RegisteredProjectRecord["runtimeBinding"],
+  setupApproval: ReturnType<typeof parseRegistrationInput>["setupApproval"],
+): Promise<{
+  setupApprovalBinding: RegisteredProjectRecord["setupApproval"];
+  setupApprovedAt: string;
+  setupRuntimeAdmission: ReturnType<typeof admitProjectSetupRuntime>;
+}> {
+  if (definition.e2e === undefined && setupApproval === undefined) {
+    return { setupApprovalBinding: undefined, setupApprovedAt: "", setupRuntimeAdmission: undefined };
+  }
+  if (setupApproval === undefined) throw agentXError("FORBIDDEN", "E2E project registration requires a stored source-backed setup decision");
+  const expectedProposalPrefix = `project-setup-proposals/${identity.ownerKey}/`;
+  if (!setupApproval.proposalRef.startsWith(expectedProposalPrefix) || setupApproval.proposalRef !== `${expectedProposalPrefix}${setupApproval.proposalSha256}.json`) {
+    throw agentXError("FORBIDDEN", "setup approval reference is outside the authenticated administrator scope");
+  }
+  const approval = await getItem<Record<string, unknown>>(dependencies, { pk: `PROJECT_SETUP#${definition.name}`, sk: `PROPOSAL#${setupApproval.proposalSha256}` });
+  if (!approval || approval.ownerKey !== identity.ownerKey || approval.proposalRef !== setupApproval.proposalRef || approval.decision !== setupApproval.decision) {
+    throw agentXError("FORBIDDEN", "setup decision is missing, stale, or belongs to another administrator");
+  }
+  assertSetupApprovalMatchesDefinition(definition, setupApproval, approval);
+  const setupApprovalBinding: RegisteredProjectRecord["setupApproval"] = {
+    proposalRef: setupApproval.proposalRef, proposalSha256: setupApproval.proposalSha256,
+    candidateDigest: String(approval.candidateDigest), decision: setupApproval.decision,
+  };
+  const setupApprovedAt = typeof approval.approvedAt === "string" ? approval.approvedAt : "";
+  const setupRuntimeAdmission = setupApproval.decision === "approve" && definition.e2e !== undefined
+    ? await resolveSetupRuntimeAdmission(dependencies, runtimeBinding)
+    : undefined;
+  return { setupApprovalBinding, setupApprovedAt, setupRuntimeAdmission };
+}
+
+async function readRegistrationAccountSetup(
+  dependencies: AwsBrokerDependencies,
+  record: RegisteredProjectRecord,
+  definition: ProjectDefinition,
+  setupApprovalBinding: RegisteredProjectRecord["setupApproval"],
+  setupApprovedAt: string,
+): Promise<{ snapshot: E2ESourceSnapshot; approvedAt: string; proposalSha256: string } | undefined> {
+  // Owner decision D5 (Task 3.1): registering the setup is the step that makes it effective, so it registers the project's synthetic test accounts too, in the transaction
+  // that stores the revision. The setup is the one this registration binds (the registering administrator's own approved proposal for this project), never another.
+  if (setupApprovalBinding?.decision !== "approve" || definition.e2e === undefined || setupApprovedAt === "") return undefined;
+  const repository = definition.repositories[0]!;
+  const repositoryParts = /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/i.exec(repository.url);
+  const setup = await readApprovedSetupSource(dependencies, record, E2EPolicySchema.parse(definition.e2e), repository,
+    repositoryParts?.[1] && repositoryParts[2] ? `${repositoryParts[1]}/${repositoryParts[2]}` : undefined);
+  if (!setup.ok) throw agentXError("PROJECT_REVISION_MISMATCH", `the approved setup could not be read to register the project's test accounts: ${setup.reason}`);
+  return { snapshot: setup.snapshot, approvedAt: setupApprovedAt, proposalSha256: setupApprovalBinding.proposalSha256 };
+}
+
+function assertImmutableProjectMatch(
+  stored: RegisteredProjectRecord,
+  inCompany: (row: unknown) => boolean,
+  definition: ProjectDefinition,
+  runtimeBinding: RegisteredProjectRecord["runtimeBinding"],
+  setupApprovalBinding: RegisteredProjectRecord["setupApproval"],
+): void {
+  if (!inCompany(stored)) throw agentXError("NOT_FOUND", "registered project not found");
+  // The stored revision is read back from DynamoDB, which keeps no map's attribute order: compare content, not text.
+  if (!sameJsonContent(stored.definition, definition) || !sameJsonContent(stored.runtimeBinding, runtimeBinding) || !sameJsonContent(stored.setupApproval, setupApprovalBinding)) {
+    throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revisions and runtime bindings are immutable");
+  }
+}
+
+function resolveRegistrationAttemptCompany(
+  record: RegisteredProjectRecord,
+  snapshot: Awaited<ReturnType<typeof readNamedCompanyCatalogSnapshot>>,
+  companyId: string | undefined,
+): void {
+  // Ownership may be carried forward only from the stored legacy revision (or the checked membership already used above).
+  const storedCompany = snapshot.newest?.companyId;
+  if (storedCompany !== undefined) {
+    if (!OrgIdSchema.safeParse(storedCompany).success || (record.companyId !== undefined && storedCompany !== record.companyId)) {
+      throw agentXError("PROJECT_REVISION_MISMATCH", "core project ownership conflict");
+    }
+    record.companyId = storedCompany;
+  } else if (record.companyId !== undefined && companyId === undefined) {
+    throw agentXError("PROJECT_REVISION_MISMATCH", "core project ownership conflict");
+  }
+}
+
+function registrationCatalogUpdateItem(
+  dependencies: AwsBrokerDependencies,
+  ownCompany: OrgId | undefined,
+  projectName: string,
+  latestRevision: number,
+  now: string,
+  incarnationRevision: number,
+  snapshot: Awaited<ReturnType<typeof readNamedCompanyCatalogSnapshot>>,
+): TransactItems[number] {
+  const condition = snapshot.catalog === undefined ? "attribute_not_exists(pk)"
+    : snapshot.catalog.latestRevision === undefined ? "attribute_not_exists(latestRevision)"
+      : "latestRevision = :observed AND latestRevision < :revision";
+  const updateExpression = ownCompany !== undefined
+    ? "SET entityType = :entity, #name = :name, companyId = :company, incarnationRevision = :incarnation, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)"
+    : "SET entityType = :entity, #name = :name, incarnationRevision = :incarnation, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)";
+  return { Update: {
+    TableName: dependencies.tableName,
+    Key: ownCompany !== undefined ? orgProjectCatalogKey(ownCompany, projectName) : projectCatalogKey(projectName),
+    UpdateExpression: updateExpression,
+    ConditionExpression: condition,
+    ExpressionAttributeNames: { "#name": "name" },
+    ExpressionAttributeValues: {
+      ":entity": "PROJECT_CATALOG", ":name": projectName, ":revision": latestRevision, ":now": now,
+      ":incarnation": incarnationRevision,
+      ...(ownCompany === undefined ? {} : { ":company": ownCompany }),
+      ...(snapshot.catalog?.latestRevision === undefined ? {} : { ":observed": snapshot.catalog.latestRevision }),
+    },
+  } };
+}
+
+function registrationAuthorityItems(
+  tableName: string,
+  authority: "first" | "administrator" | "takeover",
+  identity: AuthenticatedIdentity,
+  definition: ProjectDefinition,
+  grantCompanyId: OrgId | undefined,
+  takeover: ReturnType<typeof parseRegistrationInput>["takeover"],
+  now: string,
+): TransactItems {
+  // DEC 254zzz98: the grant this attempt reads and writes is beside the revision (grantCompanyId, from the revision key's company).
+  const membership = membershipRecord(identity.ownerKey, definition.name, "administrator", grantCompanyId);
+  const membershipKey = grantKeyFor(grantCompanyId, identity.ownerKey, definition.name);
+  // A first registration and a takeover write the registrant's administrator membership; an administrator's own is left as it is (its grant is not reissued)
+  // but must still hold when the revision commits.
+  const grantItems: TransactItems = authority === "administrator"
+    ? [{ ConditionCheck: { TableName: tableName, Key: membershipKey, ConditionExpression: "#role = :administrator",
+      ExpressionAttributeNames: { "#role": "role" }, ExpressionAttributeValues: { ":administrator": "administrator" } } }]
+    : [{ Put: { TableName: tableName, Item: membership } },
+      // Spec 065: the project's side of the membership, so its members can be listed.
+      { Put: { TableName: tableName, Item: { ...projectMemberKey(definition.name, identity.ownerKey, grantCompanyId), entityType: "PROJECT_MEMBER", role: "administrator", grantedAt: now } } }];
+  if (authority !== "takeover" || takeover === undefined) return grantItems;
+  return [...grantItems, { Put: { TableName: tableName, ConditionExpression: "attribute_not_exists(pk)", Item: {
+    pk: `PROJECT_TAKEOVER#${definition.name}`, sk: `AT#${now}#${randomUUID()}`, entityType: "PROJECT_OWNERSHIP_TAKEOVER",
+    projectName: definition.name, revision: definition.revision, takenBy: identity.ownerKey, subject: identity.subject, reason: takeover.reason, at: now,
+  } } }];
+}
+
+async function handleRegistrationCommitConflict(
+  dependencies: AwsBrokerDependencies,
+  error: unknown,
+  context: {
+    key: { pk: string; sk: string };
+    inCompany: (row: unknown) => boolean;
+    definition: ProjectDefinition;
+    runtimeBinding: RegisteredProjectRecord["runtimeBinding"];
+    setupApprovalBinding: RegisteredProjectRecord["setupApproval"];
+    repairCatalogPointerFromHistory: () => Promise<void>;
+    readCatalogSnapshot: () => Promise<Awaited<ReturnType<typeof readNamedCompanyCatalogSnapshot>>>;
+    snapshot: Awaited<ReturnType<typeof readNamedCompanyCatalogSnapshot>>;
+    accountSetup: { snapshot: E2ESourceSnapshot; approvedAt: string; proposalSha256: string } | undefined;
+    planAccounts: () => Promise<{ items: TransactItems; written: number; planKey: string }>;
+    accountsPlanKey: string;
+    judgeAuthority: (newestRevision: number) => Promise<"first" | "administrator" | "takeover">;
+    authority: "first" | "administrator" | "takeover";
+    isLastAttempt: boolean;
+  },
+): Promise<RegisteredProjectRecord | undefined> {
+  await rethrowAsDeferredIfHeld(dependencies, error, Date.now()); // AUTOREQUALIFY: the start fence refused the setup run: say so, not "catalog conflict"
+  if (!isConditional(error)) throw error;
+  // A same-revision registration may have won concurrently. Validate the immutable record and
+  // catalog before returning duplicate success; otherwise retry only a catalog/history advance.
+  const winner = await getItem<RegisteredProjectRecord>(dependencies, context.key);
+  if (winner !== undefined) {
+    assertImmutableProjectMatch(winner, context.inCompany, context.definition, context.runtimeBinding, context.setupApprovalBinding);
+    await context.repairCatalogPointerFromHistory();
+    return winner;
+  }
+  const refreshed = await context.readCatalogSnapshot();
+  const advanced = refreshed.newestRevision > context.snapshot.newestRevision
+    || (refreshed.catalog?.latestRevision ?? 0) > (context.snapshot.catalog?.latestRevision ?? 0);
+  // Another registration may have moved an account under this one: plan again (a stale setup is refused then) rather than give up.
+  const accountsMoved = context.accountSetup !== undefined && (await context.planAccounts()).planKey !== context.accountsPlanKey;
+  // The registrant's standing may have changed under this attempt (the membership removed or downgraded outside the API, the project registered by a rival): refused here, not as a catalog conflict.
+  const authorityMoved = (await context.judgeAuthority(refreshed.newestRevision)) !== context.authority;
+  if ((!advanced && !accountsMoved && !authorityMoved) || context.isLastAttempt) {
+    throw agentXError("PROJECT_REVISION_MISMATCH", "project revision registration could not commit against the current catalog");
+  }
+  return undefined;
+}
+
+async function commitProjectRegistration(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  context: {
+    key: { pk: string; sk: string };
+    record: RegisteredProjectRecord;
+    definition: ProjectDefinition;
+    runtimeBinding: RegisteredProjectRecord["runtimeBinding"];
+    setupApprovalBinding: RegisteredProjectRecord["setupApproval"];
+    takeover: ReturnType<typeof parseRegistrationInput>["takeover"];
+    companyId: string | undefined;
+    ownCompany: OrgId | undefined;
+    grantCompanyId: OrgId | undefined;
+    companyBudget: ReturnType<typeof boundedCompanyReads>;
+    now: string;
+    inCompany: (row: unknown) => boolean;
+    readCatalogSnapshot: () => Promise<Awaited<ReturnType<typeof readNamedCompanyCatalogSnapshot>>>;
+    repairCatalogPointerFromHistory: () => Promise<void>;
+    judgeAuthority: (newestRevision: number) => Promise<"first" | "administrator" | "takeover">;
+    setupAdmissionRows: { transactionItems: Array<Record<string, unknown>> } | undefined;
+    accountSetup: { snapshot: E2ESourceSnapshot; approvedAt: string; proposalSha256: string } | undefined;
+    planAccounts: () => Promise<{ items: TransactItems; written: number; planKey: string }>;
+    nameClaimWrites: TransactItems;
+  },
+): Promise<{ project: Omit<RegisteredProjectRecord, "pk" | "sk">; duplicate: boolean; ownershipTakenOver: boolean }> {
+  const maxRegistrationAttempts = 3;
+  for (let attempt = 0; attempt < maxRegistrationAttempts; attempt += 1) {
+    const snapshot = await context.readCatalogSnapshot();
+    const latestRevision = Math.max(context.definition.revision, snapshot.newestRevision);
+    const updateCatalog = snapshot.catalog?.latestRevision !== latestRevision;
+    resolveRegistrationAttemptCompany(context.record, snapshot, context.companyId);
+    // An existing project changes (its test accounts included) only at the hand of one of its administrators, or of an instance administrator who takes it over explicitly.
+    // Judged against the project as it is on this attempt: an administrator who raced a first registration and lost finds the project there on the next one.
+    const authority = await context.judgeAuthority(snapshot.newestRevision);
+    const accounts = await context.planAccounts();
+    let corePlan: Awaited<ReturnType<typeof planCoreProjectWrites>>;
+    try {
+      corePlan = await planRegistrationCoreWrites({ tableName: dependencies.tableName, documentClient: context.companyBudget.client }, context.ownCompany, context.record, snapshot);
+    } catch {
+      throw agentXError("PROJECT_REVISION_MISMATCH", await coreCopyRefusalWords({ tableName: dependencies.tableName, documentClient: context.companyBudget.client }, context.record.companyId, context.definition.name));
+    }
+    // One transaction holds at most 100 items; the project revision, its membership, the catalog and the setup admission take the rest.
+    if (accounts.items.length > 60) throw agentXError("CONFIG_INVALID", "the setup declares more synthetic test accounts than one registration can store");
+    try {
+      await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+        { Put: { TableName: dependencies.tableName, Item: context.record, ConditionExpression: "attribute_not_exists(pk)" } },
+        ...registrationAuthorityItems(dependencies.tableName, authority, identity, context.definition, context.grantCompanyId, context.takeover, context.now),
+        // Spec 025 A3: the admin project list reads this row instead of scanning the table.
+        ...(updateCatalog ? [registrationCatalogUpdateItem(dependencies, context.ownCompany, context.definition.name, latestRevision, context.now, corePlan.incarnationRevision, snapshot)] : []),
+        ...(context.setupAdmissionRows?.transactionItems ?? []),
+        ...accounts.items,
+        ...corePlan.writes, ...context.nameClaimWrites,
+      ] }));
+      const ownershipTakenOver = authority === "takeover";
+      if (ownershipTakenOver) {
+        console.log(JSON.stringify({ component: "broker", event: "project.ownership_taken_over", project: context.definition.name, revision: context.definition.revision, takenBy: identity.ownerKey }));
+      }
+      return { project: withoutKeys(context.record), duplicate: false, ownershipTakenOver };
+    } catch (error) {
+      const winner = await handleRegistrationCommitConflict(dependencies, error, {
+        key: context.key, inCompany: context.inCompany, definition: context.definition, runtimeBinding: context.runtimeBinding,
+        setupApprovalBinding: context.setupApprovalBinding, repairCatalogPointerFromHistory: context.repairCatalogPointerFromHistory,
+        readCatalogSnapshot: context.readCatalogSnapshot, snapshot, accountSetup: context.accountSetup,
+        planAccounts: context.planAccounts, accountsPlanKey: accounts.planKey, judgeAuthority: context.judgeAuthority,
+        authority, isLastAttempt: attempt + 1 === maxRegistrationAttempts,
+      });
+      if (winner !== undefined) return { project: withoutKeys(winner), duplicate: true, ownershipTakenOver: false };
+    }
+  }
+  throw agentXError("PROJECT_REVISION_MISMATCH", "project revision registration exceeded its bounded catalog retries");
+}
+
+async function handleExistingProjectRegistration(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  existing: RegisteredProjectRecord,
+  context: {
+    companyId: string | undefined;
+    companyBudget: ReturnType<typeof boundedCompanyReads>;
+    definition: ProjectDefinition;
+    runtimeBinding: RegisteredProjectRecord["runtimeBinding"];
+    setupApprovalBinding: RegisteredProjectRecord["setupApproval"];
+    wantsPreflight: boolean;
+    checkedPreflight: PreflightOutcome | undefined;
+    inCompany: (row: unknown) => boolean;
+    connectors: () => ResolvedConnector[];
+    repairCatalogPointerFromHistory: () => Promise<void>;
+  },
+): Promise<{ project: Omit<RegisteredProjectRecord, "pk" | "sk">; preflight: PreflightOutcome | undefined }> {
+  if (!context.inCompany(existing)) throw agentXError("NOT_FOUND", "registered project not found");
+  for (const repository of context.definition.repositories) await checkCompanyRepository(dependencies, context.companyId, repository.url, context.companyBudget);
+  assertImmutableProjectMatch(existing, context.inCompany, context.definition, context.runtimeBinding, context.setupApprovalBinding);
+  await context.repairCatalogPointerFromHistory();
+  // A revision stored before the static checks existed stays idempotent: report, never refuse.
+  const preflight = context.checkedPreflight
+    ?? (context.wantsPreflight ? await preflightConnectors(context.connectors(), context.definition, identity.ownerKey) : undefined);
+  return { project: withoutKeys(existing), preflight };
+}
+
 async function registerProject(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
@@ -1290,50 +1721,13 @@ async function registerProject(
   /** A stored revision is this registration's company's: by its own partition for a named company (a row there may leave its company out), else by its stored company. */
   const inCompany = (row: unknown) => ownCompany !== undefined ? row !== null && typeof row === "object" && ownPartitionRow(row as Record<string, unknown>, ownCompany) : recordInCompany(row, companyId);
   await checkRegistrationCompany(dependencies, definition.name, companyId, companyBudget);
-  let setupRuntimeAdmission: ReturnType<typeof admitProjectSetupRuntime>;
+  const { setupApprovalBinding, setupApprovedAt, setupRuntimeAdmission } = await resolveRegistrationSetupApproval(dependencies, identity, definition, runtimeBinding, setupApproval);
   let setupExecutionCreated = false;
   let ownershipTakenOver = false;
-  let setupApprovalBinding: RegisteredProjectRecord["setupApproval"];
-  let setupApprovedAt = "";
-  if (definition.e2e !== undefined || setupApproval !== undefined) {
-    if (setupApproval === undefined) throw agentXError("FORBIDDEN", "E2E project registration requires a stored source-backed setup decision");
-    const expectedProposalPrefix = `project-setup-proposals/${identity.ownerKey}/`;
-    if (!setupApproval.proposalRef.startsWith(expectedProposalPrefix) || setupApproval.proposalRef !== `${expectedProposalPrefix}${setupApproval.proposalSha256}.json`) throw agentXError("FORBIDDEN", "setup approval reference is outside the authenticated administrator scope");
-    const approval = await getItem<Record<string, unknown>>(dependencies, { pk: `PROJECT_SETUP#${definition.name}`, sk: `PROPOSAL#${setupApproval.proposalSha256}` });
-    if (!approval || approval.ownerKey !== identity.ownerKey || approval.proposalRef !== setupApproval.proposalRef || approval.decision !== setupApproval.decision) throw agentXError("FORBIDDEN", "setup decision is missing, stale, or belongs to another administrator");
-    const repository = definition.repositories[0];
-    const mapping = approval.identityMapping;
-    if (!repository || !mapping || typeof mapping !== "object" || Array.isArray(mapping)
-      || (mapping as Record<string, unknown>).registeredRepositoryId !== repository.name
-      || typeof approval.repositoryUrl !== "string" || approval.repositoryUrl.toLowerCase() !== repository.url.toLowerCase()) throw agentXError("PROJECT_REVISION_MISMATCH", "registered repository identity does not match the source-backed setup decision");
-    if (setupApproval.decision === "approve") {
-      if (definition.e2e === undefined || !sameJsonContent(definition.e2e, approval.policy)) throw agentXError("PROJECT_REVISION_MISMATCH", "E2E policy does not match the approved source-backed setup proposal");
-    } else if (definition.e2e !== undefined) throw agentXError("FORBIDDEN", "declined setup decision cannot register an E2E policy");
-    setupApprovalBinding = { proposalRef: setupApproval.proposalRef, proposalSha256: setupApproval.proposalSha256, candidateDigest: String(approval.candidateDigest), decision: setupApproval.decision };
-    setupApprovedAt = typeof approval.approvedAt === "string" ? approval.approvedAt : "";
-    if (setupApproval.decision === "approve" && definition.e2e !== undefined && dependencies.projectSetupRuntimeCatalogId
-      && runtimeBinding.deploymentMode === "ec2-ebs") {
-      const bindingDigest = projectSetupBindingDigest(runtimeBinding);
-      const catalogItem = await dependencies.documentClient.send(new GetCommand({
-        TableName: dependencies.tableName,
-        Key: projectSetupRuntimeKey(dependencies.projectSetupRuntimeCatalogId, bindingDigest),
-        ConsistentRead: true,
-      }));
-      const runtimeKey = projectSetupRuntimeKey(dependencies.projectSetupRuntimeCatalogId, bindingDigest);
-      const parsedCatalog = ProjectSetupRuntimeRecordSchema.safeParse(projectSetupRuntimeRecord(catalogItem.Item, runtimeKey));
-      if (parsedCatalog.success) {
-        setupRuntimeAdmission = admitProjectSetupRuntime(parsedCatalog.data, {
-          runtimeCatalogId: dependencies.projectSetupRuntimeCatalogId, binding: runtimeBinding,
-          scope: "source-interface", now: Date.now(),
-        });
-      }
-    }
-  }
   const budget = toolBudget(approvedToolCount(definition));
   const connectors = () => resolveConnectors(definition, connectorTypeContext(dependencies), dependencies.connectorTypes);
   const respond = (project: Omit<RegisteredProjectRecord, "pk" | "sk">, duplicate: boolean, preflight: PreflightOutcome | undefined) => {
     const warnings = registrationWarnings(budget.warning, preflight);
-
     return {
       project, duplicate,
       tools: { maximum: budget.maximum, warnAbove: TOOL_WARNING_THRESHOLD, limit: TOOL_LIMIT },
@@ -1363,17 +1757,11 @@ async function registerProject(
   const repairCatalogPointerFromHistory = () => ownCompany !== undefined ? repairNamedCompanyCatalogPointer(dependencies, ownCompany, definition.name, definition.revision) : repairProjectCatalogPointerFromHistory(dependencies, definition.name);
   const existing = await getItem<RegisteredProjectRecord>(dependencies, key);
   if (existing) {
-    if (!inCompany(existing)) throw agentXError("NOT_FOUND", "registered project not found");
-    for (const repository of definition.repositories) await checkCompanyRepository(dependencies, companyId, repository.url, companyBudget);
-    // The stored revision is read back from DynamoDB, which keeps no map's attribute order: compare content, not text.
-    if (!sameJsonContent(existing.definition, definition) || !sameJsonContent(existing.runtimeBinding, runtimeBinding) || !sameJsonContent(existing.setupApproval, setupApprovalBinding)) {
-      throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revisions and runtime bindings are immutable");
-    }
-    await repairCatalogPointerFromHistory();
-    // A revision stored before the static checks existed stays idempotent: report, never refuse.
-    const preflight = checked?.preflight
-      ?? (wantsPreflight ? await preflightConnectors(connectors(), definition, identity.ownerKey) : undefined);
-    return respond(withoutKeys(existing), true, preflight);
+    const duplicate = await handleExistingProjectRegistration(dependencies, identity, existing, {
+      companyId, companyBudget, definition, runtimeBinding, setupApprovalBinding, wantsPreflight,
+      checkedPreflight: checked?.preflight, inCompany, connectors, repairCatalogPointerFromHistory,
+    });
+    return respond(duplicate.project, true, duplicate.preflight);
   }
   // Refused before any vendor is contacted for a registrant who may not store this revision; the commit judges it again.
   const firstSnapshot = await readCatalogSnapshot();
@@ -1390,25 +1778,11 @@ async function registerProject(
     registeredAt: now,
     ...(setupApprovalBinding === undefined ? {} : { setupApproval: setupApprovalBinding }),
   };
-  // DEC 254zzz80: the registrant's grant row and key, set on each attempt for the company the revision is stored for.
-  let membership: MembershipRecord;
-  let membershipKey: { pk: string; sk: string };
   const setupAdmissionRows = setupRuntimeAdmission && setupApprovalBinding?.decision === "approve" && definition.e2e !== undefined
     ? await createProjectSetupAdmissionRows(dependencies, identity, record, setupApprovalBinding, setupRuntimeAdmission)
     : undefined;
   setupExecutionCreated = setupAdmissionRows !== undefined;
-  // Owner decision D5 (Task 3.1): registering the setup is the step that makes it effective, so it registers the project's synthetic test accounts too, in the transaction
-  // that stores the revision. The setup is the one this registration binds (the registering administrator's own approved proposal for this project), never another.
-  const registerAccounts = setupApprovalBinding?.decision === "approve" && definition.e2e !== undefined && setupApprovedAt !== "";
-  let accountSetup: { snapshot: E2ESourceSnapshot; approvedAt: string; proposalSha256: string } | undefined;
-  if (registerAccounts) {
-    const repository = definition.repositories[0]!;
-    const repositoryParts = /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/i.exec(repository.url);
-    const setup = await readApprovedSetupSource(dependencies, record, E2EPolicySchema.parse(definition.e2e), repository,
-      repositoryParts?.[1] && repositoryParts[2] ? `${repositoryParts[1]}/${repositoryParts[2]}` : undefined);
-    if (!setup.ok) throw agentXError("PROJECT_REVISION_MISMATCH", `the approved setup could not be read to register the project's test accounts: ${setup.reason}`);
-    accountSetup = { snapshot: setup.snapshot, approvedAt: setupApprovedAt, proposalSha256: setupApprovalBinding!.proposalSha256 };
-  }
+  const accountSetup = await readRegistrationAccountSetup(dependencies, record, definition, setupApprovalBinding, setupApprovedAt);
   const planAccounts = async () => {
     if (accountSetup === undefined) return { items: [] as TransactItems, written: 0, planKey: "" };
     try { return await planSetupAccountWrites(dependencies, { orgId: LEGACY_E2E_COMPANY, projectId: definition.name, snapshot: accountSetup.snapshot, setup: accountSetup, now: Date.now() }); }
@@ -1417,100 +1791,13 @@ async function registerProject(
       throw error;
     }
   };
-  const maxRegistrationAttempts = 3;
-  for (let attempt = 0; attempt < maxRegistrationAttempts; attempt += 1) {
-    const snapshot = await readCatalogSnapshot();
-    const latestRevision = Math.max(definition.revision, snapshot.newestRevision);
-    const updateCatalog = snapshot.catalog?.latestRevision !== latestRevision;
-    // Ownership may be carried forward only from the stored legacy revision (or the checked membership already used above).
-    const storedCompany = snapshot.newest?.companyId;
-    if (storedCompany !== undefined) {
-      if (!OrgIdSchema.safeParse(storedCompany).success || (record.companyId !== undefined && storedCompany !== record.companyId)) throw agentXError("PROJECT_REVISION_MISMATCH", "core project ownership conflict");
-      record.companyId = storedCompany;
-    } else if (record.companyId !== undefined && companyId === undefined) throw agentXError("PROJECT_REVISION_MISMATCH", "core project ownership conflict");
-    // DEC 254zzz98: the grant this attempt reads and writes is beside the revision (grantCompanyId, from the revision key's company).
-    membership = membershipRecord(identity.ownerKey, definition.name, "administrator", grantCompanyId);
-    membershipKey = grantKeyFor(grantCompanyId, identity.ownerKey, definition.name);
-    // An existing project changes (its test accounts included) only at the hand of one of its administrators, or of an instance administrator who takes it over explicitly.
-    // Judged against the project as it is on this attempt: an administrator who raced a first registration and lost finds the project there on the next one.
-    const authority = await judgeAuthority(snapshot.newestRevision);
-    const accounts = await planAccounts();
-    let corePlan: Awaited<ReturnType<typeof planCoreProjectWrites>>;
-    try {
-      corePlan = await planRegistrationCoreWrites({ tableName: dependencies.tableName, documentClient: companyBudget.client }, ownCompany, record, snapshot);
-    }
-    catch { throw agentXError("PROJECT_REVISION_MISMATCH", await coreCopyRefusalWords({ tableName: dependencies.tableName, documentClient: companyBudget.client }, record.companyId, definition.name)); }
-
-    // One transaction holds at most 100 items; the project revision, its membership, the catalog and the setup admission take the rest.
-    if (accounts.items.length > 60) throw agentXError("CONFIG_INVALID", "the setup declares more synthetic test accounts than one registration can store");
-    try {
-      await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
-      { Put: { TableName: dependencies.tableName, Item: record, ConditionExpression: "attribute_not_exists(pk)" } },
-      // A first registration and a takeover write the registrant's administrator membership; an administrator's own is left as it is (its grant is not reissued)
-      // but must still hold when the revision commits.
-      ...(authority === "administrator"
-        ? [{ ConditionCheck: { TableName: dependencies.tableName, Key: membershipKey, ConditionExpression: "#role = :administrator",
-          ExpressionAttributeNames: { "#role": "role" }, ExpressionAttributeValues: { ":administrator": "administrator" } } }]
-        : [{ Put: { TableName: dependencies.tableName, Item: membership } },
-          // Spec 065: the project's side of the membership, so its members can be listed.
-          { Put: { TableName: dependencies.tableName, Item: { ...projectMemberKey(definition.name, identity.ownerKey, grantCompanyId), entityType: "PROJECT_MEMBER", role: "administrator", grantedAt: now } } }]),
-      ...(authority === "takeover" && takeover !== undefined ? [{ Put: { TableName: dependencies.tableName, ConditionExpression: "attribute_not_exists(pk)", Item: {
-        pk: `PROJECT_TAKEOVER#${definition.name}`, sk: `AT#${now}#${randomUUID()}`, entityType: "PROJECT_OWNERSHIP_TAKEOVER",
-        projectName: definition.name, revision: definition.revision, takenBy: identity.ownerKey, subject: identity.subject, reason: takeover.reason, at: now,
-      } } }] : []),
-      // Spec 025 A3: the admin project list reads this row instead of scanning the table.
-      ...(updateCatalog ? [{ Update: {
-        TableName: dependencies.tableName,
-        Key: ownCompany !== undefined ? orgProjectCatalogKey(ownCompany, definition.name) : projectCatalogKey(definition.name),
-        UpdateExpression: ownCompany !== undefined
-          ? "SET entityType = :entity, #name = :name, companyId = :company, incarnationRevision = :incarnation, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)"
-          : "SET entityType = :entity, #name = :name, incarnationRevision = :incarnation, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
-        ConditionExpression: snapshot.catalog === undefined ? "attribute_not_exists(pk)"
-          : snapshot.catalog.latestRevision === undefined ? "attribute_not_exists(latestRevision)"
-            : "latestRevision = :observed AND latestRevision < :revision",
-        ExpressionAttributeNames: { "#name": "name" },
-        ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": definition.name, ":revision": latestRevision, ":now": now,
-          ":incarnation": corePlan.incarnationRevision,
-          ...(ownCompany === undefined ? {} : { ":company": ownCompany }),
-          ...(snapshot.catalog?.latestRevision === undefined ? {} : { ":observed": snapshot.catalog.latestRevision }) },
-      } }] : []),
-      ...(setupAdmissionRows?.transactionItems ?? []),
-      ...accounts.items,
-      ...corePlan.writes, ...nameClaimWrites,
-      ] }));
-      if (authority === "takeover") {
-        ownershipTakenOver = true;
-        console.log(JSON.stringify({ component: "broker", event: "project.ownership_taken_over", project: definition.name, revision: definition.revision, takenBy: identity.ownerKey }));
-      }
-      return respond(withoutKeys(record), false, preflight);
-    } catch (error) {
-      await rethrowAsDeferredIfHeld(dependencies, error, Date.now()); // AUTOREQUALIFY: the start fence refused the setup run: say so, not "catalog conflict"
-      if (!isConditional(error)) throw error;
-      // A same-revision registration may have won concurrently. Validate the immutable record and
-      // catalog before returning duplicate success; otherwise retry only a catalog/history advance.
-      const winner = await getItem<RegisteredProjectRecord>(dependencies, key);
-      if (winner !== undefined) {
-        if (!inCompany(winner)) throw agentXError("NOT_FOUND", "registered project not found");
-        if (!sameJsonContent(winner.definition, definition) || !sameJsonContent(winner.runtimeBinding, runtimeBinding)
-          || !sameJsonContent(winner.setupApproval, setupApprovalBinding)) {
-          throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revisions and runtime bindings are immutable");
-        }
-        await repairCatalogPointerFromHistory();
-        return respond(withoutKeys(winner), true, preflight);
-      }
-      const refreshed = await readCatalogSnapshot();
-      const advanced = refreshed.newestRevision > snapshot.newestRevision
-        || (refreshed.catalog?.latestRevision ?? 0) > (snapshot.catalog?.latestRevision ?? 0);
-      // Another registration may have moved an account under this one: plan again (a stale setup is refused then) rather than give up.
-      const accountsMoved = accountSetup !== undefined && (await planAccounts()).planKey !== accounts.planKey;
-      // The registrant's standing may have changed under this attempt (the membership removed or downgraded outside the API, the project registered by a rival): refused here, not as a catalog conflict.
-      const authorityMoved = (await judgeAuthority(refreshed.newestRevision)) !== authority;
-      if ((!advanced && !accountsMoved && !authorityMoved) || attempt + 1 === maxRegistrationAttempts) {
-        throw agentXError("PROJECT_REVISION_MISMATCH", "project revision registration could not commit against the current catalog");
-      }
-    }
-  }
-  throw agentXError("PROJECT_REVISION_MISMATCH", "project revision registration exceeded its bounded catalog retries");
+  const committed = await commitProjectRegistration(dependencies, identity, {
+    key, record, definition, runtimeBinding, setupApprovalBinding, takeover, companyId, ownCompany, grantCompanyId,
+    companyBudget, now, inCompany, readCatalogSnapshot, repairCatalogPointerFromHistory, judgeAuthority,
+    setupAdmissionRows, accountSetup, planAccounts, nameClaimWrites,
+  });
+  ownershipTakenOver = committed.ownershipTakenOver;
+  return respond(committed.project, committed.duplicate, preflight);
 }
 
 /** The identity and source fences join the registration transaction, in their original order. */
@@ -1614,6 +1901,64 @@ async function repairNamedCompanyCatalogPointer(dependencies: AwsBrokerDependenc
   }
 }
 
+async function planCatalogRepairCoreWrites(
+  dependencies: AwsBrokerDependencies,
+  coreBudget: ReturnType<typeof boundedCompanyReads>,
+  snapshot: Awaited<ReturnType<typeof readProjectCatalogSnapshot>>,
+  projectName: string,
+): ReturnType<typeof planCoreProjectWrites> {
+  let corePlan: Awaited<ReturnType<typeof planCoreProjectWrites>>;
+  try {
+    corePlan = await planCoreProjectWrites({ tableName: dependencies.tableName, documentClient: coreBudget.client }, snapshot.newest!);
+    corePlan.writes = guardCoreProjectSource(dependencies, snapshot.newest!, corePlan.writes);
+  } catch {
+    throw agentXError("PROJECT_REVISION_MISMATCH", await coreCopyRefusalWords({ tableName: dependencies.tableName, documentClient: coreBudget.client }, snapshot.newest?.companyId, projectName));
+  }
+  if (corePlan.status === "unknown_company") brokerLogLine({ event: "core.project_copy_skipped", reason: "unknown_company" });
+  return corePlan;
+}
+
+function legacyCatalogRepairUpdateItem(
+  tableName: string,
+  projectName: string,
+  targetRevision: number,
+  snapshot: Awaited<ReturnType<typeof readProjectCatalogSnapshot>>,
+): TransactItems[number] {
+  const condition = snapshot.catalog === undefined ? "attribute_not_exists(pk)"
+    : snapshot.catalog.latestRevision === undefined
+      ? "entityType = :entity AND #name = :name AND attribute_not_exists(latestRevision)"
+      : "entityType = :entity AND #name = :name AND latestRevision = :observed AND latestRevision < :revision";
+  return { Update: {
+    TableName: tableName,
+    Key: projectCatalogKey(projectName),
+    UpdateExpression: "SET entityType = :entity, #name = :name, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
+    ConditionExpression: condition,
+    ExpressionAttributeNames: { "#name": "name" },
+    ExpressionAttributeValues: {
+      ":entity": "PROJECT_CATALOG", ":name": projectName, ":revision": targetRevision,
+      ":now": new Date().toISOString(),
+      ...(snapshot.catalog?.latestRevision === undefined ? {} : { ":observed": snapshot.catalog.latestRevision }),
+    },
+  } };
+}
+
+async function assertCatalogRepairRetryable(
+  dependencies: AwsBrokerDependencies,
+  projectName: string,
+  options: { createCatalogRow?: boolean; task?: { companyId?: unknown } },
+  snapshot: Awaited<ReturnType<typeof readProjectCatalogSnapshot>>,
+  attempt: number,
+  error: unknown,
+): Promise<void> {
+  if (!isConditional(error)) throw error;
+  if (attempt === 2) throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog pointer could not be reconciled with immutable revision history");
+  const refreshed = await readProjectCatalogSnapshot(dependencies, projectName, options.task);
+  if (refreshed.newestRevision <= snapshot.newestRevision
+    && (refreshed.catalog?.latestRevision ?? 0) <= (snapshot.catalog?.latestRevision ?? 0)) {
+    throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog pointer changed without revision history advancing");
+  }
+}
+
 async function repairProjectCatalogPointerFromHistory(dependencies: AwsBrokerDependencies, projectName: string, options: { createCatalogRow?: boolean; task?: { companyId?: unknown } } = {}): Promise<void> {
   // Legacy index repair and the known-company core copy commit together. No legacy revision is rewritten.
   const coreBudget = boundedCompanyReads(dependencies.documentClient);
@@ -1622,57 +1967,38 @@ async function repairProjectCatalogPointerFromHistory(dependencies: AwsBrokerDep
     const targetRevision = snapshot.newestRevision;
     if (targetRevision < 1) throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revision history is unavailable");
     if (snapshot.catalog === undefined && options.createCatalogRow === false) throw agentXError("PROJECT_REVISION_MISMATCH", "catalog-row-absent");
-    let corePlan: Awaited<ReturnType<typeof planCoreProjectWrites>>;
-    try {
-      corePlan = await planCoreProjectWrites({ tableName: dependencies.tableName, documentClient: coreBudget.client }, snapshot.newest!);
-      corePlan.writes = guardCoreProjectSource(dependencies, snapshot.newest!, corePlan.writes);
-    }
-    catch { throw agentXError("PROJECT_REVISION_MISMATCH", await coreCopyRefusalWords({ tableName: dependencies.tableName, documentClient: coreBudget.client }, snapshot.newest?.companyId, projectName)); }
-    if (corePlan.status === "unknown_company") brokerLogLine({ event: "core.project_copy_skipped", reason: "unknown_company" });
+    const corePlan = await planCatalogRepairCoreWrites(dependencies, coreBudget, snapshot, projectName);
     const repairLegacy = snapshot.catalog?.latestRevision !== targetRevision;
     if (!repairLegacy && corePlan.status !== "ready") return;
-    const key = projectCatalogKey(projectName);
     try {
       await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
         ...corePlan.writes,
-        ...(repairLegacy ? [{ Update: {
-        TableName: dependencies.tableName,
-        Key: key,
-        UpdateExpression: "SET entityType = :entity, #name = :name, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
-        ConditionExpression: snapshot.catalog === undefined ? "attribute_not_exists(pk)"
-          : snapshot.catalog.latestRevision === undefined
-            ? "entityType = :entity AND #name = :name AND attribute_not_exists(latestRevision)"
-            : "entityType = :entity AND #name = :name AND latestRevision = :observed AND latestRevision < :revision",
-        ExpressionAttributeNames: { "#name": "name" },
-        ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": projectName, ":revision": targetRevision,
-          ":now": new Date().toISOString(),
-          ...(snapshot.catalog?.latestRevision === undefined ? {} : { ":observed": snapshot.catalog.latestRevision }) },
-        } }] : []),
+        ...(repairLegacy ? [legacyCatalogRepairUpdateItem(dependencies.tableName, projectName, targetRevision, snapshot)] : []),
       ] }));
       return;
     } catch (error) {
-      if (!isConditional(error)) throw error;
-      if (attempt === 2) throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog pointer could not be reconciled with immutable revision history");
-      const refreshed = await readProjectCatalogSnapshot(dependencies, projectName, options.task);
-      if (refreshed.newestRevision <= snapshot.newestRevision
-        && (refreshed.catalog?.latestRevision ?? 0) <= (snapshot.catalog?.latestRevision ?? 0)) {
-        throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog pointer changed without revision history advancing");
-      }
+      await assertCatalogRepairRetryable(dependencies, projectName, options, snapshot, attempt, error);
     }
   }
 }
 
-async function createProjectSetupAdmissionRows(
+function decodeSetupSourceEntries(rawSources: unknown[]): Array<{ path: string; sha256: string; bytes: Buffer; kind: "blob" }> {
+  return rawSources.map((raw) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid source record");
+    const source = raw as Record<string, unknown>;
+    if (typeof source.path !== "string" || typeof source.sha256 !== "string" || typeof source.bytesBase64 !== "string" || source.kind !== "blob") {
+      throw new Error("invalid source record");
+    }
+    return { path: source.path, sha256: source.sha256, bytes: Buffer.from(source.bytesBase64, "base64"), kind: "blob" as const };
+  });
+}
+
+async function loadVerifiedProjectSetupProposal(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
   project: RegisteredProjectRecord,
   setupApproval: NonNullable<RegisteredProjectRecord["setupApproval"]>,
-  runtime: NonNullable<ReturnType<typeof admitProjectSetupRuntime>>,
-  retry?: { attemptId: string; retryOfExecutionId: string },
-): Promise<{ transactionItems: Array<Record<string, unknown>> } | undefined> {
-  if (!dependencies.projectSetupRuntimeCatalogId || project.runtimeBinding.deploymentMode !== "ec2-ebs") return undefined;
-  const endpoint = new URL(runtime.endpoint);
-  if (endpoint.protocol !== "http:" || !z.ipv4().safeParse(endpoint.hostname).success) return undefined;
+): Promise<{ policyDigest: string; snapshot: E2ESourceSnapshot; policy: E2EPolicy } | undefined> {
   const approval = await getItem<Record<string, unknown>>(dependencies, { pk: `PROJECT_SETUP#${project.definition.name}`, sk: `PROPOSAL#${setupApproval.proposalSha256}` });
   if (!approval || approval.ownerKey !== identity.ownerKey || approval.decision !== "approve" || approval.proposalRef !== setupApproval.proposalRef
     || typeof approval.policyDigest !== "string" || !sameJsonContent(approval.policy, project.definition.e2e)) return undefined;
@@ -1690,25 +2016,104 @@ async function createProjectSetupAdmissionRows(
   if (!Array.isArray(rawSnapshot.sources)) return undefined;
   let snapshot: E2ESourceSnapshot;
   try {
-    snapshot = { ...rawSnapshot, sources: rawSnapshot.sources.map((raw) => {
-      if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid source record");
-      const source = raw as Record<string, unknown>;
-      if (typeof source.path !== "string" || typeof source.sha256 !== "string" || typeof source.bytesBase64 !== "string" || source.kind !== "blob") throw new Error("invalid source record");
-      return { path: source.path, sha256: source.sha256, bytes: Buffer.from(source.bytesBase64, "base64"), kind: "blob" as const };
-    }) } as unknown as E2ESourceSnapshot;
+    snapshot = { ...rawSnapshot, sources: decodeSetupSourceEntries(rawSnapshot.sources) } as unknown as E2ESourceSnapshot;
     verifyE2ESourceSnapshot(snapshot, snapshot.candidate);
   } catch { return undefined; }
   const policy = E2EPolicySchema.safeParse(project.definition.e2e);
   if (!policy.success) return undefined;
+  return { policyDigest: approval.policyDigest, snapshot, policy: policy.data };
+}
+
+function buildProjectSetupRunContext(
+  derived: ReturnType<typeof deriveProjectSetupSourceSmoke>,
+  project: RegisteredProjectRecord,
+  setupApproval: NonNullable<RegisteredProjectRecord["setupApproval"]>,
+  policy: E2EPolicy,
+  policyDigest: string,
+  runtime: NonNullable<ReturnType<typeof admitProjectSetupRuntime>>,
+  ids: { setupExecutionId: string; operationId: string; fence: number },
+  now: Date,
+  stableUuid: (label: string) => string,
+): { setupRunContext: Record<string, unknown>; evidenceByteLimit: number } | undefined {
+  try {
+    const plan = selectE2EExecutionPlan(derived.selectionInput);
+    if (plan.groups.length === 0 || plan.groups.some((group) => group.expectedCases.length === 0)) return undefined;
+    const bundleBody = { schemaVersion: 1 as const, planDigest: derived.planDigest, templateVersion: "trusted-e2e/v1", scenarios: derived.scenarios, bundleDigest: "0".repeat(64) };
+    const bundle = E2EScenarioBundleSchema.parse({ ...bundleBody, bundleDigest: e2eScenarioBundleDigest(bundleBody) });
+    const compiledGroups = plan.groups.map((group) => ({ group, compiled: compileE2EScenarios(bundle, plan.effectiveTargets, group, { selectionInput: derived.selectionInput, executionPlan: plan, group }) }));
+    const totalCases = compiledGroups.reduce((total, item) => total + item.group.expectedCases.length, 0);
+    const evidenceByteLimit = e2ePrivateTransferMaxBytes(totalCases, compiledGroups.length);
+    const roundId = stableUuid("round");
+    const admittedAt = now.toISOString();
+    const deadlineAt = new Date(now.getTime() + policy.limits.runTimeoutMs).toISOString();
+    const taskId = `project-setup:${ids.setupExecutionId}`;
+    const groupAdmissions = compiledGroups.map(({ group, compiled }, index) => {
+      const runId = stableUuid(`run-${index}-${group.groupId}`);
+      const binding = E2ERunBindingSchema.parse({ schemaVersion: 1, runId, roundId, taskId, operationId: ids.operationId, operationFence: ids.fence,
+        workflowRevision: project.definition.revision, groupId: group.groupId, executionPlanDigest: plan.digest, executionMode: group.mode,
+        mockManifestDigest: group.mockManifestDigest, authorizationRevision: `setup:${1}`, candidateDigest: setupApproval.candidateDigest,
+        planDigest: derived.planDigest, policyDigest, bundleDigest: bundle.bundleDigest,
+        appBuildDigest: createHash("sha256").update(canonicalJson(compiled.inventory)).digest("hex"),
+        environmentDigest: createHash("sha256").update(canonicalJson(runtime.runnerEnvironment), "utf8").digest("hex"), runtimeManifestDigest: runtime.manifestDigest,
+        modelRouteRevision: null, expectedCases: compiled.expectedCases, admittedAt, deadlineAt });
+      return { group, binding, expectedConfigDigest: compiled.expectedConfigDigest, compiledInventoryDigest: compiled.inventory.digest,
+        expectedCases: compiled.expectedCases, selectionPacketPath: compiled.selectionPacketPath };
+    });
+    const round = E2ERoundSchema.parse({ schemaVersion: 1, roundId, taskId, operationId: ids.operationId, operationFence: ids.fence,
+      workflowRevision: project.definition.revision, executionPlanDigest: plan.digest, admittedAt, deadlineAt,
+      limits: policy.limits, groupBindings: groupAdmissions.map((item) => item.binding) });
+    return {
+      setupRunContext: { roundId, admittedAt, deadlineAt, runnerEnvironment: runtime.runnerEnvironment,
+        runnerToolchain: runtime.runnerToolchain, runnerToolchainDigest: runtime.runnerToolchainDigest, plan, bundle, round, groupAdmissions },
+      evidenceByteLimit,
+    };
+  } catch { return undefined; }
+}
+
+async function uploadProjectSetupExecutionObject(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  setupApproval: NonNullable<RegisteredProjectRecord["setupApproval"]>,
+  executionObject: Record<string, unknown>,
+): Promise<{ key: string; sha256: string; byteLength: number } | undefined> {
+  const executionBytes = Buffer.from(canonicalJson(executionObject), "utf8");
+  const executionDigest = createHash("sha256").update(executionBytes).digest("hex");
+  const executionRef = { key: `project-setup-executions/sha256/${executionDigest}.json`, sha256: executionDigest, byteLength: executionBytes.byteLength };
+  try {
+    await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: executionRef.key, Body: executionBytes,
+      ContentType: "application/json", Metadata: { sha256: executionDigest, owner: identity.ownerKey, candidate: setupApproval.candidateDigest }, IfNoneMatch: "*" }));
+  } catch (error) {
+    const code = error && typeof error === "object" ? (error as { name?: unknown; $metadata?: { httpStatusCode?: unknown } }).name : undefined;
+    const status = error && typeof error === "object" ? (error as { $metadata?: { httpStatusCode?: unknown } }).$metadata?.httpStatusCode : undefined;
+    if (code !== "PreconditionFailed" && status !== 412) throw error;
+    if (await readStoredText(dependencies.s3, dependencies.artifactBucketName, executionRef.key, MAX_SETUP_PROPOSAL_BYTES) !== executionBytes.toString("utf8")) return undefined;
+  }
+  return executionRef;
+}
+
+async function createProjectSetupAdmissionRows(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  project: RegisteredProjectRecord,
+  setupApproval: NonNullable<RegisteredProjectRecord["setupApproval"]>,
+  runtime: NonNullable<ReturnType<typeof admitProjectSetupRuntime>>,
+  retry?: { attemptId: string; retryOfExecutionId: string },
+): Promise<{ transactionItems: Array<Record<string, unknown>> } | undefined> {
+  if (!dependencies.projectSetupRuntimeCatalogId || project.runtimeBinding.deploymentMode !== "ec2-ebs") return undefined;
+  const endpoint = new URL(runtime.endpoint);
+  if (endpoint.protocol !== "http:" || !z.ipv4().safeParse(endpoint.hostname).success) return undefined;
+  const verifiedProposal = await loadVerifiedProjectSetupProposal(dependencies, identity, project, setupApproval);
+  if (!verifiedProposal) return undefined;
+  const { policyDigest, snapshot, policy } = verifiedProposal;
   let derived: ReturnType<typeof deriveProjectSetupSourceSmoke>;
   try {
     derived = deriveProjectSetupSourceSmoke({
       projectName: project.definition.name, proposalSha256: setupApproval.proposalSha256,
       approval: { proposalRef: setupApproval.proposalRef, proposalSha256: setupApproval.proposalSha256, candidateDigest: setupApproval.candidateDigest,
-        policyDigest: approval.policyDigest, runtimeCatalogId: runtime.runtimeCatalogId, catalogRevision: runtime.catalogRevision,
+        policyDigest, runtimeCatalogId: runtime.runtimeCatalogId, catalogRevision: runtime.catalogRevision,
         bindingDigest: runtime.bindingDigest, manifestDigest: runtime.manifestDigest, generation: runtime.generation },
-      snapshot, policy: policy.data,
-      sandboxAvailability: { targetId: "default-sandbox", profileId: policy.data.defaultSandboxProfileId, connection: "connected", approval: "approved",
+      snapshot, policy,
+      sandboxAvailability: { targetId: "default-sandbox", profileId: policy.defaultSandboxProfileId, connection: "connected", approval: "approved",
         qualification: "qualified", authorizationRevision: `catalog-${runtime.catalogRevision}` },
       runtimeAvailability: [],
     });
@@ -1732,43 +2137,14 @@ async function createProjectSetupAdmissionRows(
   const operationId = stableUuid("operation");
   const outboxId = stableUuid("outbox");
   const fence = 1;
-  let setupRunContext: Record<string, unknown>;
-  let evidenceByteLimit: number;
-  try {
-    const plan = selectE2EExecutionPlan(derived.selectionInput);
-    if (plan.groups.length === 0 || plan.groups.some((group) => group.expectedCases.length === 0)) return undefined;
-    const bundleBody = { schemaVersion: 1 as const, planDigest: derived.planDigest, templateVersion: "trusted-e2e/v1", scenarios: derived.scenarios, bundleDigest: "0".repeat(64) };
-    const bundle = E2EScenarioBundleSchema.parse({ ...bundleBody, bundleDigest: e2eScenarioBundleDigest(bundleBody) });
-    const compiledGroups = plan.groups.map((group) => ({ group, compiled: compileE2EScenarios(bundle, plan.effectiveTargets, group, { selectionInput: derived.selectionInput, executionPlan: plan, group }) }));
-    const totalCases = compiledGroups.reduce((total, item) => total + item.group.expectedCases.length, 0);
-    evidenceByteLimit = e2ePrivateTransferMaxBytes(totalCases, compiledGroups.length);
-    const roundId = stableUuid("round");
-    const admittedAt = now.toISOString();
-    const deadlineAt = new Date(now.getTime() + policy.data.limits.runTimeoutMs).toISOString();
-    const taskId = `project-setup:${setupExecutionId}`;
-    const groupAdmissions = compiledGroups.map(({ group, compiled }, index) => {
-      const runId = stableUuid(`run-${index}-${group.groupId}`);
-      const binding = E2ERunBindingSchema.parse({ schemaVersion: 1, runId, roundId, taskId, operationId, operationFence: fence,
-        workflowRevision: project.definition.revision, groupId: group.groupId, executionPlanDigest: plan.digest, executionMode: group.mode,
-        mockManifestDigest: group.mockManifestDigest, authorizationRevision: `setup:${1}`, candidateDigest: setupApproval.candidateDigest,
-        planDigest: derived.planDigest, policyDigest: approval.policyDigest, bundleDigest: bundle.bundleDigest,
-        appBuildDigest: createHash("sha256").update(canonicalJson(compiled.inventory)).digest("hex"),
-        environmentDigest: createHash("sha256").update(canonicalJson(runtime.runnerEnvironment), "utf8").digest("hex"), runtimeManifestDigest: runtime.manifestDigest,
-        modelRouteRevision: null, expectedCases: compiled.expectedCases, admittedAt, deadlineAt });
-      return { group, binding, expectedConfigDigest: compiled.expectedConfigDigest, compiledInventoryDigest: compiled.inventory.digest,
-        expectedCases: compiled.expectedCases, selectionPacketPath: compiled.selectionPacketPath };
-    });
-    const round = E2ERoundSchema.parse({ schemaVersion: 1, roundId, taskId, operationId, operationFence: fence,
-      workflowRevision: project.definition.revision, executionPlanDigest: plan.digest, admittedAt, deadlineAt,
-      limits: policy.data.limits, groupBindings: groupAdmissions.map((item) => item.binding) });
-    setupRunContext = { roundId, admittedAt, deadlineAt, runnerEnvironment: runtime.runnerEnvironment,
-      runnerToolchain: runtime.runnerToolchain, runnerToolchainDigest: runtime.runnerToolchainDigest, plan, bundle, round, groupAdmissions };
-  } catch { return undefined; }
+  const builtRunContext = buildProjectSetupRunContext(derived, project, setupApproval, policy, policyDigest, runtime, { setupExecutionId, operationId, fence }, now, stableUuid);
+  if (!builtRunContext) return undefined;
+  const { setupRunContext, evidenceByteLimit } = builtRunContext;
   const executionObject = {
     domain: "project-setup-source-interface/v1", schemaVersion: 1, setupExecutionId, subjectId,
     transportCorrelationId, ownerKey: identity.ownerKey, projectName: project.definition.name, projectRevision: project.definition.revision,
     approvalRevision: 1, proposalRef: setupApproval.proposalRef, proposalSha256: setupApproval.proposalSha256,
-    candidateDigest: setupApproval.candidateDigest, policyDigest: approval.policyDigest, policy: policy.data,
+    candidateDigest: setupApproval.candidateDigest, policyDigest, policy,
     sourceSnapshot: { ...snapshot, sources: snapshot.sources.map((source) => ({ path: source.path, sha256: source.sha256, kind: source.kind, bytesBase64: Buffer.from(source.bytes).toString("base64") })) },
     // The worker reconstructs this exact selection against the retained snapshot bytes and then
     // recompiles. Snapshot bytes live once in the bounded content-addressed object above.
@@ -1786,22 +2162,12 @@ async function createProjectSetupAdmissionRows(
     ...(retry ? { retryOfExecutionId: retry.retryOfExecutionId, retryActorKey: identity.ownerKey } : {}),
   };
   await assertNoRequalifyHold(dependencies, Date.now()); // AUTOREQUALIFY: no new setup run while the test machine is being switched
-  const executionBytes = Buffer.from(canonicalJson(executionObject), "utf8");
-  const executionDigest = createHash("sha256").update(executionBytes).digest("hex");
-  const executionRef = { key: `project-setup-executions/sha256/${executionDigest}.json`, sha256: executionDigest, byteLength: executionBytes.byteLength };
-  try {
-    await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: executionRef.key, Body: executionBytes,
-      ContentType: "application/json", Metadata: { sha256: executionDigest, owner: identity.ownerKey, candidate: setupApproval.candidateDigest }, IfNoneMatch: "*" }));
-  } catch (error) {
-    const code = error && typeof error === "object" ? (error as { name?: unknown; $metadata?: { httpStatusCode?: unknown } }).name : undefined;
-    const status = error && typeof error === "object" ? (error as { $metadata?: { httpStatusCode?: unknown } }).$metadata?.httpStatusCode : undefined;
-    if (code !== "PreconditionFailed" && status !== 412) throw error;
-    if (await readStoredText(dependencies.s3, dependencies.artifactBucketName, executionRef.key, MAX_SETUP_PROPOSAL_BYTES) !== executionBytes.toString("utf8")) return undefined;
-  }
+  const executionRef = await uploadProjectSetupExecutionObject(dependencies, identity, setupApproval, executionObject);
+  if (!executionRef) return undefined;
   const execution = ProjectSetupExecutionSchema.parse({ schemaVersion: 1, setupExecutionId, subjectId, transportCorrelationId,
     projectName: project.definition.name, projectRevision: project.definition.revision, ownerKey: identity.ownerKey, approvalRevision: 1,
     proposalRef: setupApproval.proposalRef, proposalSha256: setupApproval.proposalSha256, candidateDigest: setupApproval.candidateDigest,
-    policyDigest: approval.policyDigest, bindingDigest: runtime.bindingDigest, runtimeGeneration: runtime.generation,
+    policyDigest, bindingDigest: runtime.bindingDigest, runtimeGeneration: runtime.generation,
     executionRef, runtimeCatalogId: runtime.runtimeCatalogId, runtimeCatalogRevision: runtime.catalogRevision,
     state: "ACCEPTED", operationId, outboxId, fence,
     deadlineAt: setupRunContext.deadlineAt, evidenceByteLimit, createdAt: now.toISOString(),
@@ -1825,15 +2191,25 @@ async function createProjectSetupAdmissionRows(
     put(requalifySetupWorkRow(setupExecutionId, execution.deadlineAt)), requalifyHoldFence(dependencies.tableName, Date.now())] };
 }
 
-async function retryProjectSetupAsAdministrator(
+function matchingSetupRetryDuplicate(
+  record: Record<string, unknown> | undefined,
+  setupExecutionId: string,
+  retryActorKey: string,
+  originalCreatorKey: string,
+): { setupExecutionId: string; operationId: string; status: "QUEUED"; duplicate: true } | undefined {
+  if (record?.entityType === "PROJECT_SETUP_RETRY" && record.previousExecutionId === setupExecutionId
+    && record.retryActorKey === retryActorKey && record.originalCreatorKey === originalCreatorKey
+    && typeof record.setupExecutionId === "string" && typeof record.operationId === "string") {
+    return { setupExecutionId: record.setupExecutionId, operationId: record.operationId, status: "QUEUED", duplicate: true };
+  }
+  return undefined;
+}
+
+async function loadRetryableProjectSetupExecution(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
   setupExecutionId: string,
-  value: unknown,
-): Promise<{ setupExecutionId: string; operationId: string; status: "QUEUED"; duplicate: boolean }> {
-  if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required for an explicit setup retry");
-  const input = z.object({ requestId: z.string().uuid() }).strict().parse(value);
-  const idempotencyKey = { pk: `PROJECT_SETUP#${setupExecutionId}`, sk: `RETRY#${identity.ownerKey}#${input.requestId}` };
+) {
   const executionKey = projectSetupExecutionKey(setupExecutionId);
   const raw = await getItem<Record<string, unknown>>(dependencies, executionKey);
   const parked = ProjectSetupExecutionSchema.safeParse(projectSetupDomainRecord(raw, executionKey, "PROJECT_SETUP_EXECUTION"));
@@ -1850,48 +2226,107 @@ async function retryProjectSetupAsAdministrator(
     && priorOperation.data.fence === parked.data.fence && priorOperation.data.transportCorrelationId === parked.data.transportCorrelationId;
   if (!parkedRetry && !expiredDispatchRetry) throw agentXError("STALE_FENCE", "only an owned parked setup execution or an expired matching dispatch can be retried");
   if (identity.ownerKey !== parked.data.ownerKey) throw agentXError("FORBIDDEN", "setup retry actor must be the original project creator");
-  const project = await requireProject(dependencies, parked.data.projectName, parked.data.projectRevision);
-  await requireAdministrator(dependencies, identity, parked.data.projectName);
+  return { executionKey, priorOperationKey, parked: parked.data, expiredDispatchRetry };
+}
+
+async function verifyProjectSetupRetryEligibility(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  parked: ReturnType<typeof ProjectSetupExecutionSchema.parse>,
+  setupExecutionId: string,
+) {
+  const project = await requireProject(dependencies, parked.projectName, parked.projectRevision);
+  await requireAdministrator(dependencies, identity, parked.projectName);
   if (project.runtimeBinding.deploymentMode !== "ec2-ebs") throw agentXError("RUNTIME_UNAVAILABLE", "the approved setup runtime profile is unavailable");
-  if (project.registeredBy !== parked.data.ownerKey || project.setupApproval?.decision !== "approve"
-    || project.setupApproval.proposalRef !== parked.data.proposalRef || project.setupApproval.proposalSha256 !== parked.data.proposalSha256
-    || project.setupApproval.candidateDigest !== parked.data.candidateDigest || project.definition.e2e === undefined
-    || !dependencies.projectSetupRuntimeCatalogId || dependencies.projectSetupRuntimeCatalogId !== parked.data.runtimeCatalogId
-    || projectSetupBindingDigest(project.runtimeBinding) !== parked.data.bindingDigest) {
+  if (project.registeredBy !== parked.ownerKey || project.setupApproval?.decision !== "approve"
+    || project.setupApproval.proposalRef !== parked.proposalRef || project.setupApproval.proposalSha256 !== parked.proposalSha256
+    || project.setupApproval.candidateDigest !== parked.candidateDigest || project.definition.e2e === undefined
+    || !dependencies.projectSetupRuntimeCatalogId || dependencies.projectSetupRuntimeCatalogId !== parked.runtimeCatalogId
+    || projectSetupBindingDigest(project.runtimeBinding) !== parked.bindingDigest) {
     throw agentXError("PROJECT_REVISION_MISMATCH", "setup source, policy, binding, or catalog changed; complete normal approval before retry");
   }
-  const approval = await getItem<Record<string, unknown>>(dependencies, { pk: `PROJECT_SETUP#${project.definition.name}`, sk: `PROPOSAL#${parked.data.proposalSha256}` });
-  if (!approval || approval.ownerKey !== parked.data.ownerKey || approval.decision !== "approve" || approval.proposalRef !== parked.data.proposalRef
-    || approval.policyDigest !== parked.data.policyDigest || !sameJsonContent(approval.policy, project.definition.e2e)) {
+  const approval = await getItem<Record<string, unknown>>(dependencies, { pk: `PROJECT_SETUP#${project.definition.name}`, sk: `PROPOSAL#${parked.proposalSha256}` });
+  if (!approval || approval.ownerKey !== parked.ownerKey || approval.decision !== "approve" || approval.proposalRef !== parked.proposalRef
+    || approval.policyDigest !== parked.policyDigest || !sameJsonContent(approval.policy, project.definition.e2e)) {
     throw agentXError("PROJECT_REVISION_MISMATCH", "current setup approval no longer matches the parked source and policy");
   }
-  const runtimeKey = projectSetupRuntimeKey(parked.data.runtimeCatalogId, parked.data.bindingDigest);
+  const runtimeKey = projectSetupRuntimeKey(parked.runtimeCatalogId, parked.bindingDigest);
   const runtimeItem = await dependencies.documentClient.send(new GetCommand({ TableName: dependencies.tableName, Key: runtimeKey, ConsistentRead: true }));
   const runtime = ProjectSetupRuntimeRecordSchema.safeParse(projectSetupRuntimeRecord(runtimeItem.Item, runtimeKey));
   if (!runtime.success) throw agentXError("RUNTIME_UNAVAILABLE", "the exact approved setup runtime binding is unavailable");
-  const admittedRuntime = admitProjectSetupRuntime(runtime.data, { runtimeCatalogId: parked.data.runtimeCatalogId, binding: project.runtimeBinding,
+  const admittedRuntime = admitProjectSetupRuntime(runtime.data, { runtimeCatalogId: parked.runtimeCatalogId, binding: project.runtimeBinding,
     scope: "source-interface", now: Date.now() });
-  if (!admittedRuntime || admittedRuntime.catalogRevision !== parked.data.runtimeCatalogRevision) {
+  if (!admittedRuntime || admittedRuntime.catalogRevision !== parked.runtimeCatalogRevision) {
     throw agentXError("PROJECT_REVISION_MISMATCH", "the admitted setup catalog revision changed; complete normal approval before retry");
   }
-  if (!(await setupAdmissionMatchesExecution(dependencies, parked.data))) {
+  if (!(await setupAdmissionMatchesExecution(dependencies, parked))) {
     throw agentXError("RUNTIME_UNAVAILABLE", "the immutable setup admission does not match its stored execution identity");
   }
   const sessionKey = projectSetupSessionKey(setupExecutionId);
   const sessionResponse = await dependencies.documentClient.send(new GetCommand({ TableName: dependencies.tableName, Key: sessionKey, ConsistentRead: true }));
   const session = ProjectSetupSessionSchema.safeParse(projectSetupDomainRecord(sessionResponse.Item, sessionKey, "PROJECT_SETUP_SESSION"));
-  if (!session.success || session.data.setupExecutionId !== setupExecutionId || session.data.subjectId !== parked.data.subjectId
-    || session.data.transportCorrelationId !== parked.data.transportCorrelationId || session.data.approvalRevision !== parked.data.approvalRevision
-    || session.data.bindingDigest !== parked.data.bindingDigest || session.data.generation !== parked.data.runtimeGeneration || session.data.state !== "READY") {
+  if (!session.success || session.data.setupExecutionId !== setupExecutionId || session.data.subjectId !== parked.subjectId
+    || session.data.transportCorrelationId !== parked.transportCorrelationId || session.data.approvalRevision !== parked.approvalRevision
+    || session.data.bindingDigest !== parked.bindingDigest || session.data.generation !== parked.runtimeGeneration || session.data.state !== "READY") {
     throw agentXError("RUNTIME_UNAVAILABLE", "the exact approved setup session is no longer ready");
   }
+  return { project, setupApproval: project.setupApproval, runtime: runtime.data, admittedRuntime, session: session.data };
+}
+
+function buildSetupRetryPriorMutations(
+  tableName: string,
+  setupExecutionId: string,
+  executionKey: { pk: string; sk: string },
+  priorOperationKey: { pk: string; sk: string },
+  parked: ReturnType<typeof ProjectSetupExecutionSchema.parse>,
+  expiredDispatchRetry: boolean,
+  now: string,
+): { priorExecutionMutation: TransactItems[number]; priorOperationMutation: TransactItems[number] } {
+  const parkResult = { domain: "project-setup-source-interface/v1", candidateDigest: parked.candidateDigest,
+    processStatus: "UNKNOWN", qualification: "UNKNOWN", cleanupConfirmed: false, parkReason: "setup-deadline-expired" };
+  const priorExecutionMutation: TransactItems[number] = expiredDispatchRetry
+    ? { Update: { TableName: tableName, Key: executionKey,
+        UpdateExpression: "SET #state = :parked, updatedAt = :now, completedAt = :now, #result = :result",
+        ConditionExpression: "#state = :dispatching AND operationId = :operationId AND subjectId = :subjectId AND fence = :fence AND approvalRevision = :approvalRevision AND transportCorrelationId = :correlation AND deadlineAt = :deadlineAt AND deadlineAt <= :now",
+        ExpressionAttributeNames: { "#state": "state", "#result": "result" },
+        ExpressionAttributeValues: { ":parked": "PARKED", ":dispatching": "DISPATCHING", ":now": now, ":result": parkResult,
+          ":operationId": parked.operationId, ":subjectId": parked.subjectId, ":fence": parked.fence,
+          ":approvalRevision": parked.approvalRevision, ":correlation": parked.transportCorrelationId,
+          ":deadlineAt": parked.deadlineAt } } }
+    : { ConditionCheck: { TableName: tableName, Key: executionKey,
+        ConditionExpression: "#state = :parked AND operationId = :operationId AND fence = :fence",
+        ExpressionAttributeNames: { "#state": "state" },
+        ExpressionAttributeValues: { ":parked": "PARKED", ":operationId": parked.operationId, ":fence": parked.fence } } };
+  const priorOperationMutation: TransactItems[number] = expiredDispatchRetry
+    ? { Update: { TableName: tableName, Key: priorOperationKey,
+        UpdateExpression: "SET #status = :parked, updatedAt = :now, #result = :result",
+        ConditionExpression: "(#status = :dispatching OR #status = :delivered) AND setupExecutionId = :setupExecutionId AND operationId = :operationId AND fence = :fence AND transportCorrelationId = :correlation",
+        ExpressionAttributeNames: { "#status": "status", "#result": "result" },
+        ExpressionAttributeValues: { ":parked": "PARKED", ":dispatching": "DISPATCHING", ":delivered": "DELIVERED", ":now": now,
+          ":result": parkResult, ":setupExecutionId": setupExecutionId, ":operationId": parked.operationId,
+          ":fence": parked.fence, ":correlation": parked.transportCorrelationId } } }
+    : { ConditionCheck: { TableName: tableName, Key: priorOperationKey,
+        ConditionExpression: "#status = :parked AND setupExecutionId = :setupExecutionId AND operationId = :operationId AND fence = :fence AND transportCorrelationId = :correlation",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: { ":parked": "PARKED", ":setupExecutionId": setupExecutionId,
+          ":operationId": parked.operationId, ":fence": parked.fence, ":correlation": parked.transportCorrelationId } } };
+  return { priorExecutionMutation, priorOperationMutation };
+}
+
+async function retryProjectSetupAsAdministrator(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  setupExecutionId: string,
+  value: unknown,
+): Promise<{ setupExecutionId: string; operationId: string; status: "QUEUED"; duplicate: boolean }> {
+  if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required for an explicit setup retry");
+  const input = z.object({ requestId: z.string().uuid() }).strict().parse(value);
+  const idempotencyKey = { pk: `PROJECT_SETUP#${setupExecutionId}`, sk: `RETRY#${identity.ownerKey}#${input.requestId}` };
+  const { executionKey, priorOperationKey, parked, expiredDispatchRetry } = await loadRetryableProjectSetupExecution(dependencies, identity, setupExecutionId);
+  const { project, setupApproval, runtime, admittedRuntime, session } = await verifyProjectSetupRetryEligibility(dependencies, identity, parked, setupExecutionId);
   const prior = await getItem<Record<string, unknown>>(dependencies, idempotencyKey);
-  if (prior && prior.entityType === "PROJECT_SETUP_RETRY" && prior.previousExecutionId === setupExecutionId
-    && prior.retryActorKey === identity.ownerKey && prior.originalCreatorKey === parked.data.ownerKey
-    && typeof prior.setupExecutionId === "string" && typeof prior.operationId === "string") {
-    return { setupExecutionId: prior.setupExecutionId, operationId: prior.operationId, status: "QUEUED", duplicate: true };
-  }
-  const setupApproval = project.setupApproval;
+  const priorDuplicate = matchingSetupRetryDuplicate(prior, setupExecutionId, identity.ownerKey, parked.ownerKey);
+  if (priorDuplicate) return priorDuplicate;
   const rows = await createProjectSetupAdmissionRows(dependencies, identity, project, setupApproval, admittedRuntime,
     { attemptId: input.requestId, retryOfExecutionId: setupExecutionId });
   if (!rows) throw agentXError("RUNTIME_UNAVAILABLE", "the approved source-interface setup run cannot be admitted");
@@ -1902,37 +2337,12 @@ async function retryProjectSetupAsAdministrator(
   const nextOperation = operationPut.Put.Item;
   const marker = { ...idempotencyKey, entityType: "PROJECT_SETUP_RETRY", previousExecutionId: setupExecutionId,
     setupExecutionId: nextExecution.setupExecutionId, operationId: nextOperation.operationId, retryActorKey: identity.ownerKey,
-    originalCreatorKey: parked.data.ownerKey, createdAt: new Date().toISOString() };
+    originalCreatorKey: parked.ownerKey, createdAt: new Date().toISOString() };
   const now = new Date().toISOString();
-  const terminalAuthorityChecks = projectSetupTerminalAuthorityChecks(dependencies.tableName, parked.data, runtime.data, session.data, LEGACY_REVISION_GRANT);
-  const parkResult = { domain: "project-setup-source-interface/v1", candidateDigest: parked.data.candidateDigest,
-    processStatus: "UNKNOWN", qualification: "UNKNOWN", cleanupConfirmed: false, parkReason: "setup-deadline-expired" };
-  const priorExecutionMutation = expiredDispatchRetry
-    ? { Update: { TableName: dependencies.tableName, Key: executionKey,
-        UpdateExpression: "SET #state = :parked, updatedAt = :now, completedAt = :now, #result = :result",
-        ConditionExpression: "#state = :dispatching AND operationId = :operationId AND subjectId = :subjectId AND fence = :fence AND approvalRevision = :approvalRevision AND transportCorrelationId = :correlation AND deadlineAt = :deadlineAt AND deadlineAt <= :now",
-        ExpressionAttributeNames: { "#state": "state", "#result": "result" },
-        ExpressionAttributeValues: { ":parked": "PARKED", ":dispatching": "DISPATCHING", ":now": now, ":result": parkResult,
-          ":operationId": parked.data.operationId, ":subjectId": parked.data.subjectId, ":fence": parked.data.fence,
-          ":approvalRevision": parked.data.approvalRevision, ":correlation": parked.data.transportCorrelationId,
-          ":deadlineAt": parked.data.deadlineAt } } }
-    : { ConditionCheck: { TableName: dependencies.tableName, Key: executionKey,
-        ConditionExpression: "#state = :parked AND operationId = :operationId AND fence = :fence",
-        ExpressionAttributeNames: { "#state": "state" },
-        ExpressionAttributeValues: { ":parked": "PARKED", ":operationId": parked.data.operationId, ":fence": parked.data.fence } } };
-  const priorOperationMutation = expiredDispatchRetry
-    ? { Update: { TableName: dependencies.tableName, Key: priorOperationKey,
-        UpdateExpression: "SET #status = :parked, updatedAt = :now, #result = :result",
-        ConditionExpression: "(#status = :dispatching OR #status = :delivered) AND setupExecutionId = :setupExecutionId AND operationId = :operationId AND fence = :fence AND transportCorrelationId = :correlation",
-        ExpressionAttributeNames: { "#status": "status", "#result": "result" },
-        ExpressionAttributeValues: { ":parked": "PARKED", ":dispatching": "DISPATCHING", ":delivered": "DELIVERED", ":now": now,
-          ":result": parkResult, ":setupExecutionId": setupExecutionId, ":operationId": parked.data.operationId,
-          ":fence": parked.data.fence, ":correlation": parked.data.transportCorrelationId } } }
-    : { ConditionCheck: { TableName: dependencies.tableName, Key: priorOperationKey,
-        ConditionExpression: "#status = :parked AND setupExecutionId = :setupExecutionId AND operationId = :operationId AND fence = :fence AND transportCorrelationId = :correlation",
-        ExpressionAttributeNames: { "#status": "status" },
-        ExpressionAttributeValues: { ":parked": "PARKED", ":setupExecutionId": setupExecutionId,
-          ":operationId": parked.data.operationId, ":fence": parked.data.fence, ":correlation": parked.data.transportCorrelationId } } };
+  const terminalAuthorityChecks = projectSetupTerminalAuthorityChecks(dependencies.tableName, parked, runtime, session, LEGACY_REVISION_GRANT);
+  const { priorExecutionMutation, priorOperationMutation } = buildSetupRetryPriorMutations(
+    dependencies.tableName, setupExecutionId, executionKey, priorOperationKey, parked, expiredDispatchRetry, now,
+  );
   try {
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
       ...terminalAuthorityChecks,
@@ -1942,12 +2352,8 @@ async function retryProjectSetupAsAdministrator(
       { Put: { TableName: dependencies.tableName, Item: marker, ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" } },
     ] }));
   } catch (error) {
-    const duplicate = await getItem<Record<string, unknown>>(dependencies, idempotencyKey);
-    if (duplicate?.entityType === "PROJECT_SETUP_RETRY" && duplicate.previousExecutionId === setupExecutionId
-      && duplicate.retryActorKey === identity.ownerKey && duplicate.originalCreatorKey === parked.data.ownerKey
-      && typeof duplicate.setupExecutionId === "string" && typeof duplicate.operationId === "string") {
-      return { setupExecutionId: duplicate.setupExecutionId, operationId: duplicate.operationId, status: "QUEUED", duplicate: true };
-    }
+    const duplicate = matchingSetupRetryDuplicate(await getItem<Record<string, unknown>>(dependencies, idempotencyKey), setupExecutionId, identity.ownerKey, parked.ownerKey);
+    if (duplicate) return duplicate;
     await rethrowAsDeferredIfHeld(dependencies, error, Date.now()); // AUTOREQUALIFY: the start fence refused the retry
     throw error;
   }
@@ -2421,72 +2827,43 @@ function closeOperationParts(
   return { operation, outbox: outboxRecord(workspace, invocation), fence };
 }
 
-async function startThreadWorkspaceClose(
+async function closedThreadWorkspaceStartResult(
+  dependencies: AwsBrokerDependencies,
+  workspace: WorkspaceInstance & { closedAt: string },
+): Promise<SlackWorkspaceCloseStartResult> {
+  const closeOperation = workspace.closeOperationId
+    ? await requireOperation(dependencies, workspace.id, workspace.closeOperationId)
+    : undefined;
+  const closePreflight = closeOperation?.kind === "close" && closeOperation.status === "SUCCEEDED"
+    ? WorkspaceClosePreflightResultSchema.safeParse(closeOperation.result)
+    : undefined;
+  return {
+    outcome: "CLOSED",
+    workspaceId: workspace.id,
+    closedAt: workspace.closedAt,
+    ...(closeOperation?.kind === "close" && closeOperation.discardUnpublished === true && closePreflight?.success && !closePreflight.data.safeToClose
+      ? { discardedUnpublished: true }
+      : {}),
+  };
+}
+
+async function preflightCloseStartResult(
+  dependencies: AwsBrokerDependencies,
+  workspaceId: string,
+  operationId: string,
+): Promise<SlackWorkspaceCloseStartResult> {
+  const operation = await requireOperation(dependencies, workspaceId, operationId);
+  return { outcome: "PREFLIGHT", workspaceId, operationId: operation.id, status: operation.status };
+}
+
+async function commitThreadWorkspaceCloseStart(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
-  value: unknown,
+  workspace: WorkspaceInstance,
+  requestId: string,
+  idempotencyKey: { pk: string; sk: string },
+  discardUnpublished: boolean,
 ): Promise<SlackWorkspaceCloseStartResult> {
-  const charging = threadCharging(dependencies, identity);
-  const input = object(value, "thread workspace close request");
-  // C11: only the developer closes a shared task, from their AI tool.
-  if (identity.sharedTask !== undefined) {
-    if (input.includeSharedTask === true) return { outcome: "REFUSED", reason: "shared_task" };
-    throw agentXError("FORBIDDEN", SHARED_CLOSE_REFUSED);
-  }
-  const requestId = uuid(input.requestId, "requestId");
-  if (input.discard_unpublished !== undefined && typeof input.discard_unpublished !== "boolean") {
-    throw agentXError("CONFIG_INVALID", "discard_unpublished must be a boolean");
-  }
-  const discardUnpublished = input.discard_unpublished === true;
-  const workspace = await getThreadWorkspace(dependencies, identity.ownerKey);
-  if (!workspace) return { outcome: "NOT_FOUND" };
-  if (discardUnpublished) {
-    const starter = charging.starterOf(await getItem<Record<string, unknown>>(dependencies, slackThreadKey(identity.ownerKey)));
-    if (starter === undefined || starter !== conversationStarterId(identity)) {
-      return { outcome: "REFUSED", reason: "not_owner" };
-    }
-  }
-  // Spec 014: a thread that never needed the worker has no compute, so there is nothing to close.
-  if (workspace.status === "UNPREPARED") return { outcome: "NOT_FOUND" };
-  // #213: a failed preparation that was released holds no slot and has nothing to check, and a
-  // lazy turn was told it has no compute; answered as an UNPREPARED thread is.
-  if (workspace.status === "PREPARATION_FAILED" && !workspace.activeOperationId) {
-    if (charging.starterOf(await getItem<Record<string, unknown>>(dependencies, slackThreadKey(identity.ownerKey))) === undefined) return { outcome: "NOT_FOUND" };
-  }
-  if (workspace.status === "CLOSED" && workspace.closedAt) {
-    const closeOperation = workspace.closeOperationId
-      ? await requireOperation(dependencies, workspace.id, workspace.closeOperationId)
-      : undefined;
-    const closePreflight = closeOperation?.kind === "close" && closeOperation.status === "SUCCEEDED"
-      ? WorkspaceClosePreflightResultSchema.safeParse(closeOperation.result)
-      : undefined;
-    return {
-      outcome: "CLOSED",
-      workspaceId: workspace.id,
-      closedAt: workspace.closedAt,
-      ...(closeOperation?.kind === "close" && closeOperation.discardUnpublished === true && closePreflight?.success && !closePreflight.data.safeToClose
-        ? { discardedUnpublished: true }
-        : {}),
-    };
-  }
-  if (workspace.status === "CLOSING" && workspace.closeOperationId) {
-    const operation = await requireOperation(dependencies, workspace.id, workspace.closeOperationId);
-    return { outcome: "PREFLIGHT", workspaceId: workspace.id, operationId: operation.id, status: operation.status };
-  }
-
-  const idempotencyKey = {
-    pk: `IDEMPOTENCY#${identity.ownerKey}#CLOSE`,
-    sk: `REQUEST#${requestId}`,
-  };
-  const previous = await getItem<{ operationId: string; workspaceId: string }>(dependencies, idempotencyKey);
-  if (previous) {
-    const operation = await requireOperation(dependencies, previous.workspaceId, previous.operationId);
-    return { outcome: "PREFLIGHT", workspaceId: previous.workspaceId, operationId: operation.id, status: operation.status };
-  }
-  if ((workspace.status !== "READY" && workspace.status !== "STOPPED") || workspace.activeOperationId) {
-    throw agentXError("WORKSPACE_BUSY", `workspace is ${workspace.status}; wait for active work before closing it`);
-  }
-
   const now = new Date().toISOString();
   const { operation, outbox, fence } = closeOperationParts(dependencies, workspace, requestId, requesterOf(identity), now, discardUnpublished);
   const operationId = operation.id;
@@ -2521,13 +2898,73 @@ async function startThreadWorkspaceClose(
   } catch (error) {
     if (!isConditional(error)) throw error;
     const concurrent = await getItem<{ operationId: string; workspaceId: string }>(dependencies, idempotencyKey);
-    if (concurrent) {
-      const existing = await requireOperation(dependencies, concurrent.workspaceId, concurrent.operationId);
-      return { outcome: "PREFLIGHT", workspaceId: concurrent.workspaceId, operationId: existing.id, status: existing.status };
-    }
+    if (concurrent) return await preflightCloseStartResult(dependencies, concurrent.workspaceId, concurrent.operationId);
     throw agentXError("WORKSPACE_BUSY", "another operation acquired the workspace before closure");
   }
   return { outcome: "PREFLIGHT", workspaceId: workspace.id, operationId, status: "ACCEPTED" };
+}
+
+async function resolveEarlyThreadCloseStart(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  charging: ReturnType<typeof threadCharging>,
+  workspace: WorkspaceInstance,
+  discardUnpublished: boolean,
+): Promise<SlackWorkspaceCloseStartResult | undefined> {
+  if (discardUnpublished) {
+    const starter = charging.starterOf(await getItem<Record<string, unknown>>(dependencies, slackThreadKey(identity.ownerKey)));
+    if (starter === undefined || starter !== conversationStarterId(identity)) {
+      return { outcome: "REFUSED", reason: "not_owner" };
+    }
+  }
+  // Spec 014: a thread that never needed the worker has no compute, so there is nothing to close.
+  if (workspace.status === "UNPREPARED") return { outcome: "NOT_FOUND" };
+  // #213: a failed preparation that was released holds no slot and has nothing to check, and a
+  // lazy turn was told it has no compute; answered as an UNPREPARED thread is.
+  if (workspace.status === "PREPARATION_FAILED" && !workspace.activeOperationId) {
+    if (charging.starterOf(await getItem<Record<string, unknown>>(dependencies, slackThreadKey(identity.ownerKey))) === undefined) return { outcome: "NOT_FOUND" };
+  }
+  if (workspace.status === "CLOSED" && workspace.closedAt) {
+    return await closedThreadWorkspaceStartResult(dependencies, { ...workspace, closedAt: workspace.closedAt });
+  }
+  if (workspace.status === "CLOSING" && workspace.closeOperationId) {
+    return await preflightCloseStartResult(dependencies, workspace.id, workspace.closeOperationId);
+  }
+  return undefined;
+}
+
+async function startThreadWorkspaceClose(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  value: unknown,
+): Promise<SlackWorkspaceCloseStartResult> {
+  const charging = threadCharging(dependencies, identity);
+  const input = object(value, "thread workspace close request");
+  // C11: only the developer closes a shared task, from their AI tool.
+  if (identity.sharedTask !== undefined) {
+    if (input.includeSharedTask === true) return { outcome: "REFUSED", reason: "shared_task" };
+    throw agentXError("FORBIDDEN", SHARED_CLOSE_REFUSED);
+  }
+  const requestId = uuid(input.requestId, "requestId");
+  if (input.discard_unpublished !== undefined && typeof input.discard_unpublished !== "boolean") {
+    throw agentXError("CONFIG_INVALID", "discard_unpublished must be a boolean");
+  }
+  const discardUnpublished = input.discard_unpublished === true;
+  const workspace = await getThreadWorkspace(dependencies, identity.ownerKey);
+  if (!workspace) return { outcome: "NOT_FOUND" };
+  const early = await resolveEarlyThreadCloseStart(dependencies, identity, charging, workspace, discardUnpublished);
+  if (early !== undefined) return early;
+
+  const idempotencyKey = {
+    pk: `IDEMPOTENCY#${identity.ownerKey}#CLOSE`,
+    sk: `REQUEST#${requestId}`,
+  };
+  const previous = await getItem<{ operationId: string; workspaceId: string }>(dependencies, idempotencyKey);
+  if (previous) return await preflightCloseStartResult(dependencies, previous.workspaceId, previous.operationId);
+  if ((workspace.status !== "READY" && workspace.status !== "STOPPED") || workspace.activeOperationId) {
+    throw agentXError("WORKSPACE_BUSY", `workspace is ${workspace.status}; wait for active work before closing it`);
+  }
+  return await commitThreadWorkspaceCloseStart(dependencies, identity, workspace, requestId, idempotencyKey, discardUnpublished);
 }
 
 /** Deletes a workspace's compute and storage by its deployment mode; the one place that switch lives (FR-024). */
@@ -2555,67 +2992,62 @@ async function deleteWorkspaceCompute(dependencies: AwsBrokerDependencies, works
   }
 }
 
-async function completeThreadWorkspaceClose(
+async function assertDiscardUnpublishedAuthorized(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
-  value: unknown,
-): Promise<SlackWorkspaceCloseCompleteResult> {
-  const slack = identity.slack;
-  const channel = identity.channel;
-  if (!slack && !channel) throw agentXError("FORBIDDEN", "a conversation identity is required");
-  const input = object(value, "thread workspace close completion");
-  if (identity.sharedTask !== undefined) throw agentXError("FORBIDDEN", SHARED_CLOSE_REFUSED);
-  uuid(input.requestId, "requestId");
-  const operationId = uuid(input.operationId, "operationId");
-  const workspace = await getThreadWorkspace(dependencies, identity.ownerKey);
-  if (!workspace) throw agentXError("NOT_FOUND", "thread workspace not found");
-  const operation = await requireOperation(dependencies, workspace.id, operationId);
-  if (operation.kind !== "close") throw agentXError("CONFIG_INVALID", "operation is not a workspace close");
-  const preflight = operation.status === "SUCCEEDED" ? WorkspaceClosePreflightResultSchema.safeParse(operation.result) : undefined;
-  const discardedUnpublished = operation.discardUnpublished === true && preflight?.success === true && !preflight.data.safeToClose;
-  if (workspace.status === "CLOSED" && workspace.closedAt && workspace.closeOperationId === operationId) {
-    return {
-      outcome: "CLOSED",
-      workspaceId: workspace.id,
-      operationId,
-      closedAt: workspace.closedAt,
-      storageReleased: closeReleasesStorage(workspace),
-      ...(discardedUnpublished ? { discardedUnpublished: true } : {}),
-    };
-  }
-  if (operation.kind !== "close" || operation.status !== "SUCCEEDED" || workspace.status !== "CLOSING" || workspace.closeOperationId !== operationId) {
-    throw agentXError("WORKSPACE_NOT_READY", "workspace close preflight has not completed safely");
-  }
-  const parsedPreflight = WorkspaceClosePreflightResultSchema.parse(operation.result);
-  if (!parsedPreflight.safeToClose && operation.discardUnpublished !== true) throw agentXError("WORKSPACE_NOT_READY", "workspace contains unpublished work");
-  if (operation.discardUnpublished === true && channel) {
+  operation: OperationRecord,
+): Promise<void> {
+  if (operation.discardUnpublished !== true) return;
+  if (identity.channel) {
     // Spec 062: the starter is the linked developer, who must also be the one who asked to discard.
     const thread = await getItem<{ starterDeveloperId?: unknown }>(dependencies, slackThreadKey(identity.ownerKey));
     const requestedBy = operation.requestedBy;
-    if (typeof thread?.starterDeveloperId !== "string" || thread.starterDeveloperId !== channel.developer.developerId
+    if (typeof thread?.starterDeveloperId !== "string" || thread.starterDeveloperId !== identity.channel.developer.developerId
       || requestedBy === undefined || !("kind" in requestedBy) || requestedBy.developerId !== thread.starterDeveloperId) {
       throw agentXError("FORBIDDEN", "only the conversation starter who authorized discard may complete this close");
     }
   }
-  if (operation.discardUnpublished === true && slack) {
+  if (identity.slack) {
     const thread = await getItem<{ starterUserId?: unknown }>(dependencies, slackThreadKey(identity.ownerKey));
     const requestedBy = operation.requestedBy;
     if (typeof thread?.starterUserId !== "string"
-      || thread.starterUserId !== slack.requester.userId
+      || thread.starterUserId !== identity.slack.requester.userId
       || requestedBy === undefined
       || "kind" in requestedBy
       || requestedBy.userId !== thread.starterUserId
-      || requestedBy.teamId !== slack.thread.teamId) {
+      || requestedBy.teamId !== identity.slack.thread.teamId) {
       throw agentXError("FORBIDDEN", "only the Slack thread starter who authorized discard may complete this close");
     }
   }
+}
 
-  await deleteWorkspaceCompute(dependencies, workspace);
-  const storageReleased = closeReleasesStorage(workspace);
-  if (!slack) {
-    return completeChannelThreadClose(dependencies, identity, workspace, operation, storageReleased, discardedUnpublished, parsedPreflight.safeToClose);
-  }
+function closedThreadCompleteResult(
+  workspaceId: string,
+  operationId: string,
+  closedAt: string,
+  storageReleased: boolean,
+  discardedUnpublished: boolean,
+): SlackWorkspaceCloseCompleteResult {
+  return {
+    outcome: "CLOSED",
+    workspaceId,
+    operationId,
+    closedAt,
+    storageReleased,
+    ...(discardedUnpublished ? { discardedUnpublished: true } : {}),
+  };
+}
 
+async function completeSlackThreadClose(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  workspace: WorkspaceInstance,
+  operation: OperationRecord,
+  slack: NonNullable<AuthenticatedIdentity["slack"]>,
+  storageReleased: boolean,
+  discardedUnpublished: boolean,
+  safeToClose: boolean,
+): Promise<SlackWorkspaceCloseCompleteResult> {
   const thread = await getItem<{ starterUserId?: string; closedAt?: string }>(dependencies, slackThreadKey(identity.ownerKey));
   if (typeof thread?.starterUserId !== "string") throw agentXError("CONFIG_INVALID", "Slack thread starter is missing");
   const organizationKey = slackOrganizationLimitKey(slack.thread.teamId);
@@ -2635,7 +3067,7 @@ async function completeThreadWorkspaceClose(
         UpdateExpression: "SET #status = :closed, closedAt = :closedAt, updatedAt = :closedAt REMOVE activeOperationId, closeError",
         ConditionExpression: "#status = :closing AND closeOperationId = :operation AND fence = :fence",
         ExpressionAttributeNames: { "#status": "status" },
-        ExpressionAttributeValues: { ":closed": "CLOSED", ":closing": "CLOSING", ":closedAt": closedAt, ":operation": operationId, ":fence": operation.fence },
+        ExpressionAttributeValues: { ":closed": "CLOSED", ":closing": "CLOSING", ":closedAt": closedAt, ":operation": operation.id, ":fence": operation.fence },
       } },
       { Update: {
         TableName: dependencies.tableName,
@@ -2658,25 +3090,53 @@ async function completeThreadWorkspaceClose(
         Key: slackThreadKey(identity.ownerKey),
         UpdateExpression: "SET closedAt = :closedAt, closeOperationId = :operation",
         ConditionExpression: "attribute_not_exists(closedAt)",
-        ExpressionAttributeValues: { ":closedAt": closedAt, ":operation": operationId },
+        ExpressionAttributeValues: { ":closedAt": closedAt, ":operation": operation.id },
       } },
     ] }));
   } catch (error) {
     if (!isConditional(error)) throw error;
     const closed = await requireWorkspace(dependencies, workspace.id);
     if (closed.status === "CLOSED" && closed.closedAt) {
-      return {
-        outcome: "CLOSED",
-        workspaceId: closed.id,
-        operationId,
-        closedAt: closed.closedAt,
-        storageReleased,
-        ...(discardedUnpublished ? { discardedUnpublished: true } : {}),
-      };
+      return closedThreadCompleteResult(closed.id, operation.id, closed.closedAt, storageReleased, discardedUnpublished);
     }
     throw agentXError("WORKSPACE_BUSY", "workspace close completion conflicted; retry");
   }
-  return { outcome: "CLOSED", workspaceId: workspace.id, operationId, closedAt, storageReleased, ...(operation.discardUnpublished === true ? { discardedUnpublished: !parsedPreflight.safeToClose } : {}) };
+  return { outcome: "CLOSED", workspaceId: workspace.id, operationId: operation.id, closedAt, storageReleased, ...(operation.discardUnpublished === true ? { discardedUnpublished: !safeToClose } : {}) };
+}
+
+async function completeThreadWorkspaceClose(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  value: unknown,
+): Promise<SlackWorkspaceCloseCompleteResult> {
+  const slack = identity.slack;
+  const channel = identity.channel;
+  if (!slack && !channel) throw agentXError("FORBIDDEN", "a conversation identity is required");
+  const input = object(value, "thread workspace close completion");
+  if (identity.sharedTask !== undefined) throw agentXError("FORBIDDEN", SHARED_CLOSE_REFUSED);
+  uuid(input.requestId, "requestId");
+  const operationId = uuid(input.operationId, "operationId");
+  const workspace = await getThreadWorkspace(dependencies, identity.ownerKey);
+  if (!workspace) throw agentXError("NOT_FOUND", "thread workspace not found");
+  const operation = await requireOperation(dependencies, workspace.id, operationId);
+  if (operation.kind !== "close") throw agentXError("CONFIG_INVALID", "operation is not a workspace close");
+  const preflight = operation.status === "SUCCEEDED" ? WorkspaceClosePreflightResultSchema.safeParse(operation.result) : undefined;
+  const discardedUnpublished = operation.discardUnpublished === true && preflight?.success === true && !preflight.data.safeToClose;
+  if (workspace.status === "CLOSED" && workspace.closedAt && workspace.closeOperationId === operationId) {
+    return closedThreadCompleteResult(workspace.id, operationId, workspace.closedAt, closeReleasesStorage(workspace), discardedUnpublished);
+  }
+  if (operation.kind !== "close" || operation.status !== "SUCCEEDED" || workspace.status !== "CLOSING" || workspace.closeOperationId !== operationId) {
+    throw agentXError("WORKSPACE_NOT_READY", "workspace close preflight has not completed safely");
+  }
+  const parsedPreflight = WorkspaceClosePreflightResultSchema.parse(operation.result);
+  if (!parsedPreflight.safeToClose && operation.discardUnpublished !== true) throw agentXError("WORKSPACE_NOT_READY", "workspace contains unpublished work");
+  await assertDiscardUnpublishedAuthorized(dependencies, identity, operation);
+  await deleteWorkspaceCompute(dependencies, workspace);
+  const storageReleased = closeReleasesStorage(workspace);
+  if (!slack) {
+    return completeChannelThreadClose(dependencies, identity, workspace, operation, storageReleased, discardedUnpublished, parsedPreflight.safeToClose);
+  }
+  return completeSlackThreadClose(dependencies, identity, workspace, operation, slack, storageReleased, discardedUnpublished, parsedPreflight.safeToClose);
 }
 
 /** Spec 062: an adapter conversation's close gives back the charge stored on its thread record, in the close's write. */
@@ -2719,54 +3179,75 @@ async function completeChannelThreadClose(
   return { outcome: "CLOSED", workspaceId: workspace.id, operationId: operation.id, closedAt, storageReleased, ...(operation.discardUnpublished === true ? { discardedUnpublished: !safeToClose } : {}) };
 }
 
-async function ensureThreadWorkspace(
+function parseThreadWorkspaceFlags(input: Record<string, unknown>) {
+  // Older deployed Slack services parse a strict response; add discovery metadata only on opt-in.
+  const include: IntegrationInclude = {
+    integrations: input.includeIntegrations === true,
+    connectors: input.includeConnectors === true,
+    // A separate opt-in: an older Slack service parses the connectors array with a schema that
+    // still requires type "github", so every other resolved connector type is withheld unless the
+    // service says it can parse them too.
+    allConnectorTypes: input.includeAllConnectorTypes === true,
+    // A separate opt-in: the Slack service released before this field existed already sends
+    // includeConnectors: true but parses the WORKSPACE result with a strict schema that lacks
+    // recoverableOperations. The control plane deploys first, so gating this on includeConnectors
+    // would fail every turn until the Slack service caught up.
+    recoverableOperations: input.includeRecoverableOperations === true,
+    // A separate opt-in (feature 014): services released before the action gate parse strictly.
+    actionPolicy: input.includeActionPolicy === true,
+  };
+  return {
+    include,
+    includeSettingsRevision: input.includeSettingsRevision === true,
+    // Spec 014, a separate opt-in: a service that sends lazyPreparation: true parses status
+    // UNPREPARED and prepares compute through POST /v1/threads/workspace/prepare when a tool first
+    // needs the worker. Every other service keeps getting a workspace whose compute is prepared now.
+    lazyPreparation: input.lazyPreparation === true,
+    includeOpenTaskCount: input.includeOpenTaskCount === true,
+  };
+}
+
+async function ensureSharedThreadWorkspace(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
-  value: unknown,
+  sharedTask: NonNullable<AuthenticatedIdentity["sharedTask"]>,
+  input: Record<string, unknown>,
+  include: IntegrationInclude,
+  includeSettingsRevision: boolean,
 ): Promise<SlackThreadWorkspaceResult> {
-  const slack = identity.slack;
-  const limits = dependencies.slack;
-  const projectName = conversationProjectName(identity);
-  if (projectName === undefined || !limits) throw agentXError("FORBIDDEN", "a conversation identity is required");
-  const input = object(value, "thread workspace request");
-  const requestId = uuid(input.requestId, "requestId");
-  // Older deployed Slack services parse a strict response; add discovery metadata only on opt-in.
-  const includeIntegrations = input.includeIntegrations === true;
-  const includeSettingsRevision = input.includeSettingsRevision === true;
-  const includeConnectors = input.includeConnectors === true;
-  // A separate opt-in: an older Slack service parses the connectors array with a schema that
-  // still requires type "github", so every other resolved connector type is withheld unless the
-  // service says it can parse them too.
-  const includeAllConnectorTypes = input.includeAllConnectorTypes === true;
-  // A separate opt-in: the Slack service released before this field existed already sends
-  // includeConnectors: true but parses the WORKSPACE result with a strict schema that lacks
-  // recoverableOperations. The control plane deploys first, so gating this on includeConnectors
-  // would fail every turn until the Slack service caught up.
-  const includeRecoverableOperations = input.includeRecoverableOperations === true;
-  // Spec 014, a separate opt-in: a service that sends lazyPreparation: true parses status
-  // UNPREPARED and prepares compute through POST /v1/threads/workspace/prepare when a tool first
-  // needs the worker. Every other service keeps getting a workspace whose compute is prepared now.
-  const lazyPreparation = input.lazyPreparation === true;
-  // A separate opt-in (feature 014): services released before the action gate parse strictly.
-  const includeActionPolicy = input.includeActionPolicy === true;
-  const include: IntegrationInclude = {
-    integrations: includeIntegrations,
-    connectors: includeConnectors,
-    allConnectorTypes: includeAllConnectorTypes,
-    recoverableOperations: includeRecoverableOperations,
-    actionPolicy: includeActionPolicy,
-  };
-  if (identity.sharedTask !== undefined) {
-    // Task mode (a separate opt-in, so a service that never sends it keeps the closed workflow thread): only for exactly
-    // the open Slack-started task whose own thread this is.
-    const taskAnswer = input.taskAnswer === undefined ? undefined : SlackTaskAnswerRequestSchema.safeParse(input.taskAnswer);
-    if (taskAnswer !== undefined && !taskAnswer.success) throw agentXError("CONFIG_INVALID", "taskAnswer needs the task's ID");
-    if (taskAnswer?.data.taskId === identity.sharedTask.taskId && identity.sharedTask.taskAnswer === true && slack !== undefined) {
-      const answer = await taskAnswerWorkspace(dependencies, slack.thread, identity.sharedTask, taskAnswer.data.commentId, identity);
-      if (answer !== undefined) return answer;
-    }
-    return sharedThreadWorkspace(dependencies, identity, identity.sharedTask, input.includeSharedTask === true, include, includeSettingsRevision);
+  // Task mode (a separate opt-in, so a service that never sends it keeps the closed workflow thread): only for exactly
+  // the open Slack-started task whose own thread this is.
+  const taskAnswer = input.taskAnswer === undefined ? undefined : SlackTaskAnswerRequestSchema.safeParse(input.taskAnswer);
+  if (taskAnswer !== undefined && !taskAnswer.success) throw agentXError("CONFIG_INVALID", "taskAnswer needs the task's ID");
+  if (taskAnswer?.data.taskId === sharedTask.taskId && sharedTask.taskAnswer === true && identity.slack !== undefined) {
+    const answer = await taskAnswerWorkspace(dependencies, identity.slack.thread, sharedTask, taskAnswer.data.commentId, identity);
+    if (answer !== undefined) return answer;
   }
+  return sharedThreadWorkspace(dependencies, identity, sharedTask, input.includeSharedTask === true, include, includeSettingsRevision);
+}
+
+async function prepareUnpreparedThreadWorkspaceNow(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  requestId: string,
+  existing: WorkspaceInstance,
+  flags: ReturnType<typeof parseThreadWorkspaceFlags>,
+): Promise<SlackThreadWorkspaceResult> {
+  // An older Slack service cannot parse UNPREPARED and expects compute now: prepare it at once.
+  const prepared = await startThreadPreparation(dependencies, identity, requestId, existing, flags.includeOpenTaskCount);
+  if (prepared.outcome !== "WORKSPACE") return prepared;
+  const current = await requireWorkspace(dependencies, existing.id);
+  const result = await existingThreadWorkspace(dependencies, identity, requestId, current, flags.include, flags.includeSettingsRevision, flags.includeOpenTaskCount);
+  return result.outcome === "WORKSPACE" ? { ...result, created: prepared.created } : result;
+}
+
+async function resolveExistingThreadWorkspaceResult(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  requestId: string,
+  projectName: string,
+  flags: ReturnType<typeof parseThreadWorkspaceFlags>,
+): Promise<SlackThreadWorkspaceResult | undefined> {
   const threadWorkspace = await getThreadWorkspace(dependencies, identity.ownerKey);
   if (threadWorkspace) {
     if (threadWorkspace.status === "CLOSED" && threadWorkspace.closedAt) {
@@ -2777,28 +3258,46 @@ async function ensureThreadWorkspace(
     }
   }
   const existing = threadWorkspace ?? await getDefaultWorkspace(dependencies, identity.ownerKey, projectName);
-  if (existing) {
-    if (existing.status === "CLOSED" && existing.closedAt) {
-      return { outcome: "CLOSED", workspaceId: existing.id, closedAt: existing.closedAt };
-    }
-    if (existing.status === "UNPREPARED" && !lazyPreparation) {
-      // An older Slack service cannot parse UNPREPARED and expects compute now: prepare it at once.
-      const prepared = await startThreadPreparation(dependencies, identity, requestId, existing, input.includeOpenTaskCount === true);
-      if (prepared.outcome !== "WORKSPACE") return prepared;
-      const current = await requireWorkspace(dependencies, existing.id);
-      const result = await existingThreadWorkspace(dependencies, identity, requestId, current, include, includeSettingsRevision, input.includeOpenTaskCount === true);
-      return result.outcome === "WORKSPACE" ? { ...result, created: prepared.created } : result;
-    }
-    return existingThreadWorkspace(dependencies, identity, requestId, existing, include, includeSettingsRevision, input.includeOpenTaskCount === true, lazyPreparation);
+  if (!existing) return undefined;
+  if (existing.status === "CLOSED" && existing.closedAt) {
+    return { outcome: "CLOSED", workspaceId: existing.id, closedAt: existing.closedAt };
   }
+  if (existing.status === "UNPREPARED" && !flags.lazyPreparation) {
+    return await prepareUnpreparedThreadWorkspaceNow(dependencies, identity, requestId, existing, flags);
+  }
+  return existingThreadWorkspace(dependencies, identity, requestId, existing, flags.include, flags.includeSettingsRevision, flags.includeOpenTaskCount, flags.lazyPreparation);
+}
 
-  // New threads use the latest revision; an existing thread keeps the revision its workspace was prepared with.
-  const project = slackThreadOwnRow(identity, await requireLatestProject(dependencies, projectName));
-  if (lazyPreparation) {
-    return createUnpreparedThreadWorkspace(dependencies, identity, requestId, project, include, includeSettingsRevision);
-  }
-  // Spec 062: an adapter conversation is served by a service that prepares lazily, so it is never charged here.
-  if (!slack) throw agentXError("CONFIG_INVALID", "an adapter conversation's workspace is prepared through the prepare route");
+async function buildCreatedSlackThreadWorkspaceResult(
+  dependencies: AwsBrokerDependencies,
+  project: RegisteredProjectRecord,
+  preparation: Awaited<ReturnType<typeof newWorkspacePreparation>>,
+  flags: ReturnType<typeof parseThreadWorkspaceFlags>,
+): Promise<SlackThreadWorkspaceResult> {
+  return {
+    outcome: "WORKSPACE",
+    workspaceId: preparation.workspace.id,
+    status: "PREPARING",
+    operationId: preparation.operationId,
+    created: true,
+    orchestratorInstructions: project.definition.orchestratorInstructions,
+    ...await threadIntegrations(project.definition, flags.include, dependencies),
+    ...(flags.include.recoverableOperations ? { recoverableOperations: [] } : {}),
+    ...(flags.includeSettingsRevision ? { settingsRevision: project.definition.revision } : {}),
+    ...(flags.include.actionPolicy && project.definition.actionPolicy ? { actionPolicy: project.definition.actionPolicy } : {}),
+  };
+}
+
+async function createEagerSlackThreadWorkspace(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  requestId: string,
+  projectName: string,
+  project: RegisteredProjectRecord,
+  slack: NonNullable<AuthenticatedIdentity["slack"]>,
+  limits: NonNullable<AwsBrokerDependencies["slack"]>,
+  flags: ReturnType<typeof parseThreadWorkspaceFlags>,
+): Promise<SlackThreadWorkspaceResult> {
   const effective = await effectiveSlackLimits(dependencies, limits);
   await healMemberSlots(dependencies, slackMemberLimitKey(slack.requester.teamId, slack.requester.userId), effective);
   const { teamId, userId } = slack.requester;
@@ -2824,25 +3323,41 @@ async function ensureThreadWorkspace(
       if (await membershipMovedSince(dependencies, identity.ownerKey, projectName, attempted.membership, LEGACY_REVISION_GRANT)) continue;
       const concurrent = await getDefaultWorkspace(dependencies, identity.ownerKey, projectName);
       if (concurrent) {
-        return existingThreadWorkspace(dependencies, identity, requestId, concurrent, include, includeSettingsRevision, input.includeOpenTaskCount === true);
+        return existingThreadWorkspace(dependencies, identity, requestId, concurrent, flags.include, flags.includeSettingsRevision, flags.includeOpenTaskCount);
       }
-      return threadWorkspaceLimitRefusal(dependencies, teamId, userId, effective, input.includeOpenTaskCount === true);
+      return threadWorkspaceLimitRefusal(dependencies, teamId, userId, effective, flags.includeOpenTaskCount);
     }
   }
   if (preparation === undefined) throw agentXError("WORKSPACE_BUSY", "thread workspace creation conflicted with another request; retry");
   await recordThreadRequester(dependencies, identity, preparation.workspace.id, true);
-  return {
-    outcome: "WORKSPACE",
-    workspaceId: preparation.workspace.id,
-    status: "PREPARING",
-    operationId: preparation.operationId,
-    created: true,
-    orchestratorInstructions: project.definition.orchestratorInstructions,
-    ...await threadIntegrations(project.definition, include, dependencies),
-    ...(include.recoverableOperations ? { recoverableOperations: [] } : {}),
-    ...(includeSettingsRevision ? { settingsRevision: project.definition.revision } : {}),
-    ...(include.actionPolicy && project.definition.actionPolicy ? { actionPolicy: project.definition.actionPolicy } : {}),
-  };
+  return await buildCreatedSlackThreadWorkspaceResult(dependencies, project, preparation, flags);
+}
+
+async function ensureThreadWorkspace(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  value: unknown,
+): Promise<SlackThreadWorkspaceResult> {
+  const slack = identity.slack;
+  const limits = dependencies.slack;
+  const projectName = conversationProjectName(identity);
+  if (projectName === undefined || !limits) throw agentXError("FORBIDDEN", "a conversation identity is required");
+  const input = object(value, "thread workspace request");
+  const requestId = uuid(input.requestId, "requestId");
+  const flags = parseThreadWorkspaceFlags(input);
+  if (identity.sharedTask !== undefined) {
+    return await ensureSharedThreadWorkspace(dependencies, identity, identity.sharedTask, input, flags.include, flags.includeSettingsRevision);
+  }
+  const existingResult = await resolveExistingThreadWorkspaceResult(dependencies, identity, requestId, projectName, flags);
+  if (existingResult !== undefined) return existingResult;
+  // New threads use the latest revision; an existing thread keeps the revision its workspace was prepared with.
+  const project = slackThreadOwnRow(identity, await requireLatestProject(dependencies, projectName));
+  if (flags.lazyPreparation) {
+    return createUnpreparedThreadWorkspace(dependencies, identity, requestId, project, flags.include, flags.includeSettingsRevision);
+  }
+  // Spec 062: an adapter conversation is served by a service that prepares lazily, so it is never charged here.
+  if (!slack) throw agentXError("CONFIG_INVALID", "an adapter conversation's workspace is prepared through the prepare route");
+  return await createEagerSlackThreadWorkspace(dependencies, identity, requestId, projectName, project, slack, limits, flags);
 }
 
 /**
@@ -3645,6 +4160,31 @@ const THREAD_RETRY_ATTEMPTS = 2;
  * to it, so a release that commits meanwhile cancels the retry instead of leaving a preparing
  * workspace uncharged. A racing retry that won is answered with the workspace as it now stands.
  */
+async function handleThreadPreparationRetryConflict(
+  dependencies: AwsBrokerDependencies,
+  workspaceId: string,
+  charging: ReturnType<typeof threadCharging>,
+  effective: Awaited<ReturnType<typeof effectiveSlackLimits>> | undefined,
+  includeOpenTaskCount: boolean,
+  error: unknown,
+): Promise<{ retry: true; current: WorkspaceInstance } | { retry: false; result: { status: WorkspaceInstance["status"]; operationId: string | null } | SlackThreadWorkspaceResult }> {
+  if (!isConditional(error)) throw error;
+  const current = await requireWorkspace(dependencies, workspaceId);
+  if (current.status !== "PREPARATION_FAILED" || current.activeOperationId) {
+    return { retry: false, result: { status: current.status, operationId: current.activeOperationId ?? null } };
+  }
+  if (effective !== undefined) {
+    // The refusal throws its own WORKSPACE_BUSY when no limit is reached.
+    try {
+      const refusal = await charging.refusal(effective, includeOpenTaskCount);
+      if (refusal.outcome === "LIMIT_REACHED") return { retry: false, result: refusal };
+    } catch (refusalError) {
+      if (!(refusalError instanceof AgentXError) || refusalError.code !== "WORKSPACE_BUSY") throw refusalError;
+    }
+  }
+  return { retry: true, current };
+}
+
 async function retryThreadPreparation(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
@@ -3666,20 +4206,9 @@ async function retryThreadPreparation(
       const retried = await retryWorkspacePreparation(dependencies, identity, requestId, identity.ownerKey, project, current, charge);
       return { status: "PREPARING", operationId: retried.operationId };
     } catch (error) {
-      if (!isConditional(error)) throw error;
-      current = await requireWorkspace(dependencies, workspace.id);
-      if (current.status !== "PREPARATION_FAILED" || current.activeOperationId) {
-        return { status: current.status, operationId: current.activeOperationId ?? null };
-      }
-      if (effective !== undefined) {
-        // The refusal throws its own WORKSPACE_BUSY when no limit is reached.
-        try {
-          const refusal = await charging.refusal(effective, includeOpenTaskCount);
-          if (refusal.outcome === "LIMIT_REACHED") return refusal;
-        } catch (refusalError) {
-          if (!(refusalError instanceof AgentXError) || refusalError.code !== "WORKSPACE_BUSY") throw refusalError;
-        }
-      }
+      const outcome = await handleThreadPreparationRetryConflict(dependencies, workspace.id, charging, effective, includeOpenTaskCount, error);
+      if (!outcome.retry) return outcome.result;
+      current = outcome.current;
     }
   }
   throw agentXError("WORKSPACE_BUSY", "thread workspace preparation conflicted with another request; retry");
@@ -4250,6 +4779,277 @@ async function acceptPullRequest(
   return { operation: publicOperation(operation), duplicate: false };
 }
 
+async function loadVerifiedLifecyclePullRequest(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  workspace: WorkspaceInstance,
+  request: ReturnType<typeof PullRequestLifecycleRequestSchema.parse>,
+) {
+  const { project, settingsRevision } = await publicationProject(dependencies, workspace, identity);
+  const repository = project.definition.repositories.find((candidate) => candidate.name === request.repository);
+  if (!repository) throw agentXError("CONFIG_INVALID", "repository is not registered for this project");
+  const existingRecord = await getItem<PullRequestRecord>(
+    dependencies,
+    pullRequestKey(workspace.id, request.repository, request.pullRequestNumber),
+  );
+  const remote = await dependencies.githubPullRequests.getPullRequest(repository.url, request.pullRequestNumber);
+  const record = existingRecord ?? await adoptLegacyPullRequest(
+    dependencies,
+    workspace.id,
+    repository.name,
+    repository.url,
+    remote,
+  );
+  if (record.repositoryUrl !== repository.url) throw agentXError("FORBIDDEN", "pull request repository is outside this project revision");
+  if (remote.headBranch !== record.headBranch || remote.baseBranch !== record.baseBranch) {
+    throw agentXError("STALE_FENCE", "pull request branch identity changed outside AgentX");
+  }
+  if (remote.headCommit !== record.expectedHeadCommit) {
+    throw agentXError("STALE_FENCE", "pull request head changed outside AgentX; reconcile it before retrying");
+  }
+  return { project, settingsRevision, repository, remote, record };
+}
+
+async function executeMetadataPullRequestLifecycle(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  workspace: WorkspaceInstance,
+  request: ReturnType<typeof PullRequestLifecycleRequestSchema.parse> & { action: "edit" | "close" | "reopen" },
+  record: PullRequestRecord,
+  remote: Awaited<ReturnType<AwsBrokerDependencies["githubPullRequests"]["getPullRequest"]>>,
+  meta: { operationId: string; now: string; requestHash: string; idempotencyKey: { pk: string; sk: string } },
+  extra: ExtraItems,
+): Promise<{ operation: Operation; duplicate: false }> {
+  if (request.action === "edit" && remote.state === "merged") {
+    throw agentXError("CONFIG_INVALID", "merged pull request metadata is immutable through AgentX");
+  }
+  if (request.action === "close" && remote.state !== "open") {
+    throw agentXError("CONFIG_INVALID", "only an open pull request can be closed");
+  }
+  if (request.action === "reopen" && remote.state !== "closed") {
+    throw agentXError("CONFIG_INVALID", "only a closed, unmerged pull request can be reopened");
+  }
+  const updated = await dependencies.githubPullRequests.updatePullRequest(record.repositoryUrl, record.number, {
+    ...(request.title === undefined ? {} : { title: request.title }),
+    ...(request.body === undefined
+      ? {}
+      : { body: (await attributedBody(dependencies, identity, request.body)) ?? request.body }),
+    ...(request.action === "close" ? { state: "closed" as const } : {}),
+    ...(request.action === "reopen" ? { state: "open" as const } : {}),
+  });
+  const result: PullRequestLifecycleResult = PullRequestLifecycleResultSchema.parse({
+    action: request.action,
+    repository: record.repository,
+    number: record.number,
+    url: updated.url,
+    state: updated.state,
+    headBranch: record.headBranch,
+    baseBranch: record.baseBranch,
+    commit: updated.headCommit,
+    checks: [],
+    reconciled: false,
+  });
+  const operation = operationRecord({
+    id: meta.operationId, workspaceId: workspace.id, kind: "maintain", requestId: request.requestId,
+    payloadHash: meta.requestHash, status: "SUCCEEDED", fence: workspace.fence,
+    createdAt: meta.now, updatedAt: meta.now, result,
+    ...requesterOf(identity),
+  });
+  const updatedRecord: PullRequestRecord = {
+    ...record,
+    state: updated.state,
+    expectedHeadCommit: updated.headCommit,
+    title: updated.title,
+    body: updated.body,
+    updatedAt: meta.now,
+  };
+  await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+    { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
+    { Put: { TableName: dependencies.tableName, Item: updatedRecord } },
+    { Put: {
+      TableName: dependencies.tableName,
+      Item: { ...meta.idempotencyKey, entityType: "IDEMPOTENCY", operationId: meta.operationId, payloadHash: meta.requestHash },
+      ConditionExpression: "attribute_not_exists(pk)",
+    } },
+    ...extra(publicOperation(operation)),
+  ] }));
+  return { operation: publicOperation(operation), duplicate: false };
+}
+
+function assertPullRequestWorkspaceReady(workspace: WorkspaceInstance): void {
+  if (!["READY", "STOPPED"].includes(workspace.status) || workspace.activeOperationId) {
+    throw agentXError(workspace.status === "BUSY" ? "WORKSPACE_BUSY" : "WORKSPACE_NOT_READY", `workspace is ${workspace.status}`);
+  }
+}
+
+async function enqueueReplaceOrRevertPullRequest(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  workspace: WorkspaceInstance,
+  target: { project: RegisteredProjectRecord; settingsRevision: number; repository: ProjectDefinition["repositories"][number]; record: PullRequestRecord; remote: Awaited<ReturnType<AwsBrokerDependencies["githubPullRequests"]["getPullRequest"]>> },
+  request: ReturnType<typeof PullRequestLifecycleRequestSchema.parse> & { action: "replace" | "revert" },
+  meta: { operationId: string; now: string; requestHash: string; idempotencyKey: { pk: string; sk: string } },
+  extra: ExtraItems,
+): Promise<{ operation: Operation; duplicate: false }> {
+  const { project, settingsRevision, repository, record, remote } = target;
+  if (request.action === "replace" && remote.state !== "open") {
+    throw agentXError("CONFIG_INVALID", "only an open pull request can be replaced");
+  }
+  if (request.action === "revert" && (remote.state !== "merged" || !remote.mergeCommit)) {
+    throw agentXError("CONFIG_INVALID", "only a merged pull request with a merge commit can be reverted");
+  }
+  assertPullRequestWorkspaceReady(workspace);
+  const fence = workspace.fence + 1;
+  const title = request.title ?? `${request.action === "replace" ? "Replace" : "Revert"}: ${remote.title}`;
+  const baseBody = request.body ?? (request.action === "replace"
+    ? `Clean replacement for #${record.number}.`
+    : `Reverts merged pull request #${record.number}.`);
+  const body = (await attributedBody(dependencies, identity, baseBody)) ?? baseBody;
+  const headBranch = `agentx/${meta.operationId}`;
+  const operation = operationRecord({
+    id: meta.operationId, workspaceId: workspace.id, kind: "publish", requestId: request.requestId,
+    payloadHash: meta.requestHash, status: "ACCEPTED", fence, createdAt: meta.now, updatedAt: meta.now,
+    ...requesterOf(identity),
+  });
+  operation.settingsRevision = settingsRevision;
+  operation.publication = {
+    repository: record.repository,
+    repositoryUrl: record.repositoryUrl,
+    headBranch,
+    baseBranch: record.baseBranch,
+    title,
+    body,
+    codeBuildGates: codeBuildGatesOf(repository),
+    mode: request.action,
+    targetPullRequestNumber: record.number,
+    ...(remote.mergeCommit === undefined ? {} : { revertCommit: remote.mergeCommit }),
+  };
+  const invocation: WorkerInvocation = {
+    protocolVersion: 1,
+    kind: "publish",
+    operationId: meta.operationId,
+    workspaceId: workspace.id,
+    fence,
+    projectRevision: workspace.projectRevision,
+    callbackCapability: issueCapability(dependencies, workspace.id, meta.operationId, fence, true),
+    payload: {
+      mode: request.action,
+      project: project.definition,
+      repository: record.repository,
+      title,
+      body,
+      headBranch,
+      repositoryGrant: issueRepositoryGrant(
+        dependencies, project, identity.ownerKey, workspace.id, meta.operationId, "push", record.repository,
+      ),
+      targetPullRequestNumber: record.number,
+      ...(remote.mergeCommit === undefined ? {} : { revertCommit: remote.mergeCommit }),
+      // Spec 051 P-2, as for a new pull request.
+      ...(project.definition.readiness.length === 0 ? {} : { reportChecks: true as const }),
+    },
+  };
+  const outbox = outboxRecord(workspace, invocation);
+  await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+    { Update: {
+      TableName: dependencies.tableName,
+      Key: workspaceKey(workspace.id),
+      UpdateExpression: "SET #status = :busy, activeOperationId = :operation, fence = :fence, updatedAt = :now",
+      ConditionExpression: "ownerKey = :owner AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
+      ExpressionAttributeNames: { "#status": "status" },
+      ExpressionAttributeValues: {
+        ":owner": identity.ownerKey, ":busy": "BUSY", ":ready": "READY", ":stopped": "STOPPED",
+        ":operation": meta.operationId, ":fence": fence, ":now": meta.now,
+      },
+    } },
+    { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
+    { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
+    { Put: {
+      TableName: dependencies.tableName,
+      Item: { ...meta.idempotencyKey, entityType: "IDEMPOTENCY", operationId: meta.operationId, payloadHash: meta.requestHash },
+      ConditionExpression: "attribute_not_exists(pk)",
+    } },
+    ...extra(publicOperation(operation)),
+  ] }));
+  return { operation: publicOperation(operation), duplicate: false };
+}
+
+async function enqueueMaintainPullRequest(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  workspace: WorkspaceInstance,
+  target: { project: RegisteredProjectRecord; settingsRevision: number; repository: ProjectDefinition["repositories"][number]; record: PullRequestRecord; remote: Awaited<ReturnType<AwsBrokerDependencies["githubPullRequests"]["getPullRequest"]>> },
+  request: ReturnType<typeof PullRequestLifecycleRequestSchema.parse> & { action: "append" | "sync" },
+  meta: { operationId: string; now: string; requestHash: string; idempotencyKey: { pk: string; sk: string } },
+  extra: ExtraItems,
+): Promise<{ operation: Operation; duplicate: false }> {
+  const { project, settingsRevision, repository, record, remote } = target;
+  if (remote.state !== "open") throw agentXError("CONFIG_INVALID", "only an open pull request can be maintained");
+  if (!["READY", "STOPPED"].includes(workspace.status) || workspace.activeOperationId) {
+    throw agentXError(workspace.status === "BUSY" ? "WORKSPACE_BUSY" : "WORKSPACE_NOT_READY", `workspace is ${workspace.status}`);
+  }
+  const fence = workspace.fence + 1;
+  const operation = operationRecord({
+    id: meta.operationId, workspaceId: workspace.id, kind: "maintain", requestId: request.requestId,
+    payloadHash: meta.requestHash, status: "ACCEPTED", fence, createdAt: meta.now, updatedAt: meta.now,
+    ...requesterOf(identity),
+  });
+  operation.settingsRevision = settingsRevision;
+  operation.maintenance = {
+    action: request.action,
+    repository: record.repository,
+    repositoryUrl: record.repositoryUrl,
+    pullRequestNumber: record.number,
+    headBranch: record.headBranch,
+    baseBranch: record.baseBranch,
+    expectedHeadCommit: record.expectedHeadCommit,
+    codeBuildGates: codeBuildGatesOf(repository),
+  };
+  const invocation: WorkerInvocation = {
+    protocolVersion: 1,
+    kind: "maintain",
+    operationId: meta.operationId,
+    workspaceId: workspace.id,
+    fence,
+    projectRevision: workspace.projectRevision,
+    callbackCapability: issueCapability(dependencies, workspace.id, meta.operationId, fence, true),
+    payload: {
+      action: request.action,
+      project: project.definition,
+      repository: record.repository,
+      pullRequestNumber: record.number,
+      headBranch: record.headBranch,
+      baseBranch: record.baseBranch,
+      expectedHeadCommit: record.expectedHeadCommit,
+      repositoryGrant: issueRepositoryGrant(
+        dependencies, project, identity.ownerKey, workspace.id, meta.operationId, "push", record.repository,
+      ),
+    },
+  };
+  const outbox = outboxRecord(workspace, invocation);
+  await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+    { Update: {
+      TableName: dependencies.tableName,
+      Key: workspaceKey(workspace.id),
+      UpdateExpression: "SET #status = :busy, activeOperationId = :operation, fence = :fence, updatedAt = :now",
+      ConditionExpression: "ownerKey = :owner AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
+      ExpressionAttributeNames: { "#status": "status" },
+      ExpressionAttributeValues: {
+        ":owner": identity.ownerKey, ":busy": "BUSY", ":ready": "READY", ":stopped": "STOPPED",
+        ":operation": meta.operationId, ":fence": fence, ":now": meta.now,
+      },
+    } },
+    { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
+    { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
+    { Put: {
+      TableName: dependencies.tableName,
+      Item: { ...meta.idempotencyKey, entityType: "IDEMPOTENCY", operationId: meta.operationId, payloadHash: meta.requestHash },
+      ConditionExpression: "attribute_not_exists(pk)",
+    } },
+    ...extra(publicOperation(operation)),
+  ] }));
+  return { operation: publicOperation(operation), duplicate: false };
+}
+
 async function acceptPullRequestLifecycle(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
@@ -4281,240 +5081,18 @@ async function acceptPullRequestLifecycle(
   }
   // Ruling A: nothing replaces, reverts, edits, closes or reopens a gated task's (the retired spec 056 workflow's) pull request through AgentX on request.
   if (await gatedTaskWorkspace(dependencies, workspaceId)) throw agentXError("CONFIG_INVALID", GATED_TASK_PULL_REQUEST_ACTION_REFUSAL);
-  const { project, settingsRevision } = await publicationProject(dependencies, workspace, identity);
-  const repository = project.definition.repositories.find((candidate) => candidate.name === request.repository);
-  if (!repository) throw agentXError("CONFIG_INVALID", "repository is not registered for this project");
-  const existingRecord = await getItem<PullRequestRecord>(
-    dependencies,
-    pullRequestKey(workspaceId, request.repository, request.pullRequestNumber),
-  );
-  const remote = await dependencies.githubPullRequests.getPullRequest(repository.url, request.pullRequestNumber);
-  const record = existingRecord ?? await adoptLegacyPullRequest(
-    dependencies,
-    workspaceId,
-    repository.name,
-    repository.url,
-    remote,
-  );
-  if (record.repositoryUrl !== repository.url) throw agentXError("FORBIDDEN", "pull request repository is outside this project revision");
-  if (remote.headBranch !== record.headBranch || remote.baseBranch !== record.baseBranch) {
-    throw agentXError("STALE_FENCE", "pull request branch identity changed outside AgentX");
-  }
-  if (remote.headCommit !== record.expectedHeadCommit) {
-    throw agentXError("STALE_FENCE", "pull request head changed outside AgentX; reconcile it before retrying");
-  }
-
-  const now = new Date().toISOString();
-  const operationId = randomUUID();
+  const target = await loadVerifiedLifecyclePullRequest(dependencies, identity, workspace, request);
+  const meta = { operationId: randomUUID(), now: new Date().toISOString(), requestHash, idempotencyKey };
   if (request.action === "edit" || request.action === "close" || request.action === "reopen") {
-    if (request.action === "edit" && remote.state === "merged") {
-      throw agentXError("CONFIG_INVALID", "merged pull request metadata is immutable through AgentX");
-    }
-    if (request.action === "close" && remote.state !== "open") {
-      throw agentXError("CONFIG_INVALID", "only an open pull request can be closed");
-    }
-    if (request.action === "reopen" && remote.state !== "closed") {
-      throw agentXError("CONFIG_INVALID", "only a closed, unmerged pull request can be reopened");
-    }
-    const updated = await dependencies.githubPullRequests.updatePullRequest(record.repositoryUrl, record.number, {
-      ...(request.title === undefined ? {} : { title: request.title }),
-      ...(request.body === undefined
-        ? {}
-        : { body: (await attributedBody(dependencies, identity, request.body)) ?? request.body }),
-      ...(request.action === "close" ? { state: "closed" as const } : {}),
-      ...(request.action === "reopen" ? { state: "open" as const } : {}),
-    });
-    const result: PullRequestLifecycleResult = PullRequestLifecycleResultSchema.parse({
-      action: request.action,
-      repository: record.repository,
-      number: record.number,
-      url: updated.url,
-      state: updated.state,
-      headBranch: record.headBranch,
-      baseBranch: record.baseBranch,
-      commit: updated.headCommit,
-      checks: [],
-      reconciled: false,
-    });
-    const operation = operationRecord({
-      id: operationId, workspaceId, kind: "maintain", requestId: request.requestId,
-      payloadHash: requestHash, status: "SUCCEEDED", fence: workspace.fence,
-      createdAt: now, updatedAt: now, result,
-      ...requesterOf(identity),
-    });
-    const updatedRecord: PullRequestRecord = {
-      ...record,
-      state: updated.state,
-      expectedHeadCommit: updated.headCommit,
-      title: updated.title,
-      body: updated.body,
-      updatedAt: now,
-    };
-    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
-      { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
-      { Put: { TableName: dependencies.tableName, Item: updatedRecord } },
-      { Put: {
-        TableName: dependencies.tableName,
-        Item: { ...idempotencyKey, entityType: "IDEMPOTENCY", operationId, payloadHash: requestHash },
-        ConditionExpression: "attribute_not_exists(pk)",
-      } },
-      ...extra(publicOperation(operation)),
-    ] }));
-    return { operation: publicOperation(operation), duplicate: false };
+    return await executeMetadataPullRequestLifecycle(dependencies, identity, workspace, { ...request, action: request.action }, target.record, target.remote, meta, extra);
   }
-
   if (request.action === "replace" || request.action === "revert") {
-    if (request.action === "replace" && remote.state !== "open") {
-      throw agentXError("CONFIG_INVALID", "only an open pull request can be replaced");
-    }
-    if (request.action === "revert" && (remote.state !== "merged" || !remote.mergeCommit)) {
-      throw agentXError("CONFIG_INVALID", "only a merged pull request with a merge commit can be reverted");
-    }
-    if (!['READY', 'STOPPED'].includes(workspace.status) || workspace.activeOperationId) {
-      throw agentXError(workspace.status === "BUSY" ? "WORKSPACE_BUSY" : "WORKSPACE_NOT_READY", `workspace is ${workspace.status}`);
-    }
-    const fence = workspace.fence + 1;
-    const title = request.title ?? `${request.action === "replace" ? "Replace" : "Revert"}: ${remote.title}`;
-    const baseBody = request.body ?? (request.action === "replace"
-      ? `Clean replacement for #${record.number}.`
-      : `Reverts merged pull request #${record.number}.`);
-    const body = (await attributedBody(dependencies, identity, baseBody)) ?? baseBody;
-    const headBranch = `agentx/${operationId}`;
-    const operation = operationRecord({
-      id: operationId, workspaceId, kind: "publish", requestId: request.requestId,
-      payloadHash: requestHash, status: "ACCEPTED", fence, createdAt: now, updatedAt: now,
-      ...requesterOf(identity),
-    });
-    operation.settingsRevision = settingsRevision;
-    operation.publication = {
-      repository: record.repository,
-      repositoryUrl: record.repositoryUrl,
-      headBranch,
-      baseBranch: record.baseBranch,
-      title,
-      body,
-      codeBuildGates: codeBuildGatesOf(repository),
-      mode: request.action,
-      targetPullRequestNumber: record.number,
-      ...(remote.mergeCommit === undefined ? {} : { revertCommit: remote.mergeCommit }),
-    };
-    const invocation: WorkerInvocation = {
-      protocolVersion: 1,
-      kind: "publish",
-      operationId,
-      workspaceId,
-      fence,
-      projectRevision: workspace.projectRevision,
-      callbackCapability: issueCapability(dependencies, workspaceId, operationId, fence, true),
-      payload: {
-        mode: request.action,
-        project: project.definition,
-        repository: record.repository,
-        title,
-        body,
-        headBranch,
-        repositoryGrant: issueRepositoryGrant(
-          dependencies, project, identity.ownerKey, workspaceId, operationId, "push", record.repository,
-        ),
-        targetPullRequestNumber: record.number,
-        ...(remote.mergeCommit === undefined ? {} : { revertCommit: remote.mergeCommit }),
-        // Spec 051 P-2, as for a new pull request.
-        ...(project.definition.readiness.length === 0 ? {} : { reportChecks: true as const }),
-      },
-    };
-    const outbox = outboxRecord(workspace, invocation);
-    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
-      { Update: {
-        TableName: dependencies.tableName,
-        Key: workspaceKey(workspaceId),
-        UpdateExpression: "SET #status = :busy, activeOperationId = :operation, fence = :fence, updatedAt = :now",
-        ConditionExpression: "ownerKey = :owner AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
-        ExpressionAttributeNames: { "#status": "status" },
-        ExpressionAttributeValues: {
-          ":owner": identity.ownerKey, ":busy": "BUSY", ":ready": "READY", ":stopped": "STOPPED",
-          ":operation": operationId, ":fence": fence, ":now": now,
-        },
-      } },
-      { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
-      { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
-      { Put: {
-        TableName: dependencies.tableName,
-        Item: { ...idempotencyKey, entityType: "IDEMPOTENCY", operationId, payloadHash: requestHash },
-        ConditionExpression: "attribute_not_exists(pk)",
-      } },
-      ...extra(publicOperation(operation)),
-    ] }));
-    return { operation: publicOperation(operation), duplicate: false };
+    return await enqueueReplaceOrRevertPullRequest(dependencies, identity, workspace, target, { ...request, action: request.action }, meta, extra);
   }
-
   if (request.action !== "append" && request.action !== "sync") {
     throw agentXError("CONFIG_INVALID", "pull request action is not supported");
   }
-  if (remote.state !== "open") throw agentXError("CONFIG_INVALID", "only an open pull request can be maintained");
-  if (!['READY', 'STOPPED'].includes(workspace.status) || workspace.activeOperationId) {
-    throw agentXError(workspace.status === "BUSY" ? "WORKSPACE_BUSY" : "WORKSPACE_NOT_READY", `workspace is ${workspace.status}`);
-  }
-  const fence = workspace.fence + 1;
-  const operation = operationRecord({
-    id: operationId, workspaceId, kind: "maintain", requestId: request.requestId,
-    payloadHash: requestHash, status: "ACCEPTED", fence, createdAt: now, updatedAt: now,
-    ...requesterOf(identity),
-  });
-  operation.settingsRevision = settingsRevision;
-  operation.maintenance = {
-    action: request.action,
-    repository: record.repository,
-    repositoryUrl: record.repositoryUrl,
-    pullRequestNumber: record.number,
-    headBranch: record.headBranch,
-    baseBranch: record.baseBranch,
-    expectedHeadCommit: record.expectedHeadCommit,
-    codeBuildGates: codeBuildGatesOf(repository),
-  };
-  const invocation: WorkerInvocation = {
-    protocolVersion: 1,
-    kind: "maintain",
-    operationId,
-    workspaceId,
-    fence,
-    projectRevision: workspace.projectRevision,
-    callbackCapability: issueCapability(dependencies, workspaceId, operationId, fence, true),
-    payload: {
-      action: request.action,
-      project: project.definition,
-      repository: record.repository,
-      pullRequestNumber: record.number,
-      headBranch: record.headBranch,
-      baseBranch: record.baseBranch,
-      expectedHeadCommit: record.expectedHeadCommit,
-      repositoryGrant: issueRepositoryGrant(
-        dependencies, project, identity.ownerKey, workspaceId, operationId, "push", record.repository,
-      ),
-    },
-  };
-  const outbox = outboxRecord(workspace, invocation);
-  await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
-    { Update: {
-      TableName: dependencies.tableName,
-      Key: workspaceKey(workspaceId),
-      UpdateExpression: "SET #status = :busy, activeOperationId = :operation, fence = :fence, updatedAt = :now",
-      ConditionExpression: "ownerKey = :owner AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
-      ExpressionAttributeNames: { "#status": "status" },
-      ExpressionAttributeValues: {
-        ":owner": identity.ownerKey, ":busy": "BUSY", ":ready": "READY", ":stopped": "STOPPED",
-        ":operation": operationId, ":fence": fence, ":now": now,
-      },
-    } },
-    { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
-    { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
-    { Put: {
-      TableName: dependencies.tableName,
-      Item: { ...idempotencyKey, entityType: "IDEMPOTENCY", operationId, payloadHash: requestHash },
-      ConditionExpression: "attribute_not_exists(pk)",
-    } },
-    ...extra(publicOperation(operation)),
-  ] }));
-  return { operation: publicOperation(operation), duplicate: false };
+  return await enqueueMaintainPullRequest(dependencies, identity, workspace, target, { ...request, action: request.action }, meta, extra);
 }
 
 async function acceptCancellation(
@@ -5180,6 +5758,106 @@ async function setupAdmissionMatchesExecution(
     && runtime.generation === execution.runtimeGeneration && runtime.transportCorrelationId === execution.transportCorrelationId;
 }
 
+async function parkUnboundWorkerSetupFailure(
+  dependencies: AwsBrokerDependencies,
+  setupExecutionId: string,
+  operationId: string,
+  authorized: Awaited<ReturnType<typeof requireProjectSetupCapability>>,
+  body: { domain: "project-setup-source-interface/v1"; candidateDigest: string; processStatus: "SUCCEEDED" | "FAILED" | "UNKNOWN"; qualification: "PASS" | "FAILED" | "UNKNOWN"; cleanupConfirmed: boolean; evidenceRef?: { key: string; sha256: string } | undefined },
+): Promise<{ accepted: true; parked: true; qualification: "UNKNOWN" }> {
+  if ((body.processStatus !== "FAILED" && body.processStatus !== "UNKNOWN") || body.qualification !== "UNKNOWN"
+    || body.cleanupConfirmed !== false || body.evidenceRef !== undefined) {
+    throw agentXError("CALLBACK_FORBIDDEN", "an unbound worker failure may only report an unknown, unqualified terminal result");
+  }
+  const current = authorized.execution;
+  const now = new Date().toISOString();
+  const parkedResult = { domain: body.domain, candidateDigest: current.candidateDigest, processStatus: "UNKNOWN", qualification: "UNKNOWN",
+    cleanupConfirmed: false, reportedCandidateDigest: body.candidateDigest, reportedProcessStatus: body.processStatus, reportedQualification: body.qualification,
+    reportedCleanupConfirmed: body.cleanupConfirmed, parkReason: "worker-failure-without-candidate" };
+  await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+    ...projectSetupTerminalAuthorityChecks(dependencies.tableName, current, authorized.runtime, authorized.session, authorized.companyId),
+    { Update: { TableName: dependencies.tableName, Key: projectSetupExecutionKey(setupExecutionId),
+      UpdateExpression: "SET #state = :parked, updatedAt = :now, completedAt = :now, #result = :result",
+      ConditionExpression: "#state = :dispatching AND operationId = :operationId AND subjectId = :subjectId AND fence = :fence AND approvalRevision = :approvalRevision AND transportCorrelationId = :correlation",
+      ExpressionAttributeNames: { "#state": "state", "#result": "result" }, ExpressionAttributeValues: { ":parked": "PARKED", ":dispatching": "DISPATCHING",
+        ":now": now, ":result": parkedResult, ":operationId": operationId, ":subjectId": current.subjectId, ":fence": current.fence,
+        ":approvalRevision": current.approvalRevision, ":correlation": current.transportCorrelationId } } },
+    { Update: { TableName: dependencies.tableName, Key: projectSetupOperationKey(setupExecutionId, operationId),
+      UpdateExpression: "SET #status = :parked, updatedAt = :now, #result = :result",
+      ConditionExpression: "(#status = :dispatching OR #status = :delivered) AND setupExecutionId = :setupExecutionId AND operationId = :operationId AND fence = :fence AND transportCorrelationId = :correlation",
+      ExpressionAttributeNames: { "#status": "status", "#result": "result" }, ExpressionAttributeValues: { ":parked": "PARKED", ":dispatching": "DISPATCHING",
+        ":delivered": "DELIVERED", ":now": now, ":result": parkedResult, ":setupExecutionId": setupExecutionId,
+        ":operationId": operationId, ":fence": current.fence, ":correlation": current.transportCorrelationId } } },
+  ] }));
+  return { accepted: true, parked: true, qualification: "UNKNOWN" };
+}
+
+function isSetupTerminalAuthorityCancel(error: unknown): boolean {
+  const cancellationReasons = error && typeof error === "object"
+    ? (error as { CancellationReasons?: Array<{ Code?: unknown }> }).CancellationReasons : undefined;
+  return error instanceof Error && error.name === "TransactionCanceledException"
+    && cancellationReasons?.slice(0, 5).some((reason) => reason.Code === "ConditionalCheckFailed") === true;
+}
+
+function projectSetupTerminalState(processStatus: "SUCCEEDED" | "FAILED" | "UNKNOWN"): "SUCCEEDED" | "FAILED" | "PARKED" {
+  if (processStatus === "SUCCEEDED") return "SUCCEEDED";
+  if (processStatus === "FAILED") return "FAILED";
+  return "PARKED";
+}
+
+async function persistProjectSetupTerminalResult(
+  dependencies: AwsBrokerDependencies,
+  setupExecutionId: string,
+  operationId: string,
+  claims: NonNullable<ReturnType<typeof verifyProjectSetupCapability>>,
+  authorized: Awaited<ReturnType<typeof requireProjectSetupCapability>>,
+  body: { domain: "project-setup-source-interface/v1"; setupExecutionId: string; operationId: string; candidateDigest: string },
+  verified: Awaited<ReturnType<typeof verifyProjectSetupSmokeEvidence>>,
+): Promise<{ accepted: true; parked?: true; qualification?: "UNKNOWN" }> {
+  const current = authorized.execution;
+  const processStatus = verified?.processStatus ?? "UNKNOWN";
+  const qualification = verified?.qualification ?? "UNKNOWN";
+  const cleanupConfirmed = verified?.cleanupConfirmed ?? false;
+  const terminalState = projectSetupTerminalState(processStatus);
+  const evidenceField = verified?.evidenceRef ? { evidenceRef: verified.evidenceRef } : {};
+  const persistedResult = { domain: body.domain, candidateDigest: current.candidateDigest, processStatus,
+    qualification, cleanupConfirmed, ...evidenceField };
+  const parkPayload = {
+    setupExecutionId: body.setupExecutionId, operationId: body.operationId, candidateDigest: body.candidateDigest,
+    processStatus, qualification, cleanupConfirmed, ...evidenceField,
+  };
+  const terminalAt = new Date().toISOString();
+  if (Date.parse(authorized.runtime.qualifiedAt) > Date.parse(terminalAt) || Date.parse(authorized.runtime.expiresAt) <= Date.parse(terminalAt)) {
+    const parked = await parkProjectSetupResultAfterAuthorityChange(dependencies, setupExecutionId, operationId, claims, parkPayload);
+    if (parked) return { accepted: true, parked: true, qualification: "UNKNOWN" };
+    throw agentXError("STALE_FENCE", "qualified setup runtime expired before terminal persistence");
+  }
+  const terminalItems = [
+    ...projectSetupTerminalAuthorityChecks(dependencies.tableName, current, authorized.runtime, authorized.session, authorized.companyId),
+    { Update: { TableName: dependencies.tableName, Key: projectSetupExecutionKey(setupExecutionId),
+      UpdateExpression: "SET #state = :state, completedAt = :now, #result = :result",
+      ConditionExpression: "#state = :dispatching AND operationId = :operationId AND fence = :fence",
+      ExpressionAttributeNames: { "#state": "state", "#result": "result" },
+      ExpressionAttributeValues: { ":state": terminalState, ":now": terminalAt, ":result": persistedResult,
+        ":dispatching": "DISPATCHING", ":operationId": operationId, ":fence": claims.fence } } },
+    { Update: { TableName: dependencies.tableName, Key: projectSetupOperationKey(setupExecutionId, operationId),
+      UpdateExpression: "SET #status = :status, updatedAt = :now, #result = :result",
+      ConditionExpression: "(#status = :dispatching OR #status = :delivered) AND fence = :fence",
+      ExpressionAttributeNames: { "#status": "status", "#result": "result" },
+      ExpressionAttributeValues: { ":status": terminalState, ":now": terminalAt, ":result": persistedResult,
+        ":dispatching": "DISPATCHING", ":delivered": "DELIVERED", ":fence": claims.fence } } },
+  ];
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: terminalItems }));
+  } catch (error) {
+    if (!isSetupTerminalAuthorityCancel(error)) throw error;
+    const parked = await parkProjectSetupResultAfterAuthorityChange(dependencies, setupExecutionId, operationId, claims, parkPayload);
+    if (!parked) throw error;
+    return { accepted: true, parked: true, qualification: "UNKNOWN" };
+  }
+  return { accepted: true };
+}
+
 async function handleProjectSetupCallback(
   dependencies: AwsBrokerDependencies,
   request: AdaptedHttpRequest,
@@ -5213,81 +5891,13 @@ async function handleProjectSetupCallback(
     throw agentXError("CALLBACK_FORBIDDEN", "project setup result does not match its immutable source execution");
   }
   if (body.candidateDigest === "0".repeat(64)) {
-    if ((body.processStatus !== "FAILED" && body.processStatus !== "UNKNOWN") || body.qualification !== "UNKNOWN"
-      || body.cleanupConfirmed !== false || body.evidenceRef !== undefined) {
-      throw agentXError("CALLBACK_FORBIDDEN", "an unbound worker failure may only report an unknown, unqualified terminal result");
-    }
-    const now = new Date().toISOString();
-    const parkedResult = { domain: body.domain, candidateDigest: current.candidateDigest, processStatus: "UNKNOWN", qualification: "UNKNOWN",
-      cleanupConfirmed: false, reportedCandidateDigest: body.candidateDigest, reportedProcessStatus: body.processStatus, reportedQualification: body.qualification,
-      reportedCleanupConfirmed: body.cleanupConfirmed, parkReason: "worker-failure-without-candidate" };
-    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
-      ...projectSetupTerminalAuthorityChecks(dependencies.tableName, current, authorized.runtime, authorized.session, authorized.companyId),
-      { Update: { TableName: dependencies.tableName, Key: projectSetupExecutionKey(setupExecutionId),
-        UpdateExpression: "SET #state = :parked, updatedAt = :now, completedAt = :now, #result = :result",
-        ConditionExpression: "#state = :dispatching AND operationId = :operationId AND subjectId = :subjectId AND fence = :fence AND approvalRevision = :approvalRevision AND transportCorrelationId = :correlation",
-        ExpressionAttributeNames: { "#state": "state", "#result": "result" }, ExpressionAttributeValues: { ":parked": "PARKED", ":dispatching": "DISPATCHING",
-          ":now": now, ":result": parkedResult, ":operationId": operationId, ":subjectId": current.subjectId, ":fence": current.fence,
-          ":approvalRevision": current.approvalRevision, ":correlation": current.transportCorrelationId } } },
-      { Update: { TableName: dependencies.tableName, Key: projectSetupOperationKey(setupExecutionId, operationId),
-        UpdateExpression: "SET #status = :parked, updatedAt = :now, #result = :result",
-        ConditionExpression: "(#status = :dispatching OR #status = :delivered) AND setupExecutionId = :setupExecutionId AND operationId = :operationId AND fence = :fence AND transportCorrelationId = :correlation",
-        ExpressionAttributeNames: { "#status": "status", "#result": "result" }, ExpressionAttributeValues: { ":parked": "PARKED", ":dispatching": "DISPATCHING",
-          ":delivered": "DELIVERED", ":now": now, ":result": parkedResult, ":setupExecutionId": setupExecutionId,
-          ":operationId": operationId, ":fence": current.fence, ":correlation": current.transportCorrelationId } } },
-    ] }));
-    return { accepted: true, parked: true, qualification: "UNKNOWN" };
+    return await parkUnboundWorkerSetupFailure(dependencies, setupExecutionId, operationId, authorized, body);
   }
   if (body.candidateDigest !== current.candidateDigest) {
     throw agentXError("CALLBACK_FORBIDDEN", "project setup result does not match its immutable source execution");
   }
   const verified = body.evidenceRef ? await verifyProjectSetupSmokeEvidence(dependencies, current, body.evidenceRef, authorized.runtime.runnerEnvironment, authorized.runtime.runnerToolchain) : undefined;
-  const processStatus = verified?.processStatus ?? "UNKNOWN";
-  const qualification = verified?.qualification ?? "UNKNOWN";
-  const cleanupConfirmed = verified?.cleanupConfirmed ?? false;
-  const terminalState = processStatus === "SUCCEEDED" ? "SUCCEEDED" : processStatus === "FAILED" ? "FAILED" : "PARKED";
-  const persistedResult = { domain: body.domain, candidateDigest: current.candidateDigest, processStatus,
-    qualification, cleanupConfirmed, ...(verified?.evidenceRef ? { evidenceRef: verified.evidenceRef } : {}) };
-  const terminalAt = new Date().toISOString();
-  if (Date.parse(authorized.runtime.qualifiedAt) > Date.parse(terminalAt) || Date.parse(authorized.runtime.expiresAt) <= Date.parse(terminalAt)) {
-    const parked = await parkProjectSetupResultAfterAuthorityChange(dependencies, setupExecutionId, operationId, claims, {
-      setupExecutionId: body.setupExecutionId, operationId: body.operationId, candidateDigest: body.candidateDigest,
-      processStatus, qualification, cleanupConfirmed, ...(verified?.evidenceRef ? { evidenceRef: verified.evidenceRef } : {}),
-    });
-    if (parked) return { accepted: true, parked: true, qualification: "UNKNOWN" };
-    throw agentXError("STALE_FENCE", "qualified setup runtime expired before terminal persistence");
-  }
-  const terminalItems = [
-    ...projectSetupTerminalAuthorityChecks(dependencies.tableName, current, authorized.runtime, authorized.session, authorized.companyId),
-    { Update: { TableName: dependencies.tableName, Key: projectSetupExecutionKey(setupExecutionId),
-      UpdateExpression: "SET #state = :state, completedAt = :now, #result = :result",
-      ConditionExpression: "#state = :dispatching AND operationId = :operationId AND fence = :fence",
-      ExpressionAttributeNames: { "#state": "state", "#result": "result" },
-      ExpressionAttributeValues: { ":state": terminalState, ":now": terminalAt, ":result": persistedResult,
-        ":dispatching": "DISPATCHING", ":operationId": operationId, ":fence": claims.fence } } },
-    { Update: { TableName: dependencies.tableName, Key: projectSetupOperationKey(setupExecutionId, operationId),
-      UpdateExpression: "SET #status = :status, updatedAt = :now, #result = :result",
-      ConditionExpression: "(#status = :dispatching OR #status = :delivered) AND fence = :fence",
-      ExpressionAttributeNames: { "#status": "status", "#result": "result" },
-      ExpressionAttributeValues: { ":status": terminalState, ":now": terminalAt, ":result": persistedResult,
-        ":dispatching": "DISPATCHING", ":delivered": "DELIVERED", ":fence": claims.fence } } },
-  ];
-  try {
-    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: terminalItems }));
-  } catch (error) {
-    const cancellationReasons = error && typeof error === "object"
-      ? (error as { CancellationReasons?: Array<{ Code?: unknown }> }).CancellationReasons : undefined;
-    const authorityConditionFailed = error instanceof Error && error.name === "TransactionCanceledException"
-      && cancellationReasons?.slice(0, 5).some((reason) => reason.Code === "ConditionalCheckFailed");
-    if (!authorityConditionFailed) throw error;
-    const parked = await parkProjectSetupResultAfterAuthorityChange(dependencies, setupExecutionId, operationId, claims, {
-      setupExecutionId: body.setupExecutionId, operationId: body.operationId, candidateDigest: body.candidateDigest,
-      processStatus, qualification, cleanupConfirmed, ...(verified?.evidenceRef ? { evidenceRef: verified.evidenceRef } : {}),
-    });
-    if (!parked) throw error;
-    return { accepted: true, parked: true, qualification: "UNKNOWN" };
-  }
-  return { accepted: true };
+  return await persistProjectSetupTerminalResult(dependencies, setupExecutionId, operationId, claims, authorized, body, verified);
 }
 
 async function parkProjectSetupResultAfterAuthorityChange(
@@ -5346,6 +5956,216 @@ async function parkProjectSetupResultAfterAuthorityChange(
   }
 }
 
+async function readVerifiedSetupJsonObject(
+  dependencies: AwsBrokerDependencies,
+  key: string,
+  expectedSha256: string,
+  maxBytes: number,
+): Promise<Record<string, unknown> | undefined> {
+  const text = await readStoredText(dependencies.s3, dependencies.artifactBucketName, key, maxBytes);
+  if (text === undefined || createHash("sha256").update(text, "utf8").digest("hex") !== expectedSha256) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    return parsed as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+}
+
+function isMatchingSetupAdmission(
+  admission: Record<string, unknown>,
+  execution: ReturnType<typeof ProjectSetupExecutionSchema.parse>,
+  evidence: Record<string, unknown>,
+): boolean {
+  const admittedRuntime = admission.runtime && typeof admission.runtime === "object" && !Array.isArray(admission.runtime)
+    ? admission.runtime as Record<string, unknown> : undefined;
+  if (admittedRuntime?.runtimeCatalogId !== execution.runtimeCatalogId
+    || admittedRuntime.catalogRevision !== execution.runtimeCatalogRevision
+    || admittedRuntime.bindingDigest !== execution.bindingDigest
+    || admittedRuntime.generation !== execution.runtimeGeneration
+    || admittedRuntime.transportCorrelationId !== execution.transportCorrelationId) return false;
+  if (typeof admission.planDigest !== "string" || evidence.planDigest !== admission.planDigest) return false;
+  return admission.domain === "project-setup-source-interface/v1" && admission.setupExecutionId === execution.setupExecutionId
+    && admission.subjectId === execution.subjectId && admission.transportCorrelationId === execution.transportCorrelationId
+    && admission.candidateDigest === execution.candidateDigest
+    && Boolean(admission.sourceSnapshot) && typeof admission.sourceSnapshot === "object"
+    && Boolean(admission.selectionInput) && typeof admission.selectionInput === "object"
+    && Boolean(admission.setupRunContext) && typeof admission.setupRunContext === "object"
+    && Array.isArray(admission.scenarios);
+}
+
+function loadAndInspectSetupEvidenceSnapshot(
+  admission: Record<string, unknown>,
+  evidence: Record<string, unknown>,
+): { snapshot: E2ESourceSnapshot; discoveredTargetIds: string[] } | undefined {
+  const sourceRecord = admission.sourceSnapshot as Record<string, unknown>;
+  if (!Array.isArray(sourceRecord.sources)) return undefined;
+  const snapshot = { ...sourceRecord, sources: decodeSetupSourceEntries(sourceRecord.sources) } as unknown as E2ESourceSnapshot;
+  verifyE2ESourceSnapshot(snapshot, snapshot.candidate);
+  // An admission stored before a web app's contract could name its API target recorded discovery without it; it is read against that derivation as well as the current one.
+  const sourceInspections = [inspectE2ERepository(snapshot, snapshot.candidate).inspection, inspectE2ERepositoryBeforeContractApiTargets(snapshot, snapshot.candidate).inspection];
+  const sourceInspection = sourceInspections.find((candidate) => canonicalJson(admission.discoveredApplications) === canonicalJson(candidate.applications)
+    && canonicalJson(admission.discoveryMissingInputs) === canonicalJson(candidate.missingInputs)
+    && canonicalJson(admission.discoveredTargetIds) === canonicalJson(candidate.proposedTargets.map((target) => target.targetId).sort()));
+  if (sourceInspection === undefined) return undefined;
+  const discoveredTargetIds = sourceInspection.proposedTargets.map((target) => target.targetId).sort();
+  if (canonicalJson(evidence.discoveredApplications) !== canonicalJson(sourceInspection.applications)
+    || canonicalJson(evidence.discoveryMissingInputs) !== canonicalJson(sourceInspection.missingInputs)
+    || canonicalJson(evidence.discoveredTargetIds) !== canonicalJson(discoveredTargetIds)) return undefined;
+  return { snapshot, discoveredTargetIds };
+}
+
+function validateSetupEvidenceRunContext(
+  admission: Record<string, unknown>,
+  evidence: Record<string, unknown>,
+  snapshot: E2ESourceSnapshot,
+  discoveredTargetIds: string[],
+  approvedRunnerEnvironment: ReturnType<typeof ProjectSetupRunnerEnvironmentSchema.parse>,
+  approvedRunnerToolchain: ReturnType<typeof ProjectSetupRunnerToolchainSchema.parse>,
+) {
+  E2EPolicySchema.parse(admission.policy);
+  const selectionInput = { ...(admission.selectionInput as Record<string, unknown>), sourceSnapshot: snapshot };
+  const plan = selectE2EExecutionPlan(selectionInput as never);
+  if (plan.groups.length === 0) return undefined;
+  const bundleBody = { schemaVersion: 1 as const, planDigest: admission.planDigest as string, templateVersion: "trusted-e2e/v1", scenarios: admission.scenarios as never, bundleDigest: "0".repeat(64) };
+  const bundle = E2EScenarioBundleSchema.parse({ ...bundleBody, bundleDigest: e2eScenarioBundleDigest(bundleBody) });
+  const runContext = admission.setupRunContext as Record<string, unknown>;
+  const round = E2ERoundSchema.parse((evidence.round) ?? null);
+  const groupAdmissions = runContext.groupAdmissions;
+  if (!Array.isArray(groupAdmissions) || groupAdmissions.length !== plan.groups.length || plan.groups.length === 0
+    || canonicalJson(runContext.plan) !== canonicalJson(plan) || canonicalJson(runContext.bundle) !== canonicalJson(bundle)
+    || canonicalJson(runContext.round) !== canonicalJson(round) || canonicalJson(runContext.runnerEnvironment) !== canonicalJson(approvedRunnerEnvironment)
+    || canonicalJson(runContext.runnerToolchain) !== canonicalJson(approvedRunnerToolchain)
+    || runContext.runnerToolchainDigest !== createHash("sha256").update(canonicalJson(approvedRunnerToolchain)).digest("hex")
+    || !Array.isArray(evidence.groupRuns) || evidence.groupRuns.length !== plan.groups.length) return undefined;
+  const unsupportedTargetIds = admission.unsupportedTargetIds;
+  const selectedTargetIds = Array.isArray(admission.selectedTargetIds) ? admission.selectedTargetIds : [];
+  const expectedNotExecutedTargetIds = discoveredTargetIds.filter((targetId) => !selectedTargetIds.includes(targetId));
+  if (!Array.isArray(unsupportedTargetIds) || canonicalJson(evidence.unsupportedTargetIds) !== canonicalJson(unsupportedTargetIds)) return undefined;
+  if (canonicalJson(unsupportedTargetIds) !== canonicalJson(expectedNotExecutedTargetIds)
+    || canonicalJson(admission.notExecutedTargetIds) !== canonicalJson(expectedNotExecutedTargetIds)
+    || canonicalJson(evidence.notExecutedTargetIds) !== canonicalJson(expectedNotExecutedTargetIds)) return undefined;
+  return {
+    selectionInput, plan, bundle, round,
+    authenticatedGroupAdmissions: groupAdmissions as unknown as unknown[],
+    submittedGroupRuns: evidence.groupRuns as unknown as unknown[],
+  };
+}
+
+function parseGroupHostRequestIds(
+  rawHostRequestIds: unknown,
+  hostRequestPayloads: ReadonlyMap<string, unknown>,
+): Map<string, string> | undefined {
+  if (!Array.isArray(rawHostRequestIds)) return undefined;
+  const hostRequestIds = new Map<string, string>();
+  for (const row of rawHostRequestIds) {
+    if (!Array.isArray(row) || row.length !== 2 || typeof row[0] !== "string" || typeof row[1] !== "string" || hostRequestIds.has(row[0])) return undefined;
+    hostRequestIds.set(row[0], row[1]);
+  }
+  if (hostRequestIds.size !== hostRequestPayloads.size || [...hostRequestPayloads.keys()].some((caseId) => !hostRequestIds.has(caseId))) return undefined;
+  return hostRequestIds;
+}
+
+function parseSetupActualCliRun(
+  actualValue: unknown,
+  approvedRunnerToolchain: ReturnType<typeof ProjectSetupRunnerToolchainSchema.parse>,
+): { actualRecord: Record<string, unknown>; actual: never } | undefined {
+  if (!actualValue || typeof actualValue !== "object" || Array.isArray(actualValue)) return undefined;
+  const actualRecord = actualValue as Record<string, unknown>;
+  if (canonicalJson(actualRecord.runnerToolchain) !== canonicalJson(approvedRunnerToolchain)) return undefined;
+  if (typeof actualRecord.launchId !== "string" || typeof actualRecord.rawReportBase64 !== "string" || typeof actualRecord.runStartCaptureBase64 !== "string"
+    || !Array.isArray(actualRecord.candidateCaptures) || !Array.isArray(actualRecord.assertionReceipts)
+    || typeof actualRecord.cleanupConfirmed !== "boolean" || typeof actualRecord.cleanupServerListening !== "boolean") return undefined;
+  const rawReportBytes = Buffer.from(actualRecord.rawReportBase64, "base64");
+  const runStartCaptureBytes = Buffer.from(actualRecord.runStartCaptureBase64, "base64");
+  const runStartCapture = parseE2EFirstPartyCapture(runStartCaptureBytes, actualRecord.launchId);
+  const actual = { launchId: actualRecord.launchId, launchConfigDigest: actualRecord.launchConfigDigest, fixedAssetDigests: actualRecord.fixedAssetDigests,
+    publicList: actualRecord.publicList, selected: actualRecord.selected, filtered: actualRecord.filtered,
+    rawReportBytes: new Uint8Array(rawReportBytes), runStartCaptureBytes: new Uint8Array(runStartCaptureBytes), runStartCapture,
+    assertionReceipts: actualRecord.assertionReceipts, declaredMockComponentIds: actualRecord.declaredMockComponentIds,
+    candidateCaptures: actualRecord.candidateCaptures, listProcess: actualRecord.listProcess, runProcess: actualRecord.runProcess,
+    cleanupConfirmed: actualRecord.cleanupConfirmed, cleanupServerListening: actualRecord.cleanupServerListening, evidenceDirectory: "" } as never;
+  return { actualRecord, actual };
+}
+
+function verifySetupEvidenceGroupRun(
+  index: number,
+  group: ReturnType<typeof selectE2EExecutionPlan>["groups"][number],
+  admissionGroup: unknown,
+  rawGroupRun: unknown,
+  context: {
+    execution: ReturnType<typeof ProjectSetupExecutionSchema.parse>;
+    admission: Record<string, unknown>;
+    snapshot: E2ESourceSnapshot;
+    selectionInput: Record<string, unknown>;
+    plan: ReturnType<typeof selectE2EExecutionPlan>;
+    bundle: ReturnType<typeof E2EScenarioBundleSchema.parse>;
+    round: ReturnType<typeof E2ERoundSchema.parse>;
+    semanticApprovalDigests: Map<string, string>;
+    approvedRunnerEnvironment: ReturnType<typeof ProjectSetupRunnerEnvironmentSchema.parse>;
+    approvedRunnerToolchain: ReturnType<typeof ProjectSetupRunnerToolchainSchema.parse>;
+  },
+): { qualification: "PASS" | "FAILED" | "UNKNOWN"; cleanupConfirmed: boolean; processSucceeded: boolean } | undefined {
+  if (!admissionGroup || !rawGroupRun || typeof admissionGroup !== "object" || typeof rawGroupRun !== "object" || Array.isArray(rawGroupRun)) return undefined;
+  const admitted = admissionGroup as Record<string, unknown>;
+  const groupRun = rawGroupRun as Record<string, unknown>;
+  const compiled = compileE2EScenarios(context.bundle, context.plan.effectiveTargets, group, { selectionInput: context.selectionInput, executionPlan: context.plan, group } as never);
+  if (canonicalJson(admitted.group) !== canonicalJson(group) || admitted.expectedConfigDigest !== compiled.expectedConfigDigest
+    || admitted.compiledInventoryDigest !== compiled.inventory.digest || admitted.selectionPacketPath !== compiled.selectionPacketPath
+    || canonicalJson(admitted.expectedCases) !== canonicalJson(compiled.expectedCases)) return undefined;
+  const binding = E2ERunBindingSchema.parse(admitted.binding);
+  if (binding.operationId !== context.execution.operationId || binding.operationFence !== context.execution.fence || binding.workflowRevision !== context.execution.projectRevision
+    || binding.candidateDigest !== context.execution.candidateDigest || binding.planDigest !== context.admission.planDigest || binding.groupId !== group.groupId
+    || canonicalJson(context.round.groupBindings[index]) !== canonicalJson(binding) || canonicalJson(groupRun.group) !== canonicalJson(group)
+    || canonicalJson(groupRun.binding) !== canonicalJson(binding)) return undefined;
+  const selection = JSON.parse(compiled.files.get(compiled.selectionPacketPath) ?? "null") as unknown;
+  if (canonicalJson(groupRun.selection) !== canonicalJson(selection)) return undefined;
+  const hostRequestIds = parseGroupHostRequestIds(groupRun.hostRequestIds, compiled.hostRequestPayloads);
+  if (!hostRequestIds) return undefined;
+  const parsedActual = parseSetupActualCliRun(groupRun.actual, context.approvedRunnerToolchain);
+  if (!parsedActual) return undefined;
+  const { actualRecord, actual } = parsedActual;
+  const actualQualification = collectE2EActualCliRun({ actual, compiled, binding, round: context.round, selection: selection as never,
+    sourceDigest: e2eSnapshotSourceDigest(compiled, context.snapshot.sources.map(({ path, sha256 }) => ({ path, sha256 }))),
+    semanticApprovalDigests: context.semanticApprovalDigests, hostRequestIds,
+    declaredMockComponentIds: Array.isArray(actualRecord.declaredMockComponentIds) ? actualRecord.declaredMockComponentIds as string[] : [],
+    environment: context.approvedRunnerEnvironment,
+    usage: { discoveredResults: Number(actualRecord.selected) + Number(actualRecord.filtered), maxAgentContextBytes: 0, maxLedgerBytes: 0, maxObservationBytes: 0, artifactBytes: 0, downloads: 0, events: 0, modelTokens: 0, maxModelCallsInStep: 0, maxActionStepsInStep: 0 },
+    limits: { maxAgentContextBytes: 16_384, maxLedgerBytes: 8_192, maxObservationBytes: 262_144, maxEventsPerStep: 1_000, maxModelTokensPerCall: 64_000 } });
+  const runProcess = actualRecord.runProcess as Record<string, unknown> | undefined;
+  return {
+    qualification: actualQualification.qualification?.status ?? "UNKNOWN",
+    cleanupConfirmed: actualRecord.cleanupConfirmed === true && actualRecord.cleanupServerListening === false,
+    processSucceeded: runProcess?.status === 0 && runProcess.signal === null && runProcess.aborted === false && runProcess.timedOut === false,
+  };
+}
+
+function isMatchingSetupEvidenceHeader(
+  evidence: Record<string, unknown>,
+  execution: ReturnType<typeof ProjectSetupExecutionSchema.parse>,
+  approvedRunnerToolchain: ReturnType<typeof ProjectSetupRunnerToolchainSchema.parse>,
+): boolean {
+  return evidence.schemaVersion === "project-setup-smoke-evidence/v1" && evidence.setupExecutionId === execution.setupExecutionId
+    && evidence.subjectId === execution.subjectId && evidence.transportCorrelationId === execution.transportCorrelationId
+    && evidence.executionRefSha256 === execution.executionRef.sha256 && evidence.candidateDigest === execution.candidateDigest
+    && canonicalJson(evidence.runnerToolchain) === canonicalJson(approvedRunnerToolchain);
+}
+
+function summarizeSetupEvidenceOutcomes(
+  reference: { key: string; sha256: string },
+  groupCount: number,
+  qualifications: Array<"PASS" | "FAILED" | "UNKNOWN">,
+  cleanupStates: boolean[],
+  processStates: boolean[],
+): { evidenceRef: { key: string; sha256: string }; processStatus: "SUCCEEDED" | "FAILED" | "UNKNOWN"; qualification: "PASS" | "FAILED" | "UNKNOWN"; cleanupConfirmed: boolean } {
+  const cleanupConfirmed = cleanupStates.length === groupCount && cleanupStates.every(Boolean);
+  const processStatus = processStates.every(Boolean) ? "SUCCEEDED" : "FAILED";
+  const qualification = qualifications.includes("FAILED") ? "FAILED"
+    : qualifications.length === groupCount && qualifications.every((item) => item === "PASS") ? "PASS" : "UNKNOWN";
+  return { evidenceRef: reference, processStatus, qualification: cleanupConfirmed ? qualification : "UNKNOWN", cleanupConfirmed };
+}
+
 async function verifyProjectSetupSmokeEvidence(
   dependencies: AwsBrokerDependencies,
   execution: ReturnType<typeof ProjectSetupExecutionSchema.parse>,
@@ -5357,141 +6177,31 @@ async function verifyProjectSetupSmokeEvidence(
   const approvedRunnerToolchain = ProjectSetupRunnerToolchainSchema.safeParse(approvedRunnerToolchainInput);
   if (!approvedRunnerEnvironment.success || !approvedRunnerToolchain.success) return undefined;
   if (reference.key !== `project-setup-evidence/sha256/${reference.sha256}.json`) return undefined;
-  const evidenceText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, reference.key, execution.evidenceByteLimit);
-  if (evidenceText === undefined || createHash("sha256").update(evidenceText, "utf8").digest("hex") !== reference.sha256) return undefined;
-  let evidence: Record<string, unknown>;
+  const evidence = await readVerifiedSetupJsonObject(dependencies, reference.key, reference.sha256, execution.evidenceByteLimit);
+  if (!evidence || !isMatchingSetupEvidenceHeader(evidence, execution, approvedRunnerToolchain.data)) return undefined;
+  const admission = await readVerifiedSetupJsonObject(dependencies, execution.executionRef.key, execution.executionRef.sha256, MAX_SETUP_PROPOSAL_BYTES);
+  if (!admission || !isMatchingSetupAdmission(admission, execution, evidence)) return undefined;
   try {
-    const parsed: unknown = JSON.parse(evidenceText);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-    evidence = parsed as Record<string, unknown>;
-  } catch { return undefined; }
-  if (evidence.schemaVersion !== "project-setup-smoke-evidence/v1" || evidence.setupExecutionId !== execution.setupExecutionId
-    || evidence.subjectId !== execution.subjectId || evidence.transportCorrelationId !== execution.transportCorrelationId
-    || evidence.executionRefSha256 !== execution.executionRef.sha256 || evidence.candidateDigest !== execution.candidateDigest
-    || canonicalJson(evidence.runnerToolchain) !== canonicalJson(approvedRunnerToolchain.data)) return undefined;
-  const admissionText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, execution.executionRef.key, MAX_SETUP_PROPOSAL_BYTES);
-  if (admissionText === undefined || createHash("sha256").update(admissionText, "utf8").digest("hex") !== execution.executionRef.sha256) return undefined;
-  let admission: Record<string, unknown>;
-  try {
-    const parsed: unknown = JSON.parse(admissionText);
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-    admission = parsed as Record<string, unknown>;
-  } catch { return undefined; }
-  const admittedRuntime = admission.runtime && typeof admission.runtime === "object" && !Array.isArray(admission.runtime)
-    ? admission.runtime as Record<string, unknown> : undefined;
-  if (admittedRuntime?.runtimeCatalogId !== execution.runtimeCatalogId
-    || admittedRuntime.catalogRevision !== execution.runtimeCatalogRevision
-    || admittedRuntime.bindingDigest !== execution.bindingDigest
-    || admittedRuntime.generation !== execution.runtimeGeneration
-    || admittedRuntime.transportCorrelationId !== execution.transportCorrelationId) return undefined;
-  if (typeof admission.planDigest !== "string" || evidence.planDigest !== admission.planDigest) return undefined;
-  if (admission.domain !== "project-setup-source-interface/v1" || admission.setupExecutionId !== execution.setupExecutionId
-    || admission.subjectId !== execution.subjectId || admission.transportCorrelationId !== execution.transportCorrelationId
-    || admission.candidateDigest !== execution.candidateDigest
-    || !admission.sourceSnapshot || typeof admission.sourceSnapshot !== "object" || !admission.selectionInput || typeof admission.selectionInput !== "object"
-    || !admission.setupRunContext || typeof admission.setupRunContext !== "object" || !Array.isArray(admission.scenarios)) return undefined;
-  try {
-    const sourceRecord = admission.sourceSnapshot as Record<string, unknown>;
-    if (!Array.isArray(sourceRecord.sources)) return undefined;
-    const snapshot = { ...sourceRecord, sources: sourceRecord.sources.map((raw) => {
-      if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid source row");
-      const source = raw as Record<string, unknown>;
-      if (typeof source.path !== "string" || typeof source.sha256 !== "string" || source.kind !== "blob" || typeof source.bytesBase64 !== "string") throw new Error("invalid source row");
-      return { path: source.path, sha256: source.sha256, kind: "blob" as const, bytes: Buffer.from(source.bytesBase64, "base64") };
-    }) } as unknown as E2ESourceSnapshot;
-    verifyE2ESourceSnapshot(snapshot, snapshot.candidate);
-    // An admission stored before a web app's contract could name its API target recorded discovery without it; it is read against that derivation as well as the current one.
-    const sourceInspections = [inspectE2ERepository(snapshot, snapshot.candidate).inspection, inspectE2ERepositoryBeforeContractApiTargets(snapshot, snapshot.candidate).inspection];
-    const sourceInspection = sourceInspections.find((candidate) => canonicalJson(admission.discoveredApplications) === canonicalJson(candidate.applications)
-      && canonicalJson(admission.discoveryMissingInputs) === canonicalJson(candidate.missingInputs)
-      && canonicalJson(admission.discoveredTargetIds) === canonicalJson(candidate.proposedTargets.map((target) => target.targetId).sort()));
-    if (sourceInspection === undefined) return undefined;
-    const discoveredTargetIds = sourceInspection.proposedTargets.map((target) => target.targetId).sort();
-    if (canonicalJson(evidence.discoveredApplications) !== canonicalJson(sourceInspection.applications)
-      || canonicalJson(evidence.discoveryMissingInputs) !== canonicalJson(sourceInspection.missingInputs)
-      || canonicalJson(evidence.discoveredTargetIds) !== canonicalJson(discoveredTargetIds)) return undefined;
-    E2EPolicySchema.parse(admission.policy);
-    const selectionInput = { ...(admission.selectionInput as Record<string, unknown>), sourceSnapshot: snapshot };
-    const plan = selectE2EExecutionPlan(selectionInput as never);
-    if (plan.groups.length === 0) return undefined;
-    const bundleBody = { schemaVersion: 1 as const, planDigest: admission.planDigest, templateVersion: "trusted-e2e/v1", scenarios: admission.scenarios, bundleDigest: "0".repeat(64) };
-    const bundle = E2EScenarioBundleSchema.parse({ ...bundleBody, bundleDigest: e2eScenarioBundleDigest(bundleBody) });
-    const runContext = admission.setupRunContext as Record<string, unknown>;
-    const round = E2ERoundSchema.parse((evidence.round) ?? null);
-    const groupAdmissions = runContext.groupAdmissions;
-    if (!Array.isArray(groupAdmissions) || groupAdmissions.length !== plan.groups.length || plan.groups.length === 0
-      || canonicalJson(runContext.plan) !== canonicalJson(plan) || canonicalJson(runContext.bundle) !== canonicalJson(bundle)
-      || canonicalJson(runContext.round) !== canonicalJson(round) || canonicalJson(runContext.runnerEnvironment) !== canonicalJson(approvedRunnerEnvironment.data)
-      || canonicalJson(runContext.runnerToolchain) !== canonicalJson(approvedRunnerToolchain.data)
-      || runContext.runnerToolchainDigest !== createHash("sha256").update(canonicalJson(approvedRunnerToolchain.data)).digest("hex")
-      || !Array.isArray(evidence.groupRuns) || evidence.groupRuns.length !== plan.groups.length) return undefined;
-    const authenticatedGroupAdmissions = groupAdmissions as unknown as unknown[];
-    const submittedGroupRuns = evidence.groupRuns as unknown as unknown[];
-    const unsupportedTargetIds = admission.unsupportedTargetIds;
-    const selectedTargetIds = Array.isArray(admission.selectedTargetIds) ? admission.selectedTargetIds : [];
-    const expectedNotExecutedTargetIds = discoveredTargetIds.filter((targetId) => !selectedTargetIds.includes(targetId));
-    if (!Array.isArray(unsupportedTargetIds) || canonicalJson(evidence.unsupportedTargetIds) !== canonicalJson(unsupportedTargetIds)) return undefined;
-    if (canonicalJson(unsupportedTargetIds) !== canonicalJson(expectedNotExecutedTargetIds)
-      || canonicalJson(admission.notExecutedTargetIds) !== canonicalJson(expectedNotExecutedTargetIds)
-      || canonicalJson(evidence.notExecutedTargetIds) !== canonicalJson(expectedNotExecutedTargetIds)) return undefined;
-    const semanticApprovalDigests = new Map(bundle.scenarios.map((scenario) => [scenario.scenarioId, (admission.semanticApproval as { digest: string }).digest]));
+    const inspected = loadAndInspectSetupEvidenceSnapshot(admission, evidence);
+    if (!inspected) return undefined;
+    const validated = validateSetupEvidenceRunContext(admission, evidence, inspected.snapshot, inspected.discoveredTargetIds, approvedRunnerEnvironment.data, approvedRunnerToolchain.data);
+    if (!validated) return undefined;
+    const semanticApprovalDigests = new Map(validated.bundle.scenarios.map((scenario) => [scenario.scenarioId, (admission.semanticApproval as { digest: string }).digest]));
     const qualifications: Array<"PASS" | "FAILED" | "UNKNOWN"> = [];
     const cleanupStates: boolean[] = [];
     const processStates: boolean[] = [];
-    for (const [index, group] of plan.groups.entries()) {
-      const admissionGroup = authenticatedGroupAdmissions[index];
-      const rawGroupRun = submittedGroupRuns[index];
-      if (!admissionGroup || !rawGroupRun || typeof admissionGroup !== "object" || typeof rawGroupRun !== "object" || Array.isArray(rawGroupRun)) return undefined;
-      const admitted = admissionGroup as Record<string, unknown>;
-      const groupRun = rawGroupRun as Record<string, unknown>;
-      const compiled = compileE2EScenarios(bundle, plan.effectiveTargets, group, { selectionInput, executionPlan: plan, group } as never);
-      if (canonicalJson(admitted.group) !== canonicalJson(group) || admitted.expectedConfigDigest !== compiled.expectedConfigDigest
-        || admitted.compiledInventoryDigest !== compiled.inventory.digest || admitted.selectionPacketPath !== compiled.selectionPacketPath
-        || canonicalJson(admitted.expectedCases) !== canonicalJson(compiled.expectedCases)) return undefined;
-      const binding = E2ERunBindingSchema.parse(admitted.binding);
-      if (binding.operationId !== execution.operationId || binding.operationFence !== execution.fence || binding.workflowRevision !== execution.projectRevision
-        || binding.candidateDigest !== execution.candidateDigest || binding.planDigest !== admission.planDigest || binding.groupId !== group.groupId
-        || canonicalJson(round.groupBindings[index]) !== canonicalJson(binding) || canonicalJson(groupRun.group) !== canonicalJson(group)
-        || canonicalJson(groupRun.binding) !== canonicalJson(binding)) return undefined;
-      const selection = JSON.parse(compiled.files.get(compiled.selectionPacketPath) ?? "null") as unknown;
-      if (canonicalJson(groupRun.selection) !== canonicalJson(selection) || !Array.isArray(groupRun.hostRequestIds)) return undefined;
-      const hostRequestIds = new Map<string, string>();
-      for (const row of groupRun.hostRequestIds) {
-        if (!Array.isArray(row) || row.length !== 2 || typeof row[0] !== "string" || typeof row[1] !== "string" || hostRequestIds.has(row[0])) return undefined;
-        hostRequestIds.set(row[0], row[1]);
-      }
-      if (hostRequestIds.size !== compiled.hostRequestPayloads.size || [...compiled.hostRequestPayloads.keys()].some((caseId) => !hostRequestIds.has(caseId))) return undefined;
-      const actualValue = groupRun.actual;
-      if (!actualValue || typeof actualValue !== "object" || Array.isArray(actualValue)) return undefined;
-      const actualRecord = actualValue as Record<string, unknown>;
-      if (canonicalJson(actualRecord.runnerToolchain) !== canonicalJson(approvedRunnerToolchain.data)) return undefined;
-      if (typeof actualRecord.launchId !== "string" || typeof actualRecord.rawReportBase64 !== "string" || typeof actualRecord.runStartCaptureBase64 !== "string"
-        || !Array.isArray(actualRecord.candidateCaptures) || !Array.isArray(actualRecord.assertionReceipts)
-        || typeof actualRecord.cleanupConfirmed !== "boolean" || typeof actualRecord.cleanupServerListening !== "boolean") return undefined;
-      const rawReportBytes = Buffer.from(actualRecord.rawReportBase64, "base64");
-      const runStartCaptureBytes = Buffer.from(actualRecord.runStartCaptureBase64, "base64");
-      const runStartCapture = parseE2EFirstPartyCapture(runStartCaptureBytes, actualRecord.launchId);
-      const actual = { launchId: actualRecord.launchId, launchConfigDigest: actualRecord.launchConfigDigest, fixedAssetDigests: actualRecord.fixedAssetDigests,
-        publicList: actualRecord.publicList, selected: actualRecord.selected, filtered: actualRecord.filtered,
-        rawReportBytes: new Uint8Array(rawReportBytes), runStartCaptureBytes: new Uint8Array(runStartCaptureBytes), runStartCapture,
-        assertionReceipts: actualRecord.assertionReceipts, declaredMockComponentIds: actualRecord.declaredMockComponentIds,
-        candidateCaptures: actualRecord.candidateCaptures, listProcess: actualRecord.listProcess, runProcess: actualRecord.runProcess,
-        cleanupConfirmed: actualRecord.cleanupConfirmed, cleanupServerListening: actualRecord.cleanupServerListening, evidenceDirectory: "" } as never;
-      const actualQualification = collectE2EActualCliRun({ actual, compiled, binding, round, selection: selection as never,
-        sourceDigest: e2eSnapshotSourceDigest(compiled, snapshot.sources.map(({ path, sha256 }) => ({ path, sha256 }))), semanticApprovalDigests, hostRequestIds,
-        declaredMockComponentIds: Array.isArray(actualRecord.declaredMockComponentIds) ? actualRecord.declaredMockComponentIds as string[] : [],
-        environment: approvedRunnerEnvironment.data,
-        usage: { discoveredResults: Number(actualRecord.selected) + Number(actualRecord.filtered), maxAgentContextBytes: 0, maxLedgerBytes: 0, maxObservationBytes: 0, artifactBytes: 0, downloads: 0, events: 0, modelTokens: 0, maxModelCallsInStep: 0, maxActionStepsInStep: 0 },
-        limits: { maxAgentContextBytes: 16_384, maxLedgerBytes: 8_192, maxObservationBytes: 262_144, maxEventsPerStep: 1_000, maxModelTokensPerCall: 64_000 } });
-      qualifications.push(actualQualification.qualification?.status ?? "UNKNOWN");
-      cleanupStates.push(actualRecord.cleanupConfirmed === true && actualRecord.cleanupServerListening === false);
-      const runProcess = actualRecord.runProcess as Record<string, unknown> | undefined;
-      processStates.push(runProcess?.status === 0 && runProcess.signal === null && runProcess.aborted === false && runProcess.timedOut === false);
+    for (const [index, group] of validated.plan.groups.entries()) {
+      const outcome = verifySetupEvidenceGroupRun(index, group, validated.authenticatedGroupAdmissions[index], validated.submittedGroupRuns[index], {
+        execution, admission, snapshot: inspected.snapshot, selectionInput: validated.selectionInput, plan: validated.plan,
+        bundle: validated.bundle, round: validated.round, semanticApprovalDigests,
+        approvedRunnerEnvironment: approvedRunnerEnvironment.data, approvedRunnerToolchain: approvedRunnerToolchain.data,
+      });
+      if (!outcome) return undefined;
+      qualifications.push(outcome.qualification);
+      cleanupStates.push(outcome.cleanupConfirmed);
+      processStates.push(outcome.processSucceeded);
     }
-    const cleanupConfirmed = cleanupStates.length === plan.groups.length && cleanupStates.every(Boolean);
-    const processStatus = processStates.every(Boolean) ? "SUCCEEDED" : "FAILED";
-    const qualification = qualifications.includes("FAILED") ? "FAILED" : qualifications.length === plan.groups.length && qualifications.every((item) => item === "PASS") ? "PASS" : "UNKNOWN";
-    return { evidenceRef: reference, processStatus, qualification: cleanupConfirmed ? qualification : "UNKNOWN", cleanupConfirmed };
+    return summarizeSetupEvidenceOutcomes(reference, validated.plan.groups.length, qualifications, cleanupStates, processStates);
   } catch {
     return undefined;
   }
@@ -6115,101 +6825,101 @@ const readObjectText = (dependencies: AwsBrokerDependencies, key: string, maxByt
 
 const TERMINAL_ERROR_MAX = 16_384;
 
-async function recordTerminalResult(
+async function handleAlreadyTerminalOperation(
   dependencies: AwsBrokerDependencies,
   operation: OperationRecord,
-  value: unknown,
+  status: OperationStatus,
 ): Promise<OperationRecord> {
-  const input = object(value, "terminal result");
-  const status = input.status;
-  if (!TERMINAL.has(status as OperationStatus)) throw agentXError("CONFIG_INVALID", "terminal status is invalid");
-  if (TERMINAL.has(operation.status)) {
-    // Issue 202: a task whose cancel failed ended INTERRUPTED but kept its workspace, as it might
-    // still run. Its own result proves the run ended, so it frees the workspace; the result itself
-    // is not stored (results stay immutable), and the worker gets the stored operation.
-    if (operation.kind === "task" && operation.status === "INTERRUPTED") {
-      const released = await releaseOnOwnResult(dependencies, operation);
-      if (released !== undefined) return released;
-    }
-    if (operation.status !== status && !isSweptPrepare(operation)) throw agentXError("IDEMPOTENCY_CONFLICT", "terminal result is immutable");
-    // #213: a repeated result releases a failed prepare's slot too, in case the first one's release
-    // did not land (the release is idempotent, and does nothing to a workspace that moved on).
-    if (operation.kind === "prepare" && operation.status !== "SUCCEEDED") {
-      await releaseFailedPreparation(dependencies.documentClient, dependencies.tableName, operation.workspaceId);
-    }
-    return operation;
+  // Issue 202: a task whose cancel failed ended INTERRUPTED but kept its workspace, as it might
+  // still run. Its own result proves the run ended, so it frees the workspace; the result itself
+  // is not stored (results stay immutable), and the worker gets the stored operation.
+  if (operation.kind === "task" && operation.status === "INTERRUPTED") {
+    const released = await releaseOnOwnResult(dependencies, operation);
+    if (released !== undefined) return released;
   }
-  const workspace = await requireWorkspace(dependencies, operation.workspaceId);
-  const now = new Date().toISOString();
-  const terminalStatus = status as OperationStatus;
-  // #154: the worker's error can quote a command's output, so it is redacted before it is stored,
-  // and redactAndCap redacts before it caps.
-  const error = typeof input.error === "string" ? redactAndCap(input.error, TERMINAL_ERROR_MAX).text : undefined;
-  const result = operation.kind === "publish" && status === "SUCCEEDED"
-    ? PullRequestResultSchema.parse(input.result)
-    : operation.kind === "close" && status === "SUCCEEDED"
-      ? WorkspaceClosePreflightResultSchema.parse(input.result)
-      : input.result;
-  const closePreflight = operation.kind === "close" && terminalStatus === "SUCCEEDED"
-    ? WorkspaceClosePreflightResultSchema.parse(result)
-    : undefined;
-  // Explicit discard only bypasses the unpublished-work refusal after the worker has
-  // successfully produced a valid preflight. A failed or cancelled check must never delete
-  // compute or storage merely because the owner authorized discarding the checked-out changes.
-  const closeCanFinish = operation.kind === "close" && closePreflight !== undefined
-    && (closePreflight.safeToClose || operation.discardUnpublished === true);
-  const workspaceStatus =
-    operation.kind === "prepare"
-      ? terminalStatus === "SUCCEEDED"
-        ? "READY"
-        : "PREPARATION_FAILED"
-      : operation.kind === "close"
-        ? closeCanFinish
-          ? "CLOSING"
-          : operation.closePreviousStatus ?? "READY"
-        : "READY";
-  const terminalTarget = operation.kind === "cancel" && operation.targetOperationId
-    ? operationKey(operation.workspaceId, operation.targetOperationId)
-    : undefined;
-  const transactItems: TransactItems = [
-    { Update: {
-      TableName: dependencies.tableName,
-      Key: operationKey(operation.workspaceId, operation.id),
-      UpdateExpression: "SET #status = :status, updatedAt = :now, #result = :result, #error = :error",
-      ConditionExpression: "fence = :fence",
-      ExpressionAttributeNames: { "#status": "status", "#result": "result", "#error": "error" },
-      ExpressionAttributeValues: { ":status": terminalStatus, ":now": now, ":result": result ?? null, ":error": error ?? null, ":fence": operation.fence },
-    } },
-  ];
-  if (operation.kind === "cancel" && terminalTarget) {
-    transactItems.push({ Update: {
-      TableName: dependencies.tableName,
-      Key: terminalTarget,
-      UpdateExpression: "SET #status = :status, updatedAt = :now",
-      // Issue 195: a cancel that did not succeed (a duplicate the worker no longer knows, say)
-      // never turns a target that already ended into INTERRUPTED. A failed condition falls back
-      // below to recording the cancel's own result only.
-      ...(terminalStatus === "SUCCEEDED" ? {} : { ConditionExpression: "#status = :cancelRequested" }),
-      ExpressionAttributeNames: { "#status": "status" },
-      ExpressionAttributeValues: {
-        ":status": cancelledTargetStatus(terminalStatus), ":now": now,
-        ...(terminalStatus === "SUCCEEDED" ? {} : { ":cancelRequested": "CANCEL_REQUESTED" }),
-      },
-    } });
+  if (operation.status !== status && !isSweptPrepare(operation)) throw agentXError("IDEMPOTENCY_CONFLICT", "terminal result is immutable");
+  // #213: a repeated result releases a failed prepare's slot too, in case the first one's release
+  // did not land (the release is idempotent, and does nothing to a workspace that moved on).
+  if (operation.kind === "prepare" && operation.status !== "SUCCEEDED") {
+    await releaseFailedPreparation(dependencies.documentClient, dependencies.tableName, operation.workspaceId);
   }
-  // Spec 051 Ruling T: a task's end, or its cancel's, sets the workspace's latest checks in the same transaction. That
-  // update holds only while this operation owns the workspace at its fence, so a late or repeated result never
-  // replaces a newer task's, and no write can be lost after the result commits.
-  const latestChecks = await terminalLatestChecks(dependencies, operation, terminalStatus, result, now);
-  const standingFailures = latestChecks === undefined ? undefined : await nextWorkspaceStanding(dependencies, operation.workspaceId, latestChecks.report);
-  const workspaceExpression = operation.kind === "prepare" && terminalStatus === "SUCCEEDED"
+  return operation;
+}
+
+function parseTerminalOperationResult(
+  operation: OperationRecord,
+  terminalStatus: OperationStatus,
+  rawResult: unknown,
+): { result: unknown; closePreflight: ReturnType<typeof WorkspaceClosePreflightResultSchema.parse> | undefined } {
+  if (operation.kind === "publish" && terminalStatus === "SUCCEEDED") {
+    return { result: PullRequestResultSchema.parse(rawResult), closePreflight: undefined };
+  }
+  if (operation.kind === "close" && terminalStatus === "SUCCEEDED") {
+    const closePreflight = WorkspaceClosePreflightResultSchema.parse(rawResult);
+    return { result: closePreflight, closePreflight };
+  }
+  return { result: rawResult, closePreflight: undefined };
+}
+
+function nextTerminalWorkspaceStatus(
+  operation: OperationRecord,
+  terminalStatus: OperationStatus,
+  closeCanFinish: boolean,
+): WorkspaceInstance["status"] {
+  if (operation.kind === "prepare") {
+    return terminalStatus === "SUCCEEDED" ? "READY" : "PREPARATION_FAILED";
+  }
+  if (operation.kind === "close") {
+    return closeCanFinish ? "CLOSING" : (operation.closePreviousStatus ?? "READY");
+  }
+  return "READY";
+}
+
+function buildTerminalCancelTargetUpdate(
+  tableName: string,
+  terminalTarget: ReturnType<typeof operationKey>,
+  terminalStatus: OperationStatus,
+  now: string,
+): TransactItems[number] {
+  return { Update: {
+    TableName: tableName,
+    Key: terminalTarget,
+    UpdateExpression: "SET #status = :status, updatedAt = :now",
+    // Issue 195: a cancel that did not succeed (a duplicate the worker no longer knows, say)
+    // never turns a target that already ended into INTERRUPTED. A failed condition falls back
+    // below to recording the cancel's own result only.
+    ...(terminalStatus === "SUCCEEDED" ? {} : { ConditionExpression: "#status = :cancelRequested" }),
+    ExpressionAttributeNames: { "#status": "status" },
+    ExpressionAttributeValues: {
+      ":status": cancelledTargetStatus(terminalStatus), ":now": now,
+      ...(terminalStatus === "SUCCEEDED" ? {} : { ":cancelRequested": "CANCEL_REQUESTED" }),
+    },
+  } };
+}
+
+function buildTerminalWorkspaceUpdate(
+  tableName: string,
+  workspaceId: string,
+  operation: OperationRecord,
+  terminalStatus: OperationStatus,
+  workspaceStatus: WorkspaceInstance["status"],
+  closeCanFinish: boolean,
+  closePreflight: ReturnType<typeof WorkspaceClosePreflightResultSchema.parse> | undefined,
+  error: string | undefined,
+  latestChecks: ReturnType<typeof latestChecksItem> | undefined,
+  standingFailures: StandingFailure[] | undefined,
+  now: string,
+): TransactItems[number] {
+  const isPrepareSucceeded = operation.kind === "prepare" && terminalStatus === "SUCCEEDED";
+  const isCloseRejected = operation.kind === "close" && !closeCanFinish;
+  const workspaceExpression = isPrepareSucceeded
     ? "SET #status = :status, updatedAt = :now, preparationManifest = :manifest REMOVE activeOperationId"
-    : operation.kind === "close" && !closeCanFinish
+    : isCloseRejected
       ? "SET #status = :status, updatedAt = :now, closeError = :closeError REMOVE activeOperationId"
       : "SET #status = :status, updatedAt = :now REMOVE activeOperationId, closeError";
-  const workspaceUpdate: TransactItems[number] = { Update: {
-    TableName: dependencies.tableName,
-    Key: workspaceKey(workspace.id),
+  return { Update: {
+    TableName: tableName,
+    Key: workspaceKey(workspaceId),
     UpdateExpression: latestChecks === undefined ? workspaceExpression : workspaceExpression.replace(" REMOVE ", ", latestChecks = :latestChecks, standingFailures = :standingFailures REMOVE "),
     ConditionExpression: operation.kind === "cancel"
       ? "activeOperationId = :target AND fence = :fence"
@@ -6220,50 +6930,148 @@ async function recordTerminalResult(
       ":now": now,
       ":fence": operation.fence,
       ...(operation.kind === "cancel" ? { ":target": operation.targetOperationId } : { ":operation": operation.id }),
-      ...(operation.kind === "prepare" && terminalStatus === "SUCCEEDED" ? { ":manifest": ".agentx/preparation-manifest.json" } : {}),
+      ...(isPrepareSucceeded ? { ":manifest": ".agentx/preparation-manifest.json" } : {}),
       ...(latestChecks === undefined ? {} : { ":latestChecks": latestChecks, ":standingFailures": standingFailures }),
-      ...(operation.kind === "close" && !closeCanFinish
+      ...(isCloseRejected
         ? { ":closeError": error ?? (closePreflight ? "workspace contains unpublished work" : "workspace close preflight failed") }
         : {}),
     },
   } };
-  if (operation.kind !== "cancel" || terminalStatus === "SUCCEEDED") transactItems.push(workspaceUpdate);
-  const send = (items: TransactItems) => dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: items }));
+}
+
+function terminalOperationSnapshot(
+  operation: OperationRecord,
+  terminalStatus: OperationStatus,
+  now: string,
+  result: unknown,
+  error: string | undefined,
+): OperationRecord {
+  return { ...operation, status: terminalStatus, updatedAt: now, ...(result === undefined ? {} : { result }), ...(error === undefined ? {} : { error }) };
+}
+
+async function recordOwnCancelTerminalResult(
+  dependencies: AwsBrokerDependencies,
+  operation: OperationRecord,
+  terminalStatus: OperationStatus,
+  now: string,
+  result: unknown,
+  error: string | undefined,
+  ownUpdateItem: TransactItems[number],
+): Promise<OperationRecord> {
   try {
-    await send(transactItems);
-  } catch (transactionError) {
-    if (!isConditional(transactionError)) throw transactionError;
-    const existing = await requireOperation(dependencies, operation.workspaceId, operation.id);
-    if (existing.status === terminalStatus || isSweptPrepare(existing)) {
-      if (existing.kind === "prepare" && existing.status !== "SUCCEEDED") {
-        await releaseFailedPreparation(dependencies.documentClient, dependencies.tableName, existing.workspaceId);
-      }
-      return existing;
-    }
-    // A cancel whose target finished first (its own result, and for a developer task its
-    // completed record, committed meanwhile): decided again once, from a fresh read, the cancel
-    // records only its own result. The target, the workspace and the audit record stay as the
-    // target's result left them, so there is exactly one completed record and no worker retry.
-    if (operation.kind === "cancel" && operation.targetOperationId) {
-      const target = await requireOperation(dependencies, operation.workspaceId, operation.targetOperationId);
-      if (TERMINAL.has(target.status)) {
-        try {
-          await send([transactItems[0]!]);
-        } catch (ownError) {
-          if (!isConditional(ownError)) throw ownError;
-          const again = await requireOperation(dependencies, operation.workspaceId, operation.id);
-          if (again.status === terminalStatus) return again;
-          throw agentXError("STALE_FENCE", "terminal callback no longer owns the workspace");
-        }
-        return { ...operation, status: terminalStatus, updatedAt: now, ...(result === undefined ? {} : { result }), ...(error === undefined ? {} : { error }) };
-      }
-    }
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [ownUpdateItem] }));
+  } catch (ownError) {
+    if (!isConditional(ownError)) throw ownError;
+    const again = await requireOperation(dependencies, operation.workspaceId, operation.id);
+    if (again.status === terminalStatus) return again;
     throw agentXError("STALE_FENCE", "terminal callback no longer owns the workspace");
+  }
+  return terminalOperationSnapshot(operation, terminalStatus, now, result, error);
+}
+
+async function handleTerminalResultTransactionConflict(
+  dependencies: AwsBrokerDependencies,
+  operation: OperationRecord,
+  terminalStatus: OperationStatus,
+  now: string,
+  result: unknown,
+  error: string | undefined,
+  ownUpdateItem: TransactItems[number],
+  transactionError: unknown,
+): Promise<OperationRecord> {
+  if (!isConditional(transactionError)) throw transactionError;
+  const existing = await requireOperation(dependencies, operation.workspaceId, operation.id);
+  if (existing.status === terminalStatus || isSweptPrepare(existing)) {
+    if (existing.kind === "prepare" && existing.status !== "SUCCEEDED") {
+      await releaseFailedPreparation(dependencies.documentClient, dependencies.tableName, existing.workspaceId);
+    }
+    return existing;
+  }
+  // A cancel whose target finished first (its own result, and for a developer task its
+  // completed record, committed meanwhile): decided again once, from a fresh read, the cancel
+  // records only its own result. The target, the workspace and the audit record stay as the
+  // target's result left them, so there is exactly one completed record and no worker retry.
+  if (operation.kind === "cancel" && operation.targetOperationId) {
+    const target = await requireOperation(dependencies, operation.workspaceId, operation.targetOperationId);
+    if (TERMINAL.has(target.status)) {
+      return await recordOwnCancelTerminalResult(dependencies, operation, terminalStatus, now, result, error, ownUpdateItem);
+    }
+  }
+  throw agentXError("STALE_FENCE", "terminal callback no longer owns the workspace");
+}
+
+async function buildTerminalResultTransactItems(
+  dependencies: AwsBrokerDependencies,
+  workspace: WorkspaceInstance,
+  operation: OperationRecord,
+  terminalStatus: OperationStatus,
+  result: unknown,
+  closePreflight: ReturnType<typeof WorkspaceClosePreflightResultSchema.parse> | undefined,
+  error: string | undefined,
+  now: string,
+): Promise<TransactItems> {
+  // Explicit discard only bypasses the unpublished-work refusal after the worker has
+  // successfully produced a valid preflight. A failed or cancelled check must never delete
+  // compute or storage merely because the owner authorized discarding the checked-out changes.
+  const closeCanFinish = operation.kind === "close" && closePreflight !== undefined
+    && (closePreflight.safeToClose || operation.discardUnpublished === true);
+  const workspaceStatus = nextTerminalWorkspaceStatus(operation, terminalStatus, closeCanFinish);
+  const transactItems: TransactItems = [
+    { Update: {
+      TableName: dependencies.tableName,
+      Key: operationKey(operation.workspaceId, operation.id),
+      UpdateExpression: "SET #status = :status, updatedAt = :now, #result = :result, #error = :error",
+      ConditionExpression: "fence = :fence",
+      ExpressionAttributeNames: { "#status": "status", "#result": "result", "#error": "error" },
+      ExpressionAttributeValues: { ":status": terminalStatus, ":now": now, ":result": result ?? null, ":error": error ?? null, ":fence": operation.fence },
+    } },
+  ];
+  if (operation.kind === "cancel" && operation.targetOperationId) {
+    transactItems.push(buildTerminalCancelTargetUpdate(dependencies.tableName, operationKey(operation.workspaceId, operation.targetOperationId), terminalStatus, now));
+  }
+  // Spec 051 Ruling T: a task's end, or its cancel's, sets the workspace's latest checks in the same transaction. That
+  // update holds only while this operation owns the workspace at its fence, so a late or repeated result never
+  // replaces a newer task's, and no write can be lost after the result commits.
+  const latestChecks = await terminalLatestChecks(dependencies, operation, terminalStatus, result, now);
+  const standingFailures = latestChecks === undefined ? undefined : await nextWorkspaceStanding(dependencies, operation.workspaceId, latestChecks.report);
+  const workspaceUpdate = buildTerminalWorkspaceUpdate(
+    dependencies.tableName, workspace.id, operation, terminalStatus, workspaceStatus,
+    closeCanFinish, closePreflight, error, latestChecks, standingFailures, now,
+  );
+  if (operation.kind !== "cancel" || terminalStatus === "SUCCEEDED") transactItems.push(workspaceUpdate);
+  return transactItems;
+}
+
+async function recordTerminalResult(
+  dependencies: AwsBrokerDependencies,
+  operation: OperationRecord,
+  value: unknown,
+): Promise<OperationRecord> {
+  const input = object(value, "terminal result");
+  const status = input.status;
+  if (!TERMINAL.has(status as OperationStatus)) throw agentXError("CONFIG_INVALID", "terminal status is invalid");
+  const terminalStatus = status as OperationStatus;
+  if (TERMINAL.has(operation.status)) {
+    return await handleAlreadyTerminalOperation(dependencies, operation, terminalStatus);
+  }
+  const workspace = await requireWorkspace(dependencies, operation.workspaceId);
+  const now = new Date().toISOString();
+  // #154: the worker's error can quote a command's output, so it is redacted before it is stored,
+  // and redactAndCap redacts before it caps.
+  const error = typeof input.error === "string" ? redactAndCap(input.error, TERMINAL_ERROR_MAX).text : undefined;
+  const { result, closePreflight } = parseTerminalOperationResult(operation, terminalStatus, input.result);
+  const transactItems = await buildTerminalResultTransactItems(dependencies, workspace, operation, terminalStatus, result, closePreflight, error, now);
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }));
+  } catch (transactionError) {
+    return await handleTerminalResultTransactionConflict(
+      dependencies, operation, terminalStatus, now, result, error, transactItems[0]!, transactionError,
+    );
   }
   // #213: a prepare that did not succeed leaves the workspace PREPARATION_FAILED, which stops
   // counting toward the workspace limits now; the release logs, and never fails the callback.
   if (operation.kind === "prepare" && terminalStatus !== "SUCCEEDED") await releaseFailedPreparation(dependencies.documentClient, dependencies.tableName, workspace.id);
-  return { ...operation, status: terminalStatus, updatedAt: now, ...(result === undefined ? {} : { result }), ...(error === undefined ? {} : { error }) };
+  return terminalOperationSnapshot(operation, terminalStatus, now, result, error);
 }
 
 /** Spec 051 Ruling T: the workspace's latest checks, as stored: what is known, which task, and when. */
@@ -6834,6 +7642,110 @@ const sqs = new SQSClient(awsClientConfiguration);
 const slackCompany = slackCompanyDependenciesFromEnvironment(process.env, { documentClient, dynamo: dynamoClient, secrets: secretsManager, installToken: true,
   ...(process.env.DEVELOPER_TOKEN_ISSUER ? { linkOrigin: process.env.DEVELOPER_TOKEN_ISSUER } : {}) });
 
+function brokerSlackAndCoreHeaderWiring() {
+  return {
+    ...(coreOfferedModels === undefined ? {} : { coreOfferedModels }),
+    ...(slackCompany === undefined ? {} : { workspaces: slackCompany.workspaces, ...(slackCompany.companies === undefined ? {} : { slackCompanies: slackCompany.companies }) }),
+    ...(process.env.SLACK_TEAM_ID === undefined ? {} : { slackWorkspaceLegacyTeamId: process.env.SLACK_TEAM_ID }),
+    slackModelAccess: { env: process.env, taskTokens: () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration)) },
+    ...(slackInstallWiring === undefined ? {} : { slackInstall: slackInstallWiring }),
+    ...(slackChannelWiring === undefined ? {} : { slackChannels: slackChannelWiring }),
+    ...(process.env.ROVARA_SIGNIN_URL === undefined ? {} : { slackSignInUrl: process.env.ROVARA_SIGNIN_URL }),
+  };
+}
+
+function brokerOptionalFeatureWiring(developer: DeveloperApiConfiguration | undefined) {
+  return {
+    ...(process.env.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID
+      ? { projectSetupRuntimeCatalogId: process.env.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID }
+      : {}),
+    ...(process.env.AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID
+      ? { e2eFeatureRuntimeCatalogId: process.env.AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID }
+      : {}),
+    githubWebhookSecret: github.webhookSecret,
+    ...(linear === undefined ? {} : { linearWebhook: linear.webhook }),
+    checkRepositoryAccess: (repository: { url: string; credentialRef: string }) => githubCredentials.checkRepository(repository),
+    githubMcp: { credentials: (repository: { url: string; credentialRef: string }, access: "read" | "write") => githubCredentials.issueCredentials(repository, access) },
+    connectorCredentials: {
+      secrets: secretsManagerSource(secretsManager, process.env.CONNECTOR_SECRET_PREFIX),
+      githubApp: { ref: requiredEnvironment("GITHUB_APP_CREDENTIAL_REF"), secretName: github.privateKeySecretArn },
+      ...(process.env.CONNECTOR_SECRET_PREFIX ? { connectorSecretPrefix: process.env.CONNECTOR_SECRET_PREFIX } : {}),
+    },
+    codeBuild,
+    ...(developer ? { developer } : {}),
+    ...(linking ? { linking } : {}),
+    ...(companyReads ? { companyReads } : {}),
+    ...(chatgpt ? { chatgpt } : {}),
+    // Spec 062: channel adapters, only where the deployment turns them on (infra/lib/channel-adapters.ts).
+    ...(process.env.CHANNEL_ADAPTERS === "enabled"
+      ? { channelAdapters: {
+          secretPrefix: requiredEnvironment("CHANNEL_ADAPTER_SECRET_PREFIX"),
+          secrets: secretsManagerAdapterSecrets(secretsManager),
+        } }
+      : {}),
+    // M1.4 Task 4.2: the installation's worker model settings (SSM, ids and ARNs only), read per request. Absent until a guarded deploy sets the prefix and grants the read, so the
+    // AI navigation route cannot be derived and agent steps stay unavailable (`agent-route-not-approved`).
+    ...(process.env.AGENTX_E2E_AGENT_SETTINGS_PREFIX
+      ? { e2eAgentInstallation: () => e2eAgentInstallationFromParameters(requiredEnvironment("AGENTX_E2E_AGENT_SETTINGS_PREFIX"), async (names) => {
+          const response = await ssm.send(new GetParametersCommand({ Names: [...names] }));
+          return new Map((response.Parameters ?? []).flatMap((parameter) => parameter.Name && parameter.Value ? [[parameter.Name, parameter.Value] as const] : []));
+        }, process.env.AWS_REGION, { readShape: (modelId) => readE2EModelRouteShape({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }, E2E_DEFAULT_MODEL_ROUTE_ID, modelId) }) }
+      : {}),
+    // Spec 025 A12: set only here, so a test harness without its own `me` never reaches the network.
+    adminReads: {
+      me: { issuer: requiredEnvironment("OIDC_ISSUER"), fetch, ...(developer?.slackUserByEmail === undefined ? {} : { slackUserByEmail: developer.slackUserByEmail }) },
+      health: healthProbes({
+        cloudWatch,
+        sqs,
+        release: process.env.AGENTX_RELEASE_VERSION,
+        alarmPrefix: process.env.AGENTX_ALARM_PREFIX,
+        deadLetterQueues: process.env.HEALTH_DEAD_LETTER_QUEUES,
+        slackAuthCheck: developer?.slackAuthCheck,
+        github: githubCredentials,
+        log: brokerLogLine,
+      }),
+    },
+  };
+}
+
+function brokerSlackAndSwebenchWiring() {
+  return {
+    ...(process.env.TURN_RECORDS_TABLE_NAME ? { turnRecordsTableName: process.env.TURN_RECORDS_TABLE_NAME } : {}),
+    ...(process.env.SLACK_THREADS_TABLE_NAME ? { slackThreadsTableName: process.env.SLACK_THREADS_TABLE_NAME } : {}),
+    ...(process.env.SLACK_ORCHESTRATOR_ROLE_ARN
+      ? {
+          slack: {
+            orchestratorRoleArn: process.env.SLACK_ORCHESTRATOR_ROLE_ARN,
+            memberWorkspaceLimit: positiveInteger(
+              Number(process.env.SLACK_MEMBER_WORKSPACE_LIMIT ?? "3"),
+              "SLACK_MEMBER_WORKSPACE_LIMIT",
+            ),
+            organizationWorkspaceLimit: positiveInteger(
+              Number(process.env.SLACK_ORGANIZATION_WORKSPACE_LIMIT ?? "20"),
+              "SLACK_ORGANIZATION_WORKSPACE_LIMIT",
+            ),
+          },
+        }
+      : {}),
+    // Spec 043: read per request, so installing the eval stack or a new runner image needs no broker release.
+    ...(process.env.SWEBENCH_SETTINGS_PREFIX
+      ? {
+          swebench: {
+            deployment: () => swebenchDeploymentFromParameters(requiredEnvironment("SWEBENCH_SETTINGS_PREFIX"), async (names) => {
+              const response = await ssm.send(new GetParametersCommand({ Names: [...names] }));
+              return new Map((response.Parameters ?? []).flatMap((parameter) => parameter.Name && parameter.Value ? [[parameter.Name, parameter.Value] as const] : []));
+            }),
+            async startExecution(input: { stateMachineArn: string; name: string; input: string }) {
+              const response = await stepFunctions.send(new StartExecutionCommand(input));
+              // Spec 052 Ruling 13: recorded on the run, so the batch tick can find a dead execution.
+              return { executionArn: response.executionArn };
+            },
+          },
+        }
+      : {}),
+  };
+}
+
 /**
  * The broker's handler, built on the first request, once the callback signing key has been read from Secrets Manager (callback-signing-key.ts): the control plane gives this function
  * the secret's ARN, never the key. A failed read builds nothing and is tried again on the next request.
@@ -6917,13 +7829,7 @@ function buildBrokerHandler(callbackSigningKey: string) {
   const developer = linkingOnly || signIn === undefined ? undefined : withCoreRoutes(signIn, coreRoot);
   return createAwsBrokerHandler({
     core: coreRoot,
-    ...(coreOfferedModels === undefined ? {} : { coreOfferedModels }),
-    ...(slackCompany === undefined ? {} : { workspaces: slackCompany.workspaces, ...(slackCompany.companies === undefined ? {} : { slackCompanies: slackCompany.companies }) }),
-    ...(process.env.SLACK_TEAM_ID === undefined ? {} : { slackWorkspaceLegacyTeamId: process.env.SLACK_TEAM_ID }),
-    slackModelAccess: { env: process.env, taskTokens: () => taskTokensFromEnvironment(process.env, new KMSClient(awsClientConfiguration)) },
-    ...(slackInstallWiring === undefined ? {} : { slackInstall: slackInstallWiring }),
-    ...(slackChannelWiring === undefined ? {} : { slackChannels: slackChannelWiring }),
-    ...(process.env.ROVARA_SIGNIN_URL === undefined ? {} : { slackSignInUrl: process.env.ROVARA_SIGNIN_URL }),
+    ...brokerSlackAndCoreHeaderWiring(),
     documentClient,
     s3,
     tableName: requiredEnvironment("STATE_TABLE_NAME"),
@@ -6946,91 +7852,11 @@ function buildBrokerHandler(callbackSigningKey: string) {
       workerBinding: async () => workerBindingFromPairs(process.env.EC2_WORKER_SUBNETS!, process.env.EC2_WORKER_LAUNCH_TEMPLATE_ID!),
     } } : {}),
     projectSetupSource: { capture: ({ repositoryUrl, ref }) => githubCredentials.captureE2ESourceSnapshot(repositoryUrl, ref) },
-    ...(process.env.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID
-      ? { projectSetupRuntimeCatalogId: process.env.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID }
-      : {}),
-    ...(process.env.AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID
-      ? { e2eFeatureRuntimeCatalogId: process.env.AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID }
-      : {}),
-    githubWebhookSecret: github.webhookSecret,
-    ...(linear === undefined ? {} : { linearWebhook: linear.webhook }),
-    checkRepositoryAccess: (repository) => githubCredentials.checkRepository(repository),
-    githubMcp: { credentials: (repository, access) => githubCredentials.issueCredentials(repository, access) },
-    connectorCredentials: {
-      secrets: secretsManagerSource(secretsManager, process.env.CONNECTOR_SECRET_PREFIX),
-      githubApp: { ref: requiredEnvironment("GITHUB_APP_CREDENTIAL_REF"), secretName: github.privateKeySecretArn },
-      ...(process.env.CONNECTOR_SECRET_PREFIX ? { connectorSecretPrefix: process.env.CONNECTOR_SECRET_PREFIX } : {}),
-    },
-    codeBuild,
-    ...(developer ? { developer } : {}),
-    ...(linking ? { linking } : {}),
-    ...(companyReads ? { companyReads } : {}),
-    ...(chatgpt ? { chatgpt } : {}),
-    // Spec 062: channel adapters, only where the deployment turns them on (infra/lib/channel-adapters.ts).
-    ...(process.env.CHANNEL_ADAPTERS === "enabled"
-      ? { channelAdapters: {
-          secretPrefix: requiredEnvironment("CHANNEL_ADAPTER_SECRET_PREFIX"),
-          secrets: secretsManagerAdapterSecrets(secretsManager),
-        } }
-      : {}),
-    // M1.4 Task 4.2: the installation's worker model settings (SSM, ids and ARNs only), read per request. Absent until a guarded deploy sets the prefix and grants the read, so the
-    // AI navigation route cannot be derived and agent steps stay unavailable (`agent-route-not-approved`).
-    ...(process.env.AGENTX_E2E_AGENT_SETTINGS_PREFIX
-      ? { e2eAgentInstallation: () => e2eAgentInstallationFromParameters(requiredEnvironment("AGENTX_E2E_AGENT_SETTINGS_PREFIX"), async (names) => {
-          const response = await ssm.send(new GetParametersCommand({ Names: [...names] }));
-          return new Map((response.Parameters ?? []).flatMap((parameter) => parameter.Name && parameter.Value ? [[parameter.Name, parameter.Value] as const] : []));
-        }, process.env.AWS_REGION, { readShape: (modelId) => readE2EModelRouteShape({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME") }, E2E_DEFAULT_MODEL_ROUTE_ID, modelId) }) }
-      : {}),
-    // Spec 025 A12: set only here, so a test harness without its own `me` never reaches the network.
-    adminReads: {
-      me: { issuer: requiredEnvironment("OIDC_ISSUER"), fetch, ...(developer?.slackUserByEmail === undefined ? {} : { slackUserByEmail: developer.slackUserByEmail }) },
-      health: healthProbes({
-        cloudWatch,
-        sqs,
-        release: process.env.AGENTX_RELEASE_VERSION,
-        alarmPrefix: process.env.AGENTX_ALARM_PREFIX,
-        deadLetterQueues: process.env.HEALTH_DEAD_LETTER_QUEUES,
-        slackAuthCheck: developer?.slackAuthCheck,
-        github: githubCredentials,
-        log: brokerLogLine,
-      }),
-    },
-    ...(process.env.TURN_RECORDS_TABLE_NAME ? { turnRecordsTableName: process.env.TURN_RECORDS_TABLE_NAME } : {}),
-    ...(process.env.SLACK_THREADS_TABLE_NAME ? { slackThreadsTableName: process.env.SLACK_THREADS_TABLE_NAME } : {}),
-    ...(process.env.SLACK_ORCHESTRATOR_ROLE_ARN
-      ? {
-          slack: {
-            orchestratorRoleArn: process.env.SLACK_ORCHESTRATOR_ROLE_ARN,
-            memberWorkspaceLimit: positiveInteger(
-              Number(process.env.SLACK_MEMBER_WORKSPACE_LIMIT ?? "3"),
-              "SLACK_MEMBER_WORKSPACE_LIMIT",
-            ),
-            organizationWorkspaceLimit: positiveInteger(
-              Number(process.env.SLACK_ORGANIZATION_WORKSPACE_LIMIT ?? "20"),
-              "SLACK_ORGANIZATION_WORKSPACE_LIMIT",
-            ),
-          },
-        }
-      : {}),
+    ...brokerOptionalFeatureWiring(developer),
     async deleteEc2Session(workspaceId) {
       await ec2Sessions.deleteSession(workspaceId);
     },
-    // Spec 043: read per request, so installing the eval stack or a new runner image needs no broker release.
-    ...(process.env.SWEBENCH_SETTINGS_PREFIX
-      ? {
-          swebench: {
-            deployment: () => swebenchDeploymentFromParameters(requiredEnvironment("SWEBENCH_SETTINGS_PREFIX"), async (names) => {
-              const response = await ssm.send(new GetParametersCommand({ Names: [...names] }));
-              return new Map((response.Parameters ?? []).flatMap((parameter) => parameter.Name && parameter.Value ? [[parameter.Name, parameter.Value] as const] : []));
-            }),
-            async startExecution(input) {
-              const response = await stepFunctions.send(new StartExecutionCommand(input));
-              // Spec 052 Ruling 13: recorded on the run, so the batch tick can find a dead execution.
-              return { executionArn: response.executionArn };
-            },
-          },
-        }
-      : {}),
+    ...brokerSlackAndSwebenchWiring(),
   });
 }
 
@@ -7058,7 +7884,7 @@ async function administratorOfTaskCompany(dependencies: AwsBrokerDependencies, i
   const companies = dependencies.developer?.companies ?? dependencies.companies;
   if (companies === undefined) return true;
   let companyId: string | undefined;
-  try { companyId = await companies.companyOf(identity.ownerKey); } catch { return false; }
+  try { companyId = await companies.companyOf(identity.ownerKey); } catch (error) { rethrowMembershipReadFailure(error); return false; }
   return companyId !== undefined && recordInCompany(task, companyId);
 }
 

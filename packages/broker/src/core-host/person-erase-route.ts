@@ -13,6 +13,7 @@
 import { AgentXError, ON_THE_WEBSITE_MESSAGE, OrgRoleSchema, PERSON_ERASE_OWED_WORDS, PersonEraseReceiptSchema, PersonEraseRequestSchema, agentXError, type OrgRole, type Principal } from "@agentx/contracts";
 import type { BrokerRequest, BrokerResponse } from "../handler.js";
 import { erasePerson, isErasablePersonId, type PersonEraseDeps } from "../core/people/erase.js";
+import { rethrowMembershipReadFailure } from "../core/membership-read.js";
 
 const ERASE_PATH = /^\/v1\/app\/people\/([^/]+)\/erase$/u;
 const ORG_ID = /^org_[0-9a-z]{20}$/u;
@@ -55,7 +56,7 @@ export function createPersonEraseRoute(options: PersonEraseRouteOptions): { rout
       if (match === null || request.method !== "POST") return undefined;
       try {
         let membership: { companyId: string; role: OrgRole } | undefined;
-        try { membership = await options.companyOf(caller); } catch { membership = undefined; }
+        try { membership = await options.companyOf(caller); } catch (error) { rethrowMembershipReadFailure(error); membership = undefined; }
         if (membership === undefined || membership === null || typeof membership !== "object" || typeof membership.companyId !== "string" || !ORG_ID.test(membership.companyId) || !OrgRoleSchema.safeParse(membership.role).success) return json(401, { error: { code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN } });
         const companyId = membership.companyId;
         if (caller.principal.companyId !== companyId) return json(401, { error: { code: "UNAUTHENTICATED", message: SIGN_IN_AGAIN } });

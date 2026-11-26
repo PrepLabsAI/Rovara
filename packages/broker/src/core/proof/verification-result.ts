@@ -15,8 +15,9 @@ import type { OrgId } from "@agentx/contracts";
 import type { TestEnvDeps } from "../test-env/deps.js";
 import { readKnownFailingMarks, knownFailingTaskBranches, verificationResultsEnabled } from "../test-env/known-failing.js";
 import { usableNightlyBaseline } from "../test-env/nightly-usable.js";
+import { isFixedEnvironmentNote } from "./test-result-items.js";
 import {
-  autoFixDecision, classifyBlockedWorkflow, E2E_PROJECT_CHECK_ID, SANDBOX_MODEL_HOSTS_ITEM_ID, isValidTestId,
+  autoFixDecision, classifyBlockedWorkflow, isBrowserRunnerBlock, E2E_PROJECT_CHECK_ID, isValidTestId,
   type AutoFixBudget, type AutoFixCode, type AutoFixFacts, type EvidencePack, type TestingBlockedReason, type TestingCodeReason, type TestingPartialReason, type TestingReason, type TestingResult,
   type WorkflowSnapshot,
 } from "@agentx/contracts";
@@ -95,6 +96,11 @@ export const RESULT_RULES: Readonly<Record<AutoFixCode, Rule>> = {
   "dispatch-exhausted": ASK, "run-lost": ASK, "owner-stopped": ASK, "base-merged": ASK,
   "e2e-evidence-unknown": { kind: "unclear" }, "check-result-unknown": { kind: "unclear" }, "check-failed-cause-unknown": { kind: "unclear" },
 };
+
+/** BROWSER-SKIP-HONESTY: a refused round whose block reason says there is no browser runner says that, not "the test machine cannot be used". */
+function environmentReasonOf(reason: TestingBlockedReason, code: AutoFixCode | undefined, blockReason: string | undefined): TestingBlockedReason {
+  return code === "runtime-unusable" && isBrowserRunnerBlock(blockReason) ? "browser_runner_missing" : reason;
+}
 
 /** At a blocked REVIEW the tests already passed: only these two codes are about the tests, every other signal is about the review or the pull request. */
 const REVIEW_STAGE_TEST_CODES: ReadonlySet<AutoFixCode> = new Set<AutoFixCode>(["regression-found", "leftover-processes"]);
@@ -199,7 +205,8 @@ export function classifyTestingResult(input: ResultInput): ResultOutcome {
   let unclearWaiting: ResultWaiting | undefined;
   for (const [index, rule] of rules.entries()) {
     if (rule.kind === "code") codeReasons.push(rule.reason);
-    else if (rule.kind === "environment") blockedReasons.push(rule.reason);
+    // BROWSER-SKIP-HONESTY: a refused round whose block reason says there is no browser runner says that, not "the test machine cannot be used".
+    else if (rule.kind === "environment") blockedReasons.push(environmentReasonOf(rule.reason, signals[index]?.code, workflow.blockReason));
     else if (rule.kind === "original_fails") originalFails = true;
     else if (rule.kind === "ask") ask = true;
     else if (rule.kind === "unclear") {
@@ -267,7 +274,8 @@ export function classifyTestingResult(input: ResultInput): ResultOutcome {
     else if (item.kind === "scenario") partial.push("scenario_not_tested");
     else if (item.kind === "check") partial.push("check_not_run");
     // FIX-0518: the laptop's opt-out line ("model hosts allowed in the test sandbox by project setting") is a fixed note about where the tests ran, not a sign that details could not be read: it is shown, and the verdict stays.
-    else if (item.kind === "environment") { if (item.id !== SANDBOX_MODEL_HOSTS_ITEM_ID) partial.push("evidence_unreadable"); }
+    // TEST-RESULT-HONESTY: "looks like a check needs Postgres" is a fixed note about a failure (shown with it), not a sign that details could not be read.
+    else if (item.kind === "environment") { if (!isFixedEnvironmentNote(item.id)) partial.push("evidence_unreadable"); }
     else if (item.kind === "mocked_service" && needReal.has(item.id)) partial.push("real_service_not_tested");
   }
   if (evidenceChecks.some((check) => check.after === "unknown" || check.after === "not_run")) partial.push("check_not_run");

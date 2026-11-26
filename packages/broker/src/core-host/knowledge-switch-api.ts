@@ -23,6 +23,7 @@ import { lessonAuditSink } from "../lessons/audit-sink.js";
 import { DocumentLocalToolsSettings, documentLearningSettings } from "../lessons/document-settings.js";
 import { readLocalToolsState, setCompanyLocalTools, setProjectLocalTools, type LocalToolsSetResult } from "../lessons/local-tools-setting.js";
 import { NOT_FOR_SCRIPT_TOKENS, NO_SUCH_PROJECT } from "./lessons-api.js";
+import { orIfNotMembershipFailure, rethrowMembershipReadFailure } from "../core/membership-read.js";
 
 export const KNOWLEDGE_SWITCH_COMPANY_PATH = "/v1/dev/company/lessons/local-tools";
 const PROJECT_PATH = /^\/v1\/dev\/projects\/([^/]+)\/lessons\/local-tools$/u;
@@ -80,7 +81,7 @@ export function createKnowledgeSwitchApi(options: KnowledgeSwitchOptions): Knowl
     // Owner DEC 254zzz99: both PUTs (opening or closing knowledge to tools) need the website's own client; the reads do not.
     if (request.method === "PUT" && caller.webApp !== true) throw agentXError("FORBIDDEN", ON_THE_WEBSITE);
     let found: unknown;
-    try { found = await options.companyOf(caller); } catch { found = undefined; }
+    try { found = await options.companyOf(caller); } catch (error) { rethrowMembershipReadFailure(error); found = undefined; }
     const record = found as { companyId?: unknown; role?: unknown } | undefined | null;
     const company = OrgIdSchema.safeParse(record?.companyId);
     const parsedRole = OrgRoleSchema.safeParse(record?.role);
@@ -118,7 +119,7 @@ export function createKnowledgeSwitchApi(options: KnowledgeSwitchOptions): Knowl
     if (!AgentXNameSchema.safeParse(project).success) throw agentXError("NOT_FOUND", NO_SUCH_PROJECT);
     let exists: boolean;
     let projectRole: ProjectRole | undefined;
-    try { [exists, projectRole] = await Promise.all([options.projectExists(companyId, project), options.projectRole(companyId, project, personId).catch(() => undefined)]); } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
+    try { [exists, projectRole] = await Promise.all([options.projectExists(companyId, project), options.projectRole(companyId, project, personId).catch(orIfNotMembershipFailure(undefined))]); } catch { throw agentXError("RUNTIME_UNAVAILABLE", UNAVAILABLE); }
     // Not there, or not a place this person has any part in: the same words, so another project's name is never confirmed.
     if (!exists || (!companyAdmin && projectRole === undefined)) throw agentXError("NOT_FOUND", NO_SUCH_PROJECT);
     const canChange = companyAdmin || projectRole === "maintainer";

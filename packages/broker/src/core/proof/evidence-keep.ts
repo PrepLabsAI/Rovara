@@ -20,6 +20,7 @@ import type { PinnedDependency } from "./dependency-evidence.js";
 import { buildEvidencePack, evidencePackV2Of, type EvidenceProblem, type EvidenceWriter } from "./evidence-pack.js";
 import { NO_PROD_DENY, dataGuardScanWorks, evidenceFindings, guardPack, guardRaw, guardV2Parts, type DataGuardScan } from "./evidence-guard.js";
 import { kindOfRawCheck } from "./evidence-risk.js";
+import { testResultNotTested } from "./test-result-items.js";
 
 export interface EvidenceTask { ownerKey: string; workspaceId: string; taskId: string }
 
@@ -273,7 +274,7 @@ export async function keepEvidence(deps: KeepEvidenceDeps, input: KeepEvidenceIn
     const environment = input.environment ?? DEFAULT_EVIDENCE_ENVIRONMENT;
     const built = buildEvidencePack({
       candidateDigest: input.candidateDigest, rawText, checks: input.checks, checkKinds: kinds, environment, ...(input.dependencies === undefined ? {} : { dependencies: input.dependencies }),
-      notTested: [...(input.extraNotTested ?? []), ...(environment.envRevision === 0 ? [input.environmentNote ?? NO_ENVIRONMENT_ITEM] : []), ...(rawText === undefined ? [NOT_CAPTURED_ITEM] : []), ...(guarded > 0 ? [WITHHELD_ITEM] : [])], storedArtifacts: new Map(),
+      notTested: [...(input.extraNotTested ?? []), ...testResultNotTested(input.checks), ...(environment.envRevision === 0 ? [input.environmentNote ?? NO_ENVIRONMENT_ITEM] : []), ...(rawText === undefined ? [NOT_CAPTURED_ITEM] : []), ...(guarded > 0 ? [WITHHELD_ITEM] : [])], storedArtifacts: new Map(),
     });
     if (built.pack === undefined) return { kept: false, reason: "invalid" };
     const guardedPack = guardPack(built.pack, built.newArtifacts, deny, deps.scan);

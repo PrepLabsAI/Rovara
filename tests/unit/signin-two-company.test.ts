@@ -75,7 +75,8 @@ it("a membership read failure or disappearance refuses refresh on the real serve
       if (mode === "throws") h.db.injectFault({ command: "GetCommand", match: (input) => (input.Key as { pk: string }).pk.startsWith("COMPANY_MEMBER#"), error: { name: "AccessDeniedException", message: COMPANY_A.canary + COMPANY_B.canary } });
       else h.db.delete(`COMPANY_MEMBER#${person(COMPANY_A.label)}`, "COMPANY");
       const answer = await h.refresh(refresh);
-      if (answer.status === 400) throw new Error(JSON.stringify(answer.body));
+      // Fail closed: a removed person's refresh is refused (400), and a failed membership read is refused as RETRYABLE (503) and never granted.
+      if (answer.status === 400 || answer.status === 503) throw new Error(JSON.stringify(answer.body));
       return answer;
     },
   }]);

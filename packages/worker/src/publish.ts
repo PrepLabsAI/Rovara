@@ -29,6 +29,7 @@ import type { PullRequestSink } from "./callback-client.js";
 import { runCodeBuildGates, type CodeBuildSink } from "./codebuild.js";
 import type { RepositoryCredentialProvider } from "./repository-credentials.js";
 import { runProjectCommand, type PreparationCommandRunner, type PreparationManifest } from "./prepare.js";
+import { closeShellSession, groupLimitSeconds, newShellSession } from "./shell-session.js";
 import { storedCommandOutput } from "./command-failure.js";
 import { planChecks, publicationCheckEntries } from "./verification/checks.js";
 import type { CommandResult } from "./readiness.js";
@@ -617,17 +618,20 @@ export async function runReadinessChecks(
   const sandbox = target === undefined && readiness.length > 0
     ? taskSandboxFor(options.taskShell ?? taskShellSelection(), { rootPath, taskId: invocation.operationId })
     : undefined;
+  // SETUP-L9-SHELL: the test commands are one group: their shell lines share one shell session (shell-session.ts), as they do in the preparation that first ran them.
+  const session = newShellSession({ limitSeconds: groupLimitSeconds(readiness) });
   let runner: PreparationCommandRunner = sandbox === undefined
     ? (command, index, root) => runProjectCommand(command, index, root, undefined, true)
-    : (command) => executionFor(SANDBOX_TARGET, { sandbox }).runCommand(command);
+    : (command) => executionFor(SANDBOX_TARGET, { sandbox }).runCommand(command, undefined, session);
   try {
     if (target !== undefined && readiness.length > 0) {
       const cli = options.devcontainerCli ?? createDevcontainerCli();
       await ensureDevcontainer(cli, target);
-      runner = (command) => runDevcontainerCommand(cli, target, command);
+      runner = (command) => runDevcontainerCommand(cli, target, command, undefined, session);
     }
     return await runReadinessCommands(rootPath, invocation, readiness, runner);
   } finally {
+    await closeShellSession(session);
     await sandbox?.dispose();
   }
 }
@@ -686,7 +690,9 @@ async function runReadinessCommands(
 
 /** Adds a line saying how a check ended, when a timeout or a signal ended it (#170). */
 function withEnding(stderr: string, index: number, timeoutSeconds: number, result: CommandResult): string {
-  const ending = result.timedOut === true
+  const ending = result.stoppedBy === "group_limit"
+    ? `readiness command ${index} was stopped: the time for its group of commands ran out`
+    : result.timedOut === true
     ? `readiness command ${index} timed out after ${timeoutSeconds} s`
     : result.signal !== undefined
       ? `readiness command ${index} was killed by ${result.signal}`

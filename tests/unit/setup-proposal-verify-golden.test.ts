@@ -54,7 +54,7 @@ describe("setup proposal verify (golden, with unique quote fallback)", () => {
       ],
       tests: [commandsItem("value", ["npm run lint"], [cite(4, '"test": "npm test"')])],
     }), { now: fixedNow });
-    expect(result).toEqual({ items: { far: "unverified", gone: "unverified", past: "verified", value: "unverified" }, final: true });
+    expect(result).toEqual({ items: { far: "unverified", gone: "unverified", past: "verified", value: "unverified" }, final: true, unmatched: { value: "npm run lint" } });
   });
 
   it("the window accepts repeated quotes only within 3 lines either side of the cited line", async () => {
@@ -82,7 +82,7 @@ describe("setup proposal verify (golden, with unique quote fallback)", () => {
     { name: "partial command suffix refused", quote: "run: npm cia", locations: [34], want: "unverified" },
     { name: "quote clipped before command suffix refused", quote: "run: npm ci", source: "run: npm cia", locations: [34], want: "unverified" },
     { name: "quote clipped after command prefix refused", quote: "npm ci # install", source: "pnpm ci # install", locations: [34], want: "unverified" },
-  ])("unique whole-file fallback: $name", async ({ quote, locations, want, source }) => {
+  ])("unique whole-file fallback: $name", async ({ quote, locations, want, source, name }) => {
     const lines = Array.from({ length: 60 }, (_, index) => `# filler ${index + 1}`);
     for (const line of locations) lines[line - 1] = source ?? quote;
     const text = lines.join("\n");
@@ -94,7 +94,7 @@ describe("setup proposal verify (golden, with unique quote fallback)", () => {
     const result = await verifyProposalDetailed(read, proposalOf({
       setup: [commandsItem("s", ["npm ci"], [cite(28, quote, { kind: "ci", path: ".github/workflows/ci.yml" })])],
     }), { now: fixedNow });
-    expect(result).toEqual({ items: { s: want }, final: true });
+    expect(result).toEqual({ items: { s: want }, final: true, ...(want === "unverified" && /^(partial|quote clipped before)/u.test(name) ? { unmatched: { s: "npm ci" } } : {}) });
   });
 
   it("a file over the code host's size cap is a FINAL unchecked (its verdicts are kept, it is not fetched again on every page load); other files are unaffected", async () => {

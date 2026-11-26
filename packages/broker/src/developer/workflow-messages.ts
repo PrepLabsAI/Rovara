@@ -6,7 +6,7 @@ import {
   WORKFLOW_KEEP_PULL_REQUESTS_NOTE, WORKFLOW_RESOLVE_FINDINGS_MAX, openReviewFindings, redactText, workflowKeepPullRequestsOffered, sendBackProblems, workflowIsReviewOnly, workflowReviewsSawPartialDiff, workflowCheckResultBroken, workflowSelectedChecks, workflowSendBackOffered, workflowApplicationEvidenceCodes, workflowReadmitsApplicationRound, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { splitTextAtLines } from "@agentx/contracts";
-import { GENERAL_FAKE_MADE_NOTE } from "@agentx/contracts";
+import { GENERAL_FAKE_MADE_NOTE, browserRunnerSentenceOf } from "@agentx/contracts";
 import { E2E_OWNER_SENTENCES } from "../e2e/owner-sentences.js";
 import { WORKFLOW_ACTION_IDS } from "./workflow-actions.js";
 import { isE2EPlanCorrectionBlockReason } from "./task-records.js";
@@ -149,6 +149,9 @@ function visibleBlockReason(reason: string): string | undefined {
 /** The broker's own reason a step stopped, in words the owner can act on; any other reason is internal. */
 export function plainBlockReason(blockReason: string | undefined): string {
   if (blockReason === undefined) return GENERIC_REASON;
+  // BROWSER-SKIP-HONESTY: a refused or skipped browser round says so in the plain words, wherever this reason is shown.
+  const browserRunner = browserRunnerSentenceOf(blockReason);
+  if (browserRunner !== undefined) return browserRunner;
   const visible = visibleBlockReason(blockReason);
   if (visible !== undefined) return slackText(blockReasonSentence(visible));
   const reworded = REWORDED_REASONS.get(blockReason);

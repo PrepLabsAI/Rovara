@@ -4,11 +4,11 @@
 // The answer is MODEL OUTPUT read from files an outsider may have written (a README, a Makefile, a CI file), so it is a proposal and nothing more. These helpers guarantee:
 //   - a command with a control or format character (a newline, an escape, a bidirectional override, a zero-width character) is left out, because a person could not see what it
 //     would run;
-//   - a command that can run is written as the executor will run it (`formatCommandLine` of `parseCommandLine`): same program, same arguments, one line. One that can't be
-//     read as a single program (`curl x | sh`) is kept as written, so the person sees what the repository asks for;
+//   - a command that can run is written as the executor will run it (`formatCommandLine` of `parseCommandLine`): same program, same arguments, one line; a line that needs a shell
+//     (`a && b`, `cd sub`, `source .venv/bin/activate`) is the line as written, which a shell runs (SETUP-L9-SHELL). One that is not one readable line (an open quote) is kept as written;
 //   - a command that fetches code from the internet and runs it is recognised by `remoteCodeReason`, whatever the model said;
 //   - a secret is a NAME (letters, digits, `_`, `.`, `-`); a value that came with it is cut off, and a name that looks like a token is left out.
-import { formatCommandLine, parseCommandLine, SETUP_TIMEOUT } from "./project-commands.js";
+import { formatCommandLine, HIDDEN_COMMAND_CHARACTER, parseCommandLine, SETUP_TIMEOUT } from "./project-commands.js";
 import { redactText } from "./redaction.js";
 
 /** What a person is told about a command that fetches code and runs it (the plan's exact words). */
@@ -19,7 +19,7 @@ export const SETUP_DRAFT_COMMANDS_MAX = 16;
 export const SETUP_DRAFT_COMMAND_MAX_CHARS = 500;
 
 const SECRET_NAME = /^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/u;
-const HIDDEN = /[\p{Cc}\p{Cf}]/u;
+const HIDDEN = HIDDEN_COMMAND_CHARACTER;
 
 // ---- commands that fetch code and run it
 //
@@ -29,7 +29,8 @@ const HIDDEN = /[\p{Cc}\p{Cf}]/u;
 //   - sources or substitutes a download (`bash <(curl ..)`, `sh -c "$(curl ..)"`, backticks);
 //   - runs a `-c`/`-e` script that downloads, substitutes a command, decodes base64 or evaluates (`bash -c '.. | sh'`, `python -c "..urlopen.."`, `node -e "fetch(..)"`);
 //   - downloads and then runs what it fetched (`curl -o f && sh f`, `wget x; chmod +x x`);
-//   - hands a shell a URL (`sh https://..`).
+//   - hands a shell a URL (`sh https://..`);
+//   - (a line is read by a shell, SETUP-L9-SHELL) once it fetches something, pipes into, or follows with, a word only a shell can resolve (`| "sh"`, `| $SHELL`, `; . ./f`, `&& "$SHELL" f`).
 
 const FETCH_TOOL = String.raw`(?:curl|wget|fetch|aria2c|iwr|irm|invoke-webrequest|invoke-restmethod)`;
 /** Programs that run what they are given; the path in front of any of them is allowed (`/usr/bin/env`, `/bin/sh`). */
@@ -51,6 +52,11 @@ const REMOTE_CODE_PATTERNS: readonly RegExp[] = [
   new RegExp(String.raw`(?<![\w-])${FETCH_TOOL}(?![\w-])[^\n]*(?:&&|;|\|\|)\s*(?:${INTERPRETER}\s|chmod\s+\+x\b|\.\/)`, "iu"),
   // sh https://...
   new RegExp(String.raw`(?<![\w-])(?:\S*\/)?(?:ba|z|da|k|c|fi|a)?sh\s+(?:-\S+\s+)*https?:\/\/`, "iu"),
+  // SETUP-L9-SHELL: a line is now read by a shell, so a name that only a shell can resolve counts as an interpreter once the line fetches something: a pipe into a quoted, expanded, escaped or globbed word
+  // (`curl u | "sh"`, `| s""h`, `| $SHELL`, `| \sh`, `| /bin/b?sh`) ...
+  new RegExp(String.raw`(?<![\w-])${FETCH_TOOL}(?![\w-])[^\n]*(?<!\|)\|&?\s*(?:\S*[*?\[\x60"']|\$|\\)`, "iu"),
+  // ... and a fetch followed (after \`;\`, \`&&\` or \`||\`) by the same kind of word, or by a dot-source of what it fetched (`curl u -o f; . ./f`, `curl u > f && "$SHELL" f`)
+  new RegExp(String.raw`(?<![\w-])${FETCH_TOOL}(?![\w-])[^\n]*(?:&&|;|\|\|)\s*(?:\.\s+\S|\S*[*?\[\x60"'$\\])`, "iu"),
 ];
 
 /** `REMOTE_CODE_REASON` when the command fetches code from the internet and runs it (by the rule above), else undefined. */
@@ -117,7 +123,7 @@ export function readCommand(raw: string): CommandReading {
     const text = formatCommandLine(parseCommandLine(redacted, ".", SETUP_TIMEOUT));
     return [...text].length > SETUP_DRAFT_COMMAND_MAX_CHARS ? { kind: "left_out", reason: "too_long" } : { kind: "kept", text };
   } catch {
-    // Not one program (a pipe, `&&`, an unclosed quote): shown as written, with whitespace made single so a person reads one line.
+    // Not a readable line (an unclosed quote): shown as written, with whitespace made single so a person reads one line.
     return { kind: "kept", text: redacted.replace(/\s+/gu, " ") };
   }
 }

@@ -228,6 +228,18 @@ async function isCompanyAdminNow(input: HostedSetupRunInput, project: string): P
   try { return input.wiring.approval !== undefined && setupHostApproverAllows(await input.wiring.approval.standing(input.principal.personId, project)); } catch { return false; }
 }
 
+/**
+ * What a confirm's audit row adds: the item ids the person ticked although the page said they do not match the code (what was REQUESTED), as a JSON list of the ids that fit in 1000 characters, and how many there were
+ * in all. Nothing when there are none. (An audit detail is a string or a flag, so the list is a JSON string, exact whatever characters an id holds.)
+ */
+export function confirmAuditDetails(body: { useAnyway?: readonly string[] | undefined }): Record<string, string> {
+  const anyway = body.useAnyway ?? [];
+  if (anyway.length === 0) return {};
+  const shown: string[] = [];
+  for (const id of anyway) { if (JSON.stringify([...shown, id]).length > 1_000) break; shown.push(id); }
+  return { useAnyway: JSON.stringify(shown), useAnywayCount: String(anyway.length) };
+}
+
 /** The audit record of one act, naming the person and why they were allowed. */
 function auditEvent(input: HostedSetupRunInput, action: string, eventId: string, project: string, basis: SetupRunBasis, details: Record<string, string | boolean>): AuditEvent {
   return {
@@ -258,6 +270,8 @@ async function applyView(input: HostedSetupRunInput, deps: SetupApplyDeps, proje
     // Browser testing: this candidate is a project's browser testing setup (decided on its own page, by a live company owner or admin), not a setup run's commands.
     ...(apply.browserTesting === undefined ? {} : { browserTesting: true }),
     check: { status: apply.checkState.status, ...(apply.checkState.failedStep === undefined ? {} : { failedStep: apply.checkState.failedStep }) },
+    // The commands used with no file evidence behind them (a row ticked although it did not match, or one that could not be checked against a file): the card marks them. Absent when none, or on a candidate made before this was kept.
+    ...(apply.usedWithoutMatch === undefined || apply.usedWithoutMatch.length === 0 ? {} : { usedWithoutMatch: apply.usedWithoutMatch.slice(0, 64) }),
     risk, changes, approver: SETUP_RISK_APPROVER[risk],
     // L4-RD: the candidate was drafted by Rovara's automatic repair (its check ran as the project's system owner); a person still decides it, by the same rule.
     ...(isSystemOwnerId(apply.by) ? { draftedByRovara: true } : {}),
@@ -541,7 +555,7 @@ export async function routeHostedSetupRun(input: HostedSetupRunInput): Promise<B
       }
       if (tail === "confirm") {
         const body = parsed(SetupConfirmBodySchema, raw);
-        await recorded(input, auditEvent(input, "setup_run.confirm_requested", `setup_run.confirm:${companyId}:${project}:${personId}:${body.requestId}`, project, basis, { requestId: body.requestId }));
+        await recorded(input, auditEvent(input, "setup_run.confirm_requested", `setup_run.confirm:${companyId}:${project}:${personId}:${body.requestId}`, project, basis, { requestId: body.requestId, ...confirmAuditDetails(body) }));
         return json(200, await confirmSetupAgent(deps, project, body, personId));
       }
       if (tail === "discard") {

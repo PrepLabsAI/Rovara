@@ -12,6 +12,7 @@
 //   - `money` and `sourceCode` are part of the decision, so a handler cannot show either by accident.
 //   - OWNER DECISION 254zzz558 (option A): a person a task is SHARED with (the stored share, "Can view"; or the Slack channel it is shared into) reads the WHOLE task page, the code changes included, and can comment; a person with no
 //     share is refused as before. So the share cells below are all "shown", and `ADMITTED_BY` lets both kinds of share into every part of the page: the task read, the events, the timeline, the question box (answers), the spec, the checks and their files, the code changes, the diff, the plan, the proof and the comments.
+import { rethrowMembershipReadFailure } from "../membership-read.js";
 import { AgentXError, agentXError, type OrgRole, type Principal } from "@agentx/contracts";
 import { taskOwnerView } from "../../developer/task-owner-view.js";
 import { taskNotFound } from "./access.js";
@@ -304,7 +305,7 @@ async function grantFor(ask: Ask, basis: Basis): Promise<"yes" | "no" | "unbound
 }
 
 /**
- * The live company membership and current project grant of the person, now: "yes", "no" (the way in is refused), or "unbound" (no seam: a laptop, where nothing is proved). A seam that throws is "no". With no seam on an
+ * The live company membership and current project grant of the person, now: "yes", "no" (the way in is refused), or "unbound" (no seam: a laptop, where nothing is proved). A seam that throws is "no" (a membership or grant read that FAILED is the one retryable 503 instead). With no seam on an
  * access that says it proves the grant (the hosted host) the answer is "no", never "unbound": a host that forgets to bind the seam admits nobody by the ways that need it (fail closed, as the hotfix's own check does).
  */
 async function liveGrantOf({ deps, input, task }: Ask): Promise<"yes" | "no" | "unbound"> {
@@ -312,7 +313,9 @@ async function liveGrantOf({ deps, input, task }: Ask): Promise<"yes" | "no" | "
   if (seam?.liveGrant === undefined) return deps.access.provesProjectGrant === true ? "no" : "unbound";
   try {
     return await seam.liveGrant({ personId: input.caller.principal.personId }, task) ? "yes" : "no";
-  } catch {
+  } catch (error) {
+    // A seam that answers is a fact; one whose membership or grant read FAILED is the retryable 503 (membership-read.ts), never "no" (which reads as "no such task").
+    rethrowMembershipReadFailure(error);
     return "no";
   }
 }
@@ -325,6 +328,7 @@ async function storedShare(deps: TaskFlowDeps, input: TaskReadInput, task: TaskR
   try {
     found = await seams.sharedReader({ developerId: input.caller.principal.personId, name: input.caller.principal.displayName }, task);
   } catch (error) {
+    rethrowMembershipReadFailure(error);
     // A lookup that fails is "no", on every read, and is said once in the log (fixed words: no person, no task, only the kind of failure).
     deps.log?.({ event: "developer.task_reader_lookup_failed", errorName: error instanceof Error ? error.name.slice(0, 40) : "unknown" });
     return undefined;

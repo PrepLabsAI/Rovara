@@ -2,7 +2,7 @@
 // Tasks keep using the approved revision meanwhile: a rejection deletes the candidate revision and the catalog still names the approved one. Company by company; nothing is carried from a row that was never approved.
 import { describe, expect, it } from "vitest";
 import { change, orgProjectCatalogKey, when, type ProjectDefinition } from "@agentx/contracts";
-import { earlierApprovalOf, setupApplyKey, storeSetupCandidate, type SetupApplyDeps, type SetupApplyRow } from "../../packages/broker/src/core/setup-agent/apply.js";
+import { earlierApprovalOf, readSetupApply, setupApplyKey, storeSetupCandidate, type SetupApplyDeps, type SetupApplyRow } from "../../packages/broker/src/core/setup-agent/apply.js";
 import { createHarness, definition, newRequestId, type Harness } from "../support/task-flow-harness.js";
 
 const base: ProjectDefinition = {
@@ -53,5 +53,20 @@ describe("earlierApprovalOf reads only a well-formed approval", () => {
     for (const bad of [{ revision: "2", at: "T" }, { revision: 2 }, { revision: -1, at: "T" }, { revision: 1.5, at: "T" }, { revision: 2, at: "" }, "x", null, 3]) {
       expect(earlierApprovalOf(row({ state: "rejected", earlierApproval: bad })), JSON.stringify(bad)).toBeUndefined();
     }
+  });
+});
+
+describe("the candidate keeps which commands were used with no file evidence (the approval card tags them)", () => {
+  it("stores them on the row, reads them back, and keeps nothing when there are none", async () => {
+    const h = await harnessWithProject();
+    await storeSetupCandidate(depsOf(h), { project: "payments", by: "local-owner", requestId: newRequestId(), taskId: "", baseRevision: 1, candidate: candidateOf(2), replyExtra: {}, alsoTransact: [], usedWithoutMatch: ["npm ci"] });
+    expect(((await rowOf(h)) as unknown as SetupApplyRow).usedWithoutMatch).toEqual(["npm ci"]);
+    expect((await readSetupApply(depsOf(h), "payments"))!.usedWithoutMatch).toEqual(["npm ci"]);
+    const other = await harnessWithProject();
+    await propose(other, 1);
+    expect(await rowOf(other)).not.toHaveProperty("usedWithoutMatch");
+    const empty = await harnessWithProject();
+    await storeSetupCandidate(depsOf(empty), { project: "payments", by: "local-owner", requestId: newRequestId(), taskId: "", baseRevision: 1, candidate: candidateOf(2), replyExtra: {}, alsoTransact: [], usedWithoutMatch: [] });
+    expect(await rowOf(empty)).not.toHaveProperty("usedWithoutMatch");
   });
 });

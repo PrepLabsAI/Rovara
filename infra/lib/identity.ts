@@ -21,13 +21,14 @@ export const SETUP_CALLBACK_PATH = "/auth/callback";
  * Admin writes (AdminCreateUser, AdminUpdateUserAttributes) are IAM-signed and are not limited by an app client's WriteAttributes.
  */
 export const USER_WRITE_DENIED = ["email_verified", "phone_number_verified"] as const;
-/** The only denied attribute a federated identity provider may map: Cognito writes it itself at federated sign-in and fails the sign-in if the client cannot. */
+/** The only denied attribute a federated identity provider may map: Cognito writes it itself at federated sign-in. Whether a mapped attribute the client cannot write is skipped or fails the sign-in is unverified: the Developer Guide and the CloudFormation reference disagree, so check before relying on either. */
 export type IdpMappedAttribute = "email_verified";
 
 /**
  * The app client's WriteAttributes: every standard attribute (email included, it is required) except USER_WRITE_DENIED,
  * EXCEPT the denied attributes a configured federated identity provider maps (none today: pass none). One rule, here only.
  * There are no custom attributes in this pool's schema (adding one replaces the pool), so there is none to list.
+ * Making email_verified writable for an IdP also makes it writable to any user.admin-scoped token from this client, so that is safe only while the client has no API sign-in flow and no aws.cognito.signin.user.admin scope (pinned at identity-stack.test.ts:46 and :64). Whoever adds an IdP should see that coupling.
  */
 export function cliWriteAttributes(idpMapped: readonly IdpMappedAttribute[] = []): cognito.ClientAttributes {
   const writable = (name: (typeof USER_WRITE_DENIED)[number]): boolean => (idpMapped as readonly string[]).includes(name);

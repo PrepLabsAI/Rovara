@@ -1,4 +1,4 @@
-import { DEVELOPER_FAILURE_MESSAGE_MAX, redactSecrets, redactText, type ProjectCommand } from "@agentx/contracts";
+import { DEVELOPER_FAILURE_MESSAGE_MAX, formatCommandLine, redactSecrets, redactText, shellLineOf, type ProjectCommand } from "@agentx/contracts";
 import type { CommandResult } from "./readiness.js";
 import { MAX_COMMAND_OUTPUT_BYTES, redactedTail, withoutSplitPair } from "./collected-process.js";
 
@@ -28,7 +28,9 @@ export function describeCommandFailure(
   result: CommandResult,
   suffix = "",
 ): string {
-  const how = result.timedOut === true
+  const how = result.stoppedBy === "group_limit"
+    ? "was stopped: the time for its group of commands ran out"
+    : result.timedOut === true
     ? `timed out after ${command.timeoutSeconds} s`
     : result.signal !== undefined
       ? `was killed by ${result.signal}`
@@ -51,6 +53,9 @@ export function describeCommandFailure(
 
 /** The executable and its arguments, redacted as an argv array (so `--token x` hides x) and as text. */
 function shownCommand(command: ProjectCommand): string {
+  // A shell line (`bash -c <line>`) is shown as the line it is, redacted as text.
+  const line = shellLineOf(command);
+  if (line !== undefined) return cut(redactText(formatCommandLine(command).replace(/\s+/g, " ").trim()), COMMAND_SHOWN_MAX);
   const argv = redactSecrets([command.executable, ...command.args]) as unknown[];
   return cut(redactText(argv.map(String).join(" ").replace(/\s+/g, " ").trim()), COMMAND_SHOWN_MAX);
 }

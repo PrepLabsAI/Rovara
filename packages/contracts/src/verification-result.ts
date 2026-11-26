@@ -9,6 +9,7 @@
 //   verified               every required check ran on the current candidate and passed.
 // This switch ships OFF (`vx`); the contract itself changes no behaviour.
 import { z } from "zod";
+import { BROWSER_RUNNER_WORDS } from "./browser-runner-words.js";
 
 /** One plain line: no control or format characters, so no reader can be misled about what a label says. */
 const NO_HIDDEN = /^[^\p{Cc}\p{Cf}]*$/u;
@@ -34,7 +35,7 @@ export const TESTING_CODE_REASONS = ["check_failed", "regression_found", "new_fa
 export const TESTING_BLOCKED_REASONS = [
   "check_could_not_start", "check_runner_failed", "check_command_broken", "timed_out", "executor_failed", "mock_unavailable", "provider_outage", "runner_busy",
   "test_machine_renewed", "test_machine_expired", "test_machine_unusable", "test_machine_drifted", "login_failed", "setup_changed_files", "leftover_processes",
-  "fails_on_original_code", "setup_failed_in_task", "host_blocked", "build_host_offline",
+  "fails_on_original_code", "setup_failed_in_task", "host_blocked", "build_host_offline", "browser_runner_missing",
 ] as const;
 /** Why a result is only "Partially verified", or why a row did not run. */
 export const TESTING_PARTIAL_REASONS = [
@@ -75,6 +76,7 @@ export const TESTING_REASON_TEXT: Readonly<Record<TestingReason, string>> = {
   setup_failed_in_task: "the test setup failed in this task",
   host_blocked: "an address the setup needs is not allowed",
   build_host_offline: "the build host is offline",
+  browser_runner_missing: BROWSER_RUNNER_WORDS.testingReason,
   full_suite_pending: "the full suite has not finished yet",
   full_suite_not_run: "the full suite was not run",
   claim_not_tested: "a claim of the plan was not tested",

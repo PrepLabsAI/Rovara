@@ -52,7 +52,8 @@ it("fails closed on missing, malformed or throwing membership before provider re
     }
   }
   h.companyOf.mockRejectedValue(new Error("private-canary"));
-  expect((await h.call()).statusCode).toBe(401);
+  // A membership read that THROWS is the retryable 503 (membership-read.ts), not the sign-in refusal; the provider is not read either way.
+  expect((await h.call()).statusCode).toBe(503);
   expect(h.clientProjects.repositories).not.toHaveBeenCalled();
   expect(h.clientProjects.repositoryDefaults).not.toHaveBeenCalled();
 });

@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import {
   AUTO_FIX_CODES, AUTO_FIX_TRANSIENT_GROUP_CODES, E2E_APPLICATION_SEND_BACK_CODES, EvidencePackSchema, WORKFLOW_AGENTX_ACTOR_ID,
-  WORKFLOW_APPLICATION_EVIDENCE_INCOMPLETE_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX,
+  WORKFLOW_APPLICATION_EVIDENCE_INCOMPLETE_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, TESTING_REASON_TEXT,
   WORKFLOW_BLOCK_REASONS, WorkflowDecisionRecordSchema, WorkflowSnapshotSchema, createCandidateManifest, createWorkflowSnapshot, wholeTaskSpendUsd,
   type AutoFixBudget, type AutoFixFacts, type WorkflowDecision, type WorkflowSnapshot,
 } from "@agentx/contracts";
@@ -85,6 +85,9 @@ describe("Verified and Partially verified (nothing failed or blocked)", () => {
     expect(run(passed(), { evidence: notTested("claim") })).toEqual(decided("partially_verified", ["claim_not_tested"]));
     expect(run(passed(), { evidence: notTested("scenario") })).toEqual(decided("partially_verified", ["scenario_not_tested"]));
     expect(run(passed(), { evidence: notTested("check") })).toEqual(decided("partially_verified", ["check_not_run"]));
+    // TEST-RESULT-HONESTY: a check in which every test was skipped is a check that did not run; "looks like it needs Postgres" is a note about a failure, not unreadable details.
+    expect(run(passed(), { evidence: pack([{}], { notTested: [{ kind: "check", id: "skipped:readiness:0", text: "pytest: every test was skipped", reason: "not tested" }] }) })).toEqual(decided("partially_verified", ["check_not_run"]));
+    expect(run(passed(), { evidence: notTested("environment", "needs_postgres") })).toEqual(decided("verified"));
     expect(run(passed(), { evidence: notTested("environment") })).toEqual(decided("partially_verified", ["evidence_unreadable"]));
     expect(run(passed(), { evidence: pack([{ after: "not_run", class: "not_rerun" }]) })).toEqual(decided("partially_verified", ["check_not_run"]));
     expect(run(passed(), { evidence: pack([{ after: "unknown", class: "not_rerun" }]) })).toEqual(decided("partially_verified", ["check_not_run"]));
@@ -260,5 +263,19 @@ describe("Opus review fixes 3 and 4", () => {
     expect(run(two, { facts, evidence: both, alreadyFailing: ["t1", "t2"] })).toEqual(decided("partially_verified", ["known_failing_only"]));
     // One of the two has a failing test nobody knows: the code's fault, whatever the other one is.
     expect(run(two, { facts, evidence: both, alreadyFailing: ["t1"] })).toEqual(decided("code_failed", ["new_failing_test", "fails_on_original_code"]));
+  });
+});
+
+// BROWSER-SKIP-HONESTY: a round that was refused for want of a browser runner is Blocked by environment with a reason that says so, not "the test machine cannot be used".
+describe("browser checks not run because there is no browser runner", () => {
+  it("is Blocked by environment, with the browser-runner reason", () => {
+    const workflow = verifyE2e(`${WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX}Browser checks not run: this install has no browser runner.`, { ...results([check("unit", "PASS")]) });
+    const outcome = run(workflow, { budget: budget({ enabled: false }) });
+    expect(outcome).toEqual(decided("blocked_by_environment", ["browser_runner_missing"]));
+    expect(TESTING_REASON_TEXT["browser_runner_missing" as keyof typeof TESTING_REASON_TEXT]).toBe("browser checks did not run: there is no browser runner");
+  });
+  it("keeps the old reason for any other runtime refusal", () => {
+    const workflow = verifyE2e(`${WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX}no web runtime of profile x is READY`, { ...results([check("unit", "PASS")]) });
+    expect(run(workflow, { budget: budget({ enabled: false }) })).toEqual(decided("blocked_by_environment", ["test_machine_unusable"]));
   });
 });

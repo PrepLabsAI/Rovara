@@ -9,7 +9,7 @@
 import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 import {
-  DEVCONTAINER_PATH_PATTERN, MALFORMED_RUN_REASON, SETUP_COMMANDS_MAX, SETUP_PROPOSAL_INFO_STRING, SETUP_SECRETS_MAX, isObject, malformedRunReason, sanitizeSetupProposal, setupProposalAnswerOf, type SetupProposal,
+  DEVCONTAINER_PATH_PATTERN, MALFORMED_RUN_REASON, PROVENANCE_NOTE_MAX, SETUP_COMMANDS_MAX, SETUP_PROPOSAL_INFO_STRING, SETUP_SECRETS_MAX, isObject, malformedRunReason, sanitizeSetupProposal, setupProposalAnswerOf, type SetupProposal,
 } from "@agentx/contracts";
 import { scanRepositories, type SetupScan } from "./setup-scan.js";
 import { dropUntrackedCitations, isTracked, trackedScanOf, type TrackedPaths } from "./setup-citations.js";
@@ -25,7 +25,7 @@ export function setupProposalFormatLines(meta: string | undefined): string[] {
     "EVERY item you propose must say where it came from, in `from`: a list of places you read. A place is { \"kind\": \"file\" | \"ci\" | \"readme\" | \"manifest\" | \"inferred\", \"repo\": <a repository name above>, \"path\": <path inside that repository>, \"quote\": <the few words you read, copied exactly> }. Do not give a line number: name the file and quote it. Rovara re-reads each file from GitHub and checks the quote is in it; an item whose place does not check out is shown to the person as unverified. Use \"inferred\" only when no file says it, and then give a \"note\" saying what you concluded it from. An item with no `from` is thrown away. Write the `quote` exactly as the file has it. The quote is required: an item with no quote is never shown as checked. It must contain the proposed command, repository URL or domain in full (at least 8 characters), copied from the file, and an item with several commands needs a place and quote for each. Do not name a commit.",
     "",
     "Rules:",
-    `- setup: one entry per repository: { "repo", "commands": [...] }, the commands that install what it needs (for example \`npm ci\`), in order, at most ${String(SETUP_COMMANDS_MAX)}. tests: the same, for the commands that check the repository works (for example \`npm test\`). Each command is ONE entry in the list, written as the repository says: never put two commands in one entry with only a space between them (\`npm run lint npm test\` is wrong: a package manager's \`run\` takes one script name; write \`npm run lint\` and \`npm test\` as two entries, or \`npm run lint && npm test\` as one). Arguments for a script go after \`--\` (\`npm run test -- --watch=false\`). No \`|\` or \`;\`; if a step needs several, name the script or Makefile target that does them.`,
+    `- setup: one entry per repository: { "repo", "commands": [...] }, the commands that install what it needs (for example \`npm ci\`), in order, at most ${String(SETUP_COMMANDS_MAX)}. tests: the same, for the commands that check the repository works (for example \`npm test\`). Each command is ONE entry in the list, written as the repository says: never put two commands in one entry with only a space between them (\`npm run lint npm test\` is wrong: a package manager's \`run\` takes one script name; write \`npm run lint\` and \`npm test\` as two entries, or \`npm run lint && npm test\` as one). Arguments for a script go after \`--\` (\`npm run test -- --watch=false\`). Rovara runs a project's commands as shell lines, in order, in one session (owner decision, lane L9): exported environment from an earlier line carries over to later lines (an activated venv, \`export X=...\`, nvm's PATH), but a \`cd\` does not, and neither does a variable that is not exported, so write \`cd web && npm ci\` on one line; a \`cd\` on its own line does not change where the next line runs.`,
     "- Write every command EXACTLY as the repository says to run it. Do not rewrite, shorten or tidy a command, and do not invent one the files do not support. If the README says to run something that downloads a script and runs it (`curl ... | sh`), list it as written; Rovara flags it for the person and never proposes it as a command.",
     "- repositories: other repositories this project's code lives in that are not listed above, as { \"name\", \"url\" (https), \"defaultBranch\" }, only when a file (the README, a config) names them.",
     "- checks: { \"name\", \"repo\", \"command\" } for the checks CI runs that a change must pass (lint, typecheck). testEnvironment: { \"hint\" } for what the tests need around them (a database, a service, a seed file), in one sentence.",
@@ -103,6 +103,58 @@ export async function askAgainAboutCommands(io: {
   await io.after();
 }
 
+// ---- smoke checks written by Rovara (SETUP-L2-RUNNABLE, owner Q6)
+//
+// A repository with no tests may get checks the agent wrote itself (import the package, print its version). They are NOT the project's tests: they are proposed as `checks` (which setup apply never turns into a test command, so they are
+// off until a person turns them on), they carry a fixed label in their name and in a citation note, and the agent is told in the prompt that they must not write anything. The label is code: whatever the agent wrote, it is put on.
+
+/** The words a person reads on a check the agent wrote itself for a repository with no tests. */
+export const SETUP_SMOKE_CHECK_LABEL = "Smoke check written by Rovara";
+const SMOKE_NAME_MAX = 80;
+
+const smokeName = (name: unknown): string => {
+  const own = typeof name === "string" ? name.trim().replace(/^smoke check( written by rovara)?\s*[:-]?\s*/iu, "") : "";
+  return `${SETUP_SMOKE_CHECK_LABEL}${own === "" ? "" : `: ${own}`}`.slice(0, SMOKE_NAME_MAX);
+};
+
+/** The citations of a smoke check with the label in the note of an `inferred` place (the model's own note follows it). */
+function smokeCitations(from: unknown, repo: unknown): unknown[] {
+  const places = Array.isArray(from) ? from.filter(isObject) : [];
+  const at = places.findIndex((place) => place["kind"] === "inferred" && typeof place["note"] === "string" && place["note"].trim() !== "");
+  if (at < 0) return [{ kind: "inferred", ...(typeof repo === "string" ? { repo } : {}), note: SETUP_SMOKE_CHECK_LABEL }, ...places];
+  return places.map((place, index) => (index !== at || (place["note"] as string).startsWith(SETUP_SMOKE_CHECK_LABEL) ? place : { ...place, note: `${SETUP_SMOKE_CHECK_LABEL}: ${place["note"] as string}`.slice(0, PROVENANCE_NOTE_MAX) }));
+}
+
+/**
+ * The agent's answer with its smoke checks labelled and kept out of `tests`. A tests entry marked `"smokeCheck": true` becomes one check per command; a check whose name starts "Smoke check" or that is marked is labelled. Returns a new
+ * object; the answer is not changed.
+ */
+export function labelSmokeChecks(answer: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = { ...answer };
+  const moved: Record<string, unknown>[] = [];
+  const isSmoke = (entry: Record<string, unknown>): boolean => entry["smokeCheck"] === true || (typeof entry["name"] === "string" && /^smoke check/iu.test(entry["name"].trim()));
+  if (Array.isArray(answer["tests"])) {
+    result["tests"] = answer["tests"].filter((entry) => {
+      if (!isObject(entry) || entry["smokeCheck"] !== true) return true;
+      const commands = Array.isArray(entry["commands"]) ? entry["commands"] : [];
+      // The reader keeps one check per repository and name: several commands of one entry need names that differ.
+      commands.forEach((command, index) => moved.push({ name: commands.length > 1 ? `${typeof entry["name"] === "string" ? entry["name"] : ""} ${String(index + 1)}`.trim() : entry["name"], repo: entry["repo"], command, from: entry["from"] }));
+      return false;
+    });
+  }
+  const own: unknown[] = Array.isArray(answer["checks"]) ? (answer["checks"] as unknown[]) : [];
+  const checks: unknown[] = [...own, ...moved.map((entry) => ({ ...entry, smokeCheck: true }))];
+  if (checks.length > 0) {
+    result["checks"] = checks.map((entry): unknown => {
+      if (!isObject(entry) || !isSmoke(entry)) return entry;
+      const rest = { ...entry };
+      delete rest["smokeCheck"];
+      return { ...rest, name: smokeName(entry["name"]), from: smokeCitations(entry["from"], entry["repo"]) };
+    });
+  }
+  return result;
+}
+
 /** What a retry says when the answer could not be read. Fixed words; the problems are the reader's own, never the model's text. */
 export function setupProposalRetryPrompt(errors: readonly string[]): string {
   return `Your answer could not be read as a setup proposal (${errors.join("; ")}). Answer again with exactly one block labelled ${SETUP_PROPOSAL_INFO_STRING} holding the JSON proposal, following the rules above, with a \`from\` on every item, and nothing after it.`;
@@ -165,7 +217,7 @@ export async function readSetupProposalAnswer(
   const answer = input.tracked === undefined ? setupProposalAnswerOf(finalText) : dropUntrackedCitations(setupProposalAnswerOf(finalText), input.tracked);
   const scanned = input.scan === undefined ? await scanRepositories(input.rootPath, input.repositories, { metaRepo: input.metaRepo }) : structuredClone(input.scan);
   const scan = input.tracked === undefined ? scanned : trackedScanOf(scanned, input.tracked);
-  const base: Record<string, unknown> = typeof answer === "object" && answer !== null && !Array.isArray(answer) ? { ...(answer as Record<string, unknown>) } : {};
+  const base: Record<string, unknown> = typeof answer === "object" && answer !== null && !Array.isArray(answer) ? labelSmokeChecks(answer as Record<string, unknown>) : {};
   const answered = Object.keys(base).length > 0;
   if (!answered) scan.notes.push("Rovara's model did not give an answer that could be read, so only what Rovara found by looking in the folders is listed.");
   if (!answered && scan.sources.length + scan.knowledge.length + scan.repositories.length + scan.setup.length + scan.tests.length + scan.checks.length + scan.foundNotUsed.length === 0 && scan.specTarget === undefined) {

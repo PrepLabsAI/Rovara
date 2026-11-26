@@ -1,6 +1,7 @@
 // packages/broker/src/aws/admin-actions.ts
 // Spec 025 E8, E9, E19: the admin actions 25e's change tools apply that no admin command had. Each
 // is called only by a confirmed change (Task 7) or by the CLI's own change path (Tasks 14, 15).
+import { readingMembership } from "../core/membership-read.js";
 import type { CompanyInviteRegistry, SignInClientRegistry } from "./developer-routes.js";
 import type { CompanyImportRegistry } from "./company-import-forwarding.js";
 import { randomUUID } from "node:crypto";
@@ -114,7 +115,8 @@ export async function resolveDeveloper(deps: AdminActionDependencies, reference:
  */
 export async function projectGrant(deps: Pick<AdminActionDependencies, "documentClient" | "tableName">, project: string, developerId: string, companyId?: string): Promise<{ role: "developer" | "administrator"; grantedAt: string | null } | undefined> {
   const key = grantKeyFor(companyId, developerId, project);
-  const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: key, ConsistentRead: true })) as { Item?: Record<string, unknown> & { role?: unknown; grantedAt?: unknown } };
+  // A grant read that throws is "the read failed" (a retryable 503, membership-read.ts), never "no grant".
+  const response = await readingMembership(() => deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: key, ConsistentRead: true }))) as { Item?: Record<string, unknown> & { role?: unknown; grantedAt?: unknown } };
   const company = namedCompany(companyId);
   if (company !== undefined) {
     const row = response.Item;

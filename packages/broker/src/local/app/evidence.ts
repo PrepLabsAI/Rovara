@@ -12,6 +12,7 @@ import type { TestProofActions } from "../../developer/test-proof-lines.js";
 import { keepEvidence, loadEvidencePack, policyKindsOf, loadEvidenceBaseline, loadEvidenceRead, type KeepEvidenceResult } from "../../core/proof/evidence-keep.js";
 import type { TestEnvDeps } from "../../core/test-env/deps.js";
 import { taskBaselineOf } from "../../core/test-env/baseline-task.js";
+import { unusedEnvironmentNote } from "../../core/test-env/unused-note.js";
 import { baselineCacheEnabled } from "../../core/test-env/switch.js";
 import type { TaskFlowDeps } from "../../core/task-flow/deps.js";
 
@@ -104,6 +105,8 @@ export function createLocalEvidence(options: {
       let late = false;
       const actions = operationArtifactActions({ store: flow.store, blobs }, task, operation);
       const browser = await readBrowserEvidenceUpload({ store: flow.store, objects: blobs }, operation);
+      // An approved environment the task did not use says which words apply (the pin's), instead of the generic "No approved test environment".
+      const environmentNote = await unusedEnvironmentNote({ store: flow.store }, task.companyId, task.project, task.taskId);
       const run = keepEvidence({
         scan: scanText, store: { blobs }, late: () => late, log,
         actions,
@@ -111,6 +114,7 @@ export function createLocalEvidence(options: {
         orgId: task.companyId, task: { ownerKey: task.ownerKey, workspaceId: task.workspaceId, taskId: task.taskId }, operationId: operation.id, candidateDigest: input.candidateDigest,
         checks: input.checks.filter((entry) => entry.source === "project"), policyKinds: policyKindsOf(workflowSelectedChecks(input.workflow.checkPolicy)),
         ...(await modelHostsAllowed(task) ? { extraNotTested: [MODEL_HOSTS_ALLOWED_ITEM] } : {}),
+        ...(environmentNote === undefined ? {} : { environmentNote }),
         // TE-C1: the candidates THIS operation's plan carried (read from the plan the broker stored with the operation, never from the worker), when the switch is on.
         ...baselineInput(options.testEnv, task.companyId, task.project, task.taskId, () => operation.dispatch.payload["testEnvironment"]),
         // TE-H1: what this operation's browser-evidence upload held (none unless the run was asked for it and uploaded), read with the operation's own workspace and id.

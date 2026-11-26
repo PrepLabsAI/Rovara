@@ -94,6 +94,22 @@ describe("the member list", () => {
   });
 });
 
+describe("MEMBERSHIP-READ-FAILS-SAFE: one failed membership read on the company admin routes", () => {
+  it("the member list is served as with every read working, or the retryable 503: never the 401 that signs a company admin out", async () => {
+    const reads = (() => { const h = world(); const seen: number[] = []; let n = 0; h.db.injectFault({ command: "GetCommand", match: (input) => { if (String((input.Key as { pk?: string }).pk).startsWith("COMPANY_MEMBER#")) n += 1; return false; }, error: { name: "X" }, times: 1_000_000 }); return h.call("GET", MEMBERS).then((answer) => { seen.push(answer.status); return n; }); })();
+    const count = await reads;
+    expect(count, "the list reads the caller's membership").toBeGreaterThan(0);
+    const wrong: string[] = [];
+    for (let failAt = 1; failAt <= count; failAt += 1) {
+      const h = world(); let n = 0;
+      h.db.injectFault({ command: "GetCommand", match: (input) => { if (String((input.Key as { pk?: string }).pk).startsWith("COMPANY_MEMBER#")) { n += 1; return n === failAt; } return false; }, error: { name: "ServiceUnavailable", message: "the store failed" }, times: 1 });
+      const answer = await h.call("GET", MEMBERS);
+      if (answer.status !== 200 && !(answer.status === 503 && (answer.body["error"] as { code?: string }).code === "RUNTIME_UNAVAILABLE")) wrong.push(`read #${String(failAt)} of ${String(count)} failed -> ${String(answer.status)}`);
+    }
+    expect(wrong).toEqual([]);
+  });
+});
+
 describe("company isolation", () => {
   it("another company's admin gets the same answer for A's people as for nobody, and changes nothing", async () => {
     const h = world(); h.as(OTHER);

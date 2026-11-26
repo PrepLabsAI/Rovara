@@ -145,9 +145,13 @@ it("install-level client signs in each company's verified member", async () => {
   h.deps.companies = { companyOf: async () => B };
   const foreign = await h.read("/v1/dev/access", options); expect(foreign.statusCode).toBe(401);
   if (via === "token") expect((await h.read("/v1/dev/client/projects/shared-project", { headers: options.headers })).statusCode).toBe(401);
-  for (const companyOf of [async () => undefined, async () => "bad", async (): Promise<string> => { throw new Error("private-canary"); }]) {
+  for (const companyOf of [async () => undefined, async () => "bad"]) {
     h.deps.companies = { companyOf }; expect(await h.read("/v1/dev/access", options)).toEqual(foreign);
   }
+  // A membership read that THROWS is the retryable 503 (membership-read.ts), never the foreign-membership refusal; its words are never shown.
+  h.deps.companies = { companyOf: async (): Promise<string> => { throw new Error("private-canary"); } };
+  const unreadable = await h.read("/v1/dev/access", options);
+  expect(unreadable.statusCode).toBe(503); expect(unreadable.body).not.toMatch(/private-canary|org_/);
   expect(foreign.body).not.toMatch(/private-canary|org_/);
 });
 
