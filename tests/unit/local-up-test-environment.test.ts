@@ -1,14 +1,12 @@
 // `rovara up` and a project's test environment: the owner proposes through the API, the page shows what changes and offers Approve only once a Prove run passed, the approval is the owner's own act on the
 // page (the API token cannot make it), and a task that starts afterwards pins the approved revision.
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Command } from "commander";
 import { afterEach, describe, expect, it } from "vitest";
 import { RANGE_IN_USE_SENTENCE, applyTestServicesMarker, hostUsesRunRange, prepareLocalTestServices } from "../../packages/broker/src/local/test-services-install.js";
 import { createOwnerImageService, createOwnerImageStore } from "../../packages/broker/src/local/test-services-owner-list.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { registerTestEnvCommand } from "../../packages/cli/src/up/test-env-command.js";
 import { IMPLICIT_COMPANY_ID, TestEnvironmentBodySchema, testEnvDigest, testServicesLimitInvalidSentence, WORKER_INVOCATION_FEATURES } from "@agentx/contracts";
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
@@ -135,42 +133,6 @@ describe("rovara up: a project's test environment", () => {
     expect(base.services).toHaveLength(0);
     const proposed = await h.api("/v1/app/projects/payments/test-environment/propose", { method: "POST", body: { environment: withPreprod } });
     expect(proposed.body["proposal"]).toMatchObject({ risk: "high", lessSafe: ["preprod"] });
-  });
-});
-
-describe("rovara test-env", () => {
-  it("shows, proposes and opens the page, and approves nothing", async () => {
-    const h = await launch();
-    await h.api("/v1/admin/projects", { method: "POST", body: PROJECT });
-    const printed: string[] = [];
-    const run = async (...args: string[]) => {
-      const program = new Command().exitOverride().option("--json");
-      registerTestEnvCommand(program, { home: h.root, fetch, stdout: { write: (text: string) => { printed.push(text); return true; } } });
-      await program.parseAsync(["node", "rovara", "test-env", ...args, "--state-dir", h.stateDirectory]);
-    };
-    await run("show", "payments");
-    expect(printed.join("")).toContain("Approved: none");
-    const file = join(h.root, "environment.json");
-    await writeFile(file, JSON.stringify(environment()));
-    printed.length = 0;
-    await run("propose", "payments", file);
-    expect(printed.join("")).toContain("risk medium");
-    printed.length = 0;
-    await run("show", "payments");
-    expect(printed.join("")).toContain("Waiting for approval");
-    expect(printed.join("")).toContain("cannot be approved until a Prove run passes");
-    printed.length = 0;
-    await run("open", "payments");
-    expect(printed.join("")).toBe("Opened in your browser.\n");
-    expect(new URL(h.opened.at(-1)!).pathname).toMatch(/^\/s\/once\//);
-    // There is no command that approves.
-    await expect(run("approve", "payments")).rejects.toThrow();
-    // A file that is not JSON, a project name that is not one, and nothing running are said plainly.
-    await writeFile(file, "not json");
-    await expect(run("propose", "payments", file)).rejects.toThrow(/not JSON/);
-    await expect(run("show", "bad name")).rejects.toThrow(/exact name/);
-    await h.runtime.stop();
-    await expect(run("show", "payments")).rejects.toThrow(/not running/);
   });
 });
 

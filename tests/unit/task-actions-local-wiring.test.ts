@@ -1,5 +1,5 @@
 // Task actions (owner decision 198) on `rovara up`: the owner's routes reach the core moves (they used to answer "not on this install yet"), against a real local runtime.
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WORKER_INVOCATION_FEATURES } from "@agentx/contracts";
@@ -7,7 +7,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import { defaultStateDirectory } from "../../packages/broker/src/local/state-directory.js";
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
 import { FakeWorkerMachines } from "../../packages/broker/src/ports/fake-worker-machines.js";
-import { readLocalRuntime } from "../../packages/cli/src/up/local-runtime.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 
 const cleanup: Array<() => Promise<void>> = [];
@@ -32,7 +31,7 @@ async function launch() {
   });
   cleanup.push(() => runtime.stop());
   const owner = async (path: string, method: string, body?: unknown): Promise<Answer> => {
-    const address = (await readLocalRuntime(home))!;
+    const address = { url: runtime.url, secret: (await readFile(runtime.sessionTokenPath, "utf8")).trim() };
     const response = await fetch(`${address.url}${path}`, { method, headers: { authorization: `Bearer ${address.secret}`, ...(body === undefined ? {} : { "content-type": "application/json" }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
     return { status: response.status, body: await response.json() as Answer["body"] };
   };

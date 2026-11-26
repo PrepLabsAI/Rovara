@@ -3,3 +3,5 @@ export { retryBlockedStep, NOTHING_TO_RETRY_STEP } from "./task-flow/retry.js";
 export { cancelTask } from "./task-flow/cancel.js";
 export { revisePlanWithLiveMessage, RevisePlanRequestSchema, REVISE_PLAN_REFUSALS } from "./sessions/live-steer-revise.js";
 export type { TaskFlowDeps } from "./task-flow/deps.js";
+// How we work: the reader of `.rovara/playbook.yaml`, for `rovara playbook check` (it needs no running install).
+export { parsePlaybookText, playbookIsEmpty } from "./playbook/file.js";

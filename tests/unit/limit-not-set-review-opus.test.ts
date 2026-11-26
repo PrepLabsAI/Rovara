@@ -14,8 +14,6 @@ import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.j
 import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
 import { locateWorkspace } from "../../packages/broker/src/core/task-flow/workspace-location.js";
 import { startLocalRuntime, type LocalRuntime } from "../../packages/broker/src/local/runtime.js";
-import { Command } from "commander";
-import { registerSetupAgentCommands } from "../../packages/cli/src/up/setup-agent.js";
 import { FakeDocker } from "../support/local/fake-docker.js";
 import { formBody, raw } from "../support/local-pages-fakes.js";
 
@@ -84,14 +82,7 @@ async function launch(extra: { environment?: NodeJS.ProcessEnv } = {}) {
     }
     throw new Error("the flow did not hand a job to the worker");
   };
-  const cli = async (...argv: string[]): Promise<string> => {
-    const out: string[] = [];
-    const program = new Command().exitOverride().option("--json", "", false);
-    registerSetupAgentCommands(program, { home: root, fetch, stdout: { write: (text: string) => { out.push(text); return true; } } });
-    await program.parseAsync(["node", "rovara", ...argv, "--state-dir", stateDirectory]);
-    return out.join("");
-  };
-  return { runtime, api, browse, page, post, callback, nextJob, store, machines, host, cli, opened };
+  return { runtime, api, browse, page, post, callback, nextJob, store, machines, host, opened };
 }
 type Harness = Awaited<ReturnType<typeof launch>>;
 

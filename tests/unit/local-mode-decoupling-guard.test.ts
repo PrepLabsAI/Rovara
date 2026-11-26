@@ -1,6 +1,6 @@
 // Issue #1538 phase 1: the hosted product and the core import nothing of `rovara up` (local laptop mode), so the local code can be deleted without touching them. Held by reading the code itself:
 // no source file outside the local code imports (statically, dynamically or for a type) the broker's `local/` folder, the local pages (`core/local-pages/`), `@agentx/broker/local` or
-// `@agentx/local-adapters`. The local code itself, the `rovara up` command (`packages/cli/src/up/`) and the local adapters package may.
+// `@agentx/local-adapters`. The local code itself and the local adapters package may.
 import { readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -9,7 +9,7 @@ const REPO = resolve(import.meta.dirname, "../..");
 const PACKAGES = join(REPO, "packages");
 const LOCAL_DIRS = ["packages/broker/src/local/", "packages/broker/src/core/local-pages/"];
 /** Where local code lives and may import local code. */
-const ALLOWED = [...LOCAL_DIRS, "packages/local-adapters/", "packages/cli/src/up/"];
+const ALLOWED = [...LOCAL_DIRS, "packages/local-adapters/"];
 const LOCAL_PACKAGES = /^@agentx\/(?:local-adapters|broker\/local)(?:\/|$)/u;
 const SPECIFIER = /(?:\bfrom\s*|\bimport\s*\(\s*|^\s*import\s+)["']([^"']+)["']/gmu;
 
