@@ -668,6 +668,7 @@
     "packages/cli/src/loop/runtime.ts": 150,
     "packages/cli/src/main.ts": 54,
     "packages/cli/src/mcp/install.ts": 20,
+    "packages/cli/src/playbook/cli.ts": 2,
     "packages/cli/src/record/invoker.ts": 5,
     "packages/cli/src/record/presidio.ts": 10,
     "packages/cli/src/record/register.ts": 7,
