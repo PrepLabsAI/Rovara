@@ -164,7 +164,7 @@
           "code": [
             "import { METRICS_NAMESPACE_ROOT, PRODUCTION_SOURCE_KINDS_NAMED_REFUSAL, PRODUCTION_SOURCE_KINDS_REFUSAL, RESOURCE_PREFIX, environmentSettingsPrefix, parseSourceKindsSwitch, productionSourceKindsAllowed } from \"./model-gateway-contracts.js\";",
             "import { applyCloudBoundary, byoCustomerAssumeConditions } from \"./model-gateway-boundary.js\";",
-            "import { GATEWAY_SERVICE_ARN_OUTPUT, addDeployedCloudSha } from \"./model-gateway-deployed-sha.js\";"
+            "import { GATEWAY_SERVICE_ARN_OUTPUT, addDeployedCodeSha } from \"./model-gateway-deployed-sha.js\";"
           ],
           "cloud": [
             "import { METRICS_NAMESPACE_ROOT, PRODUCTION_SOURCE_KINDS_NAMED_REFUSAL, PRODUCTION_SOURCE_KINDS_REFUSAL, RESOURCE_PREFIX, environmentSettingsPrefix, parseSourceKindsSwitch, productionSourceKindsAllowed } from \"@agentx/contracts\";",
@@ -185,13 +185,15 @@
         },
         {
           "cloudStart": 764,
-          "cloudCount": 1,
-          "cloudSha256": "4b86a37423bfd4f1f12d9bd29a0687e99d2db05e859e295db3247f74adfaa322",
+          "cloudCount": 2,
+          "cloudSha256": "2a50d9ebc8431e77b2f372e6605eb17b29a5c5c4de740b2457de9deef39a57d0",
           "code": [
-            "    // The release pipeline's own outputs, only when it names the commit (model-gateway-deployed-sha.ts): the deployed sha and the service its settled gate reads."
+            "    // The release pipeline's own outputs, only when it names the commit (model-gateway-deployed-sha.ts): the deployed sha and the service its settled gate reads.",
+            "    if (addDeployedCodeSha(this)) new CfnOutput(this, GATEWAY_SERVICE_ARN_OUTPUT, { value: service.serviceArn, description: \"The gateway's Fargate service (read by the release pipeline's settled gate)\" });"
           ],
           "cloud": [
-            "    // The release pipeline's own outputs, only when it names the commit (deployed-cloud-sha.ts): the deployed sha and the service its settled gate reads."
+            "    // The release pipeline's own outputs, only when it names the commit (deployed-cloud-sha.ts): the deployed sha and the service its settled gate reads.",
+            "    if (addDeployedCloudSha(this)) new CfnOutput(this, GATEWAY_SERVICE_ARN_OUTPUT, { value: service.serviceArn, description: \"The gateway's Fargate service (read by the release pipeline's settled gate)\" });"
           ]
         },
         {
@@ -466,6 +468,10 @@
     }
   },
   "divergedFromCloud": {
+    "infra/lib/model-gateway-deployed-sha.ts": {
+      "blob": "blob:fba152a6112d5ccf95515f22baa72c2c0a9b8805",
+      "reason": "#1478 phase 2: the helper writes DeployedCodeSha from -c rovaraCodeSha (the Code commit the release pipeline builds the gateway from) and no longer writes DeployedCloudSha; Cloud's pipeline reads Cloud's live sha from its web stack only"
+    },
     "scripts/model-gateway-image.ts": {
       "blob": "blob:31100e214139de772db50dc1682bdffad31467dd",
       "reason": "the context hash now also covers this script's own bytes and an IMAGE_FORMAT_VERSION constant, because Cloud's release pipeline tags the gateway image by that hash and would otherwise reuse an old image after a change to how it is built (pr/gateway-image-by-content, DEC 532: the same change is made in Cloud's copy, so the two stay equal)"
