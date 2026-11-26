@@ -96,6 +96,18 @@ async function readPageRetrying(deps: DeveloperSessionDeps, env: string | undefi
   }
 }
 
+/** Prints a page: each new item, or with --json each event as one line of JSON. */
+function show(page: SessionActivityPage, options: WatchOptions, printer: Printer): void {
+  if (!options.json) {
+    printer.print(page);
+    return;
+  }
+  for (const event of page.events) options.write(`${JSON.stringify(jsonSafe(event))}\n`);
+}
+
+/** Soon after something happened, then less often while nothing does. */
+const nextWait = (page: SessionActivityPage, wait: number): number => (page.events.length > 0 ? WATCH_POLL_MIN_MS : Math.min(WATCH_POLL_MAX_MS, Math.round(wait * 1.5)));
+
 /** Watches the session until it ends (or prints what there is, with `follow: false`). */
 export async function sessionWatch(deps: DeveloperSessionDeps, env: string | undefined, id: string, options: WatchOptions): Promise<void> {
   if (!SessionIdSchema.safeParse(id).success) throw agentXError("CONFIG_INVALID", "that is not a session ID; run rovara sessions to see yours");
@@ -105,13 +117,12 @@ export async function sessionWatch(deps: DeveloperSessionDeps, env: string | und
   let wait = WATCH_POLL_MIN_MS;
   for (;;) {
     const page = await readPageRetrying(deps, env, id, cursor, options.follow, sleep);
-    if (options.json) for (const event of page.events) options.write(`${JSON.stringify(jsonSafe(event))}\n`);
-    else printer.print(page);
+    show(page, options, printer);
     cursor = page.cursor ?? cursor;
     // A full page means more is waiting: ask again at once.
     if (page.events.length >= PAGE_LIMIT) continue;
     if (!page.active || !options.follow) break;
-    wait = page.events.length > 0 ? WATCH_POLL_MIN_MS : Math.min(WATCH_POLL_MAX_MS, Math.round(wait * 1.5));
+    wait = nextWait(page, wait);
     await sleep(wait);
   }
   if (!options.json && options.follow) options.write("\nThe session has ended.\n");
