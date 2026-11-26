@@ -1,5 +1,5 @@
 // L4-E12 (E2, DEC 254zzz55 N6): the free dry run's dependency list on the broker's side. It arrives through the setup run's EXISTING callback (`eval_dry_run`), is kept once per company and project (the newest run's), is read only at
-// the caller's own company's key, and is shown through the TH1 words. Two-company cases, a fixed-words refusal, and the laptop and hosted wiring.
+// the caller's own company's key, and is shown through the TH1 words. Two-company cases, a fixed-words refusal, and the hosted wiring.
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
@@ -16,8 +16,6 @@ import { workspaceKeys } from "../../packages/broker/src/core/task-flow/workspac
 import { taskKey } from "../../packages/broker/src/developer/task-records.js";
 import { hostedWorkersRunTestServices } from "../../packages/broker/src/aws/hosted-test-services.js";
 import { testServicesEnabled } from "../../packages/broker/src/core/test-env/test-services-switch.js";
-import { renderSetupPage } from "../../packages/broker/src/core/local-pages/setup-page.js";
-import type { SetupPageView } from "../../packages/broker/src/core/local-pages/views.js";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 
 const A = COMPANY_A.orgId;
@@ -157,7 +155,7 @@ describe("what a page shows: the TH1 words, and 'test services are off' read fro
   });
 });
 
-describe("laptop and hosted wiring", () => {
+describe("hosted wiring", () => {
   const read = (path: string) => readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
 
   it("hosted: test services count as off unless the operator set TestServiceImages=mirrored and the switch is on (the same rule that starts them on the workers)", () => {
@@ -174,17 +172,9 @@ describe("laptop and hosted wiring", () => {
     expect(read("packages/broker/src/core-host/setup-run-routes.ts")).toMatch(/healthRuns: input\.wiring\.eval\.healthRuns, testServicesOff: input\.wiring\.eval\.testServicesOff, now: input\.now/u);
   });
 
-  it("laptop: the setup page's view reads the list with the install's own switch (testServicesEnabled), and the page shows the words in the eval panel, escaped", () => {
-    expect(read("packages/broker/src/local/app/setup-agent.ts")).toMatch(/evalReachesView\(\{ store, companyId \}, project, \{ servicesOff: !testServicesEnabled\(process\.env\) \}\)/u);
+  it("the install's own switch (testServicesEnabled): on unless turned off or the images are unavailable", () => {
     expect(testServicesEnabled({})).toBe(true);
     expect(testServicesEnabled({ ROVARA_TEST_SERVICES: "0" })).toBe(false);
     expect(testServicesEnabled({ ROVARA_TEST_SERVICES_UNAVAILABLE: "images" })).toBe(false);
-    const view = { project: "demo", revision: 1, status: "ready", limits: { commands: 40, sameStepTries: 3, wallClockMin: 45, budgetCents: 400, hostAsks: 5 }, items: [], verified: true, journal: [], hostAsks: [], check: { status: "ready" }, approvedHosts: [],
-      evalDiscovery: { state: "waiting", taskId: "t", reportDigest: "d".repeat(64), suites: [{ selection: "evals/demo", files: ["a.txt"], questions: 1, categories: "1 ordinary", command: "[]", commandCwd: ".", report: "r.json", model: "m", judge: "j", caps: "c" }] },
-      evalReaches: { words: "A free dry run of your eval on main found it reaches <b>x</b>." } } as unknown as SetupPageView;
-    const html = renderSetupPage({ base: "/local", nonce: "n", sessionId: "s", formToken: () => "t" }, view);
-    expect(html).toContain("A free dry run of your eval on main found it reaches &lt;b&gt;x&lt;/b&gt;.");
-    expect(html).not.toContain("<b>x</b>");
-    expect(renderSetupPage({ base: "/local", nonce: "n", sessionId: "s", formToken: () => "t" }, { ...view, evalReaches: undefined } as unknown as SetupPageView)).not.toContain("free dry run");
   });
 });

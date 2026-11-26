@@ -1,6 +1,4 @@
 import { existsSync, readFileSync } from "node:fs";
-import { mkdtemp, realpath, rm, readdir } from "node:fs/promises";
-import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { companyMembershipFromStore } from "../../packages/broker/src/aws/company-check.js";
@@ -10,8 +8,7 @@ import { FakeSecretsManager } from "../support/ports/aws-fakes.js";
 import { createCompanySecretStore } from "../../packages/testing/src/isolation/secret-ledger.js";
 import { createMemberSecretReader, memberBoundConnectionSecrets } from "../../packages/broker/src/connections/company-secrets.js";
 import { LocalSecretError } from "../../packages/broker/src/ports/secret-error.js";
-import { createLocalConnectionSecrets } from "../../packages/broker/src/local/connection-secrets.js";
-import { createLocalSecretStore } from "../../packages/broker/src/ports/secret-stores.js";
+import { createSecretsManagerConnectionSecrets } from "../../packages/aws-adapters/src/secrets-manager/connection-secrets.js";
 import { InMemoryConnectionSecrets } from "../support/connection-fakes.js";
 const A = "org_aaaaaaaaaaaaaaaaaaaa", B = "org_bbbbbbbbbbbbbbbbbbbb";
 const name = (company: string) => `agentx/local/org-connectors/${company}/shared-secret`;
@@ -59,17 +56,16 @@ describe("membership-bound secrets", () => {
     company = undefined; await expect(bound.read(A,name(A))).rejects.toThrow(REFUSAL);
     company = A; await bound.scheduleDelete(A,name(A)); expect(await bound.read(A,name(A))).toBeUndefined(); expect(await inner.read(B,name(B))).toBe("b");
   });
-  it("local and fake reads return missing only for VALID other-company names, without touching files", async () => {
-    const directory = await realpath(await mkdtemp(join(process.env.TMPDIR!,"t6-member-")));
-    try {
-      const local = createLocalConnectionSecrets({directory,secrets:createLocalSecretStore({environment:{}}),companyId:A,env:"local"});
-      for (const inner of [local,new InMemoryConnectionSecrets("local")]) {
-        expect(await inner.read(A,name(B))).toBeUndefined();
-        for (const bad of [name(`${B}b`),`${name(B)}/../x`,null,42]) await expect(inner.read(A,bad as string)).rejects.toMatchObject({code:"FORBIDDEN"});
-        await expect(inner.read("bad",name(B))).rejects.toMatchObject({code:"FORBIDDEN"});
-      }
-      expect(await readdir(directory)).toEqual([]);
-    } finally {await rm(directory,{recursive:true,force:true});}
+  it("Secrets Manager and fake reads return missing only for VALID other-company names, without a call", async () => {
+    let clients = 0;
+    const hosted = createSecretsManagerConnectionSecrets({env:"local",clientFor:()=>{clients++;return new FakeSecretsManager();}});
+    for (const inner of [hosted,new InMemoryConnectionSecrets("local")]) {
+      expect(await inner.read(A,name(B))).toBeUndefined();
+      for (const bad of [name(`${B}b`),`${name(B)}/../x`,null,42]) await expect(inner.read(A,bad as string)).rejects.toThrow();
+      await expect(inner.read("bad",name(B))).rejects.toThrow();
+    }
+    await expect(new InMemoryConnectionSecrets("local").read(A,name(`${B}b`))).rejects.toMatchObject({code:"FORBIDDEN"});
+    expect(clients).toBe(0);
   });
 });
 

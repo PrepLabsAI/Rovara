@@ -1,12 +1,10 @@
-// The web start box's path suggestion (lead 4 J3; DEC 173): the service, the hosted route, the `rovara up` route and the Ask-path classifier. Any project role asks; anyone else, a missing project, another
+// The web start box's path suggestion (lead 4 J3; DEC 173): the service and the hosted route. Any project role asks; anyone else, a missing project, another
 // company's and a malformed name read the same; the role is read before the body; small talk never reaches the model; the model's reason is never returned; refusals are fixed words with no echo.
 import { describe, expect, it } from "vitest";
-import { IMPLICIT_COMPANY_ID, START_SUGGEST_WORDS, StartSuggestResponseSchema, pickOfKind, type OrgId, type RequestRouteKind, type RequestRouteOutcome } from "@agentx/contracts";
+import { START_SUGGEST_WORDS, StartSuggestResponseSchema, pickOfKind, type OrgId, type RequestRouteKind, type RequestRouteOutcome } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createStartSuggest, type StartRouter } from "../../packages/broker/src/core/answers/start-suggest.js";
 import { routeHostedStartSuggest, type HostedStartSuggestWiring } from "../../packages/broker/src/core-host/start-suggest-routes.js";
-import { createLocalStartSuggest } from "../../packages/broker/src/local/app/project-start-suggest.js";
-import { createAskStartRouter } from "../../packages/broker/src/local/start-router.js";
 import type { SetupRunStanding } from "../../packages/broker/src/core-host/setup-run-routes.js";
 
 const A = "org_aaaaaaaaaaaaaaaaaaaa" as OrgId;
@@ -155,62 +153,4 @@ describe("the hosted route", () => {
     expect(rb.calls).toHaveLength(1);
   });
 
-});
-
-describe("the local route (rovara up)", () => {
-  const flow = { projects: { latest: async (name: string) => (name === "alpha" ? { definition: { name: "alpha" } } : undefined) } } as never;
-  const principal = { provider: "local", personId: "owner", companyId: IMPLICIT_COMPANY_ID, roles: ["owner"] };
-  const owner = { principal } as never;
-  const request = (method = "POST", path = PATH, input: unknown = body()) => ({ method, path, headers: {}, body: JSON.stringify(input) });
-
-  it("lets the owner ask for a project this install has", async () => {
-    const r = router("small_change");
-    const routes = createLocalStartSuggest({ flow, route: r.route, now: () => T0 });
-    const answered = await routes.routes(request(), owner);
-    expect(answered?.statusCode).toBe(200);
-    expect(JSON.parse(answered!.body)).toEqual({ kind: "small_change", classifier: "ok", pick: "quick" });
-  });
-
-  it("a script token, a caller who is not the owner and a project that is not there all read 'project not found'; the classifier is never asked", async () => {
-    const r = router("question");
-    const routes = createLocalStartSuggest({ flow, route: r.route, now: () => T0 });
-    for (const [caller, path] of [[{ principal, scriptToken: { id: "t" } }, PATH], [{ principal: { ...principal, roles: ["developer"] } }, PATH], [owner, "/v1/app/projects/nope/code/suggest"]] as const) {
-      const answered = await routes.routes(request("POST", path), caller as never);
-      expect(answered?.statusCode).toBe(404);
-      expect(JSON.parse(answered!.body)).toEqual(NOT_FOUND);
-    }
-    expect(r.calls).toHaveLength(0);
-  });
-
-});
-
-describe("the Ask-path classifier", () => {
-  const answerer = (reply: string | Error, available = true) => {
-    const calls: Array<{ context: string; question: string; maxOutputTokens: number }> = [];
-    return {
-      calls,
-      answerer: {
-        available: async () => available,
-        answer: async (input: { context: string; question: string; maxOutputTokens: number }) => { calls.push(input); if (reply instanceof Error) throw reply; return { text: reply, model: "m" }; },
-      } as never,
-    };
-  };
-  const signal = () => new AbortController().signal;
-
-  it("anything but exactly one route object is unusable, and the reason is dropped", async () => {
-    for (const reply of ["sure, small_change", "{\"kind\":\"small_change\"}", "{\"kind\":\"deploy\",\"reason\":\"\"}", "{\"kind\":\"question\",\"reason\":\"\",\"extra\":1}", ""]) {
-      expect(await createAskStartRouter(answerer(reply).answerer)("fix", signal())).toEqual({ kind: "unclear", outcome: "invalid" });
-    }
-    expect(await createAskStartRouter(answerer("{\"kind\":\"question\",\"reason\":\"REASON-CANARY\"}").answerer)("why", signal())).toEqual({ kind: "question", outcome: "ok" });
-  });
-
-  it("no model set up is 'unavailable' and asks nothing; a failure is 'invalid', an abort is 'timeout' (never throws)", async () => {
-    const none = answerer("{}", false);
-    expect(await createAskStartRouter(none.answerer)("fix", signal())).toEqual({ kind: "unclear", outcome: "unavailable" });
-    expect(none.calls).toHaveLength(0);
-    expect(await createAskStartRouter(answerer(new Error("provider_status_500")).answerer)("fix", signal())).toEqual({ kind: "unclear", outcome: "invalid" });
-    const controller = new AbortController();
-    controller.abort();
-    expect(await createAskStartRouter(answerer(new Error("timed_out")).answerer)("fix", controller.signal)).toEqual({ kind: "unclear", outcome: "timeout" });
-  });
 });

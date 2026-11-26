@@ -12,7 +12,7 @@ import { resolve } from "node:path";
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
-  IMPLICIT_COMPANY_ID, SYSTEM_OWNER_PROVIDER, WORKER_INVOCATION_FEATURES, agentXError, change, effectiveSetupAgentLimits, orgProjectCatalogKey, projectMetaKey, projectRevisionKey, queryAll, setupLimitsKey, systemOwnerIdOf, when,
+  SYSTEM_OWNER_PROVIDER, WORKER_INVOCATION_FEATURES, agentXError, change, effectiveSetupAgentLimits, orgProjectCatalogKey, projectMetaKey, projectRevisionKey, queryAll, setupLimitsKey, systemOwnerIdOf, when,
   type Admission, type DocumentStore, type OrgId, type Principal, type ProjectDefinition,
 } from "@agentx/contracts";
 import { createSetupProposalSubject, setupApplyKey } from "../../packages/broker/src/core/setup-agent/apply.js";
@@ -38,7 +38,6 @@ import { effectiveSystemRunsGate, systemRunsConsentKey, type SystemRunsGate } fr
 import { fixedAutomationSwitch } from "../../packages/broker/src/core/automation/switch.js";
 import { developerIdOf } from "../../packages/broker/src/core/sessions/create.js";
 import { SETUP_REPAIR_NOT_STARTED, startUnattendedRun, type AutomatedRunRequest, type AutomatedRunStarter, type UnattendedStartDeps } from "../../packages/broker/src/core/automation/run-seam.js";
-import { SETUP_REPAIR_NOT_HERE, createTaskFlowRunStarter } from "../../packages/broker/src/local/app/automation.js";
 import { startTask as startFlowTask } from "../../packages/broker/src/core/task-flow/start.js";
 import { readWorkspace } from "../../packages/broker/src/core/task-flow/stage-machine.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
@@ -46,7 +45,7 @@ import { createAdapterRegistry } from "../../packages/broker/src/ports/adapter-r
 import { createAllowAllAdmission } from "../../packages/broker/src/ports/policy-defaults.js";
 import { FakeCodeHost } from "../../packages/broker/src/plugins/fake/code-host.js";
 import { FakeHostModel } from "../../packages/broker/src/plugins/fake/model.js";
-import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
+import type { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { createHarness, definition, newRequestId, type Harness } from "../support/task-flow-harness.js";
 
 const URL_ = "https://examplehost.test/acme/app";
@@ -602,17 +601,7 @@ describe("races, stuck states and what a draft may touch (review fixes)", () => 
 
 });
 
-describe("the local starter and the source", () => {
-  it("the laptop's task-flow starter REFUSES a setup repair request (it would make an ordinary task from its text)", async () => {
-    const start = vi.fn();
-    const starter = createTaskFlowRunStarter({ flow: { start, deps: { store: new MemoryDocumentStore({}) } } as never, owner: { companyId: IMPLICIT_COMPANY_ID, personId: "owner" } as never });
-    await expect(starter.start({
-      requestId: randomUUID(), project: "payments", agent: { agentId: "rovara-code" }, input: { text: "Set up the dev environment" }, origin: "nightly", limits: { maxMinutes: 60, maxRunUsd: 4 },
-      setupRepair: { limits: { commands: 40, sameStepTries: 3, wallClockMin: 45, budgetCents: 400, hostAsks: 5 }, seenTaskId: undefined },
-    })).rejects.toThrow(SETUP_REPAIR_NOT_HERE);
-    expect(start).not.toHaveBeenCalled();
-  });
-
+describe("the source", () => {
   it("the repair module has no path to an approval, a model or the project's revision (a guard on the source, beside the behaviour above)", () => {
     const source = ["repair-draft.ts", "repair-rows.ts"].map((file) => readFileSync(new URL(`../../packages/broker/src/core/setup-agent/${file}`, import.meta.url), "utf8")).join("\n");
     const code = source.split("\n").filter((line) => !/^\s*(\/\/|\*|\/\*)/u.test(line)).join("\n");

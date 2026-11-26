@@ -3,11 +3,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import { LEARNED_CONTEXT_FEATURE, ROVARA_SKILL_LONG_NOTE, ROVARA_SKILL_LONG_NOTE_BYTES, ROVARA_SKILL_TEXT_MAX_BYTES, ROVARA_SKILLS_PAYLOAD_BYTES_MAX, ROVARA_SKILLS_PER_STEP_MAX, ROVARA_SKILLS_FEATURE, companyScoped, when } from "@agentx/contracts";
-import { createAdapterRegistry } from "../../../packages/broker/src/ports/adapter-registry.js";
-import { createLocalOwnerApprovers, createLocalOwnerIdentity, createPriceTableMetering, localOwnerPrincipal } from "../../../packages/broker/src/ports/policy-defaults.js";
-import { createMemoryModelKeyStore } from "../../../packages/broker/src/ports/model-key-stores.js";
-import { builtinModelProviderBook } from "../../../packages/broker/src/local/model-proxy/index.js";
-import { createLocalLessons, type LocalLessons } from "../../../packages/broker/src/local/app/lessons.js";
 import { hostedDispatcherFlow } from "../../../packages/broker/src/aws/worker-machines/dispatcher-core.js";
 import { setLearnedLessonsGate } from "../../../packages/broker/src/lessons/policy.js";
 import { writeLearningMode } from "../../../packages/broker/src/lessons/document-settings.js";
@@ -21,41 +16,26 @@ import {
 } from "../../../packages/broker/src/lessons/skills.js";
 import type { TaskVisibilityPort } from "../../../packages/broker/src/lessons/access-port.js";
 import type { Lesson } from "../../../packages/broker/src/lessons/types.js";
-import { COMPANY, createHarness, definition, type Harness } from "../../support/task-flow-harness.js";
+import { COMPANY, hostedKnowledgeWorld, type HostedKnowledgeWorld } from "./hosted-world.js";
 import { draft, lessonRecord, wideAudience } from "../lessons/lesson-helpers.js";
 import { withLessonAudiences } from "../../../packages/broker/src/lessons/task-audience.js";
 
 afterEach(() => setLearnedLessonsGate(undefined));
 
-const REPO_PAY = "https://github.com/example/demo.git";
 const OTHER_COMPANY = "org_zzzzzzzzzzzzzzzzzzzz";
 const KEY = { workspaceId: COMPANY, project: "payments" };
 const DAY = 86_400_000;
 const sha = (text: string): string => createHash("sha256").update(text, "utf8").digest("hex");
 
-interface World { h: Harness; lessons: LocalLessons; deps: SkillDeps; workspaceId: string; taskId: string; eligible: { ids: string[]; complete: boolean }; setEnabled(value: boolean): void }
+type World = HostedKnowledgeWorld & { deps: SkillDeps; eligible: { ids: string[]; complete: boolean } };
 
 async function world(): Promise<World> {
-  let enabled = true;
-  const h = createHarness({ audit: "recording" });
-  await h.registerProject({ ...definition, repositories: [{ ...definition.repositories[0]!, url: REPO_PAY }] });
-  const owner = localOwnerPrincipal({ companyId: COMPANY });
-  const registry = createAdapterRegistry();
-  registry.register("storage", "memory", h.store, { isDefault: true });
-  registry.register("queue", "memory", h.queues, { isDefault: true });
-  registry.register("code-host", "github", { kind: "github", repositoryIdentity: async () => ({ id: "77", fullName: "example/demo", private: true }) } as never, { isDefault: true });
-  const lessons = createLocalLessons({
-    flow: h.deps, registry, companyId: COMPANY, owner, blobs: { get: async () => undefined } as never, milestones: { register: () => () => undefined },
-    audit: h.deps.audit, admission: h.deps.admission, metering: createPriceTableMetering({ currency: "USD", models: {} }),
-    approvers: createLocalOwnerApprovers({ owner, verifySession: () => false }), identity: createLocalOwnerIdentity({ companyId: COMPANY, linkedAccounts: [{ provider: "github", tenant: "", accountId: "owner-gh" }] }),
-    model: { choice: async () => ({ provider: "anthropic", model: "claude-test" }), keys: createMemoryModelKeyStore({ anthropic: ["sk", "ant", "test", "never", "real"].join("-") }), providers: builtinModelProviderBook(), fetch: (async () => new Response("{}", { status: 500 })) },
-    enabled: () => enabled, now: () => h.clock.now, log: () => undefined,
-  });
-  const { task } = await h.flow.start(h.owner, { requestId: randomUUID(), project: "payments", instructions: "Add a /health endpoint\nreturn 200", workflow: true, workflowPath: "QUICK" });
+  const w = await hostedKnowledgeWorld();
   const eligible = { ids: ["ann", "bob", "cy"], complete: true };
   const directory = { eligibility: async () => ({ complete: eligible.complete, membershipVersion: 1, ownerIds: ["ann"], eligibleIds: [...eligible.ids], lastEligibleLossAtMs: null }), identity: async () => ({ principals: [], groups: [] }) } as unknown as ApproverDirectory;
-  const deps: SkillDeps = { documents: h.store, lessons: lessons.runtime.store, directory, audit: lessons.runtime.audit, access: lessons.runtime.access, now: () => h.clock.now, vectors: lessons.runtime.vectors };
-  return { h, lessons, deps, workspaceId: task.workspaceId, taskId: task.taskId, eligible, setEnabled: (value) => { enabled = value; } };
+  const runtime = w.lessons.runtime;
+  const deps: SkillDeps = { documents: w.h.store, lessons: runtime.store, directory, audit: runtime.audit, access: runtime.access, now: () => w.h.clock.now, vectors: runtime.vectors };
+  return { ...w, deps, eligible };
 }
 
 const BODY = "When adding a new queue: 1. Create the queue and its dead-letter queue. 2. Register the handler in the worker. 3. Add an alarm on the dead-letter depth.";
@@ -536,10 +516,10 @@ describe("delivery to a plan or build step", () => {
         await writeLearningMode(w.h.store, KEY, mode, index + 10);
         for (const workflowMode of ["PLAN", "IMPLEMENT", "REVIEW"]) {
           const features = [LEARNED_CONTEXT_FEATURE, ROVARA_SKILLS_FEATURE];
-          const laptop = await w.lessons.learnedFor({ workspaceId: ws, operationId: randomUUID(), workflowMode, features });
+          const onCore = await w.lessons.learnedFor({ workspaceId: ws, operationId: randomUUID(), workflowMode, features });
           const onHosted = await hosted!.learned!({ workspaceId: ws, operationId: randomUUID(), workflowMode, features });
           const label = `switch ${String(switchOn)}, mode ${mode}, ${workflowMode}`;
-          expect(onHosted.rovaraSkills?.map((skill) => skill.name), label).toEqual(laptop.rovaraSkills?.map((skill) => skill.name));
+          expect(onHosted.rovaraSkills?.map((skill) => skill.name), label).toEqual(onCore.rovaraSkills?.map((skill) => skill.name));
           expect(onHosted.rovaraSkills === undefined, label).toBe(workflowMode === "REVIEW");
         }
       }

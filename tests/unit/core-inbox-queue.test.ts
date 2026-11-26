@@ -62,7 +62,7 @@ describe("the notice service's queue", () => {
     const jobs = readFileSync("packages/broker/src/aws/core-job-services.ts", "utf8");
     // Batch b18 (#1030): the thread notification may bring its own registry view; the job services' registry is the fallback.
     expect(jobs).toContain("createNoticeService({ store, now: clock, log, inbox: true, peopleOf: taskPeopleRecipients(store), ...options.notification, registry: options.notification?.registry ?? registry })");
-    const others = ["packages/broker/src/services/notices.ts", "packages/broker/src/core-host/code-modules.ts", "packages/broker/src/local/runtime.ts"].map((file) => readFileSync(file, "utf8")).join("\n");
+    const others = ["packages/broker/src/services/notices.ts", "packages/broker/src/core-host/code-modules.ts"].map((file) => readFileSync(file, "utf8")).join("\n");
     expect(others).not.toMatch(/inbox:\s*true/u);
   });
 });

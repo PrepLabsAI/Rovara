@@ -1,6 +1,6 @@
 // The second setup file of the shared-module test files (vitest.config.ts, project "shared-modules"; tests/support/process-state.ts runs first). These files run one after another in one worker on one module graph, so state a module keeps outlives the file that changed it. When a file ends this
-// puts the process-wide switches back as the file found them, empties the merge-action slots a local app filled (packages/broker/src/local/app/app.ts installs
-// the CI fix and branch sync deciders once per process; a fresh module graph has none), and turns the driving-test assumption off again. The switches are noted
+// puts the process-wide switches back as the file found them, empties the merge-action slots a file filled (the hosted job services, packages/broker/src/aws/core-job-services.ts,
+// and some tests install the CI fix and branch sync deciders; a fresh module graph has none), and turns the driving-test assumption off again. The switches are noted
 // once the file's imports have loaded: a shared helper that sets one when it is first loaded (tests/unit/lessons/lesson-helpers.ts turns the lessons switch on)
 // runs only once per worker, so its setting must stay for the files after it.
 import { afterAll, beforeAll } from "vitest";

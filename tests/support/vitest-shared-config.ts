@@ -18,23 +18,20 @@ export const nativeP0Files = [
 // catastrophically (packages/worker/src/env-detect/).
 // worker-env-detect-redos (#1256): about 160 s, the same detectors on every file kind filled to the 256 KiB read limit with hostile bodies. Split from
 // worker-env-detect-hardening, whose fast security checks (userinfo, variable names, key-shaped resource names) still run in every run.
-// local-up-flow: a whole task through `rovara up` on SQLite against a fake worker (243 tests, about 4 minutes).
 // (#1350: the workflow-e2e/* suites drove the retired spec 056 workflow, which no longer starts a task, and were removed.)
 
 export const nightlyOnlyFiles = [
   "tests/unit/eval-question-simulation.test.ts",
   "tests/unit/worker-env-detect-growth.test.ts",
   "tests/unit/worker-env-detect-redos.test.ts",
-  "tests/unit/local-up-flow.test.ts",
 ];
 
 // #1242: integration journeys that belong after a deployed beta environment in the release pipeline, not on code merge. Until that stage exists they
 // run only in CI's nightly job: unlike nightlyOnlyFiles, no pull request or push run includes them, not even when the change reaches them.
 export const postDeployFiles = [
-  // #1272: more integration journeys, about 7.5 test-minutes in all: the real `rovara up` task flow under attack (stage-selection-adversarial), pull
+  // #1272: more integration journeys, about 7.5 test-minutes in all: pull
   // request publication and maintenance against real local git remotes, the worker's real session rerunning checks, the install qualification web
   // journey, and the workflow-e2e harness's own self-tests.
-  "tests/unit/stage-selection-adversarial.test.ts",
   "tests/integration/pull-request-publication.test.ts",
   "tests/integration/worker-verification.test.ts",
   "tests/unit/install-qualification-web.test.ts",

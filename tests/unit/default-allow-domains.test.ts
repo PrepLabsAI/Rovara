@@ -1,9 +1,8 @@
-// The default list a cloud install's DNS firewall and a laptop's egress gateway allow is pinned exactly, and the names that let anyone
+// The default list a cloud install's DNS firewall allows is pinned exactly, and the names that let anyone
 // upload (a bucket of any AWS account, a GitHub repository or gist of any user) are not on it. Adding an entry means changing this file on purpose, with the reason.
 import { describe, expect, it } from "vitest";
-import { DEFAULT_AGENT_ALLOW_DOMAINS, isAllowedDomain } from "@agentx/contracts";
+import { DEFAULT_AGENT_ALLOW_DOMAINS, hostMatchesDomain, isAllowedDomain } from "@agentx/contracts";
 import { VERTEX_LOCATIONS } from "../../packages/contracts/src/vertex-locations.js";
-import { LOCAL_DEFAULT_ALLOW_DOMAINS, hostIsAllowed } from "../../packages/broker/src/local/isolation/allow-list.js";
 import { hostAlreadyAllowed } from "../../packages/broker/src/core/setup-agent/host-refusal.js";
 
 const EXACT_LIST = [
@@ -43,10 +42,9 @@ describe("the default allow-list", () => {
     );
   });
 
-  it("lets the Vertex AI, Gemini and Google token hosts through, by the way the firewall, the broker and the gateway read the list", () => {
+  it("lets the Vertex AI, Gemini and Google token hosts through, by the way the firewall and the broker read the list", () => {
     for (const host of VERTEX_GROUP_HOSTS) {
-      expect(hostIsAllowed(host, DEFAULT_AGENT_ALLOW_DOMAINS), host).toBe(true);
-      expect(hostIsAllowed(host, LOCAL_DEFAULT_ALLOW_DOMAINS), host).toBe(true);
+      expect(hostMatchesDomain(host, DEFAULT_AGENT_ALLOW_DOMAINS), host).toBe(true);
       expect(hostAlreadyAllowed(host, []), host).toBe(true);
     }
   });

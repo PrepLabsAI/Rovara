@@ -1,12 +1,10 @@
 import { IMPLICIT_COMPANY_ID as T1_COMPANY } from "@agentx/contracts";
-// The security rules of the design review in Code's own wiring: the packet route (who may read which reviewer's packet), the one-shot model key of a reviewer's slot, the rule that a design-review operation never gets a key of
-// its own, the blocker-reason rule and its record, the tier a reviewed design is approved at, the hold nobody can answer, and a flow with the switch off. Each test names the rule it holds; a change that loosens a rule fails one of them.
+// The security rules of the design review in Code's own wiring: the packet route (who may read which reviewer's packet), the blocker-reason rule and its record, the tier a reviewed design is approved at, the hold nobody can answer, and a flow with the switch off. Each test names the rule it holds; a change that loosens a rule fails one of them.
 import { describe, expect, it, vi } from "vitest";
 import { DesignReviewBindingSchema, WORKER_INVOCATION_FEATURES, agentXError, createCandidateManifest, type PlanDocument } from "@agentx/contracts";
 import { CallbackCapabilities } from "../../packages/broker/src/callbacks.js";
 import { DESIGN_REVIEW_PACKET_PATH, handleDesignReviewPacket } from "../../packages/broker/src/core/design-review/packet-route.js";
 import { readSlotPacket } from "../../packages/broker/src/core/design-review/packet-store.js";
-import { readSlotKeyRecord } from "../../packages/broker/src/core/design-review/slot-keys.js";
 import { checkDesignApproval, designApprovalRecordItems, designRiskOf, gradeApprovalRisk } from "../../packages/broker/src/core/design-review/decision.js";
 import { SubjectRefusal } from "../../packages/broker/src/core/decisions/approval-gate.js";
 import { gradePlanRisk } from "../../packages/broker/src/core/decisions/plan-risk.js";
@@ -17,9 +15,7 @@ import { designNotRunLine } from "../../packages/broker/src/core/design-review/n
 import { designProofLine } from "../../packages/broker/src/core/design-review/proof-line.js";
 import { operationKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import { COMPANY, SIGNING_KEY } from "../support/task-flow-harness.js";
-import { runDueDispatches } from "../../packages/broker/src/core/task-flow/stage-machine.js";
-import { UNPRICED_REFERENCE_PRICE, spendAcceptedFor, unpricedNoteOf, unpricedReferencePriceOf } from "../../packages/broker/src/local/app/design-review.js";
-import { answerRound, choose, localDesignReview, design, finish, mintKeys, nextJob, taskOf, toDesignPhase, toRound, waitingWithBlocker, world, planned, type World } from "../support/design-review-flow-world.js";
+import { answerRound, design, finish, mintKeys, nextJob, taskOf, toDesignPhase, toRound, waitingWithBlocker, world, planned, type World } from "../support/design-review-flow-world.js";
 
 const CAPABILITY = "x-agentx-callback-capability";
 const STAMP = "x-rovara-workspace";
@@ -133,57 +129,6 @@ describe("the packet route", () => {
   });
 });
 
-const slotGrants = localDesignReview;
-
-describe("a reviewer's model key", () => {
-  it("is minted once: a second ask for the slot is refused, and the first key is blocked at the proxy", async () => {
-    const w = await world();
-    const { round, binding } = await dispatched(w);
-    const { local, closed } = slotGrants(w);
-    const operation = { workspaceId: w.workspaceId, operationId: round.operation.id, fence: round.operation.fence };
-    const slot = binding.reviewers[0]!.keySlot;
-    const grant = await local.slotGrants.describeSlot(operation, slot);
-    expect(grant).toMatchObject({ routes: [{ alias: "anthropic/m1" }], budget: { currency: "USD" }, projectName: "payments" });
-    expect(grant!.budget!.micros).toBeGreaterThan(0);
-    await local.slotGrants.slotMinted(operation, slot, { keyId: "a".repeat(64), expiresAt: Date.now() + 1 });
-    expect(await readSlotKeyRecord(w.h.store, { orgId: COMPANY, operationId: round.operation.id, slot })).toMatchObject({ keyId: "a".repeat(64), askedAgain: 0 });
-    await expect(local.slotGrants.describeSlot(operation, slot)).rejects.toMatchObject({ code: "FORBIDDEN" });
-    expect(closed).toEqual(["a".repeat(64)]);
-    expect(await readSlotKeyRecord(w.h.store, { orgId: COMPANY, operationId: round.operation.id, slot })).toMatchObject({ askedAgain: 1 });
-  });
-
-  it("is recorded once even when two asks race past the check: the second record is refused", async () => {
-    const w = await world();
-    const { round, binding } = await dispatched(w);
-    const { local } = slotGrants(w);
-    const operation = { workspaceId: w.workspaceId, operationId: round.operation.id, fence: round.operation.fence };
-    const slot = binding.reviewers[0]!.keySlot;
-    await local.slotGrants.slotMinted(operation, slot, { keyId: "b".repeat(64), expiresAt: Date.now() + 1 });
-    await expect(local.slotGrants.slotMinted(operation, slot, { keyId: "c".repeat(64), expiresAt: Date.now() + 1 })).rejects.toMatchObject({ code: "FORBIDDEN" });
-    expect((await readSlotKeyRecord(w.h.store, { orgId: COMPANY, operationId: round.operation.id, slot }))!.keyId).toBe("b".repeat(64));
-  });
-
-  it("is given only for a slot of the stored binding and only for the model the binding names", async () => {
-    const w = await world();
-    const { round, binding } = await dispatched(w);
-    const operation = { workspaceId: w.workspaceId, operationId: round.operation.id, fence: round.operation.fence };
-    const slot = binding.reviewers[0]!.keySlot;
-    expect(await slotGrants(w).local.slotGrants.describeSlot(operation, "r1-other")).toBeUndefined();
-    expect(await slotGrants(w, { model: "other" }).local.slotGrants.describeSlot(operation, slot)).toBeUndefined();
-  });
-
-  it("is never the operation's own: a design-review operation is known as one, an ordinary one is not", async () => {
-    const w = await world();
-    const { round } = await dispatched(w);
-    const { local } = slotGrants(w);
-    expect(await local.isDesignReviewOperation({ workspaceId: w.workspaceId, operationId: round.operation.id })).toBe(true);
-    const other = await world();
-    await toDesignPhase(other);
-    const planning = await nextJob(other);
-    expect(await slotGrants(other).local.isDesignReviewOperation({ workspaceId: other.workspaceId, operationId: planning.operation.id })).toBe(false);
-  });
-});
-
 describe("approving a design with an open blocker", () => {
   it("needs a one-line reason, takes no reason where no blocker is open, and leaves the approval record with the reason", async () => {
     const w = await world();
@@ -244,80 +189,11 @@ describe("the tier a reviewed design is approved at", () => {
   });
 });
 
-describe("a reviewer's model key when the model has no price here", () => {
-  it("is not given unless the owner accepted \"price unknown\" at the cost hold: a model nobody priced and nobody accepted gets no key", async () => {
-    const w = await world();
-    const { round, binding } = await dispatched(w);
-    const { local } = slotGrants(w, { priced: false });
-    const operation = { workspaceId: w.workspaceId, operationId: round.operation.id, fence: round.operation.fence };
-    expect(await local.slotGrants.describeSlot(operation, binding.reviewers[0]!.keySlot)).toBeUndefined();
-  });
-
-  it("is bounded by an assumed price once the owner accepted: the review runs on a laptop with an unpriced model, and its ceiling is held at the dearest public class", async () => {
-    const w = await world({ price: false, holdAnswerable: true });
-    await toRound(w);
-    expect((await taskOf(w)).workflow.designReview).toMatchObject({ status: "waiting_cost" });
-    expect(await choose(w, "run_unpriced")).toMatchObject({ status: "decided" });
-    await runDueDispatches(w.h.deps);
-    const round = await nextJob(w);
-    const binding = DesignReviewBindingSchema.parse(round.operation.designReview);
-    const { local } = slotGrants(w, { priced: false });
-    const operation = { workspaceId: w.workspaceId, operationId: round.operation.id, fence: round.operation.fence };
-    const grant = await local.slotGrants.describeSlot(operation, binding.reviewers[0]!.keySlot);
-    expect(grant).toMatchObject({ assumedPrice: UNPRICED_REFERENCE_PRICE, routes: [{ alias: "anthropic/m1" }], budget: { currency: "USD" } });
-    expect(grant!.budget!.micros).toBeGreaterThan(0);
-    expect(UNPRICED_REFERENCE_PRICE).toEqual({ inputMicrosPerMillionTokens: 15_000_000, outputMicrosPerMillionTokens: 75_000_000 });
-    // A priced model never carries one.
-    const priced = slotGrants(w, { priced: true }).local;
-    expect((await priced.slotGrants.describeSlot(operation, binding.reviewers[1]?.keySlot ?? binding.reviewers[0]!.keySlot))).not.toHaveProperty("assumedPrice");
-  });
-});
-
-describe("the figure an unpriced run is counted at", () => {
-  it("is $15 and $75 per million tokens unless the install states another, and a figure that is not two positive numbers is ignored", () => {
-    expect(unpricedReferencePriceOf({})).toEqual(UNPRICED_REFERENCE_PRICE);
-    // The smallest figure that is a price: one micro-dollar per million tokens.
-    expect(unpricedReferencePriceOf({ ROVARA_UNPRICED_REFERENCE_PRICE: "0.000001,0.000001" })).toEqual({ inputMicrosPerMillionTokens: 1, outputMicrosPerMillionTokens: 1 });
-    expect(unpricedReferencePriceOf({ ROVARA_UNPRICED_REFERENCE_PRICE: "150, 600" })).toEqual({ inputMicrosPerMillionTokens: 150_000_000, outputMicrosPerMillionTokens: 600_000_000 });
-    for (const bad of ["", "15", "15,75,1", "a,b", "0,75", "-1,5", "15,Infinity", "1000000,5", "0.0000001,0.0000001", "1e-9,1e-9", "0.0000004,75", "15,0.0000004"]) expect(unpricedReferencePriceOf({ ROVARA_UNPRICED_REFERENCE_PRICE: bad })).toEqual(UNPRICED_REFERENCE_PRICE);
-    expect(unpricedNoteOf(UNPRICED_REFERENCE_PRICE)).toBe("If you run it anyway, Rovara counts it at $15 and $75 per million tokens (input and output). A dearer model can cost more than the limit.");
-  });
-});
-
-describe("which round an accepted \"price unknown\" is for", () => {
-  const at = (minute: number) => `2026-11-09T10:${String(minute).padStart(2, "0")}:00.000Z`;
-  const reviewer = (endedAt: string) => ({ endedAt }) as never;
-  const review = (approvalMinutes: number[], round1EndedMinute?: number) => ({
-    rounds: round1EndedMinute === undefined ? [] : [{ round: 1, reviewers: [reviewer(at(round1EndedMinute))] }],
-    approvals: approvalMinutes.map((minute) => ({ kind: "spend", at: at(minute), by: { actorId: "a" } })),
-  }) as never;
-  it("is the round the approval was made for: an approval from before the previous round ended does not cover a later round, and one made after it does", () => {
-    // Round 1: the approval came before its operation was made.
-    expect(spendAcceptedFor(review([5]), 1, at(6))).toBe(true);
-    expect(spendAcceptedFor(review([]), 1, at(6))).toBe(false);
-    // An approval made after the operation started is not for it.
-    expect(spendAcceptedFor(review([7]), 1, at(6))).toBe(false);
-    // Round 2: the round-1 approval (minute 5) is older than the end of round 1 (minute 20): no.
-    expect(spendAcceptedFor(review([5], 20), 2, at(30))).toBe(false);
-    // A fresh approval after round 1 ended covers round 2.
-    expect(spendAcceptedFor(review([5, 25], 20), 2, at(30))).toBe(true);
-    // Only a spend approval counts.
-    expect(spendAcceptedFor({ rounds: [], approvals: [{ kind: "raise_cap", at: at(5), by: { actorId: "a" }, fromUsd: 10, capUsd: 20 }] } as never, 1, at(6))).toBe(false);
-  });
-});
-
 describe("the hold nobody can answer", () => {
   it("ends the review as not run with a plain word, and the design goes to the owner: a task is never stranded at a cost choice it cannot be asked", async () => {
     const w = await world({ price: false });
     await toRound(w);
     expect((await taskOf(w)).workflow).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING", reviewPhase: "DESIGN", designReview: { status: "not_run", notRunReason: "cost_declined" } });
-  });
-});
-
-describe("the cost hold on this install", () => {
-  it("is answerable in the local wiring: the owner's page offers the choices, so a hold waits for the owner instead of ending the review", async () => {
-    const { local } = slotGrants(await world());
-    expect(local.runtime.holdAnswerable).toBe(true);
   });
 });
 

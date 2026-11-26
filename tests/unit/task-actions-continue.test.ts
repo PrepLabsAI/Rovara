@@ -11,7 +11,6 @@ import { change, queryAll, when } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import type { TaskFlowDeps } from "../../packages/broker/src/core/task-flow/deps.js";
 import { createTaskActions } from "../../packages/broker/src/core/task-flow/task-actions.js";
-import { createOwnerRoutes } from "../../packages/broker/src/local/app/routes.js";
 import { createAllowAllAdmission } from "../../packages/broker/src/ports/policy-defaults.js";
 import { COMPANY } from "../support/task-flow-harness.js";
 import { OWNER_KEY, REQUEST_A, REQUEST_B, TASK_ID, operationsOf, promptOf, seed, seedPlain, stateOf, taskOf, WORKSPACE_ID } from "../support/task-actions-world.js";
@@ -126,24 +125,11 @@ describe("continue", () => {
     expect(await broken.h.store.get(continueRecordKey(TASK_ID, REQUEST_A))).toBeUndefined();
   });
 
-});
-
-describe("the owner's route", () => {
-  const route = async (who: "owner" | "guest") => {
+  it("says no such task to anyone but the owner, and starts nothing", async () => {
     const { h } = await seedPlain();
-    const routes = createOwnerRoutes({ flow: h.flow, blobs: {} as never, openPage: async () => undefined, version: "0.0.0-test" });
-    const answered = (await routes({ method: "POST", path: `/v1/dev/tasks/${TASK_ID}/continue`, headers: {}, body: JSON.stringify(ask()) }, who === "owner" ? h.owner : h.guest))!;
-    return { h, status: answered.statusCode, json: JSON.parse(answered.body) as { task?: { status: string }; error?: { code: string; message: string } } };
-  };
-
-  it("serves continue at /continue as the owner, and says no such task to anyone else", async () => {
-    const ok = await route("owner");
-    expect(ok.status).toBe(200);
-    expect(ok.json.task?.status).toBe("RUNNING");
-    const no = await route("guest");
-    expect(no.status).toBe(404);
-    expect(no.json.error?.code).toBe("TASK_NOT_FOUND");
-    expect(await secondRound(no.h)).toHaveLength(0);
+    const before = await stateOf(h);
+    await expect(createTaskActions(h.deps).continue(h.guest, TASK_ID, ask())).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+    expect(await stateOf(h)).toEqual(before);
+    expect(await secondRound(h)).toHaveLength(0);
   });
 });
-

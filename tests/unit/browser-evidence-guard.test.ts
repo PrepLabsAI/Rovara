@@ -1,8 +1,6 @@
 
-import { readFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { afterAll, describe, expect, it } from "vitest";
-import { compactJsonText } from "../../packages/broker/src/local/isolation/browser-evidence-setting.js";
 import { installedExecutorSeccompProfilePath } from "../../packages/verifier/src/host/executor-seccomp.js";
 import { executorContainerArgs } from "../../packages/verifier/src/host/executor-container.js";
 import { browserEvidenceExecutorArgs } from "../../packages/worker/src/browser-evidence-run.js";
@@ -10,7 +8,6 @@ import { browserEvidenceExecutorArgs } from "../../packages/worker/src/browser-e
 const scratch: string[] = [];
 afterAll(async () => { while (scratch.length > 0) await rm(scratch.pop()!, { recursive: true, force: true }); });
 const EXECUTOR = `sha256:${"e".repeat(64)}`;
-const SECCOMP = compactJsonText(readFileSync(installedExecutorSeccompProfilePath(), "utf8"));
 const SANDBOX = "agentx-task-op1-abcd1234";
 const CAPTURE = "rovara-be-0123456789ab";
 const PLAN = "eyJwb3J0Ijo0MzIxfQ";
@@ -23,10 +20,5 @@ describe("the arguments the worker passes are the shape the guard accepts", () =
     expect(args).toEqual(expect.arrayContaining(executorContainerArgs(installedExecutorSeccompProfilePath())));
     expect(args.slice(-3)).toEqual(["node", ENTRY, PLAN]);
     expect(args).toEqual(expect.arrayContaining(["--shm-size", "1g", "--memory", "2g", "--memory-swap", "2g", "--pids-limit", "1024", "--cpus", "2", "--tmpfs", `/tmp:${TMPFS}`]));
-  });
-  it("compacts the profile as the docker CLI does (the guard compares text), and refuses text that is not JSON", () => {
-    expect(SECCOMP).toBe(JSON.stringify(JSON.parse(readFileSync(installedExecutorSeccompProfilePath(), "utf8"))));
-    expect(compactJsonText('{ "a": "x  y\\" z", "b": [1, 2],\n "c": {} }')).toBe('{"a":"x  y\\" z","b":[1,2],"c":{}}');
-    expect(() => compactJsonText("{ nope")).toThrow();
   });
 });

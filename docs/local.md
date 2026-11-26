@@ -1,6 +1,6 @@
 # Running Rovara on your own computer (`rovara up`)
 
-> **Removed.** The `rovara up` command, `--env local` and the commands that talked to it (`rovara open`, `token`, `chat`, `setup-agent`, `test-env`, `models`, `connections`, `design-review`, `diagnosis`, `intake`, `second-review`, `playbook show` / `open`) were removed in issue #1538 (phase 2). `rovara playbook check` and `rovara playbook init` remain. The local runtime this page describes is deleted in a later phase; the page is kept until then.
+> **Removed.** `rovara up`, `--env local` and the commands that talked to it were removed in issue #1538 (phase 2), and the local runtime and its pages (`packages/broker/src/local/`, `packages/broker/src/core/local-pages/`) were deleted in phase 3. `rovara playbook check` and `rovara playbook init` remain. This page is kept only because other pages still link to sections that describe shared behaviour; it no longer describes something you can run.
 
 `rovara up` runs Rovara as ONE local Node process: an HTTP server on `127.0.0.1`, the plug-in registry behind it, and a Docker
 container for each task's worker. There is no cloud account, no Slack and no GitHub App. This page is the skeleton (lane L4): the

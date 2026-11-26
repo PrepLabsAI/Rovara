@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { IMPLICIT_COMPANY_ID, type ActorRef, type ChannelDecision, type ConversationRef, type InboundMessage, type OrgId } from "@agentx/contracts";
 import { createLocalOwnerApprovers } from "../../packages/broker/src/ports/policy-defaults.js";
-import { chatDecisionMethod } from "../../packages/broker/src/local/app/chat.js";
+import { CHAT_METHOD_PREFIX } from "../../packages/broker/src/core/decisions/strong-methods.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { FakeChannelAdapter } from "../../packages/broker/src/ports/fake-channel-adapter.js";
 import {
@@ -128,7 +128,7 @@ describe("a chat press is never an approval on Code's own rules", () => {
   it("is not a method Code's approvers offer, and a proof of that method is refused whatever it carries", async () => {
     const approvers = createLocalOwnerApprovers({ verifySession: () => true });
     const request = { companyId: ORG, requestId: "req-12345678", kind: "plan", subject: { type: "workflow-document", id: "task-1" }, revision: 3, artifactDigest: DIGEST, risk: "low" as const };
-    const method = chatDecisionMethod("examplechat");
+    const method = `${CHAT_METHOD_PREFIX}examplechat`;
     expect(method).toBe("chat-examplechat");
     const requirement = await approvers.requirement(request);
     expect(requirement.methods).not.toContain(method);

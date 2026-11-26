@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 import {
   MODEL_REQUEST_FORMATS, MODEL_ROUTE_APIS, PLUGIN_POINTS, PLUGIN_POINT_CARDINALITY, PluginConfigSchema, SecretValue, assertModelProvider, isLoopbackHost, modelPriceRows, modelProviderAddressProblem,
-  providerFormat, type ModelProviderAdapter,
+  type ModelProviderAdapter,
 } from "@agentx/contracts";
 import { createAdapterRegistry, loadAdapters } from "../../packages/broker/src/ports/adapter-registry.js";
 import {
@@ -10,9 +10,6 @@ import {
   modelProviderPlugin, registerBuiltinModelProviders,
 } from "../../packages/broker/src/plugins/model-provider/index.js";
 import { AWS_MODULE_MISSING, AwsCredentialSetupError, createAwsCredentialSource, describeBedrockSettings, assertBuiltinIdsKept, type AwsCredentialLoaders } from "../../packages/broker/src/plugins/model-provider/index.js";
-import { createLocalModelKeyStore, modelKeyRefs } from "../../packages/broker/src/local/runtime.js";
-import { credentialOf } from "../../packages/broker/src/local/model-proxy/credentials.js";
-import { DEFAULT_PROVIDER_ENDPOINTS, upstreamTarget, upstreamUrl } from "../../packages/broker/src/local/model-proxy/index.js";
 
 const gateway: ModelProviderAdapter = {
   kind: "company-gateway", name: "Company gateway", address: "https://models.example.test/v1", signIn: { kind: "bearer-key" },
@@ -36,12 +33,11 @@ describe("the model-provider point", () => {
     expect(() => registry.register("model-provider", "company-gateway", { ...gateway, kind: "other" })).toThrow(/kind must be the name/u);
   });
 
-  it("keeps the built-in rows to what the proxy always did: address, sign-in and request format", () => {
-    expect(DEFAULT_PROVIDER_ENDPOINTS).toEqual({ anthropic: "https://api.anthropic.com", openai: "https://api.openai.com", openrouter: "https://openrouter.ai/api" });
+  it("keeps the built-in rows to their address, sign-in and request format", () => {
+    expect(Object.fromEntries(BUILTIN_MODEL_PROVIDERS.map((provider) => [provider.kind, provider.address]))).toEqual({ anthropic: "https://api.anthropic.com", openai: "https://api.openai.com", openrouter: "https://openrouter.ai/api" });
     expect(ANTHROPIC_PROVIDER.signIn).toEqual({ kind: "named-header", header: "x-api-key" });
     expect(OPENAI_PROVIDER.signIn).toEqual({ kind: "bearer-key" });
     expect(OPENROUTER_PROVIDER.formats.map((entry) => entry.format)).toEqual(["openai-completions"]);
-    expect(upstreamUrl(DEFAULT_PROVIDER_ENDPOINTS, "openai", "openai-completions")).toBe("https://api.openai.com/v1/chat/completions");
     expect(BUILTIN_MODEL_PROVIDERS).toHaveLength(3);
   });
 });
@@ -121,20 +117,6 @@ describe("the module helper", () => {
     }
   });
 
-});
-
-describe("the request address", () => {
-
-  it("puts the model in the address for the vertex variant, and picks the streaming verb", () => {
-    const vertex: ModelProviderAdapter = {
-      kind: "vertex-claude", name: "Claude on Google Cloud", address: "https://us-east5-aiplatform.googleapis.com/v1/projects/p/locations/us-east5/publishers/anthropic/models", signIn: { kind: "google-oauth" },
-      formats: [{ format: "anthropic-messages", variant: "vertex", capabilities: NATIVE_CHAT_CAPABILITIES }],
-    };
-    assertModelProvider(vertex);
-    const format = providerFormat(vertex)!;
-    expect(upstreamTarget(vertex, format, "claude-test@20250101", false)).toEqual({ url: `${vertex.address}/claude-test%4020250101:rawPredict`, variant: "vertex" });
-    expect(upstreamTarget(vertex, format, "claude-test", true).url.endsWith("/claude-test:streamRawPredict")).toBe(true);
-  });
 });
 
 describe("Bedrock as a normal provider", () => {
@@ -311,31 +293,5 @@ describe("provider ids and AWS hosts (review L4, L6)", () => {
     for (const address of ["https://models.example.test", "https://amazonaws.com.example.test", "https://bedrock-runtime.us-east-1.amazonaws.com", "http://127.0.0.1:9", "https://evil-amazonaws.com", "https://bedrock-runtime.us-west-2.example.test"]) {
       expect(() => assertModelProvider(aws(address)), address).toThrow();
     }
-  });
-});
-
-describe("model keys go through the secrets socket (P4 merge)", () => {
-  it("asks the socket for the namespaced variable, then the key file entry, for a plug-in provider; the built-ins keep their names", async () => {
-    expect(modelKeyRefs("anthropic")).toEqual([{ env: "ANTHROPIC_API_KEY" }, { key: "anthropic" }]);
-    expect(modelKeyRefs("company-gateway")).toEqual([{ env: "ROVARA_MODEL_COMPANY_GATEWAY_API_KEY" }, { key: "company-gateway" }]);
-    const asked: string[] = [];
-    const secrets = { async read(_company: string, ref: Readonly<Record<string, string>>) { asked.push(JSON.stringify(ref)); return ref.env === "ROVARA_MODEL_COMPANY_GATEWAY_API_KEY" ? new SecretValue("key-never-real") : undefined; } };
-    const providers = ["anthropic"];
-    const keys = createLocalModelKeyStore("/nowhere", {}, secrets, providers);
-    expect(await keys.providers("org")).toEqual([]);
-    providers.push("company-gateway");
-    expect(await keys.providers("org")).toEqual(["company-gateway"]);
-    expect(asked).toContain('{"env":"ROVARA_MODEL_COMPANY_GATEWAY_API_KEY"}');
-    expect(asked).not.toContain('{"env":"COMPANY_GATEWAY_API_KEY"}');
-  });
-
-  it("makes the socket's answer win over the provider's own credential()", async () => {
-    let ran = 0;
-    const provider: ModelProviderAdapter = { ...gateway, signIn: { kind: "google-oauth" }, credential: async () => { ran += 1; return new SecretValue("refreshed"); } };
-    const keys = createLocalModelKeyStore("/nowhere", {}, { async read(_c, ref) { return ref.env === "ROVARA_MODEL_COMPANY_GATEWAY_API_KEY" ? new SecretValue("stored") : undefined; } }, ["company-gateway"]);
-    expect((await credentialOf(provider, keys, "org"))?.reveal()).toBe("stored");
-    expect(ran).toBe(0);
-    const none = createLocalModelKeyStore("/nowhere", {}, { async read() { return undefined; } }, ["company-gateway"]);
-    expect((await credentialOf(provider, none, "org"))?.reveal()).toBe("refreshed");
   });
 });

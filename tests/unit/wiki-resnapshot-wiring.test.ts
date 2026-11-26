@@ -1,12 +1,10 @@
-// The one automatic new snapshot of a wiki build whose pinned commit is gone from the default branch, wired as the hosted core and the laptop wire it: the person's LIVE standing gates it, the new map is made ONCE (the plan and the pins
-// come from the same snapshot), a company's task of another company starts nothing, and the laptop's owner gets the same retry.
+// The one automatic new snapshot of a wiki build whose pinned commit is gone from the default branch, wired as the hosted core wires it: the person's LIVE standing gates it, the new map is made ONCE (the plan and the pins
+// come from the same snapshot), and a company's task of another company starts nothing.
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
-import { PREPARE_PIN_MOVED_MARKER, WORKER_INVOCATION_FEATURES, type OrgId, type WikiFileMap } from "@agentx/contracts";
+import { PREPARE_PIN_MOVED_MARKER, WORKER_INVOCATION_FEATURES, type OrgId } from "@agentx/contracts";
 import { hostedWikiResnapshot } from "../../packages/broker/src/aws/wiki-resnapshot.js";
-import { createLocalWikiBuild } from "../../packages/broker/src/local/app/wiki-build.js";
-import type { LocalWikiMap } from "../../packages/broker/src/local/app/wiki-map.js";
 import type { FileMapHost } from "../../packages/broker/src/core/wiki/file-map.js";
 import { createWikiBuildStarter } from "../../packages/broker/src/core/wiki-build/starter.js";
 import { continueWikiBuild, readWikiBuildPointer, resnapshotWikiBuild, startWikiBuild, type WikiBuildDeps } from "../../packages/broker/src/core/wiki-build/run.js";
@@ -92,24 +90,6 @@ describe("hosted: the automatic new snapshot", () => {
   });
 });
 
-describe("laptop: the same one automatic new snapshot", () => {
-  // MUTANT local: the laptop wires no retry, so a rewrite there ends plain code_moved and the owner presses Build by hand.
-  it("starts the new run over a new map, ONCE, for the owner", async () => {
-    const w = world();
-    await w.h.registerProject();
-    const made: WikiFileMap = { ...fileMap([repoEntry("demo", [area("src", { rank: 1 })])]), project: "payments" };
-    made.repositories[0]!.commit = MOVED;
-    const mapFor = vi.fn(async () => made);
-    const wikiMap: LocalWikiMap = { routes: async () => undefined, mapFor };
-    const build = createLocalWikiBuild({ flow: w.h.deps, wikiMap, owner: w.h.owner.principal, companyId, now: () => w.h.deps.now!().getTime(), modelAccessConfigured: async () => true, starter: createWikiBuildStarter });
-    w.h.deps.wikiBuildResnapshot = (run) => build.resnapshot(run);
-    const { first, last } = await startAndFail(w);
-    expect(last).toMatchObject({ resnapshotOf: first.taskId, pins: [{ repo: "demo", commit: MOVED }] });
-    expect(mapFor).toHaveBeenCalledTimes(1);
-    expect(mapFor).toHaveBeenCalledWith("payments", expect.anything(), expect.objectContaining({ remake: true }));
-  });
-});
-
 describe("the chips the person chose survive a new snapshot", () => {
   // MUTANT chain: a run started by the retry forgets the person's chips, so Continue after a second rewrite plans the map's defaults.
   it("Continue after the retry's own preparation also failed plans the same pages as the first Build", async () => {
@@ -143,8 +123,8 @@ describe("the chips the person chose survive a new snapshot", () => {
 });
 
 describe("the retry is wired where the engines are built", () => {
-  // MUTANT wiring: the hook is not installed on the hosted runtime or on the laptop's flow, so a rewrite ends plain code_moved there. (The engines need a whole deployment to boot; the assignment is pinned here.)
-  it.each([["hosted", "../../packages/broker/src/aws/core-engine-root.ts", /flow\.deps\.wikiBuildResnapshot = hostedWikiResnapshot\(/u], ["laptop", "../../packages/broker/src/local/app/app.ts", /flow\.deps\.wikiBuildResnapshot = \(run\) => wikiBuildControls\.resnapshot\(run\)/u]])("%s", (_name, file, pattern) => {
+  // MUTANT wiring: the hook is not installed on the hosted runtime, so a rewrite ends plain code_moved there. (The engines need a whole deployment to boot; the assignment is pinned here.)
+  it.each([["hosted", "../../packages/broker/src/aws/core-engine-root.ts", /flow\.deps\.wikiBuildResnapshot = hostedWikiResnapshot\(/u]])("%s", (_name, file, pattern) => {
     expect(readFileSync(new URL(file, import.meta.url), "utf8")).toMatch(pattern);
   });
 });

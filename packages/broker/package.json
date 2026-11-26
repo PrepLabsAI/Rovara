@@ -11,7 +11,6 @@
     "./e2e/discovery": "./dist/e2e/discovery.js",
     "./e2e/execution-plan": "./dist/e2e/execution-plan.js",
     "./fakes": "./dist/plugins/fake/index.js",
-    "./local": "./dist/local/index.js",
     "./ports": "./dist/ports/index.js",
     "./plugins/audit-sink-document": "./dist/plugins/audit-sink/document/module.js",
     "./plugins/channel-slack": "./dist/plugins/channel/slack/module.js",

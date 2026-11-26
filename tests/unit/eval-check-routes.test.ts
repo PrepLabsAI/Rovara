@@ -1,4 +1,4 @@
-// L4-EVCI2: the setup card's "Eval check from your CI": the hosted route (core-host/eval-check-routes.ts), the laptop's (local/app/eval-check.ts) and the shared card (core/ci-evidence/eval-check-card.ts).
+// L4-EVCI2: the setup card's "Eval check from your CI": the hosted route (core-host/eval-check-routes.ts) and the shared card (core/ci-evidence/eval-check-card.ts).
 //   GET /v1/app/projects/{project}/ci-eval-check -> { project, canManage, confirmed, proposals, explanation }; PUT { requestId, check } -> the same view.
 // Rules under test: setup proposes (the workflow files, as data) and a maintainer confirms one, or none; only a check Rovara just proposed is taken (never the browser's word); a company owner or admin, or the project's
 // administrator, confirms; any role on the project reads the confirmed check, and only a manager sees the proposals; everyone else, another company's project, a missing one and a malformed name get the SAME 404; a reader's
@@ -6,11 +6,10 @@
 /* eslint-disable @typescript-eslint/no-explicit-any -- a JSON answer is read field by field */
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { GITHUB_ACTIONS_APP_ID, IMPLICIT_COMPANY_ID, type AuditEvent, type OrgId } from "@agentx/contracts";
+import { GITHUB_ACTIONS_APP_ID, type AuditEvent, type OrgId } from "@agentx/contracts";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
 import { isEvalCheckPath, routeHostedEvalCheck, type HostedEvalCheckWiring } from "../../packages/broker/src/core-host/eval-check-routes.js";
 import type { SetupRunStanding } from "../../packages/broker/src/core-host/setup-run-routes.js";
-import { createLocalEvalCheck } from "../../packages/broker/src/local/app/eval-check.js";
 import { EVAL_CHECK_WORDS, ciDefinitionReaderOf, setEvalCheck } from "../../packages/broker/src/core/ci-evidence/eval-check-card.js";
 import { evalCheckEvidencePort, evalCheckKey } from "../../packages/broker/src/core/ci-evidence/eval-check-setting.js";
 import { parseCiEvidenceSettings } from "@agentx/contracts";
@@ -291,52 +290,6 @@ describe("the proposals across repositories", () => {
     expect(reads.sort()).toEqual(["a", "b", "c"]);
     const body = JSON.parse(answer.body) as Body;
     expect((body["proposals"] as { items: Array<Record<string, unknown>> }).items.map((item) => [item["name"], item["repository"]])).toEqual([["evals", "a"], ["Quality gate", "a"]]);
-  });
-});
-
-describe("on a laptop", () => {
-  const OWNER_ID = "owner-1";
-  function local(options: { reader?: CiDefinitionReader | undefined; audit?: (event: AuditEvent) => Promise<void>; store?: MemoryDocumentStore; project?: string } = {}) {
-    const store = options.store ?? new MemoryDocumentStore();
-    const audited: AuditEvent[] = [];
-    const routes = createLocalEvalCheck({
-      flow: { store, projects: { latest: async (name: string) => (name === (options.project ?? "beacon") ? { definition: { repositories: [{ name: "app", url: "https://github.com/acme/app", defaultBranch: "main" }] } } : undefined) } } as never,
-      registry: {} as never, audit: { stage: () => [], record: options.audit ?? (async (event: AuditEvent) => { audited.push(event); }) }, now: () => T0,
-      readerFor: async () => ("reader" in options ? options.reader : readerOf({ "ci.yml": WORKFLOW })),
-    });
-    const call = async (method: "GET" | "PUT" | "POST", path: string, body?: unknown, caller: Record<string, unknown> = {}) => {
-      const answer = await routes.routes({ method, path, headers: {}, body: body === undefined ? "" : JSON.stringify(body) }, { principal: { companyId: IMPLICIT_COMPANY_ID, personId: OWNER_ID, displayName: "o", roles: ["owner"], provider: "local" }, ...caller });
-      return answer === undefined ? undefined : { status: answer.statusCode, body: JSON.parse(answer.body) as Body };
-    };
-    return { store, audited, call };
-  }
-
-  it("propose, confirm, stored, None clears; the audit record names the install's owner; the port reads the install's one company", async () => {
-    const l = local();
-    const path = "/v1/app/projects/beacon/ci-eval-check";
-    expect((await l.call("GET", path))!.body).toMatchObject({ canManage: true, confirmed: null, proposals: { verdict: "proposals" } });
-    const done = await l.call("PUT", path, choose("evals"));
-    expect(done!.status).toBe(200);
-    expect(done!.body["confirmed"]).toMatchObject({ name: "evals", source: ACTIONS });
-    expect(l.audited[0]).toMatchObject({ actor: { id: OWNER_ID }, action: "ci_eval_check.set", companyId: IMPLICIT_COMPANY_ID, details: { basis: "install-owner", check: "evals" } });
-    expect(await evalCheckEvidencePort({ store: l.store, companyId: IMPLICIT_COMPANY_ID })(task(IMPLICIT_COMPANY_ID, "beacon"))).toMatchObject({ evalCheck: EVALS });
-    expect((await l.call("PUT", path, { requestId: randomUUID(), check: null }))!.body["confirmed"]).toBeNull();
-    expect(await evalCheckEvidencePort({ store: l.store, companyId: IMPLICIT_COMPANY_ID })(task(IMPLICIT_COMPANY_ID, "beacon"))).toBeUndefined();
-  });
-
-  it("only the owner on the API session: a script token or a non-owner is refused; a missing project is 404; an unproposed check is 400; a failing audit stores nothing; other paths are not its", async () => {
-    const l = local();
-    const path = "/v1/app/projects/beacon/ci-eval-check";
-    expect((await l.call("GET", path, undefined, { scriptToken: { tokenId: "t" } }))!.status).toBe(403);
-    expect((await l.call("PUT", path, choose("evals"), { principal: { companyId: IMPLICIT_COMPANY_ID, personId: "p", displayName: "p", roles: [], provider: "local" } }))!.status).toBe(403);
-    expect((await l.call("GET", "/v1/app/projects/ghost/ci-eval-check"))!.status).toBe(404);
-    expect((await l.call("PUT", path, choose("unit")))!.status).toBe(400);
-    expect(await l.call("POST", path, choose("evals"))).toBeUndefined();
-    expect(await l.call("GET", "/v1/app/projects/beacon/upkeep")).toBeUndefined();
-    expect(l.audited).toEqual([]);
-    const failing = local({ audit: async () => { throw new Error("down"); } });
-    expect((await failing.call("PUT", path, choose("evals")))!.status).toBe(503);
-    expect(await failing.store.get(evalCheckKey({ orgId: IMPLICIT_COMPANY_ID, project: "beacon" }))).toBeUndefined();
   });
 });
 

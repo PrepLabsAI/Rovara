@@ -90,10 +90,9 @@ describe("no request reaches a real model host", () => {
   });
 });
 
-// TE-F1c's files that call the port: the worker's bridge side and the laptop adapter. Each one is named; a new file that names the port is a new line here.
+// TE-F1c's files that call the port: the worker's bridge side. Each one is named; a new file that names the port is a new line here.
 const F1C_CALLERS: ReadonlySet<string> = new Set([
   "packages/worker/src/model-bridge.ts", "packages/worker/src/model-bridge-ledger.ts", "packages/worker/src/model-helper-bridge-client.ts", "packages/worker/src/model-record-cache.ts",
-  "packages/broker/src/local/model-egress/adapter.ts", "packages/broker/src/local/model-egress/forwarder.ts", "packages/broker/src/local/model-egress/index.ts", "packages/broker/src/local/model-egress/key-store.ts",
   // Eval host binding (plan v3.2 row 20.2): the eval's metered stage over an injected hold-and-egress, and the egress the sandbox exec is handed.
   "packages/worker/src/verification/eval-model-access.ts", "packages/worker/src/verification/eval-runner.ts",
   // The eval gateway adapter: the production EvalModelAccess, which reaches only the model gateway's own product route (https, or loopback in tests) with the egress frames; it names no provider host.
@@ -132,7 +131,7 @@ describe("no callers yet", () => {
       for (const file of files) {
         const relative = file.slice(root.length + 1);
         if (relative.startsWith("packages/contracts/") || relative.startsWith("packages/testing/")) continue;
-        // TE-F1c (the bridge and the laptop adapter) is the first real caller, by design: exact paths, nothing broader.
+        // TE-F1c (the bridge) is the first real caller, by design: exact paths, nothing broader.
         if (F1C_CALLERS.has(relative)) continue;
         // F0a's own barrel and tests are not callers of this lane.
         if (NEW_NAMES.test(readFileSync(file, "utf8"))) outside.push(relative);
