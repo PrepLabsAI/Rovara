@@ -16,7 +16,7 @@ const NEW_READS = ["spec", "checks", "changes", "timeline"] as const;
 // WIDENING (approved): a co-owner and the People list's commenters and viewers read the task's events (the events were the task's own person's and a share's alone).
 for (const persona of ["co-owner", "commenter", "viewer"]) CHANGED[`${persona} | events`] = { now: { status: 200, shape: "events" }, why: "widening: events for a co-owner / People commenter / viewer" };
 // NARROWING of an unreleased placeholder: a person the rule refuses is told the missing task's answer on the four new reads (they said ROUTE_NOT_SERVED to everyone, the stubs' placeholder).
-for (const persona of ["project member", "unknown role", "left the project", "company admin", "stranger", "other company"]) {
+for (const persona of ["project member", "unknown role", "company admin", "stranger", "other company"]) {
   for (const read of NEW_READS) CHANGED[`${persona} | ${read}`] = { now: { status: 404, code: "TASK_NOT_FOUND", message: "no such task" }, why: "narrowing: the new reads refuse a non-reader as a missing task" };
 }
 // OWNER DECISION 254zzz558 (option A, Q1 answered): a person the task is SHARED with (the stored share, "Can view") reads the whole task page, the code changes included, and can comment. Each cell below was a refusal (the
@@ -34,6 +34,19 @@ const SHARE_NOW: Record<string, Answer> = {
 for (const persona of ["shared reader", "admin and shared"]) {
   for (const [read, now] of Object.entries(SHARE_NOW)) CHANGED[`${persona} | ${read}`] = { now, why: "widening (owner decision 254zzz558, option A): a share reads the whole task page, the code changes included" };
 }
+// READ-RULE-SHARE-B (owner DEC 254zzz577), the cells that moved on top of the merged RD-2 stack. Each is listed with its reason; nothing else moved.
+// Rule 1 (a share works with NO project access, same company only): "left the project" holds a stored share row, is a live member of the company and holds no project grant. Before, the stored share needed a live project grant, so
+// all 10 reads below refused them; now they read exactly as the "shared reader" does (the timeline is still a placeholder, ROUTE_NOT_SERVED, for everyone it admits; the readable and merge reads stay refused: they are not part of the page). "other company" is a member of ANOTHER company: not one cell moved for them.
+const SHARED_ANSWERS: Record<string, Answer> = {
+  task: { status: 200, shape: "task | task:no-money" },
+  answers: { status: 200, shape: "outcome:answered" },
+  events: { status: 200, shape: "events" },
+  ...SHARE_NOW,
+};
+for (const [read, now] of Object.entries(SHARED_ANSWERS)) CHANGED[`left the project | ${read}`] = { now, why: "rule 1 (DEC 254zzz577): a stored share needs a live member of the task's company, not a project grant" };
+// Rule 3 (both "Can view" kinds are the same: the whole page): a People-list commenter or viewer now reads the plan and the proof, as a share does (they were the owner's and co-owner's alone). The diff, the comments, the spec, the checks, the changes
+// and the events of a People viewer were already served and did not move.
+for (const persona of ["commenter", "viewer"]) for (const read of ["plan", "evidence"]) CHANGED[`${persona} | ${read}`] = { now: SHARE_NOW[read]!, why: "rule 3 (DEC 254zzz577): a People commenter or viewer reads the plan and the proof like a share" };
 // FILLED READS (not a read-rule change): a lane that fills a stub moves every cell the rule ADMITS from the placeholder's ROUTE_NOT_SERVED to the served answer.
 // RD-2a (spec):
 for (const persona of ["owner", "co-owner", "commenter", "viewer"]) CHANGED[`${persona} | spec`] = { now: { status: 200, shape: "spec" }, why: "RD-2a fills the spec read: a person the rule admits is served" };

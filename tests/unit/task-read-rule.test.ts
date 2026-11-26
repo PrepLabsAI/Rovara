@@ -6,6 +6,7 @@ import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { AgentXError, agentXError } from "@agentx/contracts";
+import { membershipReadFailed } from "../../packages/broker/src/core/membership-read.js";
 import { pageRule } from "../../packages/broker/src/aws/core-task-rule-routes.js";
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import type { DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
@@ -26,11 +27,13 @@ const TABLE: Record<PersonaName, string> = {
   "owner":            "o o o o o o p o o o o o o p",
   "co-owner":         "r r r r r - p o o r r r r p",
   "project member":   "- - - - - - - - - - - - - -",
-  "commenter":        "r r r r r - p - - r r r r p",
-  "viewer":           "r r r r r - p - - r r r r p",
+  // READ-RULE-SHARE-B rule 3: a People commenter or viewer ("Can view") reads the plan and the proof too, as a share does.
+  "commenter":        "r r r r r - p r r r r r r p",
+  "viewer":           "r r r r r - p r r r r r r p",
   "shared reader":    "s s - - s s s s s s s s s s",
   "unknown role":     "- - - - - - - - - - - - - -",
-  "left the project": "- - - - - - - - - - - - - -",
+  // READ-RULE-SHARE-B rule 1: a stored share needs a live member of the task's company, NOT a project grant: a person who left the project is still shared with.
+  "left the project": "s s - - s s s s s s s s s s",
   "company admin":    "- - - - - - - - - - - - - -",
   "admin and shared": "s s - - s s s s s s s s s s",
   "removed member":   "- - - - - - - - - - - - - -",
@@ -43,6 +46,11 @@ const TABLE: Record<PersonaName, string> = {
   "starter removed from the company": "- - - - - - - - - - - - - -",
   // THE SLACK SHARE (owner decision 254zzz558, option A): no grant, not on the list, in the channel the task is shared into: the whole task page (CHANNEL_SHARE_PARTS, one cell each: the task, its events and timeline, the question box, the plan, the proof, the spec, the checks, the code changes, the diff and the comments); the merge standing, the task list's round and the readers routes are not part of the page.
   "channel share member": "p p - - p - p p p p p p p p",
+  // READ-RULE-SHARE-B: the people a share must not reach. REMOVAL WINS (rule 2): the People list's deny beats a stored share and the channel share. Another company's person, with a share row and no grant, is refused (rule 1), and so is a Slack Connect or foreign-workspace identity in the shared channel.
+  "denied with a share": "- - - - - - - - - - - - - -",
+  "denied channel member": "- - - - - - - - - - - - - -",
+  "foreign-workspace channel member": "- - - - - - - - - - - - - -",
+  "other company shared no grant": "- - - - - - - - - - - - - -",
   // Not in the loops: a task started through the bound channel with no grant is refused on every read on the core (the hotfix's ruling (a)).
   "starter via the bound channel": "- - - - - - - - - - - - - -",
 };
@@ -52,12 +60,13 @@ const expectedOf = (persona: PersonaName, read: TaskRead): Cell => CELL[TABLE[pe
 /** The seams the host binds for this person: the stored share (a live project member's, as stored) and the old People page rule. */
 function seamsOf(persona: Persona, withLiveGrant = true): TaskReadSeams {
   return {
-    sharedReader: async () => (persona.share !== undefined && persona.projectMember ? { role: persona.share } : undefined),
+    // The host's stored share: a live member of the task's company (no grant needed), never a person the People list names `denied`.
+    sharedReader: async () => (persona.share !== undefined && persona.role !== undefined && persona.companyId === FAKE_COMPANY && persona.people !== "denied" ? { role: persona.share } : undefined),
     // The host's live company membership and current project grant for this person (absent on a laptop).
     ...(withLiveGrant ? { liveGrant: async () => persona.role !== undefined && persona.projectMember } : {}),
     peoplePage: async () => {
-      if (persona.viaShare === true) return { viaChannelShare: true as const };
-      if (persona.people === undefined) throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
+      if (persona.viaShare === true && persona.people !== "denied" && persona.foreignWorkspace !== true) return { viaChannelShare: true as const };
+      if (persona.people === undefined || persona.people === "denied") throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
     },
   };
 }
@@ -171,7 +180,7 @@ describe("the one read rule: what the decision carries", () => {
     for (const persona of PERSONAS) {
       try { money[persona.name] = (await decideAs(w, persona, "task")).money; } catch { /* refused: no decision */ }
     }
-    expect(money).toEqual({ "owner": true, "co-owner": false, "commenter": false, "viewer": false, "shared reader": false, "admin and shared": true, "script token": false });
+    expect(money).toEqual({ "owner": true, "co-owner": false, "commenter": false, "viewer": false, "shared reader": false, "left the project": false, "admin and shared": true, "script token": false });
     // The real routes agree: the task view carries `money` for these, and for a live co-owner (the task's OWN money alone, DEC 254zzz398: `taskViewFor` keeps that predicate), and for nobody else.
     for (const persona of PERSONAS) {
       const answer = await w.ask(persona, "task");
@@ -319,9 +328,12 @@ describe("the one read rule: what the decision carries", () => {
     expect(await post("channel share member"), "the Slack channel share").toEqual({ status: 409, code: "IDEMPOTENCY_CONFLICT" });
     expect(await post("shared reader"), "the stored share").toEqual({ status: 409, code: "IDEMPOTENCY_CONFLICT" });
     expect(await post("admin and shared"), "the stored share, a company admin").toEqual({ status: 409, code: "IDEMPOTENCY_CONFLICT" });
-    for (const name of ["stranger", "left the project", "unknown role", "company admin", "project member", "other company"] as const) expect(await post(name), name).toEqual({ status: 404, code: "TASK_NOT_FOUND" });
-    // A People-list viewer READS the comments (the page rule admits them, mode "page") but may not WRITE one: only a decision of mode "shared" (the stored share) turns the People rule's refusal into the commenter role.
-    expect(await post("viewer"), "a People viewer").toEqual({ status: 404, code: "TASK_NOT_FOUND" });
+    // READ-RULE-SHARE-B rule 1: the stored share needs no project grant, so a shared person who is not (any more) a member of the project comments too.
+    expect(await post("left the project"), "the stored share, no project access").toEqual({ status: 409, code: "IDEMPOTENCY_CONFLICT" });
+    // READ-RULE-SHARE-B rule 3: a People-list viewer ("Can view") comments exactly as the stored share does (the comment-write cell was widened: viewer joins owner and commenter).
+    for (const name of ["viewer", "commenter"] as const) expect(await post(name), `a People ${name}`).toEqual({ status: 409, code: "IDEMPOTENCY_CONFLICT" });
+    // Refused as a missing task, nothing written: no share; an unknown role; a person of another company (with or without a grant); the REMOVED (the People list's deny beats a stored share and the channel share); a Slack Connect or foreign-workspace identity.
+    for (const name of ["stranger", "unknown role", "company admin", "project member", "other company", "other company shared no grant", "denied with a share", "denied channel member", "foreign-workspace channel member"] as const) expect(await post(name), name).toEqual({ status: 404, code: "TASK_NOT_FOUND" });
   });
 
   it("each Slack share cell is its own: one cell withheld refuses that read for the channel share alone (the one-line change of a later answer)", async () => {
@@ -389,6 +401,16 @@ describe("the one read rule: what the decision carries", () => {
     expect(log.mock.calls.map(([entry]) => (entry as { event: string }).event)).toEqual(["developer.task_reader_unknown_role", "developer.task_reader_unknown_role"]);
     expect(String((log.mock.calls[0]![0] as { role: string }).role).length).toBeLessThanOrEqual(40);
     expect(log.mock.calls[0]![0]).toMatchObject({ taskId: w.taskId });
+  });
+
+  it("a stored-share lookup whose MEMBERSHIP read failed is the retryable 503 (MEMBERSHIP-READ-FAILS-SAFE): never a share, never 'no such task', and no lookup-failed log", async () => {
+    const w = await readRuleWorld();
+    const log = vi.fn();
+    const failed = { sharedReader: async (): Promise<never> => { throw membershipReadFailed(); } };
+    for (const read of ["task", "events", "plan"] as const) {
+      await expect(decideAs(w, personaOf("shared reader"), read, { deps: { log }, seams: failed }), read).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    }
+    expect(log).not.toHaveBeenCalled();
   });
 
   it("a failing lookup of the stored share is 'no' and is logged once, in fixed words with no person and no task", async () => {

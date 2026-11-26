@@ -51,7 +51,7 @@ export interface CoreTaskRuleRouteInput {
 
 export interface CoreTaskRuleRoutes {
   route(input: CoreTaskRuleRouteInput): Promise<BrokerResponse>;
-  /** DEC 254zzz44 (a): the stored share (spec 067, `readerShare`) of this person on a task of this company: its role as stored, while they are still a member of the task's project. The read rule decides what it shows. */
+  /** DEC 254zzz44 (a): the stored share (spec 067, `readerShare`) of this person on a task of this company: its role as stored, while they are still a live member of the task's company (no project grant needed) and the People list does not deny them. The read rule decides what it shows. */
   sharedReader(input: Pick<CoreTaskRuleRouteInput, "person" | "companyId" | "task">): Promise<{ role: string } | undefined>;
   /** The old People page rule (`pageRule`) as the read rule's seam, for a person and a task of this company: resolves when it admits, throws its refusal, says `viaChannelShare` for a person who reads only because the task is shared into their channel. */
   peoplePage(input: Pick<CoreTaskRuleRouteInput, "person" | "companyId" | "task">): Promise<void | { holdsOwnTask: true } | { viaChannelShare: true }>;
@@ -238,7 +238,7 @@ export function createCoreTaskRuleRoutes(depsFor: (person: { developerId: string
       if (rest.startsWith("people/requests/")) return json({ change: await getTaskPeopleProposal(effects(deps), caller, taskId, safeDecode(rest.slice("people/requests/".length))) });
       const document = await documentRoute(rest, deps, caller, task, url, input.request, (read, seams) => input.authorize(read, seams));
       if (document !== undefined) return document;
-      // Readers and the timeline: the one read rule says who may (the task's own person, or a reader it is shared with who is still a project member; anyone else reads no such task, in the old owner check's words).
+      // Readers and the timeline: the one read rule says who may (the task's own person, or a reader it is shared with who is still a live member of the company (no project grant is needed) and is not denied on the People list; anyone else reads no such task, in the old owner check's words).
       const decision = await input.authorize(rest === "events" ? "events" : "share");
       if (rest === "events") return json({ events: await coreTimeline(input.store, input.companyId, task, whole(url.searchParams.get("limit"), DEVELOPER_EVENTS_DEFAULT, 1, DEVELOPER_EVENTS_MAX, "limit")) });
       if (decision.mode !== "owner") throw agentXError("FORBIDDEN", "only the task's owner can share it");

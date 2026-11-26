@@ -1318,30 +1318,33 @@ function memberActions(deps: DeveloperRouteDependencies) {
  * answers `mayStart`: the SAME live test the task start meets, `checkProjectAccess`: the grant, or fresh bound-channel membership while the project lets channel members use it and the person is
  * Slack-linked, for an OLD-engine task only (no engine stamp; a core task's own person needs the grant). Read now, nothing kept; a read that fails (Slack unreachable, a refusal, the stamp) is "no", as at the start; a MEMBERSHIP read that fails is the retryable 503 instead (membership-read.ts). A reader never gets it (a reader needs the grant itself).
  */
-async function taskReaderPerson(deps: DeveloperRouteDependencies, developerId: string, project: string, taskCompany?: string, options?: { ownTask?: true; taskId?: string }): Promise<{ name: string; projectMember: boolean; mayStart?: boolean } | undefined> {
+export async function taskReaderPerson(deps: DeveloperRouteDependencies, developerId: string, project: string, taskCompany?: string, options?: { ownTask?: true; taskId?: string }): Promise<{ name: string; projectMember: boolean; companyMember: boolean; mayStart?: boolean } | undefined> {
   const person = await getSignIn<Pick<DeveloperRecord, "revoked" | "displayName" | "slackUserId">>(deps, `DEVELOPER#${developerId}`);
   if (person === undefined || person.revoked === true) return undefined;
   const name = person.displayName ?? "Unknown";
-  const answer = async (held: boolean) => {
-    if (options?.ownTask !== true) return { name, projectMember: held };
-    if (held) return { name, projectMember: held, mayStart: true };
+  // `companyMember`: a LIVE member of the TASK's company (READ-RULE-SHARE-B). Every answer below is given only after that was proved, except the "not a member" returns, which say false, and the no-company-layer branch, which says the grant.
+  const answer = async (held: boolean, companyMember = true) => {
+    if (options?.ownTask !== true) return { name, projectMember: held, companyMember };
+    if (held) return { name, projectMember: held, companyMember, mayStart: true };
     try {
       // Channel access holds an OLD-engine task only: the one the engine stamp (`TASK_ENGINE#<id>`, written by the core's own start) is missing for. A core task's own person needs the grant, as its start
       // and every step do (core-engine-root.ts); no task id, a stamp that is there, or a stamp that cannot be read: grant only.
-      if (options.taskId === undefined || await isCoreTaskThatExists(deps, options.taskId)) return { name, projectMember: held, mayStart: false };
+      if (options.taskId === undefined || await isCoreTaskThatExists(deps, options.taskId)) return { name, projectMember: held, companyMember, mayStart: false };
       await checkProjectAccess(deps, { developerId, ...(person.slackUserId === undefined ? {} : { slackUserId: person.slackUserId }) }, project);
-      return { name, projectMember: held, mayStart: true };
-    } catch (error) { rethrowMembershipReadFailure(error); return { name, projectMember: held, mayStart: false }; }
+      return { name, projectMember: held, companyMember, mayStart: true };
+    } catch (error) { rethrowMembershipReadFailure(error); return { name, projectMember: held, companyMember, mayStart: false }; }
   };
   // DEC 254zzz80 / 254zzz98 (review L2): a reader of a task must be a LIVE member of the TASK's company, and their grant is read where that company keeps it (beside its
   // revision): never in the reader's own other company, so a share never says whether a person of another company holds a grant there. No live company: no grant.
   // With no company layer at all, nothing here is company-scoped: the legacy grant, byte for byte as before.
-  if ((deps.companies ?? deps.developer.companies) === undefined) return answer(await projectGrant(memberActions(deps), project, developerId, undefined) !== undefined);
+  // No company layer (COMPANY_SIGNIN is not "enabled"; the stack default is disabled) means no live company to prove, so a share FAILS CLOSED to the old rule: only a person who holds the project grant is a company member here (READ-RULE-SHARE-B, rule 1).
+  // A core task can still run on such an install (the core reads company membership from the sign-in table itself), and its sign-ins may belong to more than one company, so "registered" is never enough.
+  if ((deps.companies ?? deps.developer.companies) === undefined) { const held = await projectGrant(memberActions(deps), project, developerId, undefined) !== undefined; return answer(held, held); }
   let company: string | undefined;
-  // A membership read that FAILED is not "not a member": it goes up as the retryable 503 (membership-read.ts), so the task's own person is never told "no such task" for it.
-  try { company = await liveNamedCompany(deps, developerId); } catch (error) { rethrowMembershipReadFailure(error); return { name, projectMember: false }; }
+  // A membership read that FAILED is not "not a member": it goes up as the retryable 503 (membership-read.ts), so the task's own person is never told "no such task" for it (and a share lookup is "no share" with the failure logged, a share write the retryable 503).
+  try { company = await liveNamedCompany(deps, developerId); } catch (error) { rethrowMembershipReadFailure(error); return { name, projectMember: false, companyMember: false }; }
   const owning = taskCompany === undefined ? company : namedCompany(taskCompany);
-  if (owning !== company) return { name, projectMember: false };
+  if (owning !== company) return { name, projectMember: false, companyMember: false };
   return answer(await projectGrant(memberActions(deps), project, developerId, owning) !== undefined);
 }
 

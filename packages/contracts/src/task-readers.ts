@@ -1,5 +1,5 @@
-// Spec 067: task readers. A task's owner shares it read-only with another member of its project, by developer ID; the
-// reader then reads the task and its events as the owner does, and nothing else.
+// Spec 067: task readers. A task's owner shares it read-only with another member of its company, by developer ID (a project grant is not needed); the
+// reader then reads the task page as the one read rule's table says (core/task-flow/read-rule.ts), and comments.
 import { z } from "zod";
 
 /** The most readers one task has. */
@@ -15,7 +15,7 @@ const DeveloperIdSchema = z.string().regex(/^[a-f0-9]{64}$/u);
 export const TaskReaderPutRequestSchema = z.object({ requestId: z.string().uuid(), role: TaskReaderRoleSchema }).strict();
 export type TaskReaderPutRequest = z.infer<typeof TaskReaderPutRequestSchema>;
 
-/** One reader as the owner sees them. `name` is the person's name now; `projectMember` is false once they lost the project, and then they read nothing. */
+/** One reader as the owner sees them. `name` is the person's name now; `projectMember` says whether they hold a grant on the project now; it does not decide whether they read (a share needs the company, not the project). */
 export const TaskReaderSchema = z.object({
   developerId: DeveloperIdSchema,
   name: z.string().min(1).max(200),

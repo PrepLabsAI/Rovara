@@ -16,12 +16,17 @@
 //   stranger            a member with no project grant and nothing on the task
 //   other company       a member of ANOTHER company, with a stored share row naming them
 //   script token        the owner's script token
+// and READ-RULE-SHARE-B's four (not part of the base's golden; part of the table): each is a person a share must NOT reach
+//   denied with a share            a stored share row AND the People list names them `denied` (a deny or a removal): REMOVAL WINS
+//   denied channel member           in the channel the task is shared into AND the People list names them `denied`: REMOVAL WINS
+//   foreign-workspace channel member in the shared channel, but a Slack Connect or foreign-workspace identity: the Slack proof refuses them
+//   other company shared no grant a member of ANOTHER company with a stored share row and no grant: a share never crosses companies
 // and two more kinds, each the STARTER of a task of their own, whom the company's rule still admits (it re-reads no project grant for the task's own person with no People list) while they are gone:
 //   starter, removed from the project   a task with no People list, the person no longer holds a grant on the project
 //   starter, removed from the company   a task with a People list, the company's live membership gone (the host's read of it is a moment older than the rule's)
 import { createHash, randomUUID } from "node:crypto";
 import { vi } from "vitest";
-import { orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type OrgRole, type ProjectDefinition } from "@agentx/contracts";
+import { agentXError, orgProjectCatalogKey, projectRevisionKey, type JsonValue, type OrgId, type OrgRole, type ProjectDefinition } from "@agentx/contracts";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { taskKey } from "../../packages/broker/src/core/task-flow/keys.js";
 import type { TaskAccess } from "../../packages/broker/src/core/task-flow/deps.js";
@@ -43,7 +48,7 @@ const HONEST_CI = { honest: true as const, ciMode: () => "their_ci_fix" as const
 const SERVICES = () => ({ "merge-tracking": { pass: async () => ({}) }, "session-sweep": { pass: async () => ({}) }, "notify-deliver": { pass: async () => ({}) }, "admission-hold-sweep": { pass: async () => ({}) } });
 const idOf = (name: string): string => createHash("sha256").update(`read-rule-world\u0000${name}`).digest("hex");
 
-export type PersonaName = "starter via the bound channel" | "channel share member" | "starter removed from the project" | "starter removed from the company" | "owner" | "co-owner" | "project member" | "commenter" | "viewer" | "shared reader" | "unknown role" | "left the project" | "company admin" | "admin and shared"
+export type PersonaName = "denied with a share" | "denied channel member" | "foreign-workspace channel member" | "other company shared no grant" | "starter via the bound channel" | "channel share member" | "starter removed from the project" | "starter removed from the company" | "owner" | "co-owner" | "project member" | "commenter" | "viewer" | "shared reader" | "unknown role" | "left the project" | "company admin" | "admin and shared"
   | "removed member" | "stranger" | "other company" | "script token";
 
 export interface Persona {
@@ -57,7 +62,7 @@ export interface Persona {
   /** The company's own read rule (`canRead`): People owner, commenter, viewer. */
   reads: boolean;
   /** The People role stored on the task (the old page rule reads it). */
-  people?: "owner" | "commenter" | "viewer";
+  people?: "owner" | "commenter" | "viewer" | "denied";
   /** The stored share row's role text, when there is a row. */
   share?: string;
   /** The stored reader is still a member of the task's project. */
@@ -69,6 +74,8 @@ export interface Persona {
   channel?: boolean;
   /** The person is not on the People list, has no grant, and is in the Slack channel the task is shared into (a Slack identity): the old page rule's implicit commenter. */
   viaShare?: boolean;
+  /** The person's Slack identity is of another workspace (a Slack Connect guest, or a foreign workspace): the Slack proof refuses them, as the real proof does (`user.teamId` is not the install's own). */
+  foreignWorkspace?: boolean;
 }
 
 const p = (name: PersonaName, over: Partial<Persona>): Persona => ({ name, personId: idOf(name), companyId: FAKE_COMPANY, role: "member", acts: false, reads: false, projectMember: false, ...over });
@@ -91,11 +98,18 @@ export const PERSONAS: readonly Persona[] = [
 /** The two starters: not part of the base's golden (the base admitted them), part of the table. */
 /** What a Slack share grants (the owner's open question): a person with no grant, not on the list, in the channel the task is shared into. */
 export const SHARE_MEMBER: Persona = p("channel share member", { viaShare: true });
+/** READ-RULE-SHARE-B: the people a share must not reach (rules 1 and 2). */
+export const SHARE_B_PERSONAS: readonly Persona[] = [
+  p("denied with a share", { share: "viewer", people: "denied", projectMember: true }),
+  p("denied channel member", { viaShare: true, people: "denied" }),
+  p("foreign-workspace channel member", { viaShare: true, foreignWorkspace: true }),
+  p("other company shared no grant", { companyId: OTHER_COMPANY, share: "viewer", projectMember: false }),
+];
 export const STARTERS: readonly Persona[] = [
   p("starter removed from the project", { acts: true, reads: true, starter: true, projectMember: false }),
   p("starter removed from the company", { acts: true, reads: true, people: "owner", starter: true, projectMember: false }),
 ];
-export const ALL_PERSONAS: readonly Persona[] = [...PERSONAS, ...STARTERS, SHARE_MEMBER];
+export const ALL_PERSONAS: readonly Persona[] = [...PERSONAS, ...STARTERS, SHARE_MEMBER, ...SHARE_B_PERSONAS];
 /** A person who started a task through the bound channel with no grant. The hotfix's ruling (a): channel access holds an OLD-engine task only, so on the core they hold nothing (this world's tasks are all the core's). A test of its own. */
 export const CHANNEL_STARTER: Persona = p("starter via the bound channel", { acts: true, reads: true, starter: true, projectMember: false, channel: true });
 const WORLD_PERSONAS: readonly Persona[] = [...ALL_PERSONAS, CHANNEL_STARTER];
@@ -190,10 +204,10 @@ export async function readRuleWorld(options: { access?: TaskAccess; diffPullRequ
 
   // The old rules' own rows, over a fake table: the stored shares and the People list the page rule reads.
   const db = new FakeDynamoDb();
-  for (const persona of PERSONAS) {
+  for (const persona of [...PERSONAS, ...SHARE_B_PERSONAS]) {
     if (persona.share !== undefined) db.set({ pk: `DEVTASK#${taskId}`, sk: `READER#${persona.personId}`, schemaVersion: 1, developerId: persona.personId, role: persona.share, grantedBy: owner.personId, grantedAt: "2026-11-15T00:00:00.000Z" });
   }
-  const people = PERSONAS.filter((persona) => persona.people !== undefined && persona.name !== "script token").map((persona) => ({ developerId: persona.personId, name: persona.name.replace(" ", "-"), method: "oidc", role: persona.people! }));
+  const people = [...PERSONAS, ...SHARE_B_PERSONAS].filter((persona) => persona.people !== undefined && persona.name !== "script token").map((persona) => ({ developerId: persona.personId, name: persona.name.replaceAll(" ", "-"), method: "oidc", role: persona.people! }));
   db.set({ pk: `DEVTASK#${taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false, people });
   // A starter's own task: a People list only where the person has one (the removed-from-the-project starter has none: the hole the company's rule leaves).
   for (const starter of STARTERS) {
@@ -212,6 +226,8 @@ export async function readRuleWorld(options: { access?: TaskAccess; diffPullRequ
     // Every person is eligible and present: the stored People role alone decides, as it does for a person with a live proof.
     checkTaskPerson: async (_task: unknown, developerId: string) => {
       const persona = byId.get(developerId);
+      // A Slack Connect guest or a foreign workspace's person: the real Slack proof says "unavailable" (their `team_id` is not the install's own), which the People rule reads as a refusal.
+      if (persona?.foreignWorkspace === true) throw agentXError("TASK_ACCESS_DENIED", "task access could not be verified");
       const name = persona?.name.replaceAll(" ", "-") ?? "person";
       // A Slack identity (the person is in the share's channel, read live) for the share member; the others are web identities.
       const slack = persona?.viaShare === true ? { slackUserId: `U0${developerId.slice(0, 8).toUpperCase()}` } : {};
@@ -222,9 +238,9 @@ export async function readRuleWorld(options: { access?: TaskAccess; diffPullRequ
       const persona = byId.get(developerId);
       if (persona === undefined || persona.role === undefined) return undefined;
       // As the broker's reader: a person whose live company is not the task's has no grant there.
-      if (_company !== undefined && _company !== grantCompany(persona)) return { name: persona.name, projectMember: false };
-      if (ownTask?.ownTask === true) { ownTaskReads.push(developerId); return { name: persona.name, projectMember: persona.projectMember, mayStart: persona.projectMember }; }
-      return { name: persona.name, projectMember: persona.projectMember };
+      if (_company !== undefined && _company !== grantCompany(persona)) return { name: persona.name, projectMember: false, companyMember: false };
+      if (ownTask?.ownTask === true) { ownTaskReads.push(developerId); return { name: persona.name, projectMember: persona.projectMember, companyMember: true, mayStart: persona.projectMember }; }
+      return { name: persona.name, projectMember: persona.projectMember, companyMember: true };
     },
     readPullRequestDiff: options.diffPullRequest === true ? async (url: string) => { diffReads.push(url); return { files: [], more: false }; } : undefined,
   } as unknown as DeveloperTaskRouteDependencies);

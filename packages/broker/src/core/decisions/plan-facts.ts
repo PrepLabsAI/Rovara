@@ -48,6 +48,11 @@ export function planText(plan: PlanDocument): string {
   ].join("\n");
 }
 
+/** The words that stand where a path was taken out of a plan's own text. */
+export const WITHHELD_PATH_WORD = "(a file)";
+/** A plan's text with every path it names taken out (a reader who may not read source code is not told which files the plan touches, READ-RULE-SHARE-B / Opus S4). The words around the path stand. */
+export const withoutPathsInText = (text: string): string => text.replace(PATH_TOKEN, WITHHELD_PATH_WORD);
+
 /** The paths a plan's text names (a Markdown plan has no structure to read them from). */
 export function pathsIn(text: string): string[] {
   return [...new Set((text.match(PATH_TOKEN) ?? []).map((value) => flat(value).replace(/^\.\//u, "")).filter((path) => path !== ""))];

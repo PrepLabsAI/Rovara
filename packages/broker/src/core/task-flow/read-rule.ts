@@ -10,6 +10,12 @@
 //   - A share admits a person to the task, and then `SHARED_PARTS` says per read whether that part is shown to that role; a part that is not shown answers TASK_PART_NOT_SHOWN with the
 //     words below (never the missing task's answer for a person the page shows the task to).
 //   - `money` and `sourceCode` are part of the decision, so a handler cannot show either by accident.
+//   - OWNER DECISION 254zzz577 (READ-RULE-SHARE-B), three rules on top of the share cells below. (1) The STORED share works for a person with NO project grant, but ONLY a SAME-COMPANY person: the company is checked first for every read, and the
+//     stored share's seam proves a live member of the TASK's company (not a project grant; where no company layer is wired it falls back to the project grant). The Slack CHANNEL share is NOT widened by this lane: it holds no individual grant, but its
+//     person must still reach the project through one of its bound channels (the identity proof's `targetProjectAccess`), so a person with no project access at all is refused; it also needs the Slack proof of the install's own workspace (a
+//     Slack Connect or foreign-workspace person is refused). Whether the channel share should work with no project access at all is an owner question and an identity-proof change. (2) REMOVAL WINS: a person the task's People list names `denied`
+//     (a deny, or a removal) is never admitted by a share of either kind (the stored share's seam refuses them; the People rule, which the channel share goes through, refuses them). (3) The stored share and the People list's viewer ("Can view")
+//     read the same page (the plan and the proof included) and can comment; a People viewer is still admitted only through the identity proof, which needs a project grant.
 //   - OWNER DECISION 254zzz558 (option A): a person a task is SHARED with (the stored share, "Can view"; or the Slack channel it is shared into) reads the WHOLE task page, the code changes included, and can comment; a person with no
 //     share is refused as before. So the share cells below are all "shown", and `ADMITTED_BY` lets both kinds of share into every part of the page: the task read, the events, the timeline, the question box (answers), the spec, the checks and their files, the code changes, the diff, the plan, the proof and the comments.
 import { rethrowMembershipReadFailure } from "../membership-read.js";
@@ -45,12 +51,12 @@ export type TaskReadMode = "owner" | "reader" | "page" | "shared" | "script";
 export const SHARED_ROLES = ["viewer"] as const;
 export type SharedRole = (typeof SHARED_ROLES)[number];
 
-/** What the stored share's seam answers: the row's role as stored (any text), for a person who is still a member of the task's project; undefined for anyone else. */
+/** What the stored share's seam answers: the row's role as stored (any text), for a person who is still a live member of the task's COMPANY (no project grant is needed) and whom the task's People list does not name `denied`; undefined for anyone else. */
 export interface StoredShare { role: string }
 
 /** The host's two old rules, bound once. A seam that is absent admits nobody by that way. */
 export interface TaskReadSeams {
-  /** The stored share (spec 067) of this person on this task of the caller's own company, with the live project membership proved. A throw is "no" (or a failure: see `ADMITTED_BY`). */
+  /** The stored share (spec 067) of this person on this task of the caller's own company, with the live COMPANY membership proved (no project grant is needed, DEC 254zzz577) and the People list's deny (a removal) already applied. A throw is "no" (or a failure: see `ADMITTED_BY`). */
   sharedReader?(person: { developerId: string; name: string }, task: TaskRecord): Promise<StoredShare | undefined>;
   /**
    * The old People page rule (the diff, the comments): resolves when it admits, throws its own refusal when it does not. It resolves `{ holdsOwnTask: true }` when it admitted the task's own person by their stored id (a task
@@ -78,7 +84,8 @@ const ADMITTED_BY: Readonly<Record<TaskRead, readonly Basis[]>> = {
   // The events are for everyone the task is shown to (a co-owner, the People list's commenters and viewers, a share); the readers routes stay the task's person and a share (told only the owner may share).
   events: ["developer", "reads", "shared", "channel"], share: ["developer", "shared"],
   // The page rule (People) first; then the stored share and, for the parts the page rule does not already cover, the Slack channel share (`channel`: only a person the People list does not name, who reads because the task is shared into a channel they are in).
-  diff: ["page", "shared"], comments: ["page", "shared"], plan: ["acts", "shared", "channel"], evidence: ["acts", "shared", "channel"],
+  // READ-RULE-SHARE-B (rule 3, owner DEC 254zzz577): the People list's commenters and viewers ("Can view") read the plan and the proof like a share does (`reads` after `acts`: the owner rule still says "owner" first).
+  diff: ["page", "shared"], comments: ["page", "shared"], plan: ["acts", "reads", "shared", "channel"], evidence: ["acts", "reads", "shared", "channel"],
   spec: ["reads", "shared", "channel"], checks: ["reads", "shared", "channel"], changes: ["reads", "shared", "channel"], timeline: ["reads", "shared", "channel"], evidenceFile: ["reads", "shared", "channel"],
 };
 
@@ -135,7 +142,7 @@ export function maySeeTaskMoney(input: { companyId: string; membershipCompanyId:
 /**
  * Whether THIS reader may read THIS task's source code: the patches AND the file paths of its changes (a path can reveal the structure of code; counts stay shown). The repository's own access in this codebase is the
  * person's live project grant (there is no per-person repository check), and it is true ONLY where that grant was re-read THIS request: by the live-grant seam for every way of being admitted (the stored person of a task with
- * no People list included), or by the stored share's own live project membership, or (the owner's decision 254zzz558) by the Slack channel share, whose own table (`CHANNEL_SHARE_PARTS`) says the code is theirs to see: a person with
+ * no People list included), or by the stored share (which proves its own live company membership and whom the owner's DEC 254zzz577 lets read with no project grant: the code is theirs, like the channel share's), or (the owner's decision 254zzz558) by the Slack channel share, whose own table (`CHANNEL_SHARE_PARTS`) says the code is theirs to see: a person with
  * no grant who reads only because the task is shared into their channel. No seam (a laptop), no proof, no source code. A task of another company never has it.
  *
  * It is decided per reader and per task INSIDE `decideTaskRead`, so it runs on every request BEFORE any answer cache is consulted: a cache (the changes read's) must be keyed by the task and its pull request heads only,
@@ -276,7 +283,7 @@ async function tryWay(ask: Ask, basis: Basis, laterWays: boolean): Promise<{ adm
   }
 }
 
-/** A person admitted by one way: the live grant is re-read for EVERY way in but the stored share (which proves its own project membership) and the channel share (no grant, by design): no path assumes the grant was proved, the task's stored person with no People list included. A share is then shown each part or not by its role. */
+/** A person admitted by one way: the live grant is re-read for EVERY way in but the stored share (which proves its own company membership; it needs no grant) and the channel share (no grant, by design): no path assumes the grant was proved, the task's stored person with no People list included. A share is then shown each part or not by its role. */
 async function admitBy(ask: Ask, basis: Basis, admitted: NonNullable<Admission>): Promise<TaskReadDecision | undefined> {
   const grant = admitted.grantProved === true ? "yes" : admitted.channelShare === true ? "exempt" : await grantFor(ask, basis);
   if (grant === "no") return undefined;
@@ -298,7 +305,7 @@ function decisionOf({ deps, input, task }: Ask, admitted: NonNullable<Admission>
   };
 }
 
-/** Whether the way in already proves the live grant: the stored share (its own project membership) and the company's own rule where it says it re-reads the grant (`provesProjectGrant`); otherwise the host's live-grant seam is asked, once. */
+/** Whether the way in already proves the live grant: the stored share (its own company membership: a share needs no grant) and the company's own rule where it says it re-reads the grant (`provesProjectGrant`); otherwise the host's live-grant seam is asked, once. */
 async function grantFor(ask: Ask, basis: Basis): Promise<"yes" | "no" | "unbound"> {
   const own = basis === "shared" || ((basis === "acts" || basis === "reads") && ask.deps.access.provesProjectGrant === true);
   return own ? "yes" : liveGrantOf(ask);
@@ -320,7 +327,7 @@ async function liveGrantOf({ deps, input, task }: Ask): Promise<"yes" | "no" | "
   }
 }
 
-/** The stored share's role when it is one this code knows, a live project member's, else undefined. An unknown role is logged and is no share. */
+/** The stored share's role when it is one this code knows, a live company member's whom the People list does not deny, else undefined. An unknown role is logged and is no share. */
 async function storedShare(deps: TaskFlowDeps, input: TaskReadInput, task: TaskRecord): Promise<SharedRole | undefined> {
   const seams = input.seams;
   if (seams?.sharedReader === undefined) return undefined;
