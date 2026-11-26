@@ -74,10 +74,11 @@ describe("who can reach the fence", () => {
   });
 });
 
-describe("what the refusal row does not bound (recorded, not asserted as desired)", () => {
-  it("one authorized person can add one row per refused request id: the row count is not capped", async () => {
+describe("what the refusal row bounds (S1 fixed: counted by person, change and current incarnation)", () => {
+  it("one authorized person repeating a refused confirm with new request ids stays on one row", async () => {
     const h = world();
     for (let n = 0; n < 5; n += 1) await h.call("archive", { ...h.archive({ expectedProjectIncarnation: 9 }), requestId: `0000000${n}-2222-4333-8444-555555555555` }).catch(() => undefined);
-    expect(h.rows(lifecycleRefusalPrefix)).toHaveLength(5);
+    expect(h.rows(lifecycleRefusalPrefix)).toHaveLength(1);
+    expect(h.rows(lifecycleRefusalPrefix)[0]).toMatchObject({ refusals: 5 });
   });
 });

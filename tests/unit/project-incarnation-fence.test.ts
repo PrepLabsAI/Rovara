@@ -1,6 +1,6 @@
 // PROJECT-INCARNATION-FENCE: the archive and restore confirm names the project incarnation its preview showed. Code refuses a confirm whose incarnation is not the project's now (the project was
 // deleted and created again under the same name between the preview and the confirm), before anything is written, and keeps the refusal as an audit row. A confirm that names none behaves as before.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ReviewedProjectArchiveBodySchema, ReviewedProjectRestoreBodySchema, orgProjectCatalogKey, projectMetaKey, projectRevisionKey } from "@agentx/contracts";
 import { LIFECYCLE_INCARNATION_CHANGED, LIFECYCLE_STALE, lifecycleAuditPrefix, lifecyclePartition, lifecycleRefusalPrefix, lifecycleRequestKey, routeProjectLifecycle, type ProjectLifecycleContext } from "../../packages/broker/src/aws/project-lifecycle-routes.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -70,8 +70,9 @@ describe("the confirm names the incarnation that was previewed", () => {
     const refusals = h.rows(lifecycleRefusalPrefix);
     expect(refusals).toHaveLength(1);
     expect(refusals[0]).toEqual({
-      pk: lifecyclePartition(companyId, project), sk: `${lifecycleRefusalPrefix}2026-11-26T12:00:00.000Z#${ARCHIVE_ID}`, entityType: "PROJECT_LIFECYCLE_REFUSAL",
-      companyId, project, action: "archive", personId: "owner", basis: "company-owner", reason: "project_incarnation_changed", previewedIncarnation: 7, currentIncarnation: 9, at: "2026-11-26T12:00:00.000Z",
+      pk: lifecyclePartition(companyId, project), sk: `${lifecycleRefusalPrefix}owner#archive#9`, entityType: "PROJECT_LIFECYCLE_REFUSAL",
+      companyId, project, action: "archive", personId: "owner", basis: "company-owner", reason: "project_incarnation_changed", lastPreviewedIncarnation: 7, currentIncarnation: 9, lastRequestId: ARCHIVE_ID,
+      lastAt: "2026-11-26T12:00:00.000Z", firstAt: "2026-11-26T12:00:00.000Z", refusals: 1,
     });
   });
 
@@ -81,7 +82,7 @@ describe("the confirm names the incarnation that was previewed", () => {
     h.recreate(8);
     await expect(h.call("restore", h.restore({ expectedProjectIncarnation: 7 }))).rejects.toMatchObject({ code: "CHANGE_STALE", message: `CHANGE_STALE: ${LIFECYCLE_INCARNATION_CHANGED}` });
     expect(h.db.get(h.key.pk, h.key.sk)).toMatchObject({ status: "archived", lifecycleRevision: 1, incarnationRevision: 8 });
-    expect(h.rows(lifecycleRefusalPrefix)).toMatchObject([{ action: "restore", previewedIncarnation: 7, currentIncarnation: 8 }]);
+    expect(h.rows(lifecycleRefusalPrefix)).toMatchObject([{ action: "restore", lastPreviewedIncarnation: 7, currentIncarnation: 8 }]);
     expect(h.rows(lifecycleAuditPrefix)).toHaveLength(1);
   });
 
@@ -103,7 +104,7 @@ describe("the confirm names the incarnation that was previewed", () => {
     expect(await h.call("archive-preview")).not.toHaveProperty("expectedProjectIncarnation");
     await expect(h.call("archive", h.archive({ expectedProjectIncarnation: 7 }))).rejects.toMatchObject({ code: "CHANGE_STALE", message: `CHANGE_STALE: ${LIFECYCLE_INCARNATION_CHANGED}` });
     expect(h.db.get(h.key.pk, h.key.sk)).toMatchObject({ status: "active" });
-    expect(h.rows(lifecycleRefusalPrefix)).toMatchObject([{ previewedIncarnation: 7 }]);
+    expect(h.rows(lifecycleRefusalPrefix)).toMatchObject([{ lastPreviewedIncarnation: 7, sk: `${lifecycleRefusalPrefix}owner#archive#none` }]);
     expect(h.rows(lifecycleRefusalPrefix)[0]).not.toHaveProperty("currentIncarnation");
     expect(await h.call("archive", h.archive())).toMatchObject({ receipt: { status: "archived" } });
     expect(h.db.get(h.key.pk, h.key.sk)).not.toHaveProperty("incarnationRevision");
@@ -124,12 +125,52 @@ describe("the confirm names the incarnation that was previewed", () => {
     expect(h.rows(lifecycleRefusalPrefix)).toHaveLength(0);
   });
 
-  it("the refusal stands when its audit row cannot be written", async () => {
+  it("the refusal stands when its audit row cannot be written, and the failure leaves one log line (no data)", async () => {
     const h = world();
     h.recreate(8);
-    h.db.injectFault({ command: "PutCommand", error: { name: "ProvisionedThroughputExceededException" } });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    h.db.injectFault({ command: "UpdateCommand", error: { name: "ProvisionedThroughputExceededException" } });
     await expect(h.call("archive", h.archive({ expectedProjectIncarnation: 7 }))).rejects.toMatchObject({ code: "CHANGE_STALE", message: `CHANGE_STALE: ${LIFECYCLE_INCARNATION_CHANGED}` });
     expect(h.db.get(h.key.pk, h.key.sk)).toMatchObject({ status: "active" });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(warn.mock.calls[0]![0] as string)).toEqual({ component: "broker", level: "warn", event: "project_lifecycle.refusal_audit_failed", error: "ProvisionedThroughputExceededException" });
+    warn.mockRestore();
+  });
+
+  it("repeating a bad confirm (new request ids, any number named) raises one counter on one row, never a new row", async () => {
+    const h = world();
+    h.recreate(9);
+    for (let n = 0; n < 6; n += 1) await h.call("archive", { ...h.archive({ expectedProjectIncarnation: 100 + n }), requestId: `0000000${n}-2222-4333-8444-555555555555` }).catch(() => undefined);
+    expect(h.rows(lifecycleRefusalPrefix)).toMatchObject([{ refusals: 6, lastPreviewedIncarnation: 105, lastRequestId: "00000005-2222-4333-8444-555555555555", currentIncarnation: 9 }]);
+    // Another change, or another current incarnation, is another (still counted) row.
+    await h.call("restore", { ...h.restore({ expectedProjectIncarnation: 7 }) }).catch(() => undefined);
+    h.recreate(10);
+    await h.call("archive", h.archive({ expectedProjectIncarnation: 9 })).catch(() => undefined);
+    expect(h.rows(lifecycleRefusalPrefix).map((row) => row["sk"]).sort()).toEqual([`${lifecycleRefusalPrefix}owner#archive#10`, `${lifecycleRefusalPrefix}owner#archive#9`, `${lifecycleRefusalPrefix}owner#restore#9`]);
+  });
+
+  it("the receipt records the incarnation it was written under, and a repeat of its request id is stale for a project created again since (named or not)", async () => {
+    const h = world();
+    await h.call("archive", h.archive({ expectedProjectIncarnation: 7 }));
+    const request = lifecycleRequestKey(companyId, project, ARCHIVE_ID);
+    expect(h.db.get(request.pk, request.sk)).toMatchObject({ incarnationRevision: 7 });
+    expect(await h.call("archive", h.archive({ expectedProjectIncarnation: 7 }))).toMatchObject({ replayed: true });
+    expect(await h.call("archive", h.archive())).toMatchObject({ replayed: true });
+    // The project is deleted and created again (active, a new incarnation): the old receipt is not the answer.
+    h.db.set({ ...(h.db.get(h.key.pk, h.key.sk) ?? {}), pk: h.key.pk, sk: h.key.sk, status: "active", incarnationRevision: 8 });
+    delete (h.db.get(h.key.pk, h.key.sk) as Record<string, unknown>)["lifecycleRevision"];
+    await expect(h.call("archive", h.archive({ expectedProjectIncarnation: 8 }))).rejects.toMatchObject({ code: "CHANGE_STALE", message: `CHANGE_STALE: ${LIFECYCLE_STALE}` });
+    await expect(h.call("archive", h.archive())).rejects.toMatchObject({ code: "CHANGE_STALE", message: `CHANGE_STALE: ${LIFECYCLE_STALE}` });
+    expect(h.db.get(h.key.pk, h.key.sk)).toMatchObject({ status: "active", incarnationRevision: 8 });
+    expect(h.rows(lifecycleAuditPrefix)).toHaveLength(1);
+  });
+
+  it("a project with no incarnation writes a receipt with none, and its repeat is answered as before", async () => {
+    const h = world({ incarnation: undefined });
+    await h.call("archive", h.archive());
+    const request = lifecycleRequestKey(companyId, project, ARCHIVE_ID);
+    expect(h.db.get(request.pk, request.sk)).not.toHaveProperty("incarnationRevision");
+    expect(await h.call("archive", h.archive())).toMatchObject({ replayed: true });
   });
 });
 

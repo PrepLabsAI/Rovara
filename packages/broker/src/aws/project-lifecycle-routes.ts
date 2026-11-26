@@ -20,9 +20,9 @@
 //   - Every change keeps a receipt (by request id) and an audit row naming the person and why they were allowed, in the same transaction, under the company's own keys.
 //   - A change may also name the project incarnation its preview showed (`expectedProjectIncarnation`, optional so an older Cloud still works). When it names one and it is not the project's
 //     current one (the project was deleted and created again under the same name), the change is refused with LIFECYCLE_INCARNATION_CHANGED before anything is written, and the refusal is
-//     kept as an audit row (PROJECT_LIFECYCLE_REFUSAL). A change that names none is fenced only on the incarnation read at confirm time, as before.
+//     kept as one counted audit row per person and change (PROJECT_LIFECYCLE_REFUSAL). A change that names none is fenced only on the incarnation read at confirm time, as before.
 //   - Bodies are validated at runtime and strictly; every refusal is a fixed sentence that never echoes what was sent.
-import { GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
+import { GetCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import {
   AGENTX_NAME_PATTERN, OrgIdSchema, ReviewedProjectArchiveBodySchema, ReviewedProjectRestoreBodySchema, agentXError, companyScoped, orgProjectCatalogKey, projectMetaKey,
@@ -82,7 +82,7 @@ const MetaRow = z.object({
   lifecycleRevision: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER - 1).optional(),
 }).passthrough();
 const ProjectName = z.string().regex(AGENTX_NAME_PATTERN);
-const ReceiptRow = z.object({ entityType: z.literal("PROJECT_LIFECYCLE_REQUEST"), action: z.enum(["archive", "restore"]), personId: z.string(), receipt: z.record(z.string(), z.unknown()) }).passthrough();
+const ReceiptRow = z.object({ entityType: z.literal("PROJECT_LIFECYCLE_REQUEST"), action: z.enum(["archive", "restore"]), personId: z.string(), receipt: z.record(z.string(), z.unknown()), incarnationRevision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional() }).passthrough();
 
 interface Current { companyId: OrgId; project: string; status: "active" | "archived"; lifecycleRevision: number; projectRevision: number; access: "manage" | "view"; basis: Basis | undefined; incarnationRevision?: number }
 
@@ -191,12 +191,20 @@ function stillLatest(tableName: string, current: Current) {
 async function recordRefusal(ctx: ProjectLifecycleContext, personId: string, current: Current, action: "archive" | "restore", body: { requestId: string; expectedProjectIncarnation?: number | undefined }): Promise<void> {
   const at = new Date(ctx.now()).toISOString();
   try {
-    await ctx.documentClient.send(new PutCommand({ TableName: ctx.tableName, ConditionExpression: "attribute_not_exists(pk)", Item: {
-      pk: lifecyclePartition(current.companyId, current.project), sk: `${lifecycleRefusalPrefix}${at}#${body.requestId}`, entityType: "PROJECT_LIFECYCLE_REFUSAL",
-      companyId: current.companyId, project: current.project, action, personId, basis: current.basis, reason: "project_incarnation_changed",
-      previewedIncarnation: body.expectedProjectIncarnation, ...(current.incarnationRevision === undefined ? {} : { currentIncarnation: current.incarnationRevision }), at,
-    } }));
-  } catch { /* the refusal stands without its row */ }
+    // One row per person, change and current incarnation, counted: a person repeating a bad confirm (new request ids, any number named) raises one counter, never a new row. The state table
+    // has no expiry for these rows (its one TTL attribute is the activity index's, pinned to named files), so the bound is by key: people x 2 changes x incarnations.
+    await ctx.documentClient.send(new UpdateCommand({
+      TableName: ctx.tableName,
+      Key: { pk: lifecyclePartition(current.companyId, current.project), sk: `${lifecycleRefusalPrefix}${personId}#${action}#${current.incarnationRevision ?? "none"}` },
+      UpdateExpression: `SET entityType = :entity, companyId = :company, #project = :project, #action = :action, personId = :person, #basis = :basis, #reason = :reason, lastPreviewedIncarnation = :previewed, lastRequestId = :request, lastAt = :at, firstAt = if_not_exists(firstAt, :at)${current.incarnationRevision === undefined ? "" : ", currentIncarnation = :current"} ADD refusals :one`,
+      ExpressionAttributeNames: { "#project": "project", "#action": "action", "#basis": "basis", "#reason": "reason" },
+      ExpressionAttributeValues: { ":entity": "PROJECT_LIFECYCLE_REFUSAL", ":company": current.companyId, ":project": current.project, ":action": action, ":person": personId, ":basis": current.basis, ":reason": "project_incarnation_changed",
+        ":previewed": body.expectedProjectIncarnation, ":request": body.requestId, ":at": at, ":one": 1, ...(current.incarnationRevision === undefined ? {} : { ":current": current.incarnationRevision }) },
+    }));
+  } catch (error) {
+    // The refusal stands without its row; a failing audit write must not be silent.
+    console.warn(JSON.stringify({ component: "broker", level: "warn", event: "project_lifecycle.refusal_audit_failed", error: (error as { name?: unknown } | undefined)?.name === undefined ? "unknown" : String((error as { name: unknown }).name).slice(0, 80) }));
+  }
 }
 
 /** Refuses the change (audited, nothing else written) when the person named an incarnation and it is not the project's now. Names none: no fence from the person's side. A project with no incarnation never equals a named one. */
@@ -204,6 +212,17 @@ async function fenceIncarnation(ctx: ProjectLifecycleContext, personId: string, 
   if (body.expectedProjectIncarnation === undefined || body.expectedProjectIncarnation === current.incarnationRevision) return;
   await recordRefusal(ctx, personId, current, action, body);
   throw agentXError("CHANGE_STALE", LIFECYCLE_INCARNATION_CHANGED);
+}
+
+/** The incarnation a receipt row was written under (absent for a project with none). */
+const receiptIncarnation = (current: Current) => (current.incarnationRevision === undefined ? {} : { incarnationRevision: current.incarnationRevision });
+
+/**
+ * Whether a stored receipt answers this request: the same person, the same change, and the project incarnation it was written under (for a project created again since, or one that gained an incarnation,
+ * a repeat of the same request id is stale, not "replayed"). A request id already used by someone else, or for the other change, never answers their receipt.
+ */
+function receiptAnswers(row: z.infer<typeof ReceiptRow>, personId: string, action: "archive" | "restore", current: Current): boolean {
+  return row.personId === personId && row.action === action && row.incarnationRevision === current.incarnationRevision;
 }
 
 /** One change (archive or restore), after the caller and the body were checked. */
@@ -218,7 +237,7 @@ async function change(ctx: ProjectLifecycleContext, personId: string, current: C
     if (answer.Item === undefined) return undefined;
     const row = ReceiptRow.safeParse(answer.Item);
     // A request id already used by someone else, or for the other change, never answers their receipt.
-    if (!row.success || row.data.personId !== personId || row.data.action !== action) throw agentXError("CHANGE_STALE", LIFECYCLE_STALE);
+    if (!row.success || !receiptAnswers(row.data, personId, action, current)) throw agentXError("CHANGE_STALE", LIFECYCLE_STALE);
     return row.data.receipt;
   };
   const earlier = await readReceipt();
@@ -254,7 +273,7 @@ async function change(ctx: ProjectLifecycleContext, personId: string, current: C
           ...incarnation.values },
       } },
       { Put: { TableName: ctx.tableName, ConditionExpression: "attribute_not_exists(pk)", Item: {
-        ...requestKey, entityType: "PROJECT_LIFECYCLE_REQUEST", companyId: current.companyId, project: current.project, action, personId, receipt, at,
+        ...requestKey, entityType: "PROJECT_LIFECYCLE_REQUEST", companyId: current.companyId, project: current.project, action, personId, receipt, at, ...receiptIncarnation(current),
       } } },
       { Put: { TableName: ctx.tableName, ConditionExpression: "attribute_not_exists(pk)", Item: {
         pk: lifecyclePartition(current.companyId, current.project), sk: `${lifecycleAuditPrefix}${at}#${body.requestId}`, entityType: "PROJECT_LIFECYCLE_AUDIT",
