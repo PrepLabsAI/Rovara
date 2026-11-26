@@ -134,33 +134,57 @@ async function publishAttentionChanged(realtime: Pick<RealtimePublisher, "publis
   try { await realtime.publish({ companyId, entries, deadline: Date.now() + 1_000 }); } catch { /* a push never fails the queue */ }
 }
 
+function queueableAttentionKind(change: SessionChange): AttentionKind | undefined {
+  if (change.session.subject.kind !== "task") return undefined;
+  const kind = attentionKindOf(change.summary);
+  if (kind === undefined) return undefined;
+  // A summary written before the status model has no `display`; its first refresh counts as unchanged, so nobody is told again about work already waiting.
+  if ((change.previous as { display?: unknown }).display === undefined) return undefined;
+  // An ended session is only ever told as done or failed (no ended session is listed as needing anyone).
+  if (change.session.endedAt !== undefined && kind !== "done" && kind !== "failed") return undefined;
+  const before = sessionTaskStatus(change.previous), after = sessionTaskStatus(change.summary);
+  if (before.state === after.state && before.reason === after.reason) return undefined;
+  return kind;
+}
+
+// The task's People, when the host keeps them: a list that cannot be read tells the others as before (and says so in fixed words), it never holds the queue back.
+async function readTaskPeople(deps: { peopleOf?: PeopleOf; log?: Log }, change: SessionChange): Promise<PeopleRecipients | undefined> {
+  if (deps.peopleOf === undefined) return undefined;
+  try {
+    return await deps.peopleOf(change.session);
+  } catch {
+    (deps.log ?? (() => undefined))({ event: "attention.people_failed", sessionId: change.sessionId });
+    return undefined;
+  }
+}
+
+async function writeQueuedRows(
+  deps: { store: Pick<DocumentStore, "put">; log?: Log; pending?: boolean },
+  change: SessionChange,
+  kind: AttentionKind,
+  people: readonly string[],
+  nowMs: number,
+): Promise<void> {
+  for (const developerId of people) {
+    if (deps.pending !== false) await deps.store.put({
+      item: { ...pendingKey(change.orgId, developerId, change.sessionId, kind), entityType: "NOTIFY_PENDING", orgId: change.orgId, developerId, sessionId: change.sessionId, kind, at: change.at, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(nowMs / 1000) + PENDING_KEEP_SECONDS },
+    });
+    if (kind !== "upkeep_paused" && kind !== "setup_broken") await putInboxRow(deps.store, deps.log, { orgId: change.orgId, developerId, sessionId: change.sessionId, kind, at: change.at, nowMs }, INDEX_EXPIRY_ATTRIBUTE);
+  }
+}
+
 /**
  * After a refresh committed: when the session moved into a state someone is told about, one pending row per person. Only task sessions. Never throws: a notification is never a reason for a refresh to fail.
  * Use it as a session change hook.
  */
 export async function queueAttention(deps: { store: Pick<DocumentStore, "put" | "query">; now?: () => Date; log?: Log; realtime?: Pick<RealtimePublisher, "publish"> | undefined; peopleOf?: PeopleOf; /** `false`: write only the in-app inbox rows (a host that can message nobody keeps no queue). */ pending?: boolean }, change: SessionChange): Promise<number> {
   try {
-    if (change.session.subject.kind !== "task") return 0;
-    const kind = attentionKindOf(change.summary);
+    const kind = queueableAttentionKind(change);
     if (kind === undefined) return 0;
-    // A summary written before the status model has no `display`; its first refresh counts as unchanged, so nobody is told again about work already waiting.
-    if ((change.previous as { display?: unknown }).display === undefined) return 0;
-    // An ended session is only ever told as done or failed (no ended session is listed as needing anyone).
-    if (change.session.endedAt !== undefined && kind !== "done" && kind !== "failed") return 0;
-    const before = sessionTaskStatus(change.previous), after = sessionTaskStatus(change.summary);
-    if (before.state === after.state && before.reason === after.reason) return 0;
-    // The task's People, when the host keeps them: a list that cannot be read tells the others as before (and says so in fixed words), it never holds the queue back.
-    let onTask: PeopleRecipients | undefined;
-    if (deps.peopleOf !== undefined) {
-      try { onTask = await deps.peopleOf(change.session); } catch { (deps.log ?? (() => undefined))({ event: "attention.people_failed", sessionId: change.sessionId }); }
-    }
+    const onTask = await readTaskPeople(deps, change);
     const people = await attentionRecipients(deps.store, change.session, change.summary, kind, onTask);
     const nowMs = (deps.now ?? (() => new Date()))().getTime();
-    for (const developerId of people) {
-      if (deps.pending !== false) await deps.store.put({
-        item: { ...pendingKey(change.orgId, developerId, change.sessionId, kind), entityType: "NOTIFY_PENDING", orgId: change.orgId, developerId, sessionId: change.sessionId, kind, at: change.at, [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(nowMs / 1000) + PENDING_KEEP_SECONDS },
-      }); if (kind !== "upkeep_paused" && kind !== "setup_broken") await putInboxRow(deps.store, deps.log, { orgId: change.orgId, developerId, sessionId: change.sessionId, kind, at: change.at, nowMs }, INDEX_EXPIRY_ATTRIBUTE);
-    }
+    await writeQueuedRows(deps, change, kind, people, nowMs);
     await publishAttentionChanged(deps.realtime, change.orgId, people, change.sessionId, kind);
     return people.length;
   } catch (error) {
@@ -473,6 +497,555 @@ async function noticeLineOf(deps: { sessions: SessionStore; adminNotice: Attenti
   return { title: oneLine(session.title, TITLE_MAX) || "A task", status: oneLine(NOTICE_WORDS.stoppedByAdmin(oneLine(hideEmailAddresses(row.stoppedBy ?? ""), 80)), 200), link: deps.link?.(session), kind: STOPPED_BY_ADMIN };
 }
 
+type NotifyPrefs = Awaited<ReturnType<typeof readNotifyPrefs>>;
+interface DuePerson { rows: PendingRow[]; marker: SentMarker; prefs: NotifyPrefs; digest: boolean }
+type RowResolution = { state: "skip" } | { state: "stale" } | { state: "current"; line: Line };
+interface ResolvedPersonRows {
+  current: Array<{ row: PendingRow; line: Line }>;
+  allowedSessions: Map<string, AgentSessionRecord>;
+  stale: PendingRow[];
+  carded: Set<string>;
+}
+interface PersonRoutes {
+  targets: NotifyTarget[];
+  routes: string[];
+  chosen: Set<string>;
+  address: string | undefined;
+  appliesTo: (tkey: string, row: PendingRow) => boolean;
+}
+interface BatchSummary {
+  shown: Line[];
+  more: number;
+  mode: "digest" | "done" | "notice" | "attention";
+  allFailed: boolean;
+  allDone: boolean;
+}
+interface PersonDeliveryContext {
+  deps: AttentionDeliveryDependencies;
+  email: EmailSender | undefined;
+  orgId: OrgId;
+  developerId: string;
+  digest: boolean;
+  nowMs: number;
+  current: ReadonlyArray<{ row: PendingRow; line: Line }>;
+  allowedSessions: ReadonlyMap<string, AgentSessionRecord>;
+  personRoutes: PersonRoutes;
+  next: SentMarker;
+  outcome: AttentionOutcome;
+  log: Log;
+}
+
+const errorName = (error: unknown): string => (error instanceof Error ? error.name : "unknown");
+const emailErrorCode = (error: unknown): string => (error instanceof EmailError ? error.code : errorName(error));
+
+async function queryPendingPage(store: Pick<DocumentStore, "query">, companyId: OrgId | undefined, limit: number, cursor: string | undefined) {
+  return store.query({
+    pk: PENDING_PK,
+    ...(companyId === undefined ? {} : { sk: { op: "beginsWith" as const, prefix: `${companyId}#` } }),
+    limit,
+    ...(cursor === undefined ? {} : { cursor }),
+  });
+}
+
+function collectPendingPage(
+  items: readonly StoredDocument[],
+  byPerson: Map<string, PendingRow[]>,
+  state: { read: number },
+  limits: { maxItems: number; nowSeconds: number; companyId: OrgId | undefined },
+  late: () => boolean,
+): boolean {
+  for (const item of items) {
+    if (state.read >= limits.maxItems || late()) return false;
+    state.read += 1;
+    const row = pendingRowOf(item, limits.nowSeconds);
+    if (row === undefined || (limits.companyId !== undefined && row.orgId !== limits.companyId)) continue;
+    const key = `${row.orgId}#${row.developerId}`;
+    byPerson.set(key, [...(byPerson.get(key) ?? []), row]);
+  }
+  return true;
+}
+
+async function scanPendingQueue(
+  deps: AttentionDeliveryDependencies,
+  budget: AttentionBudget,
+  nowMs: number,
+  late: () => boolean,
+  log: Log,
+): Promise<{ byPerson: Map<string, PendingRow[]>; scanComplete: boolean | undefined }> {
+  const maxItems = Math.min(ATTENTION_READ_MAX, budget.maxItems ?? ATTENTION_READ_MAX);
+  const byPerson = new Map<string, PendingRow[]>();
+  const state = { read: 0 };
+  const limits = { maxItems, nowSeconds: Math.floor(nowMs / 1000), companyId: budget.companyId };
+  let cursor: string | undefined = budget.scan?.cursor;
+  do {
+    if (late() || state.read >= maxItems) break;
+    const page = await queryPendingPage(deps.store, budget.companyId, Math.min(PENDING_PAGE, maxItems - state.read), cursor);
+    if (!collectPendingPage(page.items, byPerson, state, limits, late)) break;
+    cursor = page.cursor;
+    if (budget.scan !== undefined) budget.scan.cursor = cursor;
+  } while (cursor !== undefined && state.read < maxItems && !late());
+  const scanComplete = budget.companyId === undefined ? undefined : cursor === undefined && state.read < maxItems && !late();
+  if (cursor !== undefined) log({ event: "attention.queue_truncated", read: state.read });
+  return { byPerson, scanComplete };
+}
+
+async function urgentRowsOf(
+  urgent: AttentionDeliveryDependencies["urgent"],
+  orgId: OrgId,
+  developerId: string,
+  rows: readonly PendingRow[],
+): Promise<PendingRow[]> {
+  const sendable: PendingRow[] = [];
+  for (const row of rows) {
+    const isUrgent = urgent === undefined || isNoticeKind(row.kind)
+      ? false
+      : await urgent(orgId, { developerId, sessionId: row.sessionId, kind: row.kind }).catch(() => false);
+    if (isUrgent === true) sendable.push(row);
+  }
+  return sendable;
+}
+
+async function evaluateDuePerson(
+  deps: AttentionDeliveryDependencies,
+  rows: PendingRow[],
+  nowMs: number,
+  outcome: AttentionOutcome,
+): Promise<DuePerson | undefined> {
+  const { orgId, developerId } = rows[0]!;
+  const marker = markerOf(await deps.store.get(notifySentKey(orgId, developerId)));
+  if (nowMs - marker.lastAt < NOTIFY_BATCH_MINUTES * 60_000) return undefined;
+  // Someone whose every owed target is waiting for a retry is not due either, so they never take a place from someone who can be told now.
+  if ((marker.waitUntil ?? 0) > nowMs) return undefined;
+  const prefs = await readNotifyPrefs(deps.store, orgId, developerId);
+  const hold = prefs.muted ? "none" : holdOf(prefs, nowMs, marker.digestDay);
+  let sendable = rows;
+  if (hold !== "none") {
+    sendable = await urgentRowsOf(deps.urgent, orgId, developerId, rows);
+    outcome.held += rows.length - sendable.length;
+    if (sendable.length === 0) return undefined;
+  }
+  return { rows: [...sendable].sort((a, b) => a.at.localeCompare(b.at)), marker, prefs, digest: hold === "none" && prefs.digestAt !== undefined && !prefs.muted };
+}
+
+async function selectDuePeople(
+  deps: AttentionDeliveryDependencies,
+  byPerson: ReadonlyMap<string, PendingRow[]>,
+  nowMs: number,
+  late: () => boolean,
+  outcome: AttentionOutcome,
+): Promise<DuePerson[]> {
+  const due: DuePerson[] = [];
+  for (const rows of byPerson.values()) {
+    if (late()) break;
+    const person = await evaluateDuePerson(deps, rows, nowMs, outcome);
+    if (person !== undefined) due.push(person);
+  }
+  due.sort((a, b) => a.rows[0]!.at.localeCompare(b.rows[0]!.at));
+  return due;
+}
+
+async function resolveUpkeepRow(deps: AttentionDeliveryDependencies, orgId: OrgId, developerId: string, row: PendingRow): Promise<RowResolution> {
+  // Not a session's row: the notice is about a project. Still theirs to read only while they administer it.
+  const subject = upkeepSubjectOf(row.sessionId);
+  // No upkeep wiring on this host: the row waits (it expires by itself) instead of being dropped over a notice that was written once for the month.
+  if (deps.upkeep === undefined) return { state: "skip" };
+  const allowed = subject !== undefined && await deps.upkeep.administers(orgId, developerId, subject.project).then((answer) => answer === true, () => false);
+  if (!allowed) return { state: "stale" };
+  return { state: "current", line: { title: oneLine(subject.project, TITLE_MAX) || "A project", status: UPKEEP_NOTICE_WORDS[subject.reason], link: deps.upkeep.link?.(subject.project), kind: "upkeep_paused" } };
+}
+
+async function resolveSetupBrokenRow(deps: AttentionDeliveryDependencies, orgId: OrgId, developerId: string, row: PendingRow): Promise<RowResolution> {
+  // Lead 4 U5: a project notice too. Still theirs to read only while they administer the project, and only while the setup it names is STILL broken (the re-check's own key, read now).
+  const subject = setupBrokenSubjectOf(row.sessionId);
+  if (deps.upkeep?.setupRead === undefined) return { state: "skip" };
+  const allowed = subject !== undefined && await deps.upkeep.administers(orgId, developerId, subject.project).then((answer) => answer === true, () => false);
+  const open = allowed ? await deps.upkeep.setupRead(orgId, subject.project).catch(() => undefined) : undefined;
+  if (!allowed || open === undefined || !open.key.startsWith(subject.prefix)) return { state: "stale" };
+  return { state: "current", line: { title: oneLine(subject.project, TITLE_MAX) || "A project", status: oneLine(setupAdminNoticeWords(open.failedStep, open.fixReady), 400), link: deps.upkeep.setupLink?.(subject.project), kind: "setup_broken" } };
+}
+
+async function isAlreadyCarded(deps: AttentionDeliveryDependencies, kind: AttentionKind, session: AgentSessionRecord): Promise<boolean> {
+  if (kind !== "needs_you") return false;
+  if (deps.planCarded !== undefined && await deps.planCarded(session).catch(() => false)) return true;
+  return deps.setupPausedTold !== undefined && await deps.setupPausedTold(session).catch(() => false);
+}
+
+async function resolveTaskRow(
+  deps: AttentionDeliveryDependencies,
+  sessions: SessionStore,
+  orgId: OrgId,
+  developerId: string,
+  row: PendingRow,
+  current: ReadonlyArray<{ row: PendingRow; line: Line }>,
+  allowedSessions: Map<string, AgentSessionRecord>,
+  carded: Set<string>,
+): Promise<RowResolution> {
+  const earlier = current.find((entry) => entry.row.sessionId === row.sessionId);
+  if (earlier !== undefined) return { state: "current", line: earlier.line };
+  const session = await sessions.get(orgId, row.sessionId);
+  if (session === undefined) return { state: "stale" };
+  const checkAccess = deps.access ?? (async (_org: OrgId, person: string, found: AgentSessionRecord) => (found.owner.developerId === person ? { owner: true } : undefined));
+  const access = await checkAccess(orgId, developerId, session).catch(() => undefined);
+  const kind = attentionKindOf(session.summary);
+  // Still current (a later change of state supersedes the row), never "needs you" for an ended session, and still theirs to read: anything else is dropped without a word.
+  if (access === undefined || kind !== row.kind || (session.endedAt !== undefined && kind !== "done" && kind !== "failed")) return { state: "stale" };
+  if (await isAlreadyCarded(deps, kind, session)) carded.add(row.sessionId);
+  allowedSessions.set(row.sessionId, session);
+  const link = deps.link?.(session);
+  const title = oneLine(access.owner ? session.title : hideEmailAddresses(session.title), TITLE_MAX) || "A task";
+  return { state: "current", line: { title, status: oneLine(taskStatusText(sessionTaskStatus(session.summary)), 200), link, kind } };
+}
+
+async function resolvePendingRow(
+  deps: AttentionDeliveryDependencies,
+  sessions: SessionStore,
+  orgId: OrgId,
+  developerId: string,
+  row: PendingRow,
+  current: ReadonlyArray<{ row: PendingRow; line: Line }>,
+  allowedSessions: Map<string, AgentSessionRecord>,
+  carded: Set<string>,
+): Promise<RowResolution> {
+  if (row.kind === "upkeep_paused") return resolveUpkeepRow(deps, orgId, developerId, row);
+  // A notice that is not a task's status (the admin notice, an admin's stop) is told by its own checks, in its own fixed words.
+  if (isNoticeKind(row.kind)) {
+    const line = await noticeLineOf({ sessions, adminNotice: deps.adminNotice, access: deps.access, link: deps.link }, orgId, developerId, row);
+    return line === undefined ? { state: "stale" } : { state: "current", line };
+  }
+  if (row.kind === "setup_broken") return resolveSetupBrokenRow(deps, orgId, developerId, row);
+  return resolveTaskRow(deps, sessions, orgId, developerId, row, current, allowedSessions, carded);
+}
+
+async function resolvePersonRows(
+  deps: AttentionDeliveryDependencies,
+  sessions: SessionStore,
+  orgId: OrgId,
+  developerId: string,
+  rows: readonly PendingRow[],
+): Promise<ResolvedPersonRows> {
+  const current: Array<{ row: PendingRow; line: Line }> = [];
+  const allowedSessions = new Map<string, AgentSessionRecord>();
+  const stale: PendingRow[] = [];
+  const carded = new Set<string>();
+  for (const row of rows) {
+    const resolved = await resolvePendingRow(deps, sessions, orgId, developerId, row, current, allowedSessions, carded);
+    if (resolved.state === "stale") stale.push(row);
+    else if (resolved.state === "current") current.push({ row, line: resolved.line });
+  }
+  return { current, allowedSessions, stale, carded };
+}
+
+async function resolveThreadSessions(
+  threadFn: AttentionDeliveryDependencies["thread"],
+  orgId: OrgId,
+  developerId: string,
+  current: ReadonlyArray<{ row: PendingRow }>,
+): Promise<Map<string, { target: NotifyTarget; sessions: Set<string> }>> {
+  // Where each session's change is also told: the conversation it was started from, when this person started it.
+  const threadSessions = new Map<string, { target: NotifyTarget; sessions: Set<string> }>();
+  if (threadFn === undefined) return threadSessions;
+  const sessionIds = new Set(current.filter(({ row }) => row.kind !== "upkeep_paused" && row.kind !== "knowledge_read" && row.kind !== "setup_broken").map(({ row }) => row.sessionId));
+  for (const sessionId of sessionIds) {
+    const thread = await threadFn(orgId, sessionId).catch(() => undefined);
+    if (thread === undefined || thread.personId !== developerId) continue;
+    const target: NotifyTarget = { channel: thread.conversation.channel, conversation: thread.conversation };
+    const found = threadSessions.get(targetKey(target)) ?? { target, sessions: new Set<string>() };
+    found.sessions.add(sessionId);
+    threadSessions.set(targetKey(target), found);
+  }
+  return threadSessions;
+}
+
+async function resolvePersonRoutes(
+  deps: AttentionDeliveryDependencies,
+  email: EmailSender | undefined,
+  orgId: OrgId,
+  developerId: string,
+  prefs: NotifyPrefs,
+  current: ReadonlyArray<{ row: PendingRow }>,
+  carded: ReadonlySet<string>,
+  log: Log,
+): Promise<PersonRoutes> {
+  const threadSessions = await resolveThreadSessions(deps.thread, orgId, developerId, current);
+  // Chat or email, as the person chose: email only when the email point can send and they have an address of their own; an email choice that cannot be sent falls back to the chats.
+  const chatReachable = prefs.targets.length > 0 || threadSessions.size > 0;
+  const rawAddress = email?.capabilities.available === true && deps.address !== undefined ? await deps.address(orgId, developerId).catch(() => undefined) : undefined;
+  const address = rawAddress !== undefined && isPlainEmailAddress(rawAddress) ? rawAddress : undefined;
+  const goes = effectiveNotify({ channel: prefs.channel ?? defaultNotifyChannel(chatReachable), slackLinked: chatReachable, emailAvailable: address !== undefined, emailUnsubscribed: prefs.emailUnsubscribed });
+  const chosen = new Set(goes.slack ? prefs.targets.map((target) => targetKey(target)) : []);
+  const wanted: NotifyTarget[] = goes.slack ? [...prefs.targets, ...[...threadSessions.values()].map(({ target }) => target).filter((target) => !chosen.has(targetKey(target)))] : [];
+  const targets = wanted.slice(0, Math.min(NOTIFY_TARGETS_MAX * 2, deps.maxTargets ?? Number.POSITIVE_INFINITY));
+  if (targets.length < wanted.length) log({ event: "attention.thread_targets_truncated", dropped: wanted.length - targets.length });
+  const routes = [...targets.map((target) => targetKey(target)), ...(goes.email ? [EMAIL_TARGET] : [])];
+  // A target tells the person about every row when they chose it (email included), and only about the sessions started there when it is the conversation of a start.
+  const doneInThread = deps.doneToldInThread?.() === true;
+  const appliesTo = (tkey: string, row: PendingRow): boolean => tkey === EMAIL_TARGET || chosen.has(tkey) || (threadSessions.get(tkey)?.sessions.has(row.sessionId) === true && !(doneInThread && row.kind === "done") && !(row.kind === "needs_you" && carded.has(row.sessionId)));
+  return { targets, routes, chosen, address, appliesTo };
+}
+
+function batchModeOf(digest: boolean, allDone: boolean, allNotice: boolean): "digest" | "done" | "notice" | "attention" {
+  if (digest) return "digest";
+  if (allDone) return "done";
+  if (allNotice) return "notice";
+  return "attention";
+}
+
+function batchSummaryOf(owed: ReadonlyArray<{ row: PendingRow; line: Line }>, digest: boolean): BatchSummary {
+  const lines = [...new Map(owed.map(({ row, line }) => [row.sessionId, line])).values()];
+  const shown = lines.slice(0, NOTIFY_ITEMS_MAX);
+  const more = lines.length - shown.length;
+  const allFailed = lines.every((line) => line.kind === "failed");
+  const allDone = lines.every((line) => line.kind === "done");
+  const allNotice = lines.every((line) => isNoticeKind(line.kind));
+  return { shown, more, mode: batchModeOf(digest, allDone, allNotice), allFailed, allDone };
+}
+
+function formatChatText(batch: BatchSummary, maxLength: number, footer: string | undefined): string {
+  if (batch.mode === "digest") return digestText(batch.shown, batch.more, maxLength, footer);
+  if (batch.mode === "done") return doneText(batch.shown, maxLength, footer);
+  if (batch.mode === "notice") return noticeText(batch.shown, batch.more, maxLength, footer);
+  return attentionText(batch.shown, batch.more, maxLength, footer);
+}
+
+async function sendAttentionEmail(
+  deps: AttentionDeliveryDependencies,
+  email: EmailSender,
+  orgId: OrgId,
+  developerId: string,
+  address: string,
+  batch: BatchSummary,
+  log: Log,
+): Promise<{ ok: boolean; refused: boolean }> {
+  const links = typeof deps.emailLinks === "function" ? deps.emailLinks(orgId, developerId) : deps.emailLinks;
+  const mail = attentionEmail(batch.shown, batch.more, batch.mode, links);
+  try {
+    await email.send({ companyId: orgId, purpose: "attention", to: address, subject: mail.subject, text: mail.text, ...(mail.unsubscribeUrl === undefined ? {} : { unsubscribeUrl: mail.unsubscribeUrl }), deadline: Date.now() + ATTENTION_SEND_TIMEOUT_MS }); // the port's deadline is on the real clock, whatever clock the sweep reads
+    return { ok: true, refused: false };
+  } catch (error) {
+    const refused = error instanceof EmailError && !error.retryable;
+    log({ event: "attention.send_failed", channel: EMAIL_TARGET, error: emailErrorCode(error) });
+    return { ok: false, refused };
+  }
+}
+
+function buildChatEvent(
+  orgId: OrgId,
+  developerId: string,
+  tkey: string,
+  target: NotifyTarget,
+  owed: ReadonlyArray<{ row: PendingRow }>,
+  batch: BatchSummary,
+  digest: boolean,
+  text: string,
+  nowMs: number,
+): ChannelEvent {
+  const base = { version: 1 as const, id: batchEventId(orgId, developerId, tkey, owed.map(({ row }) => ({ sk: row.key.sk, at: row.at }))), channel: target.channel, conversation: target.conversation, createdAt: new Date(nowMs).toISOString() };
+  if (batch.allDone && !digest) return { ...base, type: "done", data: { text } };
+  if (batch.allFailed && !digest) return { ...base, type: "error", data: { code: "task_failed", text } };
+  return { ...base, type: "progress", data: { text } };
+}
+
+async function sendAttentionChat(
+  deps: AttentionDeliveryDependencies,
+  adapter: ChannelAdapter,
+  orgId: OrgId,
+  developerId: string,
+  tkey: string,
+  target: NotifyTarget,
+  owed: ReadonlyArray<{ row: PendingRow }>,
+  allowedSessions: ReadonlyMap<string, AgentSessionRecord>,
+  batch: BatchSummary,
+  digest: boolean,
+  nowMs: number,
+  log: Log,
+): Promise<{ ok: boolean; refused: boolean }> {
+  const maxLength = adapter.capabilities.maxTextLength;
+  const rawText = formatChatText(batch, maxLength, deps.footer);
+  const text = await withApplicationNoticeSummaries(deps, owed, allowedSessions, rawText, maxLength);
+  const event = buildChatEvent(orgId, developerId, tkey, target, owed, batch, digest, text, nowMs);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([adapter.deliver(event), new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("timeout")), ATTENTION_SEND_TIMEOUT_MS); })]);
+    return { ok: true, refused: false };
+  } catch (error) {
+    log({ event: "attention.send_failed", channel: target.channel, error: errorName(error) });
+    return { ok: false, refused: false };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function markEmailRowsSent(store: Pick<DocumentStore, "update">, owed: ReadonlyArray<{ row: PendingRow }>, log: Log): Promise<void> {
+  try {
+    for (const { row } of owed) await store.update({ key: row.key, ops: [change.set("emailSent", true)], condition: when.and(when.present(), when.eq("at", row.at)) });
+  } catch (error) {
+    log({ event: "attention.mark_failed", channel: EMAIL_TARGET, error: errorName(error) });
+  }
+}
+
+async function settleEmailRows(store: Pick<DocumentStore, "update" | "transact">, settled: boolean, owed: ReadonlyArray<{ row: PendingRow }>, log: Log): Promise<void> {
+  if (settled) {
+    await markEmailRowsSent(store, owed, log);
+    return;
+  }
+  // Not sent: the claim is given back so the retry sends it. If even that fails it is never sent twice: at most once, logged.
+  await store.transact(owed.map(({ row }) => ({ kind: "update" as const, key: row.key, ops: [change.remove("emailClaimed")], condition: when.present() }))).catch((error: unknown) => log({ event: "attention.unclaim_failed", channel: EMAIL_TARGET, error: errorName(error) }));
+}
+
+async function recordRouteOutcome(
+  store: Pick<DocumentStore, "update" | "transact">,
+  tkey: string,
+  channelName: string,
+  owed: ReadonlyArray<{ row: PendingRow }>,
+  result: { ok: boolean; refused: boolean },
+  next: SentMarker,
+  nowMs: number,
+  outcome: AttentionOutcome,
+  log: Log,
+): Promise<boolean> {
+  const failures = result.ok ? 0 : (next.failures[tkey] ?? 0) + 1;
+  const settled = result.ok || result.refused || failures >= ATTENTION_TARGET_TRIES_MAX;
+  if (settled) {
+    for (const { row } of owed) row.done.add(tkey);
+    delete next.failures[tkey];
+    delete next.retryAt[tkey];
+  }
+  if (tkey === EMAIL_TARGET) await settleEmailRows(store, settled, owed, log);
+  if (result.ok) {
+    if (tkey === EMAIL_TARGET) outcome.emails += 1; else outcome.sent += 1;
+    return true;
+  }
+  if (settled) {
+    outcome.gaveUp += 1;
+    log({ event: "attention.target_gave_up", channel: channelName });
+    return false;
+  }
+  outcome.failed += 1;
+  next.failures[tkey] = failures;
+  next.retryAt[tkey] = nowMs + ATTENTION_RETRY_BASE_MS * 2 ** (failures - 1);
+  return false;
+}
+
+async function checkChatTarget(
+  deps: AttentionDeliveryDependencies,
+  orgId: OrgId,
+  tkey: string,
+  target: NotifyTarget | undefined,
+  chosen: ReadonlySet<string>,
+  log: Log,
+): Promise<{ adapter: ChannelAdapter | undefined; unreachable: boolean }> {
+  const adapter: ChannelAdapter | undefined = target === undefined ? undefined : deps.registry.get("channel", target.channel);
+  // A channel nobody serves, or one that cannot message first (for a target the person chose; a conversation of a start is a reply), will not succeed by trying again: it is counted as unreachable and marked, never retried.
+  const otherCompany = target !== undefined && !(await tenantIsCompanys(deps.companyOf, orgId, target.channel, target.conversation.tenant));
+  if (otherCompany) log({ event: "attention.other_company", channel: target.channel });
+  const unreachable = adapter === undefined || otherCompany || (!adapter.capabilities.proactive && chosen.has(tkey));
+  return { adapter, unreachable };
+}
+
+async function deliverEmailRoute(ctx: PersonDeliveryContext, owed: ReadonlyArray<{ row: PendingRow; line: Line }>): Promise<{ attempted: boolean; sent: boolean }> {
+  if ((ctx.next.retryAt[EMAIL_TARGET] ?? 0) > ctx.nowMs) return { attempted: false, sent: false };
+  // Claimed before the send, so an email is sent at most once. The claim is one transaction over the rows it covers: either every row is claimed or none is, so a claim that fails part-way never
+  // leaves a row marked as emailed that no email carried. A claim that cannot be written sends nothing now (tried again later).
+  const claimed = await claimEmailRows(ctx.deps.store, owed, ctx.nowMs).catch((error: unknown) => { ctx.log({ event: "attention.claim_failed", channel: EMAIL_TARGET, error: errorName(error) }); return undefined; });
+  if (claimed === undefined || claimed.length === 0) return { attempted: true, sent: false };
+  const batch = batchSummaryOf(claimed, ctx.digest);
+  const result = await sendAttentionEmail(ctx.deps, ctx.email!, ctx.orgId, ctx.developerId, ctx.personRoutes.address!, batch, ctx.log);
+  const sent = await recordRouteOutcome(ctx.deps.store, EMAIL_TARGET, EMAIL_TARGET, claimed, result, ctx.next, ctx.nowMs, ctx.outcome, ctx.log);
+  return { attempted: true, sent };
+}
+
+async function deliverChatRoute(ctx: PersonDeliveryContext, tkey: string, owed: ReadonlyArray<{ row: PendingRow; line: Line }>): Promise<{ attempted: boolean; sent: boolean }> {
+  const target = ctx.personRoutes.targets.find((entry) => targetKey(entry) === tkey);
+  const checked = await checkChatTarget(ctx.deps, ctx.orgId, tkey, target, ctx.personRoutes.chosen, ctx.log);
+  if (checked.unreachable) {
+    ctx.outcome.unreachable += 1;
+    for (const { row } of owed) row.done.add(tkey);
+    return { attempted: false, sent: false };
+  }
+  if ((ctx.next.retryAt[tkey] ?? 0) > ctx.nowMs) return { attempted: false, sent: false };
+  const batch = batchSummaryOf(owed, ctx.digest);
+  const result = await sendAttentionChat(ctx.deps, checked.adapter!, ctx.orgId, ctx.developerId, tkey, target!, owed, ctx.allowedSessions, batch, ctx.digest, ctx.nowMs, ctx.log);
+  const sent = await recordRouteOutcome(ctx.deps.store, tkey, target!.channel, owed, result, ctx.next, ctx.nowMs, ctx.outcome, ctx.log);
+  return { attempted: true, sent };
+}
+
+async function deliverPersonRoutes(ctx: PersonDeliveryContext, late: () => boolean): Promise<{ attempted: boolean; sentSomething: boolean }> {
+  let sentSomething = false;
+  let attempted = false;
+  for (const tkey of ctx.personRoutes.routes) {
+    if (late()) break;
+    const owed = ctx.current.filter(({ row }) => ctx.personRoutes.appliesTo(tkey, row) && !row.done.has(tkey));
+    if (owed.length === 0) continue;
+    const step = tkey === EMAIL_TARGET ? await deliverEmailRoute(ctx, owed) : await deliverChatRoute(ctx, tkey, owed);
+    if (step.attempted) attempted = true;
+    if (step.sent) sentSomething = true;
+  }
+  return { attempted, sentSomething };
+}
+
+async function dropAllRows(entries: ReadonlyArray<{ row: PendingRow }>, dropRow: (row: PendingRow) => Promise<unknown>): Promise<void> {
+  for (const { row } of entries) await dropRow(row);
+}
+
+async function finalizePersonDelivery(
+  ctx: PersonDeliveryContext,
+  prefs: NotifyPrefs,
+  sentSomething: boolean,
+  dropRow: (row: PendingRow) => Promise<unknown>,
+): Promise<void> {
+  const { deps, orgId, developerId, digest, nowMs, current, personRoutes, next, outcome, log } = ctx;
+  const { routes, appliesTo } = personRoutes;
+  if (sentSomething) {
+    outcome.people += 1;
+    next.lastAt = nowMs;
+    if (digest) next.digestDay = digestSlotDay(prefs, nowMs);
+  }
+  // When every target still owed waits for a retry, the person is not due again before the first of them.
+  const waiting = routes.filter((tkey) => current.some(({ row }) => appliesTo(tkey, row) && !row.done.has(tkey))).map((tkey) => next.retryAt[tkey]);
+  if (!sentSomething && waiting.length > 0 && waiting.every((at) => at !== undefined && at > nowMs)) next.waitUntil = Math.min(...(waiting as number[]));
+  // What each target received is marked on the rows; an event already sent has a stable id, so a mark that fails is only logged.
+  for (const { row } of current) {
+    if (routes.every((tkey) => !appliesTo(tkey, row) || row.done.has(tkey))) { await dropRow(row); continue; }
+    await deps.store.update({ key: row.key, ops: [change.set("doneTargets", [...row.done])], condition: when.and(when.present(), when.eq("at", row.at)) }).catch((error: unknown) => log({ event: "attention.mark_failed", error: errorName(error) }));
+  }
+  await deps.store.put({
+    item: {
+      ...notifySentKey(orgId, developerId), entityType: "NOTIFY_SENT", orgId, developerId, lastAt: next.lastAt, failures: next.failures, retryAt: next.retryAt,
+      ...(next.waitUntil === undefined ? {} : { waitUntil: next.waitUntil }), ...(next.digestDay === undefined ? {} : { digestDay: next.digestDay }),
+      // The digest day must outlive a day, or tomorrow's slot would be served twice.
+      [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(nowMs / 1000) + (next.digestDay === undefined ? SENT_KEEP_SECONDS : 3 * SENT_KEEP_SECONDS),
+    },
+  });
+}
+
+async function deliverForPerson(
+  deps: AttentionDeliveryDependencies,
+  sessions: SessionStore,
+  email: EmailSender | undefined,
+  person: DuePerson,
+  nowMs: number,
+  late: () => boolean,
+  outcome: AttentionOutcome,
+  dropRow: (row: PendingRow) => Promise<unknown>,
+  log: Log,
+): Promise<boolean> {
+  const { rows, marker, prefs, digest } = person;
+  const { orgId, developerId } = rows[0]!;
+  const { current, allowedSessions, stale, carded } = await resolvePersonRows(deps, sessions, orgId, developerId, rows);
+  for (const row of stale) { await dropRow(row); outcome.dropped += 1; }
+  if (current.length === 0) return false;
+  // A person who muted notices is told nowhere; the rows go (Home still lists what waits for them).
+  if (prefs.muted) { await dropAllRows(current, dropRow); return false; }
+  const personRoutes = await resolvePersonRoutes(deps, email, orgId, developerId, prefs, current, carded, log);
+  // Nowhere to be told: not messaged; the rows go.
+  if (personRoutes.routes.length === 0) { await dropAllRows(current, dropRow); return false; }
+  const next: SentMarker = { lastAt: marker.lastAt, failures: { ...marker.failures }, retryAt: { ...marker.retryAt }, ...(marker.digestDay === undefined ? {} : { digestDay: marker.digestDay }) };
+  const ctx: PersonDeliveryContext = { deps, email, orgId, developerId, digest, nowMs, current, allowedSessions, personRoutes, next, outcome, log };
+  const { attempted, sentSomething } = await deliverPersonRoutes(ctx, late);
+  await finalizePersonDelivery(ctx, prefs, sentSomething, dropRow);
+  return attempted;
+}
+
 /**
  * The sweep's delivery. The queue is read in pages (at most `ATTENTION_READ_MAX` rows; rows past their expiry are left out). People still inside their batching window are set aside BEFORE the
  * `PEOPLE_PER_SWEEP_MAX` people of this sweep are chosen, and those are taken oldest-waiting first, so nobody's rows are starved by others'. Rows a person's quiet hours or digest hold (`holdOf`) stay
@@ -488,231 +1061,19 @@ export async function deliverAttention(deps: AttentionDeliveryDependencies, budg
   const nowMs = deps.now();
   const late = () => budget.deadlineMs !== undefined && deps.now() >= budget.deadlineMs;
   if (budget.companyId !== undefined && !OrgIdSchema.safeParse(budget.companyId).success) throw new Error("the notification company is invalid");
-  const maxItems = Math.min(ATTENTION_READ_MAX, budget.maxItems ?? ATTENTION_READ_MAX);
-  const byPerson = new Map<string, PendingRow[]>();
-  let cursor: string | undefined = budget.scan?.cursor;
-  let read = 0;
-  do {
-    if (late() || read >= maxItems) break;
-    const page = await deps.store.query({ pk: PENDING_PK, ...(budget.companyId === undefined ? {} : { sk: { op: "beginsWith" as const, prefix: `${budget.companyId}#` } }), limit: Math.min(PENDING_PAGE, maxItems - read), ...(cursor === undefined ? {} : { cursor }) });
-    let finishedPage = true;
-    for (const item of page.items) {
-      if (read >= maxItems || late()) { finishedPage = false; break; }
-      read += 1;
-      const row = pendingRowOf(item, Math.floor(nowMs / 1000));
-      if (row === undefined || (budget.companyId !== undefined && row.orgId !== budget.companyId)) continue;
-      const key = `${row.orgId}#${row.developerId}`;
-      byPerson.set(key, [...(byPerson.get(key) ?? []), row]);
-    }
-    if (finishedPage) { cursor = page.cursor; if (budget.scan !== undefined) budget.scan.cursor = cursor; }
-    else break;
-  } while (cursor !== undefined && read < maxItems && !late());
-  if (budget.companyId !== undefined) outcome.complete = cursor === undefined && read < maxItems && !late();
-  if (cursor !== undefined) log({ event: "attention.queue_truncated", read });
+  const { byPerson, scanComplete } = await scanPendingQueue(deps, budget, nowMs, late, log);
   // Who is due now (outside their window, with something their quiet hours and digest let go), oldest-waiting first: only they take this sweep's places.
-  const due: Array<{ rows: PendingRow[]; marker: SentMarker; prefs: Awaited<ReturnType<typeof readNotifyPrefs>>; digest: boolean }> = [];
-  for (const rows of byPerson.values()) {
-    if (late()) break;
-    const { orgId, developerId } = rows[0]!;
-    const marker = markerOf(await deps.store.get(notifySentKey(orgId, developerId)));
-    if (nowMs - marker.lastAt < NOTIFY_BATCH_MINUTES * 60_000) continue;
-    // Someone whose every owed target is waiting for a retry is not due either, so they never take a place from someone who can be told now.
-    if ((marker.waitUntil ?? 0) > nowMs) continue;
-    const prefs = await readNotifyPrefs(deps.store, orgId, developerId);
-    const hold = prefs.muted ? "none" : holdOf(prefs, nowMs, marker.digestDay);
-    let sendable = rows;
-    if (hold !== "none") {
-      sendable = [];
-      for (const row of rows) {
-        const urgent = deps.urgent === undefined || isNoticeKind(row.kind) ? false : await deps.urgent(orgId, { developerId, sessionId: row.sessionId, kind: row.kind }).catch(() => false);
-        if (urgent === true) sendable.push(row);
-      }
-      outcome.held += rows.length - sendable.length;
-      if (sendable.length === 0) continue;
-    }
-    due.push({ rows: [...sendable].sort((a, b) => a.at.localeCompare(b.at)), marker, prefs, digest: hold === "none" && prefs.digestAt !== undefined && !prefs.muted });
-  }
-  due.sort((a, b) => a.rows[0]!.at.localeCompare(b.rows[0]!.at));
+  const due = await selectDuePeople(deps, byPerson, nowMs, late, outcome);
   const sessions = new SessionStore(deps.store);
   const dropRow = (row: PendingRow): Promise<unknown> => deps.store.delete({ key: row.key }).catch(() => undefined);
   const email = emailSenderOf(deps.registry);
   let taken = 0, visitedPeople = 0;
-  for (const { rows, marker, prefs, digest } of due) {
+  for (const person of due) {
     if (late() || taken >= PEOPLE_PER_SWEEP_MAX) break;
     visitedPeople += 1;
-    const { orgId, developerId } = rows[0]!;
-    const current: Array<{ row: PendingRow; line: Line }> = [];
-    const allowedSessions = new Map<string, AgentSessionRecord>();
-    const stale: PendingRow[] = [];
-    const carded = new Set<string>();
-    for (const row of rows) {
-      if (row.kind === "upkeep_paused") {
-        // Not a session's row: the notice is about a project. Still theirs to read only while they administer it.
-        const subject = upkeepSubjectOf(row.sessionId);
-        // No upkeep wiring on this host: the row waits (it expires by itself) instead of being dropped over a notice that was written once for the month.
-        if (deps.upkeep === undefined) continue;
-        const allowed = subject !== undefined && await deps.upkeep.administers(orgId, developerId, subject.project).then((answer) => answer === true, () => false);
-        if (!allowed) { stale.push(row); continue; }
-        current.push({ row, line: { title: oneLine(subject.project, TITLE_MAX) || "A project", status: UPKEEP_NOTICE_WORDS[subject.reason], link: deps.upkeep.link?.(subject.project), kind: "upkeep_paused" } });
-        continue;
-      }
-      // A notice that is not a task's status (the admin notice, an admin's stop) is told by its own checks, in its own fixed words.
-      if (isNoticeKind(row.kind)) {
-        const line = await noticeLineOf({ sessions, adminNotice: deps.adminNotice, access: deps.access, link: deps.link }, orgId, developerId, row);
-        if (line === undefined) stale.push(row); else current.push({ row, line });
-        continue;
-      }
-      if (row.kind === "setup_broken") {
-        // Lead 4 U5: a project notice too. Still theirs to read only while they administer the project, and only while the setup it names is STILL broken (the re-check's own key, read now).
-        const subject = setupBrokenSubjectOf(row.sessionId);
-        if (deps.upkeep?.setupRead === undefined) continue;
-        const allowed = subject !== undefined && await deps.upkeep.administers(orgId, developerId, subject.project).then((answer) => answer === true, () => false);
-        const open = allowed ? await deps.upkeep.setupRead(orgId, subject.project).catch(() => undefined) : undefined;
-        if (!allowed || open === undefined || !open.key.startsWith(subject.prefix)) { stale.push(row); continue; }
-        current.push({ row, line: { title: oneLine(subject.project, TITLE_MAX) || "A project", status: oneLine(setupAdminNoticeWords(open.failedStep, open.fixReady), 400), link: deps.upkeep.setupLink?.(subject.project), kind: "setup_broken" } });
-        continue;
-      }
-      const earlier = current.find((entry) => entry.row.sessionId === row.sessionId);
-      if (earlier !== undefined) { current.push({ row, line: earlier.line }); continue; }
-      const session = await sessions.get(orgId, row.sessionId);
-      const access = session === undefined ? undefined : await (deps.access ?? (async (_org, person, found) => (found.owner.developerId === person ? { owner: true } : undefined)))(orgId, developerId, session).catch(() => undefined);
-      const kind = session === undefined ? undefined : attentionKindOf(session.summary);
-      // Still current (a later change of state supersedes the row), never "needs you" for an ended session, and still theirs to read: anything else is dropped without a word.
-      if (session === undefined || access === undefined || kind !== row.kind || (session.endedAt !== undefined && kind !== "done" && kind !== "failed")) { stale.push(row); continue; }
-      if (kind === "needs_you" && deps.planCarded !== undefined && await deps.planCarded(session).catch(() => false)) carded.add(row.sessionId);
-      else if (kind === "needs_you" && deps.setupPausedTold !== undefined && await deps.setupPausedTold(session).catch(() => false)) carded.add(row.sessionId);
-      allowedSessions.set(row.sessionId, session);
-      const link = deps.link?.(session);
-      current.push({ row, line: { title: oneLine(access.owner ? session.title : hideEmailAddresses(session.title), TITLE_MAX) || "A task", status: oneLine(taskStatusText(sessionTaskStatus(session.summary)), 200), link, kind } });
-    }
-    for (const row of stale) { await dropRow(row); outcome.dropped += 1; }
-    if (current.length === 0) continue;
-    // A person who muted notices is told nowhere; the rows go (Home still lists what waits for them).
-    if (prefs.muted) { for (const { row } of current) await dropRow(row); continue; }
-    // Where each session's change is also told: the conversation it was started from, when this person started it.
-    const threadSessions = new Map<string, { target: NotifyTarget; sessions: Set<string> }>();
-    if (deps.thread !== undefined) {
-      for (const sessionId of new Set(current.filter(({ row }) => row.kind !== "upkeep_paused" && row.kind !== "knowledge_read" && row.kind !== "setup_broken").map(({ row }) => row.sessionId))) {
-        const thread = await deps.thread(orgId, sessionId).catch(() => undefined);
-        if (thread === undefined || thread.personId !== developerId) continue;
-        const target: NotifyTarget = { channel: thread.conversation.channel, conversation: thread.conversation };
-        const found = threadSessions.get(targetKey(target)) ?? { target, sessions: new Set<string>() };
-        found.sessions.add(sessionId);
-        threadSessions.set(targetKey(target), found);
-      }
-    }
-    // Chat or email, as the person chose: email only when the email point can send and they have an address of their own; an email choice that cannot be sent falls back to the chats.
-    const chatReachable = prefs.targets.length > 0 || threadSessions.size > 0;
-    const rawAddress = email?.capabilities.available === true && deps.address !== undefined ? await deps.address(orgId, developerId).catch(() => undefined) : undefined;
-    const address = rawAddress !== undefined && isPlainEmailAddress(rawAddress) ? rawAddress : undefined;
-    const goes = effectiveNotify({ channel: prefs.channel ?? defaultNotifyChannel(chatReachable), slackLinked: chatReachable, emailAvailable: address !== undefined, emailUnsubscribed: prefs.emailUnsubscribed });
-    const chosen = new Set(goes.slack ? prefs.targets.map((target) => targetKey(target)) : []);
-    const wanted: NotifyTarget[] = goes.slack ? [...prefs.targets, ...[...threadSessions.values()].map(({ target }) => target).filter((target) => !chosen.has(targetKey(target)))] : [];
-    const targets = wanted.slice(0, Math.min(NOTIFY_TARGETS_MAX * 2, deps.maxTargets ?? Number.POSITIVE_INFINITY));
-    if (targets.length < wanted.length) log({ event: "attention.thread_targets_truncated", dropped: wanted.length - targets.length });
-    const routes = [...targets.map((target) => targetKey(target)), ...(goes.email ? [EMAIL_TARGET] : [])];
-    // A target tells the person about every row when they chose it (email included), and only about the sessions started there when it is the conversation of a start.
-    const doneInThread = deps.doneToldInThread?.() === true;
-    const appliesTo = (tkey: string, row: PendingRow): boolean => tkey === EMAIL_TARGET || chosen.has(tkey) || (threadSessions.get(tkey)?.sessions.has(row.sessionId) === true && !(doneInThread && row.kind === "done") && !(row.kind === "needs_you" && carded.has(row.sessionId)));
-    // Nowhere to be told: not messaged; the rows go.
-    if (routes.length === 0) { for (const { row } of current) await dropRow(row); continue; }
-    taken += 1;
-    let sentSomething = false, attempted = false;
-    const next: SentMarker = { lastAt: marker.lastAt, failures: { ...marker.failures }, retryAt: { ...marker.retryAt }, ...(marker.digestDay === undefined ? {} : { digestDay: marker.digestDay }) };
-    const setOnRows = async (owed: ReadonlyArray<{ row: PendingRow }>, ops: Parameters<DocumentStore["update"]>[0]["ops"]): Promise<void> => {
-      for (const { row } of owed) await deps.store.update({ key: row.key, ops, condition: when.and(when.present(), when.eq("at", row.at)) });
-    };
-    for (const tkey of routes) {
-      if (late()) break;
-      let owed = current.filter(({ row }) => appliesTo(tkey, row) && !row.done.has(tkey));
-      if (owed.length === 0) continue;
-      const target = targets.find((entry) => targetKey(entry) === tkey);
-      const adapter: ChannelAdapter | undefined = target === undefined ? undefined : deps.registry.get("channel", target.channel);
-      // A channel nobody serves, or one that cannot message first (for a target the person chose; a conversation of a start is a reply), will not succeed by trying again: it is counted as unreachable and marked, never retried.
-      const otherCompany = target !== undefined && !(await tenantIsCompanys(deps.companyOf, orgId, target.channel, target.conversation.tenant));
-      if (otherCompany) log({ event: "attention.other_company", channel: target.channel });
-      if (tkey !== EMAIL_TARGET && (adapter === undefined || otherCompany || (!adapter.capabilities.proactive && chosen.has(tkey)))) {
-        outcome.unreachable += 1;
-        for (const { row } of owed) row.done.add(tkey);
-        continue;
-      }
-      if ((next.retryAt[tkey] ?? 0) > nowMs) continue;
-      attempted = true;
-      if (tkey === EMAIL_TARGET) {
-        // Claimed before the send, so an email is sent at most once. The claim is one transaction over the rows it covers: either every row is claimed or none is, so a claim that fails part-way never
-        // leaves a row marked as emailed that no email carried. A claim that cannot be written sends nothing now (tried again later).
-        const claimed = await claimEmailRows(deps.store, owed, nowMs).catch((error: unknown) => { log({ event: "attention.claim_failed", channel: EMAIL_TARGET, error: error instanceof Error ? error.name : "unknown" }); return undefined; });
-        if (claimed === undefined || claimed.length === 0) continue;
-        owed = claimed;
-      }
-      const lines = [...new Map(owed.map(({ row, line }) => [row.sessionId, line])).values()];
-      const shown = lines.slice(0, NOTIFY_ITEMS_MAX), more = lines.length - shown.length;
-      const allFailed = lines.every((line) => line.kind === "failed"), allDone = lines.every((line) => line.kind === "done"), allNotice = lines.every((line) => isNoticeKind(line.kind));
-      let ok = false, refused = false;
-      if (tkey === EMAIL_TARGET) {
-        const mail = attentionEmail(shown, more, digest ? "digest" : allDone ? "done" : allNotice ? "notice" : "attention", typeof deps.emailLinks === "function" ? deps.emailLinks(orgId, developerId) : deps.emailLinks);
-        try {
-          await email!.send({ companyId: orgId, purpose: "attention", to: address!, subject: mail.subject, text: mail.text, ...(mail.unsubscribeUrl === undefined ? {} : { unsubscribeUrl: mail.unsubscribeUrl }), deadline: Date.now() + ATTENTION_SEND_TIMEOUT_MS }); // the port's deadline is on the real clock, whatever clock the sweep reads
-          ok = true;
-        } catch (error) {
-          refused = error instanceof EmailError && !error.retryable;
-          log({ event: "attention.send_failed", channel: EMAIL_TARGET, error: error instanceof EmailError ? error.code : error instanceof Error ? error.name : "unknown" });
-        }
-      } else {
-        const maxLength = adapter!.capabilities.maxTextLength;
-        let text = digest ? digestText(shown, more, maxLength, deps.footer) : allDone ? doneText(shown, maxLength, deps.footer) : allNotice ? noticeText(shown, more, maxLength, deps.footer) : attentionText(shown, more, maxLength, deps.footer);
-        text = await withApplicationNoticeSummaries(deps, owed, allowedSessions, text, maxLength);
-        const base = { version: 1 as const, id: batchEventId(orgId, developerId, tkey, owed.map(({ row }) => ({ sk: row.key.sk, at: row.at }))), channel: target!.channel, conversation: target!.conversation, createdAt: new Date(nowMs).toISOString() };
-        const event = (allDone && !digest ? { ...base, type: "done", data: { text } } : allFailed && !digest ? { ...base, type: "error", data: { code: "task_failed", text } } : { ...base, type: "progress", data: { text } }) as ChannelEvent;
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        try {
-          await Promise.race([adapter!.deliver(event), new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error("timeout")), ATTENTION_SEND_TIMEOUT_MS); })]);
-          ok = true;
-        } catch (error) {
-          log({ event: "attention.send_failed", channel: target!.channel, error: error instanceof Error ? error.name : "unknown" });
-        } finally {
-          clearTimeout(timer);
-        }
-      }
-      const failures = ok ? 0 : (next.failures[tkey] ?? 0) + 1;
-      const gaveUp = !ok && (refused || failures >= ATTENTION_TARGET_TRIES_MAX);
-      if (ok || gaveUp) {
-        for (const { row } of owed) row.done.add(tkey);
-        delete next.failures[tkey];
-        delete next.retryAt[tkey];
-        if (tkey === EMAIL_TARGET) await setOnRows(owed, [change.set("emailSent", true)]).catch((error: unknown) => log({ event: "attention.mark_failed", channel: EMAIL_TARGET, error: error instanceof Error ? error.name : "unknown" }));
-      } else if (tkey === EMAIL_TARGET) {
-        // Not sent: the claim is given back so the retry sends it. If even that fails it is never sent twice: at most once, logged.
-        await deps.store.transact(owed.map(({ row }) => ({ kind: "update" as const, key: row.key, ops: [change.remove("emailClaimed")], condition: when.present() }))).catch((error: unknown) => log({ event: "attention.unclaim_failed", channel: EMAIL_TARGET, error: error instanceof Error ? error.name : "unknown" }));
-      }
-      if (ok) { sentSomething = true; if (tkey === EMAIL_TARGET) outcome.emails += 1; else outcome.sent += 1; }
-      else if (gaveUp) { outcome.gaveUp += 1; log({ event: "attention.target_gave_up", channel: tkey === EMAIL_TARGET ? EMAIL_TARGET : target!.channel }); }
-      else { outcome.failed += 1; next.failures[tkey] = failures; next.retryAt[tkey] = nowMs + ATTENTION_RETRY_BASE_MS * 2 ** (failures - 1); }
-    }
-    if (sentSomething) {
-      outcome.people += 1;
-      next.lastAt = nowMs;
-      if (digest) next.digestDay = digestSlotDay(prefs, nowMs);
-    }
-    // When every target still owed waits for a retry, the person is not due again before the first of them.
-    const waiting = routes.filter((tkey) => current.some(({ row }) => appliesTo(tkey, row) && !row.done.has(tkey))).map((tkey) => next.retryAt[tkey]);
-    if (!sentSomething && waiting.length > 0 && waiting.every((at) => at !== undefined && at > nowMs)) next.waitUntil = Math.min(...(waiting as number[]));
-    if (!attempted) taken -= 1;
-    // What each target received is marked on the rows; an event already sent has a stable id, so a mark that fails is only logged.
-    for (const { row } of current) {
-      if (routes.every((tkey) => !appliesTo(tkey, row) || row.done.has(tkey))) { await dropRow(row); continue; }
-      await deps.store.update({ key: row.key, ops: [change.set("doneTargets", [...row.done])], condition: when.and(when.present(), when.eq("at", row.at)) }).catch((error: unknown) => log({ event: "attention.mark_failed", error: error instanceof Error ? error.name : "unknown" }));
-    }
-    await deps.store.put({
-      item: {
-        ...notifySentKey(orgId, developerId), entityType: "NOTIFY_SENT", orgId, developerId, lastAt: next.lastAt, failures: next.failures, retryAt: next.retryAt,
-        ...(next.waitUntil === undefined ? {} : { waitUntil: next.waitUntil }), ...(next.digestDay === undefined ? {} : { digestDay: next.digestDay }),
-        // The digest day must outlive a day, or tomorrow's slot would be served twice.
-        [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(nowMs / 1000) + (next.digestDay === undefined ? SENT_KEEP_SECONDS : 3 * SENT_KEEP_SECONDS),
-      },
-    });
+    if (await deliverForPerson(deps, sessions, email, person, nowMs, late, outcome, dropRow, log)) taken += 1;
   }
-  if (budget.companyId !== undefined) outcome.complete = outcome.complete === true && visitedPeople === due.length && !late();
+  if (budget.companyId !== undefined) outcome.complete = scanComplete === true && visitedPeople === due.length && !late();
   if (outcome.people > 0 || outcome.dropped > 0 || outcome.failed > 0) log({ event: "attention.delivered", ...outcome });
   return outcome;
 }
