@@ -23,6 +23,16 @@ jobs:
       - uses: actions/setup-node@v5
         with: { node-version-file: .node-version, cache: npm }
       - run: npm ci
+      # tests/unit/port-guard.test.ts runs the real secret scan, and its re-check 3 cases fail loudly without gitleaks (they never skip): v0.5.0's
+      # first run stopped here for it. The same step, byte for byte, as ci.yml's test and port-guard jobs (tests/contract/release-workflow.test.ts).
+      - name: Install gitleaks 8.30.1 (checksum pinned)
+        run: |
+          if [ "$(uname -m)" = aarch64 ]; then arch=arm64; sum=e4a487ee7ccd7d3a7f7ec08657610aa3606637dab924210b3aee62570fb4b080; else arch=x64; sum=551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb; fi
+          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tar.gz" "https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_${arch}.tar.gz"
+          echo "${sum}  $RUNNER_TEMP/gitleaks.tar.gz" | sha256sum --check -
+          mkdir "$RUNNER_TEMP/gitleaks-bin"
+          tar -xzf "$RUNNER_TEMP/gitleaks.tar.gz" -C "$RUNNER_TEMP/gitleaks-bin" gitleaks
+          echo "$RUNNER_TEMP/gitleaks-bin" >> "$GITHUB_PATH"
       - run: npm run typecheck && npm run typecheck:all && npm run lint && npm run build && npm test && npm run infra:synth
 
   images:
