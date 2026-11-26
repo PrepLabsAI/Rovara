@@ -1,3 +1,4 @@
+import { MEMBERSHIP_READ_FAILED_WORDS, rethrowMembershipReadFailure } from "../core/membership-read.js";
 import type { ActionOffer, TaskMoneyV1 } from "@agentx/contracts";
 import type { TaskActionAnswer, TaskActionInput } from "../core-host/task-action-routes.js";
 import { logWorkspacePointerIntegrity } from "../core/task-flow/workspace-pointer.js";
@@ -267,9 +268,9 @@ export function coreTaskEntryFrom(
     ...(taskActions === undefined ? {} : {
       async taskActions(caller: CoreEntryCaller, taskId: string) {
         let deployed: DeployedCaller | undefined;
-        try { deployed = await deployedCallerOf(caller); } catch { return undefined; }
+        try { deployed = await deployedCallerOf(caller); } catch (error) { rethrowMembershipReadFailure(error); return undefined; }
         if (deployed === undefined) return undefined;
-        try { return await taskActions(deployed, taskId); } catch { return undefined; }
+        try { return await taskActions(deployed, taskId); } catch (error) { rethrowMembershipReadFailure(error); return undefined; }
       },
     }),
     ...(taskAction === undefined ? {} : {
@@ -287,9 +288,9 @@ export function coreTaskEntryFrom(
     ...(taskReadable === undefined ? {} : {
       async taskReadable(caller: CoreEntryCaller, taskId: string) {
         let deployed: DeployedCaller | undefined;
-        try { deployed = await deployedCallerOf(caller); } catch { return false; }
+        try { deployed = await deployedCallerOf(caller); } catch (error) { rethrowMembershipReadFailure(error); return false; }
         if (deployed === undefined) return false;
-        try { return (await taskReadable(deployed, taskId)) === true; } catch { return false; }
+        try { return (await taskReadable(deployed, taskId)) === true; } catch (error) { rethrowMembershipReadFailure(error); return false; }
       },
     }),
     ...(chatDecision === undefined ? {} : {
@@ -312,9 +313,9 @@ export function coreTaskEntryFrom(
     ...(taskMoney === undefined ? {} : {
       async taskMoney(caller: CoreEntryCaller, taskId: string) {
         let deployed: DeployedCaller | undefined;
-        try { deployed = await deployedCallerOf(caller); } catch { return undefined; }
+        try { deployed = await deployedCallerOf(caller); } catch (error) { rethrowMembershipReadFailure(error); return undefined; }
         if (deployed === undefined) return undefined;
-        try { return await taskMoney(deployed, taskId); } catch { return undefined; }
+        try { return await taskMoney(deployed, taskId); } catch (error) { rethrowMembershipReadFailure(error); return undefined; }
       },
     }),
     ...(recordThread === undefined ? {} : {
@@ -336,6 +337,8 @@ export function coreTaskEntryFrom(
       }
       // A start by a person the mapping names no company for is not the core's: the old start answers it, as before. A mapping that failed refuses it.
       if (deployed === undefined && !unreadable && isStart(request)) return undefined;
+      // A membership read that FAILED is not "no membership": the retryable 503 (membership-read.ts), which a caller never reads as "sign in again" or "no such task".
+      if (unreadable) return { statusCode: 503, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: { code: "RUNTIME_UNAVAILABLE", message: MEMBERSHIP_READ_FAILED_WORDS } }) };
       if (deployed === undefined) return { statusCode: 401, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: { code: "UNAUTHENTICATED", message: "Sign in again." } }) };
       return await routes.route(request, deployed);
     },

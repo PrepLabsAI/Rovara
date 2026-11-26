@@ -2,8 +2,9 @@
 // The two steps every session start shares, factored out of the sign-in server (a pure move: server.ts calls these exactly as it ran them inline) so the beta canary's
 // session function (canary-session.ts) builds its session with the same code and never a copy: (1) "may this person hold a session for this company right now" and
 // (2) "write the SESSION row, then issue the access token". Nothing here reads a request; every input is a parameter.
+import { membershipReadFailed } from "../core/membership-read.js";
 import { IMPLICIT_COMPANY_ID, OrgIdSchema, type DeveloperSignInMethod, type SignInClientRecord } from "@agentx/contracts";
-import type { CompanySignInStore } from "./company-membership.js";
+import { isUnreadableMembershipRow, type CompanySignInStore } from "./company-membership.js";
 import type { CodeGrant, DeveloperSignInStore, SessionRecord } from "./store.js";
 
 /** What the membership check reads: the company layer's store, the install's Slack binding, and the companyless rule (a function of the server's own state). */
@@ -35,6 +36,8 @@ async function memberOf(company: NonNullable<MintCheckDependencies["company"]>, 
   const member = await company.membership(personId);
   if (member !== undefined || !legacySeat || company.join === undefined) return member;
   const joined = await company.join({ personId, companyId: IMPLICIT_COMPANY_ID });
+  // A join that could not READ or WRITE is not "not a member": the caller answers the retryable 503 and ends nothing (membership-read.ts).
+  if (!joined.ok && joined.readFailed === true) throw membershipReadFailed();
   return joined.ok ? joined.membership : undefined;
 }
 
@@ -56,7 +59,13 @@ export async function companyMayMint(deps: MintCheckDependencies, personId: stri
     // Company is live membership; a registered audience cannot cross its owner.
     return member !== undefined && member.revokedAt === undefined && member.companyId === candidate
       && (registered === undefined || registered.installLevel === true || member.companyId === (registered.companyId ?? IMPLICIT_COMPANY_ID));
-  } catch { return false; }
+  } catch (error) {
+    // A membership row that reads and is MALFORMED is a fact about the row: no mint, as before (the person is refused, not told to retry forever).
+    if (isUnreadableMembershipRow(error)) return false;
+    // Everything else read above is a read of membership, the company's sign-in settings or the Slack binding: a THROW is "the read failed", never "may not mint". Only a read that answers decides a refusal,
+    // so a failed read can neither refuse a person nor (at the refresh) end their session; the caller answers the retryable 503 (membership-read.ts).
+    throw membershipReadFailed();
+  }
 }
 
 /** One access token as the sign-in server issues it (server.ts `accessToken`, tokens.ts `issueAccessToken`). */

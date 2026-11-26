@@ -4,6 +4,7 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import { orgProjectCatalogKey, projectRevisionKey, type JsonValue, type ProjectDefinition } from "@agentx/contracts";
+import { MEMBERSHIP_READ_FAILED_WORDS, membershipReadFailed } from "../../packages/broker/src/core/membership-read.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import { documentSavedEnvStore } from "../../packages/broker/src/core/test-env/saved-env-store.js";
 import type { SavedEnvState } from "../../packages/broker/src/core/test-env/saved-env.js";
@@ -106,6 +107,11 @@ describe("the panel read on the deployed API", () => {
     expect(bodyOf(hidden).error?.message).toBe("project not found");
     const failing = createCoreDevRoutes({ app: h.app, companyOf: h.companyOf, wiring: () => ({ origin: () => "x", canReadProject: async () => { throw new Error("grant table down"); }, savedEnv: { enabled: true } }) });
     expect(await failing.route(get(PATH), caller)).toEqual(missing);
+    // A grant read that FAILED (the deployed seam marks it, membership-read.ts) is the retryable 503, never "project not found".
+    const unreadable = createCoreDevRoutes({ app: h.app, companyOf: h.companyOf, wiring: () => ({ origin: () => "x", canReadProject: async () => { throw membershipReadFailed(); }, savedEnv: { enabled: true } }) });
+    const retry = await unreadable.route(get(PATH), caller);
+    expect(retry?.statusCode).toBe(503);
+    expect(bodyOf(retry).error).toEqual({ code: "RUNTIME_UNAVAILABLE", message: MEMBERSHIP_READ_FAILED_WORDS });
     expect(spy).not.toHaveBeenCalled();
     // the switch being off does not let an unreadable project be told apart either
     const off = await setup(false);

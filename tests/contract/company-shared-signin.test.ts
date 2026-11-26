@@ -15,7 +15,8 @@ describe("sign-in by live membership (DEC 254b a)", () => {
     const signed = await w.signIn("owner");
     const read = w.company.read.bind(w.company);
     w.company.read = async (key) => { if (key.pk === companyScoped(X, "SIGNIN_ISSUER")) throw new Error("read-canary"); return read(key); };
-    expect((await w.refresh(signed.refresh!)).status).toBe(400);
+    // The refresh reads the company's sign-in settings: a read that FAILS is the retryable 503 and the session is kept (membership-read.ts); the new sign-in still fails closed.
+    expect((await w.refresh(signed.refresh!)).status).toBe(503);
     expect((await w.signIn("owner")).refused).toBe("not invited");
     expect(JSON.stringify(w.logs)).not.toContain("read-canary");
   });

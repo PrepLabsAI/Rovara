@@ -33,11 +33,12 @@ import {
 } from "@agentx/contracts";
 import { membershipKey } from "../aws/company-check.js";
 import { ownerKeyForSubject } from "../aws/lambda.js";
-import type { CompanySignInStore } from "./company-membership.js";
+import { isUnreadableMembershipRow, type CompanySignInStore } from "./company-membership.js";
 import type { SignInProvider } from "./providers.js";
 import { SESSION_BINDING_PATTERN, sameSessionBinding, sessionBindingOf } from "./session-binding.js";
 import { endedByAdmin, type DeveloperRecord, type DeveloperSignInStore, type SessionRecord } from "./store.js";
 import { pkceChallengeMatches, sha256Hex } from "./tokens.js";
+import { readingMembership, rethrowMembershipReadFailure } from "../core/membership-read.js";
 
 type Write = NonNullable<TransactWriteCommandInput["TransactItems"]>[number];
 interface HttpResult { statusCode: number; headers: Record<string, string>; body: string }
@@ -257,7 +258,7 @@ export function createSignInLinks(options: SignInLinkOptions) {
     const admin = await liveMember(company, adminId);
     if (admin === undefined || (admin.role !== "owner" && admin.role !== "admin")) return false;
     let person;
-    try { person = await company.membership(personId); } catch { return false; }
+    try { person = await readingMembership(() => company.membership(personId).catch((error: unknown) => { if (isUnreadableMembershipRow(error)) return undefined; throw error; })); } catch (error) { rethrowMembershipReadFailure(error); return false; }
     if (person === undefined || person.companyId !== admin.companyId) return false;
     return person.role !== "owner" || admin.role === "owner";
   }
@@ -427,7 +428,7 @@ export function createSignInLinks(options: SignInLinkOptions) {
       const linked = await store.getDeveloper(linkedId);
       if (linked?.mergedInto !== personDeveloperId) return refusal("not_found", SIGN_IN_LINK_TEXT.notFound);
       let membership;
-      try { membership = await company.membership(personDeveloperId); } catch { membership = undefined; }
+      try { membership = await readingMembership(() => company.membership(personDeveloperId).catch((error: unknown) => { if (isUnreadableMembershipRow(error)) return undefined; throw error; })); } catch (error) { rethrowMembershipReadFailure(error); membership = undefined; }
       if (membership === undefined) return refusal("unavailable", SIGN_IN_LINK_TEXT.unavailable);
       const at = iso();
       const slack = method === "slack" && person.linkedSlackUserId !== undefined ? person.linkedSlackUserId : undefined;

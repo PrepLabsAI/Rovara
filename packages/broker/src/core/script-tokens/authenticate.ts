@@ -18,6 +18,7 @@ import { takeRate } from "./rate.js";
 import { noteScriptTokenUse, readScriptToken, revokeForAccessChange, scriptTokenStatus, type ScriptTokenDependencies, type ScriptTokenRecord } from "./store.js";
 import { scriptTokensEnabled } from "./switch.js";
 import { parseScriptTokenHeader, scriptTokenMatches } from "./token-format.js";
+import { rethrowMembershipReadFailure } from "../membership-read.js";
 
 /** Requests one token may make a minute, and task starts an hour. */
 export const SCRIPT_TOKEN_REQUESTS_PER_MINUTE = 60;
@@ -152,7 +153,7 @@ export async function authenticateScriptToken(deps: ScriptTokenAuthDependencies,
   const named = route.project === "body" ? (typeof body?.["project"] === "string" ? body["project"] : undefined) : route.project === "query" ? url.searchParams.get("project") ?? undefined : route.project === "path" ? route.name : undefined;
   const creatorMayUse = async (project: string): Promise<boolean> => {
     if (deps.projectGrant === undefined || record.personId === undefined) return deps.projectGrant === undefined;
-    try { return await deps.projectGrant(record.personId, project, held.principal === undefined ? record.createdRole : roleOf(held.principal.roles)); } catch { return false; }
+    try { return await deps.projectGrant(record.personId, project, held.principal === undefined ? record.createdRole : roleOf(held.principal.roles)); } catch (error) { rethrowMembershipReadFailure(error); return false; }
   };
   if (route.project !== "task" && (named === undefined || !record.projects.includes(named) || !await creatorMayUse(named))) throw notAllowed();
   if (route.project === "task") {

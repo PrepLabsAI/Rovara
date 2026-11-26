@@ -17,6 +17,7 @@ import { METRIC_MIN_CORRECTIONS, sameMistakeTwice, type SameMistakeTwice } from 
 import type { CoreLessons } from "./lessons.js";
 import { switchCovers, type CoreSwitch } from "./flags.js";
 import { LESSONS_OFF, NO_SUCH_PROJECT } from "./lessons-api.js";
+import { rethrowMembershipReadFailure } from "../core/membership-read.js";
 
 const PROJECT_PATH = /^\/v1\/dev\/projects\/([^/]+)\/lessons\/repeats$/u;
 const COMPANY_PATH = "/v1/dev/lessons/repeats";
@@ -88,7 +89,7 @@ export function createLessonsRepeatsApi(options: LessonsRepeatsOptions): Lessons
     // The switch first: off reads nothing at all, not even who is asking.
     if (options.lessonsSwitch.mode === "off") throw agentXError("LESSONS_SWITCHED_OFF", LESSONS_OFF);
     let found: unknown;
-    try { found = await options.companyOf(caller); } catch { found = undefined; }
+    try { found = await options.companyOf(caller); } catch (error) { rethrowMembershipReadFailure(error); found = undefined; }
     const record = found as { companyId?: unknown; role?: unknown } | undefined | null;
     const company = OrgIdSchema.safeParse(record?.companyId);
     const role = OrgRoleSchema.safeParse(record?.role);

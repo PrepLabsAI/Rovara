@@ -12,6 +12,7 @@
 import { AgentXError, OrgIdSchema, agentXError, type DocumentStore, type OrgId } from "@agentx/contracts";
 import { z } from "zod";
 import { readSlackOptOut, writeSlackOptOut } from "../lessons/slack-switch.js";
+import { rethrowMembershipReadFailure } from "../core/membership-read.js";
 
 export const LESSONS_SLACK_PATH = "/v1/dev/me/lessons-slack";
 /** Whether a path is this API's (the dev router asks before it hands a request here). */
@@ -39,7 +40,7 @@ export function createLessonsSlackSwitchApi(options: LessonsSlackSwitchOptions):
     if (request.path !== LESSONS_SLACK_PATH || (request.method !== "GET" && request.method !== "PUT")) throw agentXError("NOT_FOUND", "route not found");
     if (caller.scriptToken !== undefined) throw agentXError("FORBIDDEN", NOT_FOR_SCRIPT_TOKENS_SLACK);
     let found: unknown;
-    try { found = await options.companyOf(caller); } catch { found = undefined; }
+    try { found = await options.companyOf(caller); } catch (error) { rethrowMembershipReadFailure(error); found = undefined; }
     const company = OrgIdSchema.safeParse((found as { companyId?: unknown } | undefined | null)?.companyId);
     if (!company.success) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
     const companyId: OrgId = company.data;

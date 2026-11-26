@@ -27,6 +27,7 @@ import { fencedFlow } from "./parity-task-actions.js";
 import { hostedMergePressAsPerson, hostedMergeReadiness, hostedMergeStanding, type HostedMergeInput } from "./hosted-merge-routes.js";
 import type { CompanyMembership, CoreDevWiring, DeployedCaller, DeployedDecisionCaller } from "./dev-routes.js";
 import type { CoreRuntime } from "./core-runtime.js";
+import { orIfNotMembershipFailure } from "../core/membership-read.js";
 
 /** What the hosted install gives the registry for a chat: the chat seam (which company a workspace is, which person an account is), the install's proof key, and the company's approval gate. */
 export interface TaskActionChat {
@@ -185,7 +186,7 @@ export function createTaskActionRoutes(options: TaskActionRoutesOptions) {
   }
 
   async function membershipOf(deployed: DeployedCaller): Promise<CompanyMembership | undefined> {
-    const membership = await options.companyOf(deployed).catch(() => undefined);
+    const membership = await options.companyOf(deployed).catch(orIfNotMembershipFailure(undefined));
     return membership !== undefined && typeof membership.companyId === "string" && ORG_ID.test(membership.companyId) && deployed.principal.companyId === membership.companyId ? membership : undefined;
   }
 

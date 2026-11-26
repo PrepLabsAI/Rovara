@@ -1,6 +1,7 @@
 // Who may read, comment, suggest, decide and ask on a task page: one access rule and one table of roles and actions.
 import { describe, expect, it } from "vitest";
 import { TASK_ACTION_ROLES, can, resolveTaskAccess } from "../../packages/broker/src/developer/task-access.js";
+import { membershipReadFailed } from "../../packages/broker/src/core/membership-read.js";
 import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
 import { OMAR, PRIYA, SAM, pagePlan, pageTask } from "../support/page-tasks.js";
 
@@ -25,6 +26,31 @@ describe("resolveTaskAccess: the task's own person holds it only while they hold
         const error = await refusal(resolveTaskAccess(fixture.deps, PRIYA, fixture.taskId, action));
         expect([String(projectMember), action, error.code]).toEqual([String(projectMember), action, "TASK_NOT_FOUND"]);
       }
+    }
+  });
+});
+
+describe("resolveTaskAccess when the membership read FAILED (MEMBERSHIP-READ-FAILS-SAFE)", () => {
+  it("is the retryable 503 for every action, never 'no such task': the task's own person is not told their task is gone because a read failed", async () => {
+    for (const action of [undefined, "read", "decide", "retry", "close", "control", "publish", "feedback", "ask", "comment"] as const) {
+      const fixture = pageTask();
+      fixture.addVersion("plan", pagePlan());
+      fixture.deps.taskReaderPerson = async () => { throw membershipReadFailed(); };
+      const error = await refusal(resolveTaskAccess(fixture.deps, PRIYA, fixture.taskId, action));
+      expect([String(action), error.code]).toEqual([String(action), "RUNTIME_UNAVAILABLE"]);
+    }
+  });
+});
+
+describe("resolveTaskAccess on a task with a People list when the web proof's read FAILED (MEMBERSHIP-READ-FAILS-SAFE)", () => {
+  it("is the retryable 503 for the owner and for another person, never 'no such task': the access catch lets the failure through", async () => {
+    for (const person of [PRIYA, SAM]) {
+      const fixture = pageTask();
+      fixture.addVersion("plan", pagePlan());
+      fixture.db.set({ pk: `DEVTASK#${fixture.taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false, people: [{ developerId: PRIYA.developerId, slackUserId: PRIYA.slackUserId, name: "Priya", role: "owner" }] });
+      (fixture.deps as { checkTaskPerson?: unknown }).checkTaskPerson = async () => { throw membershipReadFailed(); };
+      const error = await refusal(resolveTaskAccess(fixture.deps, person, fixture.taskId, "read"));
+      expect([person.developerId, error.code]).toEqual([person.developerId, "RUNTIME_UNAVAILABLE"]);
     }
   });
 });

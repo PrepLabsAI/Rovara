@@ -2,6 +2,7 @@ import { legacyWorkspaceKey } from "../../packages/broker/src/core/task-flow/leg
 // Lane E2 (plan v3.2), step 6 part: the AWS entry points go by a task's stored engine. A workflow task (no stamp) keeps today's AWS readers; a core task is answered by the core's
 // own handlers (the core host's dev routes, company-aware) or refused exactly like a missing task, and no AWS reader returns its record, workspace or operations. A mixed stamp has one
 // owner per operation (the flow's engine). A stamp that cannot be read is an error, never the workflow.
+import { membershipReadFailed } from "../../packages/broker/src/core/membership-read.js";
 import { taskKey as coreTaskKey, workspacePartition } from "../../packages/broker/src/core/task-flow/keys.js";
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
@@ -346,6 +347,22 @@ describe("the owner's answers on the AWS developer route `POST /v1/dev/tasks/{id
   });
 
   // ---- GET /v1/dev/tasks?detail=1: the Understand round and the workflow's outcome on each row (the website's Work list answers Understand's questions inline)
+  it("?detail=1 when the core's money read or readable check FAILS: the retryable 503 (never a row with the money hidden or the round dropped as 'not allowed'); an unmarked failure still hides it (MEMBERSHIP-READ-FAILS-SAFE)", async () => {
+    const { dev, task, world, app, db, coreTasks } = await coreWorld({ actions: true, understand: true });
+    await asked(world, app, task.taskId);
+    await publish(world, db, task.taskId);
+    expect((await dev(MAYA, "GET", "/v1/dev/tasks?detail=1")).status, "control").toBe(200);
+    const money = coreTasks.taskMoney!.bind(coreTasks); const readable = coreTasks.taskReadable!.bind(coreTasks);
+    coreTasks.taskMoney = async () => { throw membershipReadFailed(); };
+    expect(await dev(MAYA, "GET", "/v1/dev/tasks?detail=1")).toMatchObject({ status: 503, body: { error: { code: "RUNTIME_UNAVAILABLE" } } });
+    coreTasks.taskMoney = async () => { throw new Error("some other failure"); };
+    expect((await dev(MAYA, "GET", "/v1/dev/tasks?detail=1")).status).toBe(200);
+    coreTasks.taskMoney = money;
+    coreTasks.taskReadable = async () => { throw membershipReadFailed(); };
+    expect(await dev(MAYA, "GET", "/v1/dev/tasks?detail=1")).toMatchObject({ status: 503, body: { error: { code: "RUNTIME_UNAVAILABLE" } } });
+    coreTasks.taskReadable = readable;
+  });
+
   it("?detail=1 gives a core task's waiting Understand round (ids, texts, options, answered false) as its owner's task read shows it, and answered true once the answers are in; nothing is written", async () => {
     const { dev, task, world, app, db } = await coreWorld({ actions: true, understand: true });
     await asked(world, app, task.taskId);

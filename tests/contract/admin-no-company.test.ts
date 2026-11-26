@@ -14,9 +14,9 @@ const caught = async (work: Promise<unknown>) => await work.then(() => undefined
 
 describe("resolveAdminCompany", () => {
 
-  it("keeps the fixed sign-in refusal when the membership read fails (fail closed), never its cause", async () => {
+  it("answers the retryable 503 when the membership read fails (fail closed: no company, never inferred from the error), never its cause", async () => {
     const error = await caught(resolveAdminCompany(reader(async () => { throw new Error("secret-table broke"); }), "person"));
-    expect(error?.code).toBe("AUTH_REQUIRED");
+    expect(error?.code).toBe("RUNTIME_UNAVAILABLE");
     expect(error?.message).not.toContain("secret");
   });
 

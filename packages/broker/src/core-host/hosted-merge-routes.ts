@@ -16,6 +16,7 @@
 //     each claim. After a merge the task's tracking row is made due now, so the next sweep records the merge in the workflow.
 //   - Refusals are the merge core's fixed words or this file's; nothing a caller sent and no token is echoed. The core's "didn't merge" words may carry GitHub's own reason, cleaned and cut by the
 //     GitHub client (`githubReasonOf`), shown only to someone who may merge this task.
+import { orIfNotMembershipFailure } from "../core/membership-read.js";
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
@@ -117,7 +118,7 @@ async function standingOf(input: HostedMergeInput, wiring: HostedMergeWiring, ta
   if (task === undefined || task.companyId !== companyId) throw taskNotFound();
   if (await flow.access.canAct(principal, task).catch(() => false)) return { task, may: "task-owner" };
   if (input.role === "owner" || input.role === "admin") return { task, may: "company-admin" };
-  const grant = await wiring.projectGrantRole(principal.personId, task.project, companyId).catch(() => undefined);
+  const grant = await wiring.projectGrantRole(principal.personId, task.project, companyId).catch(orIfNotMembershipFailure(undefined));
   if (grant === "administrator") return { task, may: "project-admin" };
   // Not one of them: a reader of the task is told so; anyone else reads exactly as for a missing task.
   await decideTaskRead(flow, { caller: { principal }, task, read: "merge" });

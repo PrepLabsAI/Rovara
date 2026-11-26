@@ -1,3 +1,4 @@
+import { rethrowMembershipReadFailure } from "../core/membership-read.js";
 import type { SlackWorkspaceScope } from "@agentx/contracts";
 import { GetCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import {
@@ -344,7 +345,8 @@ async function webIdentityStatus(deps: TaskPersonIdentityDependencies, identity:
   let record: DeveloperRecord | undefined;
   try {
     record = await deps.developerRecord(identity.developerId);
-  } catch {
+  } catch (error) {
+    rethrowMembershipReadFailure(error);
     return unavailable();
   }
   if (record === undefined || typeof record.revoked !== "boolean" || record.provider !== identity.method || record.developerId !== identity.developerId
@@ -370,7 +372,8 @@ async function qualifyWeb(
   let membership: { companyId: string } | undefined;
   try {
     membership = await deps.companyMembership(identity.developerId);
-  } catch {
+  } catch (error) {
+    rethrowMembershipReadFailure(error);
     return unavailable();
   }
   if (membership !== undefined && (typeof membership !== "object" || membership === null || typeof membership.companyId !== "string")) return unavailable();
@@ -379,7 +382,8 @@ async function qualifyWeb(
   let granted: unknown;
   try {
     granted = await deps.projectGrant(identity.developerId, task.project, companyId);
-  } catch {
+  } catch (error) {
+    rethrowMembershipReadFailure(error);
     return unavailable();
   }
   if (typeof granted !== "boolean") return unavailable();
@@ -445,7 +449,8 @@ async function taskCreatorIdentity(deps: TaskPersonIdentityDependencies, stored:
   let record: DeveloperRecord | undefined;
   try {
     record = await deps.developerRecord(developerId);
-  } catch {
+  } catch (error) {
+    rethrowMembershipReadFailure(error);
     return unavailable();
   }
   if (record === undefined || (isHostedTaskProvider(stored.provider) ? !isHostedTaskSignInMethod(record.provider) : record.provider !== stored.provider) || record.developerId !== developerId || typeof record.issuer !== "string"
@@ -529,7 +534,8 @@ export async function resolveTaskPersonId(
     let web: { eligible: boolean };
     try {
       web = await qualifyWeb(deps, task, identity);
-    } catch {
+    } catch (error) {
+      rethrowMembershipReadFailure(error);
       return refuse();
     }
     return web.eligible ? identity : refuse();
@@ -607,7 +613,8 @@ export async function listTaskWebCandidates(
   let leads: { ids: readonly string[]; complete: boolean };
   try {
     leads = await deps.projectMemberIds(stored.project, limit, taskCompanyId(stored));
-  } catch {
+  } catch (error) {
+    rethrowMembershipReadFailure(error);
     return unavailable();
   }
   if (!Array.isArray(leads.ids) || leads.ids.length > limit || typeof leads.complete !== "boolean") return unavailable();
@@ -619,7 +626,8 @@ export async function listTaskWebCandidates(
       if (identity === undefined) continue;
       const web = await qualifyWeb(deps, stored, identity);
       if (web.eligible && web.present) candidates.push({ developerId, name: identity.name });
-    } catch {
+    } catch (error) {
+      rethrowMembershipReadFailure(error);
       continue;
     }
   }

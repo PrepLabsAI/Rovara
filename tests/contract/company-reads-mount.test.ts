@@ -1,6 +1,7 @@
 // Lanes AU and EV: the company reads on the developer API. A sign-in client's token reaches them through the same checks as the other
 // /v1/dev/client routes (a live session, the registration's audience), and then the read is the company administrator's, for their company only.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { membershipReadFailed } from "../../packages/broker/src/core/membership-read.js";
 import type { DeveloperApiConfiguration } from "../../packages/broker/src/aws/developer-routes.js";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
 import { createAdminBroker, type AdminHandler } from "../support/admin-broker.js";
@@ -171,5 +172,28 @@ describe("the reads are off unless the host wires them", () => {
     expect((read.body as unknown as Records).records).toEqual([]);
     await seedAudit(store, IMPLICIT_COMPANY_ID, { eventId: "evt_implicit", at: "2026-11-10T10:05:00.000Z", actor: { type: "person", id: ADA } });
     expect(((await call("GET", AUDIT, await token())).body as unknown as Records).records.map((record) => record.eventId)).toEqual(["evt_implicit"]);
+  });
+});
+
+describe("MEMBERSHIP-READ-FAILS-SAFE: the company reads when the membership read fails", () => {
+  it("a membership read that FAILED is the retryable 503 on the audit records and the events, never the 401 that signs the administrator out", async () => {
+    await broker({ companyReads: { store, companyOf: async () => { throw membershipReadFailed(); } } });
+    for (const path of ["/v1/dev/client/company/audit/records", "/v1/dev/client/company/events"]) {
+      const answer = await call("GET", path, await token());
+      expect([path, answer.status, (answer.body["error"] as { code?: string } | undefined)?.code]).toEqual([path, 503, "RUNTIME_UNAVAILABLE"]);
+    }
+  });
+
+  it("the caller's own membership read (a person who is not an install administrator) that FAILED is the retryable 503 too", async () => {
+    await broker({ companyReads: { store, companyOf, membershipOf: async () => { throw membershipReadFailed(); } } });
+    const answer = await call("GET", "/v1/dev/client/company/audit/records", await token({ sub: CY, sid: "s-cy" }));
+    expect([answer.status, (answer.body["error"] as { code?: string } | undefined)?.code]).toEqual([503, "RUNTIME_UNAVAILABLE"]);
+    await broker({ companyReads: { store, companyOf, membershipOf: async () => { throw new Error("not a membership read"); } } });
+    expect((await call("GET", "/v1/dev/client/company/audit/records", await token({ sub: CY, sid: "s-cy" }))).status).toBe(401);
+  });
+
+  it("any other failure of the reader is still the refusal", async () => {
+    await broker({ companyReads: { store, companyOf: async () => { throw new Error("not a membership read"); } } });
+    expect((await call("GET", "/v1/dev/client/company/audit/records", await token())).status).toBe(401);
   });
 });
