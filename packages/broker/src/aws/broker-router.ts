@@ -36,7 +36,6 @@ import type { DeveloperTaskActions } from "./developer-task-actions.js";
 
 import { readE2ERuntimeStatus } from "./e2e-runtime-readiness.js";
 import { githubBindingRefusal, type GithubInstallationBindings } from "./github-credentials.js";
-import { planCompanyImport, planCompanyImportUndo } from "./install-company-import.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { handleLinearAppWebhook, LINEAR_WEBHOOK_PATH, linearWebhookResponse } from "./linear-app-webhook.js";
 import { issueRuntimeInstallChallenge, registerRuntimeInstallation, type RuntimeInstallationDependencies } from "./runtime-installation.js";
@@ -111,7 +110,6 @@ export interface AdminHttpHooks {
   putSlackBinding: (dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, teamId: string, channelId: string, body: unknown) => Promise<unknown>;
   deleteSlackBinding: (dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, teamId: string, channelId: string) => Promise<unknown>;
   cancelWorkspaceTask: (dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, workspaceId: string) => Promise<unknown>;
-  stopWorkspace: (dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, workspaceId: string) => Promise<unknown>;
   adminTaskShareMode: (dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, taskId: string, body: unknown, tasks: DeveloperTaskActions) => Promise<unknown>;
 }
 
@@ -462,18 +460,6 @@ async function dispatchAdminRuntimeAndSetup(
   return dispatchAdminCredentialsAndRuntimeStatus(dependencies, identity, request, url, body);
 }
 
-async function handleAdminCompanyImport(dependencies: AwsBrokerDependencies, url: URL, requestId: string): Promise<BrokerHttpResponse> {
-  const developer = dependencies.developer;
-  if (developer?.companyImport === undefined) throw agentXError("NOT_FOUND", "company import is not set up in this deployment");
-  const companyId = OrgIdSchema.safeParse(url.searchParams.get("companyId"));
-  const mode = url.searchParams.get("mode") ?? "import";
-  if (!companyId.success || (mode !== "import" && mode !== "undo")) {
-    throw agentXError("CONFIG_INVALID", "give the install's company id (org_ and 20 letters or digits), and the mode import or undo");
-  }
-  const reads = { documentClient: dependencies.documentClient, tableName: dependencies.tableName, signInTableName: developer.signInTableName };
-  return json((mode === "undo" ? await planCompanyImportUndo(reads, companyId.data) : await planCompanyImport(reads, companyId.data)).preview, requestId);
-}
-
 async function handleAdminOfferedModels(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
@@ -540,7 +526,6 @@ async function dispatchAdminDirectoryAndHealth(
     if (invites === undefined) throw agentXError("NOT_FOUND", "company sign-up is not set up in this deployment");
     return json(await invites.list(), request.requestId);
   }
-  if (url.pathname === "/v1/admin/company-import") { requireAdminClaim(identity); return handleAdminCompanyImport(dependencies, url, request.requestId); }
   return dispatchAdminHealthAndModels(dependencies, identity, url, request.requestId);
 }
 
@@ -628,8 +613,6 @@ async function dispatchAdminWorkspaceAndTaskOps(
   if (request.method === "POST" && url.pathname === "/v1/admin/workspaces/prepare") return json(await hooks.prepareWorkspace(dependencies, identity, body), request.requestId, 202);
   const cancelTask = /^\/v1\/admin\/workspaces\/([0-9a-f-]+)\/cancel$/.exec(url.pathname);
   if (request.method === "POST" && cancelTask?.[1]) return json(await hooks.cancelWorkspaceTask(dependencies, identity, cancelTask[1]), request.requestId, 202);
-  const stop = /^\/v1\/admin\/workspaces\/([0-9a-f-]+)\/stop$/.exec(url.pathname);
-  if (request.method === "POST" && stop?.[1]) return json({ workspace: await hooks.stopWorkspace(dependencies, identity, stop[1]) }, request.requestId, 202);
   // D1: the admin audit replay of an old workflow engine task round (/v1/admin/tasks/<id>/e2e-replay) is gone with that engine; `agentx admin task e2e-replay` went with it.
   const taskShareMode = /^\/v1\/admin\/tasks\/([^/]+)\/share-mode$/.exec(url.pathname);
   if (request.method === "POST" && taskShareMode?.[1]) return json(await hooks.adminTaskShareMode(dependencies, identity, taskShareMode[1], body, hooks.tasks), request.requestId);
