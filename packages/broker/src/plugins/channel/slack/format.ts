@@ -1,6 +1,6 @@
 // What Rovara says, shaped for the chat tool. The text of an event is Rovara's own fixed words plus a task title or a status sentence from the task: it is escaped so that none of it can become a mention, a link or a channel
 // reference, and cut to the length the adapter said it takes. A button carries only the exact request a card named; pressing it is a request (see `core/channel/cards.ts`), never an approval.
-import type { ChannelDecision, ChannelEvent } from "@agentx/contracts";
+import { checkReportWords, type ChannelDecision, type ChannelEvent } from "@agentx/contracts";
 
 /** The thread id this adapter reads as "no thread": a message at the top of a space (a direct message, a notice). It has the shape of a message time, so a conversation reference holds it. */
 export const NO_THREAD = "0000000000.000000";
@@ -58,7 +58,7 @@ export function renderEvent(event: ChannelEvent, maxLength: number): Rendered | 
     case "ack": return { text: "Got it." };
     case "progress": return { text: text(event.data.text), ...(event.data.onlyTo === undefined ? {} : { ephemeralTo: event.data.onlyTo }) };
     case "question": return { text: text(event.data.choices === undefined ? event.data.text : `${event.data.text}\n${event.data.choices.map((choice, index) => `${String(index + 1)}. ${choice}`).join("\n")}`) };
-    case "check_report": return { text: text(`${{ passed: "Checks passed.", failed: "Checks failed.", unknown: "Checks have not finished." }[event.data.status]} ${event.data.text}`) };
+    case "check_report": return { text: text(checkReportWords(event.data)) };
     case "pr": return { text: text(`Pull request: ${event.data.title}\n${event.data.url}${event.data.verdict === undefined ? "" : `\n${event.data.verdict}`}`) };
     // The text of a reply or notice only: this adapter declares no `edits`, so a later message under the same key is a new post. Parts and actions are not shown here (a follow-up; the core fits them to what the adapter declares).
     case "message": return { text: text(event.data.text), ...(event.data.audience?.kind === "ephemeral" ? { ephemeralTo: event.data.audience.actor.userId } : {}) };

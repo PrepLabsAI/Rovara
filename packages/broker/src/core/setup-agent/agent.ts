@@ -124,6 +124,8 @@ export interface SetupAgentView {
   failure?: string;
   /** What re-reading the proposal's citations from the code host at the commits the run read found, per item (`holds`, `fails`, `unchecked`): the proposal is shown with these and never without them (`verifiedView`). `verified` says every verdict is final. */
   verification?: Record<string, SetupVerification>;
+  /** For a command item that does not match the code: the first command no quote shows, per item id (additive; absent when nothing was found or the verdict was kept before this was recorded). */
+  unmatched?: Record<string, string>;
   verified?: boolean;
   /** Who pressed Stop and when, on a run a person stopped. The proposal such a run keeps is partial, unproven and never applied. */
   stoppedBy?: { name: string; at: string };
@@ -403,22 +405,22 @@ export async function verifiedView(deps: SetupAgentDeps, definition: SetupDefini
 async function verifiedViewOf(deps: SetupAgentDeps, definition: SetupDefinition, view: SetupAgentView): Promise<SetupAgentView> {
   if (view.proposal === undefined || view.taskId === undefined) return view;
   const task = await deps.store.get(taskKey(view.taskId));
-  const kept = task?.["setupAgentVerification"] as { items?: Record<string, SetupVerification> } | undefined;
-  if (kept?.items !== undefined) return { ...view, verification: kept.items, verified: true };
+  const kept = task?.["setupAgentVerification"] as { items?: Record<string, SetupVerification>; unmatched?: Record<string, string> } | undefined;
+  if (kept?.items !== undefined) return { ...view, verification: kept.items, ...(kept.unmatched === undefined ? {} : { unmatched: kept.unmatched }), verified: true };
   const recordOf = new Map(definition.repositories.map((repository) => [repository.name, repository]));
   const reader: CitationFileReader | undefined = deps.readFile === undefined ? undefined : async (repository, path, commit, options) => {
     const record = recordOf.get(repository);
     if (record === undefined) throw new Error("unknown repository");
     return deps.readFile!(record, path, commit, options);
   };
-  const { items, final } = await verifyProposalDetailed(reader, view.proposal, { now: deps.now });
+  const { items, final, unmatched } = await verifyProposalDetailed(reader, view.proposal, { now: deps.now });
   if (final) {
     await deps.store.update({
-      key: taskKey(view.taskId), ops: [change.set("setupAgentVerification", { at: new Date(deps.now()).toISOString(), items: JSON.parse(JSON.stringify(items)) as JsonValue })],
+      key: taskKey(view.taskId), ops: [change.set("setupAgentVerification", { at: new Date(deps.now()).toISOString(), items: JSON.parse(JSON.stringify(items)) as JsonValue, ...(unmatched === undefined ? {} : { unmatched: JSON.parse(JSON.stringify(unmatched)) as JsonValue }) })],
       condition: when.and(when.present(), when.notExists("setupAgentVerification")),
     });
   }
-  return { ...view, verification: items, verified: final };
+  return { ...view, verification: items, ...(unmatched === undefined ? {} : { unmatched }), verified: final };
 }
 
 /**

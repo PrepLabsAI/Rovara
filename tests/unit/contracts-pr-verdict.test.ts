@@ -129,6 +129,29 @@ describe("rule V1: the result is never better than its worst row", () => {
   });
 });
 
+describe("TEST-RESULT-HONESTY: the heading without a Testing view says what the checks skipped", () => {
+  it("a pass that skipped tests is 'Passed, N tests skipped', never 'Checks passed'", () => {
+    const v = verdict({ testing: undefined, testResult: { skipped: 4, allSkipped: false } });
+    expect(v.result).toBe("Passed, 4 tests skipped");
+    expect(v.resultKind).toBe("checks_passed");
+    expect(v.heading).toContain("Passed, 4 tests skipped");
+    expect(v.heading).not.toContain("Checks passed");
+    expect(verdict({ testing: undefined, testResult: { skipped: 1, allSkipped: false } }).result).toBe("Passed, 1 test skipped");
+  });
+  it("a run in which every test was skipped is 'Not tested', and is a thing to check", () => {
+    const v = verdict({ testing: undefined, testResult: { skipped: 0, allSkipped: true } });
+    expect(v.result).toBe("Not tested: every test was skipped");
+    expect(v.resultKind).toBe("checks_not_tested");
+    expect(kinds(v)).toContain("testing_reason");
+    expect(v.heading).not.toContain("Checks passed");
+  });
+  it("no skips says the old words; a worse result keeps its own words; a Testing view is not overruled", () => {
+    expect(verdict({ testing: undefined, testResult: { skipped: 0, allSkipped: false } }).result).toBe("Checks passed");
+    expect(verdict({ testing: undefined, checks: [pass("a"), { label: "b", status: "failed" }], testResult: { skipped: 3, allSkipped: true } }).result).toBe("Checks failed");
+    expect(verdict({ testing: { result: "verified" }, testResult: { skipped: 3, allSkipped: true } }).result).toBe("Verified");
+  });
+});
+
 describe("rule V2: proven means proven", () => {
   // Mutant X3: a requirement marked proven that carries a not-proven reason (a Rovara-made mock) is counted in "n of m proven". Killed here.
   it("a pass against a Rovara-made mock is counted as passed, never proven, even when the row says proven", () => {

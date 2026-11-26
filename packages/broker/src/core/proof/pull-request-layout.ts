@@ -17,6 +17,7 @@ import { inertLine } from "./inert-text.js";
 import type { ProofParts } from "./proof-section.js";
 import { proofCheckResults } from "./proof-section.js";
 import { testingTableLines } from "./testing-section.js";
+import { skippedFactsOf } from "./test-result-items.js";
 import { notComparedLines, weakeningFactsOf } from "./weakening-flags.js";
 import { isTestPath, type ChangedFileEntry } from "./verification-report.js";
 import type { LessonsUsedSection, PullRequestBodyContext } from "./pull-request-body.js";
@@ -154,6 +155,7 @@ export function verdictOfLayout(input: LayoutInput): PrVerdict {
     asOf: input.asOf,
     ...(context.testing === undefined ? {} : { testing: { result: context.testing.result, reasons: context.testing.reasons } }),
     checks: plainRows(rows),
+    ...((): Pick<PrVerdictInput, "testResult"> => { const facts = pack === undefined ? undefined : skippedFactsOf(pack.notTested); return facts === undefined ? {} : { testResult: facts }; })(),
     ...(reviewOnly ? { reviewOnly: { why: workflow.checkPolicy?.noneReason === undefined ? undefined : redactText(workflow.checkPolicy.noneReason) } } : {}),
     ...(otherNotTested.length === 0 ? {} : { notTested: otherNotTested }),
     ...(requirements === undefined ? {} : { requirements }), ...(parts?.stale === true ? { requirementsPending: true as const } : {}),

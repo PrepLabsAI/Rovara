@@ -2,6 +2,7 @@
 // deterministic: the same checks always give the same text, so a retried callback opens the same pull request.
 import { z } from "zod";
 import { EVIDENCE_TRUST_CLASS_WORDS } from "./check-kinds.js";
+import { TEST_RESULT_WORDS, checkResultNote } from "./check-result-notes.js";
 import { CheckReportSchema, type CheckClass, type CheckEntry, type CheckOutcome, type CheckReport } from "./checks.js";
 
 /** GitHub's limit on a pull request description, in characters. */
@@ -267,7 +268,14 @@ function checkLine(check: CheckEntry, atPublish: boolean): string {
   const classText = atPublish && check.class === "regression" ? "regression (passed at preparation, fails now)" : CLASS_TEXT[check.class];
   // General fakes: a check a Rovara-made fake answered says so on its own line. Fixed words; no service, variable or path.
   const made = check.madeByRovara === true ? ` (${EVIDENCE_TRUST_CLASS_WORDS.made_by_rovara}: answered by a fake Rovara made, never change proof)` : "";
-  return `- ${inlineCode(check.label)}: ${OUTCOME_TEXT[check.before]} → ${OUTCOME_TEXT[check.after]}, ${classText}${made}`;
+  return `- ${inlineCode(check.label)}: ${OUTCOME_TEXT[check.before]} → ${OUTCOME_TEXT[check.after]}, ${classText}${made}${resultNote(check)}`;
+}
+
+/** TEST-RESULT-HONESTY: what the check's own output adds to its line: the tests it skipped (all of them: "not tested"), or the service a failure looks to need. Nothing for an output that says neither. */
+function resultNote(check: CheckEntry): string {
+  const note = checkResultNote(check);
+  if (note.skipped !== undefined) return note.skipped.all ? `, ${TEST_RESULT_WORDS.allSkippedShort}` : `, ${TEST_RESULT_WORDS.skipped(note.skipped.skipped)}`;
+  return note.needs.length === 0 ? "" : `, ${TEST_RESULT_WORDS.needsShort(note.needs)}`;
 }
 
 function outputBlock(check: CheckEntry, where: string): string {

@@ -85,6 +85,9 @@ describe("Verified and Partially verified (nothing failed or blocked)", () => {
     expect(run(passed(), { evidence: notTested("claim") })).toEqual(decided("partially_verified", ["claim_not_tested"]));
     expect(run(passed(), { evidence: notTested("scenario") })).toEqual(decided("partially_verified", ["scenario_not_tested"]));
     expect(run(passed(), { evidence: notTested("check") })).toEqual(decided("partially_verified", ["check_not_run"]));
+    // TEST-RESULT-HONESTY: a check in which every test was skipped is a check that did not run; "looks like it needs Postgres" is a note about a failure, not unreadable details.
+    expect(run(passed(), { evidence: pack([{}], { notTested: [{ kind: "check", id: "skipped:readiness:0", text: "pytest: every test was skipped", reason: "not tested" }] }) })).toEqual(decided("partially_verified", ["check_not_run"]));
+    expect(run(passed(), { evidence: notTested("environment", "needs_postgres") })).toEqual(decided("verified"));
     expect(run(passed(), { evidence: notTested("environment") })).toEqual(decided("partially_verified", ["evidence_unreadable"]));
     expect(run(passed(), { evidence: pack([{ after: "not_run", class: "not_rerun" }]) })).toEqual(decided("partially_verified", ["check_not_run"]));
     expect(run(passed(), { evidence: pack([{ after: "unknown", class: "not_rerun" }]) })).toEqual(decided("partially_verified", ["check_not_run"]));

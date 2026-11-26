@@ -151,6 +151,8 @@ export * from "./e2e-source.js";
 export * from "./checks.js";
 export * from "./checks-section.js";
 export * from "./checks-reply.js";
+export * from "./test-output-signals.js";
+export * from "./check-result-notes.js";
 export * from "./cancel-callback-key.js";
 export * from "./task-comments.js";
 export * from "./task-people.js";
