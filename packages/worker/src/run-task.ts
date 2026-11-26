@@ -48,6 +48,7 @@ import {
 } from "./model-call-monitor.js";
 import { consoleWorkerLog, logUsageNote, type WorkerLogSink } from "./worker-log.js";
 import { ToolLoopGuard, toolLoopGuardExtension } from "./tool-loop-guard.js";
+import { taskStageMemory } from "./pi-memory.js";
 import { assistantOutcome, eventType, failedTurn, type AssistantOutcome } from "./session-events.js";
 import { pinnedSkills, withStepTimeout, type AgentSkillFile } from "./agent-step.js";
 import { loadedKnowledgePayload } from "./knowledge/manifest.js";
@@ -771,6 +772,8 @@ async function runTask(
     ...(knowledgePropose === undefined ? {} : { proposeTool: knowledgePropose.tool }),
     ...(rovaraSkills.length === 0 ? {} : { rovaraSkills }),
     compaction,
+    // Workspace memory (pi-memory.ts) for every stage but a review.
+    ...taskStageMemory({ reviewing, project: manifest.projectName }),
   };
   const session: PiSessionHandle = registered
     ? await openRegisteredWorkspacePiSession({ ...sessionOptions, sessionFile: registered.sessionFile }, dependencies.piAdapter)

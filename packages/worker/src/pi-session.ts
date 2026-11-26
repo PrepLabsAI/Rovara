@@ -61,6 +61,7 @@ import type { PiCacheRetention } from "./usage.js";
 import { stubPersistedContextResults } from "./context-sources/transcript.js";
 import { ROVARA_MCP_TOOL_PATTERN, rovaraMcpExtensions, type ContextMcpSession, type RovaraMcpWatch } from "./context-sources/pi-mcp.js";
 import { ANSWER_REFUSALS_MAX, ANSWER_TEXT_FALLBACK_NOTE } from "./structured-answer.js";
+import { memoryOption, piMemorySessionParts } from "./pi-memory.js";
 
 export type PiThinkingLevel = ThinkingLevel;
 export type PiWorkflowMode = "PLAN" | "IMPLEMENT" | "REVIEW" | "UNDERSTAND" | "SETUP" | "WIKI";
@@ -190,6 +191,8 @@ export interface PiSessionInput {
    * session; without these it still stubs any source result in what it summarises.
    */
   compaction?: SessionCompactionOptions;
+  /** Workspace memory (pi-memory.ts) for this project: the agent's memory_* tools and the matching memories before each turn, kept in this workspace's private Pi directory. */
+  memory?: { project: string };
   /** Tool calls of one assistant message run one after another, never side by side (the setup agent's limits are counted per command). Default: pi's own (parallel). */
   sequentialTools?: boolean;
   /** The most output tokens one model turn may produce: the model's own limit is lowered to this when it is higher. Default: the model's. */
@@ -302,6 +305,8 @@ export async function createWorkspacePiSession(
     rovaraSkills?: readonly AgentSkillFile[];
     /** The compaction hook's inputs (see PiSessionInput.compaction). */
     compaction?: SessionCompactionOptions;
+    /** See PiSessionInput.memory. */
+    memory?: { project: string };
     /** Where the agent works, when that is not the workspace root: a folder inside it (a parallel part's working copy). Its saved transcript and settings stay in the root's. */
     workingDirectory?: string;
     /**
@@ -373,6 +378,7 @@ export async function createWorkspacePiSession(
     ...(input.knowledgeStep === undefined ? {} : { knowledgeStep: input.knowledgeStep }),
     ...(input.proposeTool === undefined ? {} : { proposeTool: input.proposeTool }),
     ...(input.compaction === undefined ? {} : { compaction: input.compaction }),
+    ...memoryOption(input.memory),
   });
   assertContained(sessionDirectory, handle.sessionFile);
   return withLoadedKnowledge(handle, knowledgeLoad?.manifest);
@@ -413,6 +419,8 @@ export async function openRegisteredWorkspacePiSession(
     proposeTool?: ToolDefinition;
     rovaraSkills?: readonly AgentSkillFile[];
     compaction?: SessionCompactionOptions;
+    /** See PiSessionInput.memory. */
+    memory?: { project: string };
     /** As for `createWorkspacePiSession`. */
     contextFilesAt?: "working-tree" | "base-commit";
     baseCommits?: readonly { repositoryId: string; baseCommitSha?: string | undefined }[];
@@ -468,6 +476,7 @@ export async function openRegisteredWorkspacePiSession(
     ...(input.knowledgeStep === undefined ? {} : { knowledgeStep: input.knowledgeStep }),
     ...(input.proposeTool === undefined ? {} : { proposeTool: input.proposeTool }),
     ...(input.compaction === undefined ? {} : { compaction: input.compaction }),
+    ...memoryOption(input.memory),
   });
   assertContained(sessionDirectory, handle.sessionFile);
   return withLoadedKnowledge(handle, knowledgeLoad?.manifest);
@@ -648,7 +657,8 @@ async function createDefaultSession(
       return result;
     };
     const compaction = compactionExtension(input.compaction ?? {}, summarise, input.onDiagnostic === undefined ? undefined : (message) => { try { input.onDiagnostic?.(redactText(message)); } catch { /* reporting must not break a turn */ } });
-    const { resourceLoader, settingsManager } = await createWorkerResources({ ...input, extensionFactories: [...(input.extensionFactories ?? []), ...midRun, ...(sourceMcp?.extensions ?? []), ...exposure.extensions, compaction], ...(exposure.note === undefined ? {} : { toolSearchNote: exposure.note }), loadedSkills: skills, ...(input.agentRun !== undefined ? { systemPrompt: input.agentRun.systemPrompt } : input.workflowMode === "SETUP" ? { systemPrompt: SETUP_SYSTEM_PROMPT } : input.workflowMode === "WIKI" ? { systemPrompt: WIKI_SYSTEM_PROMPT } : {}) });
+    const memory = await piMemorySessionParts(input.agentDirectory, input.memory);
+    const { resourceLoader, settingsManager } = await createWorkerResources({ ...input, extensionFactories: [...(input.extensionFactories ?? []), ...memory.extensions, ...midRun, ...(sourceMcp?.extensions ?? []), ...exposure.extensions, compaction], ...(exposure.note === undefined ? {} : { toolSearchNote: exposure.note }), loadedSkills: skills, ...(input.agentRun !== undefined ? { systemPrompt: input.agentRun.systemPrompt } : input.workflowMode === "SETUP" ? { systemPrompt: SETUP_SYSTEM_PROMPT } : input.workflowMode === "WIKI" ? { systemPrompt: WIKI_SYSTEM_PROMPT } : {}) });
     // An AgentX extension that failed to load would leave its work silently undone, so the session does not start.
     // It is a deterministic AgentX bug, so not RUNTIME_UNAVAILABLE, which the broker reads as "retry" (M-10).
     const loadErrors = resourceLoader.getExtensions().errors;
@@ -672,7 +682,7 @@ async function createDefaultSession(
       thinkingLevel: requestedLevel ?? (model.reasoning ? "medium" : "off"),
       // read_skill is the worker's own tool, never a file tool: it is there only when the operation has skills.
       // With the rovara server, its tools are named by pattern; naming any MCP tool makes the list filter MCP tools, so no other server's could be active.
-      tools: [...stepTools.tools, ...(skillFiles.length === 0 ? [] : ["read_skill"]), ...knowledgeTool.map(({ name }) => name), ...(input.proposeTool === undefined || input.agentRun !== undefined ? [] : [input.proposeTool.name]), ...exposure.names, ...(input.contextMcp === undefined ? [] : [ROVARA_MCP_TOOL_PATTERN])],
+      tools: [...stepTools.tools, ...memory.tools, ...(skillFiles.length === 0 ? [] : ["read_skill"]), ...knowledgeTool.map(({ name }) => name), ...(input.proposeTool === undefined || input.agentRun !== undefined ? [] : [input.proposeTool.name]), ...exposure.names, ...(input.contextMcp === undefined ? [] : [ROVARA_MCP_TOOL_PATTERN])],
       // Only the host tools this stage chose can be active: a deferred tool's `name*` entry (a tool called `wr`) must not switch on Pi's own `write`.
       excludeTools: excludeUnselectedBuiltIns(stepTools.tools),
       // A custom tool with a built-in's name replaces it.
@@ -868,7 +878,8 @@ export async function createWorkerResources(
 ): Promise<{ resourceLoader: DefaultResourceLoader; settingsManager: SettingsManager }> {
   const skills = input.loadedSkills ?? [];
   // Pi never installs a package for the worker: the reload below would otherwise fetch every `packages` entry of the
-  // settings it reads, running `npmCommand`, in the worker (R56). AgentX loads no package.
+  // settings it reads, running `npmCommand`, in the worker (R56). AgentX loads no package through Pi: workspace memory's extension is a pinned npm dependency of the
+  // worker, loaded inline like AgentX's own (pi-memory.ts).
   process.env.PI_OFFLINE = "1";
   // Pi 1.3+ reports install telemetry and puts its attribution on provider requests unless this says no; the settings below say no too.
   process.env.PI_TELEMETRY = "0";
