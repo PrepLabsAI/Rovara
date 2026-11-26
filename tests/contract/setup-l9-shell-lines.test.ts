@@ -1,6 +1,6 @@
 // SETUP-L9-SHELL (DEC 254zzz562): a saved line is run by a shell. The parser no longer refuses `&&`, `|` and `;`; it stores a line that needs a shell as `bash -c <line>` and every other line as the program and its arguments it
 // always was. The rules that are about SAFETY rather than syntax (a download-and-run, a secret-shaped value) are applied to the line as written, so each is still refused.
-import { SHELL_PROGRAM, formatCommandLine, inlineEnvEntries, needsShell, parseCommandLine, remoteCodeReason, sanitizeSetupProposal, setupItemsOf, shellLineOf, type ProjectCommand, type SetupProposal } from "@agentx/contracts";
+import { SHELL_PROGRAM, formatCommandLine, inlineEnvEntries, needsShell, parseCommandLine, projectCommandEnvProblems, remoteCodeReason, sanitizeSetupProposal, setupItemsOf, shellLineOf, type ProjectCommand, type SetupProposal } from "@agentx/contracts";
 import { describe, expect, it } from "vitest";
 import { classifySetupChange } from "../../packages/broker/src/core/setup-agent/setup-risk.js";
 import { commandsFromProposal } from "../../packages/broker/src/core/setup-agent/apply.js";
@@ -55,9 +55,24 @@ describe("a saved line that needs a shell is stored as a shell line", () => {
   });
 
   it("refuses a hidden character in a shell line, so the approver reads what runs (a line break, an escape, a bidirectional override, a zero-width character, NUL)", () => {
-    for (const hidden of ["\n", "\r", "\u0000", "\u001b", "\u202e", "\u200b", "\u2066", "\t"]) {
+    for (const hidden of ["\n", "\r", "\u0000", "\u001b", "\u202e", "\u200b", "\u2066", "\t", "\u2028", "\u2029", "\u00a0", "\u2003", "\u200a", "\u202f", "\u3000", "\u3164", "\uffa0", "\u115f", "\u1160"]) {
       expect(() => parse(`npm ci ${hidden}&& echo ok`), JSON.stringify(hidden)).toThrow("a command is one line of plain text");
     }
+  });
+
+  it("the proposal reader leaves out a command with such a character too (same rule)", () => {
+    for (const hidden of ["\u2028", "\u00a0", "\u3164", "\uffa0", "\u1160"]) {
+      const read = sanitizeSetupProposal({ setup: [{ repo: "app", commands: [`npm ci ${hidden}&& echo ok`, "npm ci"], from: from() }] }, { basedOnRevision: 1, repositories: [{ name: "app" }] });
+      if (!read.ok) throw new Error(read.errors.join("; "));
+      expect(read.proposal.setup.flatMap((item) => (item.value as { commands: string[] }).commands), JSON.stringify(hidden)).toEqual(["npm ci"]);
+    }
+  });
+
+  it("a project command's env may not name the variables that turn a shell's trace on or redirect it", () => {
+    for (const name of ["SHELLOPTS", "BASHOPTS", "PS4", "BASH_XTRACEFD", "BASH_ENV", "ENV"]) {
+      expect(projectCommandEnvProblems({ [name]: "xtrace" }).map((problem) => problem.name), name).toEqual([name]);
+    }
+    expect(projectCommandEnvProblems({ NODE_ENV: "test" })).toEqual([]);
   });
 
   it("reads the NAME=value words a shell line puts in the environment (setup risk treats them like a command's env)", () => {

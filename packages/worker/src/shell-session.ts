@@ -75,6 +75,7 @@ export async function closeShellSession(session: ShellSession | undefined): Prom
  * Nothing is printed by this code. Compatible with bash 3.2 (a developer's Mac) and bash 5.
  */
 export const SHELL_SESSION_SCRIPT = String.raw`
+{ set +x +v; } 2>/dev/null
 __rv_state=$2
 __rv_line=$3
 __rv_nl=$'\n'

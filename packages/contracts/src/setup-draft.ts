@@ -8,7 +8,7 @@
 //     (`a && b`, `cd sub`, `source .venv/bin/activate`) is the line as written, which a shell runs (SETUP-L9-SHELL). One that is not one readable line (an open quote) is kept as written;
 //   - a command that fetches code from the internet and runs it is recognised by `remoteCodeReason`, whatever the model said;
 //   - a secret is a NAME (letters, digits, `_`, `.`, `-`); a value that came with it is cut off, and a name that looks like a token is left out.
-import { formatCommandLine, parseCommandLine, SETUP_TIMEOUT } from "./project-commands.js";
+import { formatCommandLine, HIDDEN_COMMAND_CHARACTER, parseCommandLine, SETUP_TIMEOUT } from "./project-commands.js";
 import { redactText } from "./redaction.js";
 
 /** What a person is told about a command that fetches code and runs it (the plan's exact words). */
@@ -19,7 +19,7 @@ export const SETUP_DRAFT_COMMANDS_MAX = 16;
 export const SETUP_DRAFT_COMMAND_MAX_CHARS = 500;
 
 const SECRET_NAME = /^[A-Za-z_][A-Za-z0-9_.-]{0,63}$/u;
-const HIDDEN = /[\p{Cc}\p{Cf}]/u;
+const HIDDEN = HIDDEN_COMMAND_CHARACTER;
 
 // ---- commands that fetch code and run it
 //

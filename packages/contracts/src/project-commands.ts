@@ -34,7 +34,12 @@ const SHELL_FIRST_WORDS: ReadonlySet<string> = new Set([
   "cd", "source", ".", "export", "unset", "set", "alias", "unalias", "eval", "exec", "ulimit", "umask", "hash", "declare", "local", "typeset", "readonly", "shift", "trap", "wait", "read", "return", "exit", "pushd", "popd",
   "dirs", "shopt", "builtin", "command", "type", "if", "for", "while", "until", "case", "function", "select", "[[", "!", "{", "}",
 ]);
-const HIDDEN_CHARACTER = /[\p{Cc}\p{Cf}]/u;
+/**
+ * A character a person cannot see as what it is: a control or format character (a line break, an escape, a bidirectional override, a zero-width character), the line and paragraph separators (U+2028, U+2029), a space that is not the
+ * ASCII one (U+00A0, U+1680, U+2000-U+200A, U+202F, U+205F, U+3000), and a Hangul filler (U+115F, U+1160, U+3164, U+FFA0), which look like a space and are part of a word to a shell.
+ */
+export const HIDDEN_COMMAND_CHARACTER = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\u00A0\u1680\u2000-\u200A\u202F\u205F\u3000\u115F\u1160\u3164\uFFA0]/u;
+const HIDDEN_CHARACTER = HIDDEN_COMMAND_CHARACTER;
 const ASSIGNMENT_WORD = /^[A-Za-z_][A-Za-z0-9_]*=/u;
 
 interface LineReading { words: string[]; shell: boolean; unclosedQuote: boolean }

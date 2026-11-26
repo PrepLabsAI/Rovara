@@ -232,6 +232,15 @@ describe("what the shell can see", () => {
     }
   });
 
+  it("a shell that starts with xtrace already on (SHELLOPTS in the environment) does not make the session code print the environment", async () => {
+    const traced = container({ SHELLOPTS: "xtrace", PS4: "+ ", REGISTRY_PLAIN_VALUE: "hunter2supersecret" });
+    const session = newShellSession();
+    await runContainerCommand(traced, root, line("export FOO=1"), undefined, { session });
+    const result = await runContainerCommand(traced, root, line("export BAR=2; echo done"), undefined, { session });
+    expect(result.exitCode).toBe(0);
+    expect(`${result.stdout}${result.stderr}`).not.toContain("hunter2supersecret");
+  });
+
   it("the wrapper's own words are not in the line's environment or its positional parameters", async () => {
     const seen = await out(line('echo "[$#][$0]"; env | grep -c "__rv_" || true'));
     expect(seen).toBe("[0][bash]\n0");
