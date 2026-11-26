@@ -58,12 +58,11 @@ describe("the e2e-agent-settings unit against head's control-plane template", ()
   const changeSet = plan.find((step): step is Extract<DeployStep, { kind: "create-change-set" }> => step.kind === "create-change-set")!;
   const declared = changeSet.template as Extract<typeof changeSet.template, { source: "lift-declared" }>;
 
-  it("names exactly the policies that carry each setting's ARN in head: both ARNs in the same one statement of each, and no other policy (the eval batch tick carries neither)", () => {
+  it("names exactly the policies that carry each setting's ARN in head: both ARNs in the same one statement of each, and no other policy", () => {
     for (const name of SETTINGS) {
       const carrying = Object.entries(headTemplate.Resources ?? {}).filter(([, resource]) => resource.Type === "AWS::IAM::Policy" && JSON.stringify(resource).includes(`:parameter${name}`)).map(([id]) => id).sort();
       expect(carrying, name).toEqual([...E2E_AGENT_SETTINGS_UNIT.policies].sort());
     }
-    expect(JSON.stringify(headTemplate.Resources!["EvalBatchTickServiceRoleDefaultPolicyC35492F8"])).not.toMatch(/worker-e2e-agent-model|worker-model-fallback/);
     for (const id of E2E_AGENT_SETTINGS_UNIT.policies) {
       const holders = (headTemplate.Resources![id] as unknown as Policy).Properties.PolicyDocument.Statement.filter((statement) => Array.isArray(statement.Resource) && statement.Resource.some(holdsParameter));
       expect(holders, id).toHaveLength(1);

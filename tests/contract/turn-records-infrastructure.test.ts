@@ -211,9 +211,9 @@ describe("Slack service turn records and metric filters", () => {
       FilterPattern: "{ $.event = \"turn_metrics.emit_failed\" }",
       MetricTransformations: [{ MetricNamespace: "AgentX", MetricName: "TurnMetricsEmitFailed", MetricValue: "1" }],
     });
-    // The six above, spec 052's EvalBatchWatcherFailed (eval-batch-tick-infrastructure.test.ts), and (#1131: production has the FR-045 alarms
+    // The six above and (#1131: production has the FR-045 alarms
     // too) the four the alarms read: TurnFailed, SlackDeliveryFailed, TurnDurationMs and GateCheckerFailed (alert-alarms-infrastructure.test.ts).
-    template.resourceCountIs("AWS::Logs::MetricFilter", 11);
+    template.resourceCountIs("AWS::Logs::MetricFilter", 10);
   });
 });
 

@@ -150,16 +150,12 @@ import { STUCK_SETUP_MESSAGE } from "./stuck-setup.js";
 
 
 import { adaptHttpApiEvent, identityFromJwtClaims, isAssumedRoleOf, ownerKeyForSubject, parseRuntimeBinding, requiredEnvironment, type AdaptedHttpRequest, type HttpApiV2Event } from "./lambda.js";
-import { getSwebenchRunForThread, startSwebenchRun, stopSwebenchRun } from "./swebench.js";
-import { dropWatchedBatch, listWatchedBatches, recordWatchedBatchThread, startSlackBatch, updateWatchedBatch } from "./eval-batch-service.js";
-import { swebenchDeploymentFromParameters } from "./swebench-settings.js";
 import { slackWorkflowCaller } from "./slack-workflow-caller.js";
 import { can, resolveTaskAccess, type TaskAccess, type TaskAction } from "../developer/task-access.js";
 import { taskAccessFence } from "../developer/task-people.js";
 import { MAX_ARTIFACT_BYTES, MAX_SETUP_PROPOSAL_BYTES, MAX_SETUP_EVIDENCE_BYTES, LEGACY_E2E_COMPANY, SETUP_ARTIFACT_CHUNK_BYTES, EVENT_TRANSACTION_CHUNK, NAMED_COMPANY_CANDIDATE_WAITING, type RegisteredProjectRecord, type MembershipRecord, type PullRequestRecord, type CodeBuildRecord, type AwsBrokerDependencies, type AwsBrokerInput, type SlackServiceConfiguration, DOT_SEGMENT, DEVELOPER_ROUTE_KEY, CORE_APP_ROUTE_KEY, FEEDBACK_REVIEW_ROUTE_KEY, CLIENT_PROJECT_INSTRUCTIONS, TASK_ID_PATTERN, LEGACY_REVISION_GRANT } from "./broker-types.js";
 import { type SlackStopTaskEvent, type SlackWorkflowStartEvent, type SlackWorkflowDecisionEvent, type SlackWorkflowRetryEvent, type SlackWorkflowSendBackEvent, type SlackWorkflowResolveFindingsEvent, type SlackWorkflowCloseEvent, type SlackWorkflowReviewRetryEvent, type SlackTaskAuthorizationEvent, type SlackTaskPeopleConfirmEvent, type SlackTaskPeopleReadEvent, type SlackTaskPeopleChangeEvent, type SlackTaskPeopleTakeOwnershipEvent, type SlackIntakeRecordEvent, type SlackThreadNoteEvent } from "./slack-broker-events.js";
 import { projectSetupPolicy, plannedAgentRoute, untestedAgentRouteNote, brokerDependencies, adminCompanyReader, sharedThread, sharedThreadOpen, slackThreadOwnRow, taskLegacyScope, readWorkspaceTaskLegacyProject, getSlackBinding, developerRequested, requireOwnedWorkspace, requireWorkspace, getDefaultWorkspace, getThreadWorkspace, slackCallerRouteDependencies, channelLinkRouteDependencies, channelConversationDependencies, conversationStarterId, conversationProjectName, requireLatestProject, getProjectModels, putProjectModel, resolveProjectModel, requirePullRequest, adoptLegacyPullRequest, requireMembership, getMembership, grantCompany, storedCompanyOf, requireAdministrator, requireAdministratorGrant, closeReleasesStorage, workspaceRuntime, workspaceItem, membershipRecord, workspaceKey, pullRequestKey, codeBuildKey, issueRepositoryGrant, requireGithubProjectBinding, verifyCapability, object, parseBody, uuid, name, positiveInteger, encodeCursor, decodeCursor, startsConversation, isStatus, parseStoredEvent, json } from "./broker-primitives.js";
-import { swebenchDependencies, swebenchSlackContext } from "./broker-swebench-routes.js";
 import { dispatchAdminHttpRoute, dispatchCoreAndOperatorEvent, dispatchPreAuthHttpRoute, dispatchSlackIngressEvent } from "./broker-router.js";
 export { PROJECT_SETUP_CAPTURE_POLICY, NAMED_COMPANY_CANDIDATE_WAITING, type RegisteredProjectRecord, type AwsBrokerInput } from "./broker-types.js";
 export { type SlackStopTaskEvent, type SlackWorkflowStartEvent, type SlackWorkflowDecisionEvent, type SlackWorkflowRetryEvent, type SlackWorkflowSendBackEvent, type SlackWorkflowResolveFindingsEvent, type SlackWorkflowCloseEvent, type SlackWorkflowReviewRetryEvent, type SlackWorkflowFeedbackFindingsDecisionEvent, type SlackWorkflowFeedbackNoteEvent, type SlackTaskAuthorizationEvent, type SlackTaskPeopleConfirmEvent, type SlackTaskPeopleReadEvent, type SlackTaskPeopleChangeEvent, type SlackTaskPeopleTakeOwnershipEvent, isSlackTaskPeopleReadEvent, isSlackTaskPeopleChangeEvent, isSlackTaskPeopleTakeOwnershipEvent, isSlackTaskPeopleConfirmEvent, isSlackTaskAuthorizationEvent, isSlackWorkflowStartEvent, type SlackIntakeRecordEvent, isSlackIntakeRecordEvent, isSlackWorkflowDecisionEvent, isSlackWorkflowRetryEvent, isSlackWorkflowSendBackEvent, isSlackWorkflowResolveFindingsEvent, isSlackWorkflowCloseEvent, isSlackWorkflowReviewRetryEvent, type SlackWorkflowPublishRetryEvent, isSlackWorkflowPublishRetryEvent, type SlackWorkflowKeepPullRequestsEvent, isSlackWorkflowKeepPullRequestsEvent, isSlackWorkflowFeedbackFindingsDecisionEvent, isSlackWorkflowFeedbackNoteEvent, type SlackWorkflowFeedbackReviewRetryEvent, isSlackWorkflowFeedbackReviewRetryEvent, type SlackThreadNoteEvent, isSlackThreadNoteEvent, isSlackStopTaskEvent } from "./slack-broker-events.js";
@@ -687,42 +683,9 @@ async function handleSlackAnswerService(dependencies: AwsBrokerDependencies, ide
   return json(await askSlackAnswerForIdentity({ company: view, core: view.developer?.coreApp }, identity, parseBody(request.body)), request.requestId);
 }
 
-async function routeServiceEvalRegex(
-  dependencies: AwsBrokerDependencies,
-  request: BrokerHttpRequest,
-  serviceUrl: URL,
-  identity: AuthenticatedIdentity,
-): Promise<ReturnType<typeof json> | undefined> {
-  const watchedBatch = /^\/v1\/evals\/batches\/([0-9a-f-]{36})\/(thread|watch|drop)$/.exec(serviceUrl.pathname);
-  if (request.method === "POST" && watchedBatch?.[1] && watchedBatch[2]) {
-    const slack = identity.slack;
-    if (!slack) throw agentXError("FORBIDDEN", "Slack thread context is required");
-    const scope = { thread: slack.thread, projectName: slack.binding.projectName };
-    const swebench = swebenchDependencies(dependencies);
-    const body = parseBody(request.body);
-    const answer = watchedBatch[2] === "thread" ? await recordWatchedBatchThread(swebench, scope, watchedBatch[1], body)
-      : watchedBatch[2] === "drop" ? await dropWatchedBatch(swebench, scope, watchedBatch[1], body)
-      : await updateWatchedBatch(swebench, scope, watchedBatch[1], body);
-    return json(answer, request.requestId);
-  }
-  const evalRun = /^\/v1\/evals\/swebench\/([0-9a-f-]{36})$/.exec(serviceUrl.pathname);
-  if (request.method === "GET" && evalRun?.[1]) {
-    const thread = identity.slack?.thread;
-    if (!thread) throw agentXError("FORBIDDEN", "Slack thread context is required");
-    return json({ run: await getSwebenchRunForThread(swebenchDependencies(dependencies), thread, evalRun[1]) }, request.requestId);
-  }
-  return undefined;
-}
-
 // The hosted Slack orchestrator's /v1/service/* routes (#1315): it authenticates with its IAM role and acts only as a Slack thread owner.
 async function routeServiceRequest(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, request: BrokerHttpRequest, url: URL): Promise<ReturnType<typeof json>> {
   const serviceUrl = new URL(`/v1${url.pathname.slice("/v1/service".length)}${url.search}`, "https://agentx.invalid");
-  // Spec 052 Task 6: the batch watcher's list is the whole Slack service's, not one thread's.
-  if (request.method === "GET" && serviceUrl.pathname === "/v1/evals/batches/active") {
-    requireSlackServiceRole(dependencies, request);
-    if (dependencies.swebench === undefined) return json({ batches: [], dropped: [] }, request.requestId);
-    return json(await listWatchedBatches(swebenchDependencies(dependencies), async (teamId, channelId) => (await getSlackBinding(dependencies, teamId, channelId))?.projectName), request.requestId);
-  }
   const identity = await slackServiceIdentity(dependencies, request);
   const exactRoutes: ReadonlyArray<readonly [string, string, () => Promise<ReturnType<typeof json>>]> = [
     ["POST", "/v1/threads/workspace", async () => json(await ensureThreadWorkspace(dependencies, identity, parseBody(request.body)), request.requestId)],
@@ -739,14 +702,9 @@ async function routeServiceRequest(dependencies: AwsBrokerDependencies, tasks: D
     ["POST", "/v1/threads/workspace/close/complete", async () => json(await completeThreadWorkspaceClose(dependencies, identity, parseBody(request.body)), request.requestId)],
     ["GET", "/v1/project/models", async () => json(await getProjectModels(dependencies, identity), request.requestId)],
     ["PUT", "/v1/project/model", async () => json(await putProjectModel(dependencies, identity, parseBody(request.body)), request.requestId)],
-    ["POST", "/v1/evals/swebench", async () => json(await startSwebenchRun(swebenchDependencies(dependencies), swebenchSlackContext(dependencies, identity), parseBody(request.body)), request.requestId)],
-    // Spec 052 FR-002 and Task 6: the Slack batch form, and the watcher's thread and posts for one batch.
-    ["POST", "/v1/evals/batches", async () => json(await startSlackBatch(swebenchDependencies(dependencies), swebenchSlackContext(dependencies, identity), parseBody(request.body)), request.requestId)],
   ];
   const exact = exactRoutes.find(([method, path]) => request.method === method && serviceUrl.pathname === path);
   if (exact !== undefined) return await exact[2]();
-  const evalHandled = await routeServiceEvalRegex(dependencies, request, serviceUrl, identity);
-  if (evalHandled !== undefined) return evalHandled;
   return await observeConnectorRoute(request.method, serviceUrl.pathname, () => routeWorkspaceRequest(dependencies, request, serviceUrl, identity));
 }
 
@@ -5417,11 +5375,6 @@ async function stopSlackThreadTask(dependencies: AwsBrokerDependencies, event: S
   const caller = await companySlackCaller(dependencies, thread, requester.userId);
   const binding = await getSlackBinding(dependencies, thread.teamId, thread.channelId);
   if (!binding) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
-  // Spec 043 FR-005: a thread running a SWE-bench run stops the run.
-  if (dependencies.swebench !== undefined) {
-    const runId = await stopSwebenchRun(swebenchDependencies(dependencies), thread, requester);
-    if (runId !== undefined) return { outcome: "CANCEL_REQUESTED", workspaceId: runId, targetOperationId: runId, cancelOperationId: runId };
-  }
   // Q8: in a continue thread a teammate's stop cancels the task's running task operation, whoever
   // started it, as the developer's own cancel would. A view-only or closed thread, or one whose
   // channel now serves another project (F16), stops nothing.
@@ -7708,7 +7661,7 @@ function brokerOptionalFeatureWiring(developer: DeveloperApiConfiguration | unde
   };
 }
 
-function brokerSlackAndSwebenchWiring() {
+function brokerSlackWiring() {
   return {
     ...(process.env.TURN_RECORDS_TABLE_NAME ? { turnRecordsTableName: process.env.TURN_RECORDS_TABLE_NAME } : {}),
     ...(process.env.SLACK_THREADS_TABLE_NAME ? { slackThreadsTableName: process.env.SLACK_THREADS_TABLE_NAME } : {}),
@@ -7724,22 +7677,6 @@ function brokerSlackAndSwebenchWiring() {
               Number(process.env.SLACK_ORGANIZATION_WORKSPACE_LIMIT ?? "20"),
               "SLACK_ORGANIZATION_WORKSPACE_LIMIT",
             ),
-          },
-        }
-      : {}),
-    // Spec 043: read per request, so installing the eval stack or a new runner image needs no broker release.
-    ...(process.env.SWEBENCH_SETTINGS_PREFIX
-      ? {
-          swebench: {
-            deployment: () => swebenchDeploymentFromParameters(requiredEnvironment("SWEBENCH_SETTINGS_PREFIX"), async (names) => {
-              const response = await ssm.send(new GetParametersCommand({ Names: [...names] }));
-              return new Map((response.Parameters ?? []).flatMap((parameter) => parameter.Name && parameter.Value ? [[parameter.Name, parameter.Value] as const] : []));
-            }),
-            async startExecution(input: { stateMachineArn: string; name: string; input: string }) {
-              const response = await stepFunctions.send(new StartExecutionCommand(input));
-              // Spec 052 Ruling 13: recorded on the run, so the batch tick can find a dead execution.
-              return { executionArn: response.executionArn };
-            },
           },
         }
       : {}),
@@ -7856,7 +7793,7 @@ function buildBrokerHandler(callbackSigningKey: string) {
     async deleteEc2Session(workspaceId) {
       await ec2Sessions.deleteSession(workspaceId);
     },
-    ...brokerSlackAndSwebenchWiring(),
+    ...brokerSlackWiring(),
   });
 }
 

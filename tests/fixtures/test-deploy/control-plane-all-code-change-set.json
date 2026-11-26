@@ -236,55 +236,6 @@
       "Type": "Resource",
       "ResourceChange": {
         "Action": "Modify",
-        "LogicalResourceId": "EvalBatchTickA4585B04",
-        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-EvalBatchTickA4585B04",
-        "ResourceType": "AWS::Lambda::Function",
-        "Replacement": "False",
-        "Scope": [
-          "Properties"
-        ],
-        "Details": [
-          {
-            "Target": {
-              "Attribute": "Properties",
-              "Name": "Code",
-              "RequiresRecreation": "Never"
-            },
-            "Evaluation": "Static",
-            "ChangeSource": "DirectModification"
-          }
-        ]
-      }
-    },
-    {
-      "Type": "Resource",
-      "ResourceChange": {
-        "Action": "Modify",
-        "LogicalResourceId": "EvalBatchTickScheduleDB13DEE4",
-        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-EvalBatchTickScheduleDB13DEE4",
-        "ResourceType": "AWS::Scheduler::Schedule",
-        "Replacement": "False",
-        "Scope": [
-          "Properties"
-        ],
-        "Details": [
-          {
-            "Target": {
-              "Attribute": "Properties",
-              "Name": "Target",
-              "RequiresRecreation": "Never"
-            },
-            "Evaluation": "Dynamic",
-            "ChangeSource": "ResourceAttribute",
-            "CausingEntity": "EvalBatchTickA4585B04.Arn"
-          }
-        ]
-      }
-    },
-    {
-      "Type": "Resource",
-      "ResourceChange": {
-        "Action": "Modify",
         "LogicalResourceId": "GithubWebhookRecoveryRoleDefaultPolicyDC13C89E",
         "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-GithubWebhookRecoveryRoleDefaultPolicyDC13C89E",
         "ResourceType": "AWS::IAM::Policy",
@@ -351,31 +302,6 @@
             },
             "Evaluation": "Static",
             "ChangeSource": "DirectModification"
-          }
-        ]
-      }
-    },
-    {
-      "Type": "Resource",
-      "ResourceChange": {
-        "Action": "Modify",
-        "LogicalResourceId": "SchedulerRoleForTarget490aa1DefaultPolicyAA16505F",
-        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-SchedulerRoleForTarget490aa1DefaultPolicyAA16505F",
-        "ResourceType": "AWS::IAM::Policy",
-        "Replacement": "False",
-        "Scope": [
-          "Properties"
-        ],
-        "Details": [
-          {
-            "Target": {
-              "Attribute": "Properties",
-              "Name": "PolicyDocument",
-              "RequiresRecreation": "Never"
-            },
-            "Evaluation": "Dynamic",
-            "ChangeSource": "ResourceAttribute",
-            "CausingEntity": "EvalBatchTickA4585B04.Arn"
           }
         ]
       }

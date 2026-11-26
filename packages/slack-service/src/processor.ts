@@ -212,7 +212,7 @@ export interface ProcessorDependencies<Thread = unknown> {
   plainReplies?: true;
   /** Spec 062 FR-040: how the processor's words and the model's reply are written. */
   format: ConversationFormat;
-  /** Spec 062: commands the surface adds, tried in order before the core's own (Slack's eval batches and SWE-bench runs). */
+  /** Spec 062: commands the surface adds, tried in order before the core's own. */
   commands?: ReadonlyArray<SurfaceCommand<Thread>>;
   /** Spec 062 FR-032: false for a confirmation this conversation's adapter may not approve. */
   mayApprove?: (confirmation: PendingConfirmation) => boolean;

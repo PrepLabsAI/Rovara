@@ -36,8 +36,8 @@ export interface Allowed { label: string; issueCode: string; reason: string }
 /** The apps a release can synthesize, as CDK context (the region is a placeholder too: every document names us-west-2). The named one turns every feature flag on, so no role hides behind a flag. */
 export const SCAN_CONTEXTS: ReadonlyArray<{ name: string; context: Record<string, unknown> }> = [
   { name: "legacy", context: { agentxRegion: "us-west-2" } },
-  { name: "legacy-optional", context: { agentxRegion: "us-west-2", agentxBetaAccess: "enabled", agentxBetaDomain: "enabled", agentxInstaller: "enabled", agentxCiRunner: "enabled", agentxEval: "enabled", "agentx:autoRequalify": "enabled", "agentx:autoRequalifySchedule": "enabled", "agentx:e2eQualificationTransport": "enabled" } },
-  { name: "named", context: { agentxEnv: "staging", agentxRegion: "us-west-2", "agentx:autoRequalify": "enabled", "agentx:autoRequalifySchedule": "enabled", "agentx:e2eQualificationTransport": "enabled", agentxInstaller: "enabled", agentxCiRunner: "enabled", agentxEval: "enabled" } },
+  { name: "legacy-optional", context: { agentxRegion: "us-west-2", agentxBetaAccess: "enabled", agentxBetaDomain: "enabled", agentxInstaller: "enabled", agentxCiRunner: "enabled", "agentx:autoRequalify": "enabled", "agentx:autoRequalifySchedule": "enabled", "agentx:e2eQualificationTransport": "enabled" } },
+  { name: "named", context: { agentxEnv: "staging", agentxRegion: "us-west-2", "agentx:autoRequalify": "enabled", "agentx:autoRequalifySchedule": "enabled", "agentx:e2eQualificationTransport": "enabled", agentxInstaller: "enabled", agentxCiRunner: "enabled" } },
   { name: "release-pipeline", context: { agentxReleasePipeline: "staging", agentxRegion: "us-west-2" } },
 ];
 

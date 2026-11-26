@@ -21,9 +21,9 @@ const functions = (template: typeof named) => Object.entries(template.Resources)
 const secretOf = (template: typeof named, name: string) => Object.entries(template.Resources).find(([, resource]) => resource.Type === "AWS::SecretsManager::Secret" && resource.Properties.Name === name)!;
 
 const READERS = {
-  named: ["Broker", "EvalBatchTick", "SessionsReconciler"],
+  named: ["Broker", "SessionsReconciler"],
   // #1131: production's reconciler signs stuck-cancel retries and the idle Slack backstop's cancels too.
-  legacy: ["Broker", "EvalBatchTick", "SessionsReconciler"],
+  legacy: ["Broker", "SessionsReconciler"],
 };
 const roleIdOf = (template: typeof named, logicalPrefix: string): string => {
   const [, fn] = functions(template).find(([id]) => new RegExp(`^${logicalPrefix}[0-9A-F]{8}$`, "u").test(id))!;

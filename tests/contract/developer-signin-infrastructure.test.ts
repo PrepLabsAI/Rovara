@@ -206,13 +206,13 @@ describe("broker membership condition-check grant", () => {
     const before = withoutLinearWebhookGuard(withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withTaskPeopleInvitationSwitches(withoutCoreOutboxStreamRelay(structuredClone(namedRaw)))), { named: true }), { env: "staging" }), stuckStoppingInstall("staging"))))));
     // The providers branch also adds this exact capability output. Keep a measured
     // combined pin, then remove only the asserted output to retain the upstream pin.
-    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("9fdd7b336dca146329bc6ad7a216a473838741ccfbcc751854ee0b903c43a304");
+    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("4859939e1f0594a059bb1a2c17f24e861a3694d43b89831acaded77ae53cb5b3");
     // RETAIN (arch ruling 2026-11-24, Rule D): with exactly the nine policies put back (withoutRetainPolicies) the pins recorded before it hold.
-    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(before), "named")).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("a4f7a53b5948ffa22830123a79c7df656e2411842410e35a1ede6d47e2d8ff63");
+    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(before), "named")).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("0443b97efb9578488b4601e765df5365df5f0149e9246610f4c391ebeae1f409");
     expect(before.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
     delete before.Outputs.ModelRunPriceVersion;
-    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("4bfeb05e88b9c5fd84cad9e9cd48bd723a7f4f198dc3920a5612f3e86c555633");
-    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(before), "named")).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("739b8bc713c314e7b33f952a686f00976df3a5c30ed941643535a428ece9622e");
+    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("68e457236b2e2337cec3d36503b417aae7e6cacb3fca95661add60ab9c3d8cc2");
+    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(before), "named")).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("c3c34f987059b2e6765394dc932aceaf9df144c0151cc30c5fcb2ad789ca2a34");
     const afterTuples = accessTuples(namedRaw);
     const beforeTuples = accessTuples(before);
     const broker = "role:BrokerServiceRole";
@@ -834,15 +834,15 @@ describe("task-token key and membership IAM", () => {
     expect(remainder.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
     // F1 L1a-1 (2026-11-25): re-pinned for exactly the deletion of the two dead invitation parameters and their two packed broker settings (tu, tv). Rule D: with them put back (`text`, next line) the pin recorded before holds.
     // D1-2 (declared change set, D1-PLAN section 8, rebased onto train 90): every pin below moved for exactly the removal of the three recovery Schedules, the two Scheduler roles and their policies (and, in the named template, the PlanEvidence function, its log group, role and policy); the removed resources were in every older state these pins describe.
-    expect(createHash("sha256").update(JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("3d5bb591d5e28fcd40d85cf284d3e0799922209275ebcc92cb1572f83d524399");
-    expect(createHash("sha256").update(text).digest("hex")).toBe("61857cd305f7a80d59d1f1f14dffa4bab687fa3c54886b803ac7db0e449518e1");
+    expect(createHash("sha256").update(JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("1c9e7c2bc85ca5caf869f870a4941f570fd1637c664a18a1506229d31671c0d1");
+    expect(createHash("sha256").update(text).digest("hex")).toBe("f59f9df863195925272ad943f7a9f31c8e4d64742f21ceaa357c017a449bd937");
     // RETAIN (Rule D): with exactly the policies put back the recorded pins hold (six of the seven: this chain takes the task token key out with the core engine).
-    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(withSwitches), "named", { expectSeven: 6 })).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("fac6a7a83cd1aa38b0737536b44cc3ad6ad4d3239605c9a1adcb2f75be7e8a19");
+    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(withSwitches), "named", { expectSeven: 6 })).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("25eee81285bc6cf4c7ef3fcc1f5bda5d1bc4d4dabc816ba042bc527c62ad299d");
     const beforeFirstGateway = structuredClone(withSwitches);
     delete beforeFirstGateway.Outputs.ModelRunPriceVersion;
     const beforeText = JSON.stringify(beforeFirstGateway).replace(/[a-f0-9]{64}/g, "<asset-hash>");
-    expect(createHash("sha256").update(beforeText).digest("hex")).toBe("96d6ef1cb54f6f1a608633dac51913bed93abb2bcd56a8ad38d07d64da0aa73e");
-    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(beforeFirstGateway), "named", { expectSeven: 6 })).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("39ebfe483a69a647afbcea5c68856f2134c9aa017b072b005d647c99be96e98c");
+    expect(createHash("sha256").update(beforeText).digest("hex")).toBe("f9d55ae320617dc915dee3b100f57d74a88088dea3153f9a90f13a05b4aa9acf");
+    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(beforeFirstGateway), "named", { expectSeven: 6 })).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("9462ba7ffc0e9518c424844cd604b33abf1c9cbeb426e06995144396ce7564de");
   });
 
   it("keeps the developer key resource byte-identical to the base", () => {
@@ -1230,9 +1230,6 @@ const beforeTuples: AccessTuple[] = [
   ["role:BrokerServiceRole","Allow","sqs:SendMessage","queue:CoreEngineJobsQueue","{}"],
   ["role:BrokerServiceRole","Allow","sqs:SendMessage","queue:SlackHandOffFailureQueue","{}"],
   ["role:BrokerServiceRole","Allow","sqs:SendMessage","queue:SlackRequestQueue","{}"],
-  ["role:BrokerServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/eval/runner-features","{}"],
-  ["role:BrokerServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/eval/runner-image","{}"],
-  ["role:BrokerServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/eval/settings","{}"],
   ["role:BrokerServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-anthropic-secret-arn","{}"],
   ["role:BrokerServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-e2e-agent-model","{}"],
   ["role:BrokerServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-executor-image","{}"],
@@ -1244,7 +1241,6 @@ const beforeTuples: AccessTuple[] = [
   ["role:BrokerServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-openrouter-providers","{}"],
   ["role:BrokerServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-openrouter-secret-arn","{}"],
   ["role:BrokerServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-prompt-cache-retention","{}"],
-  ["role:BrokerServiceRole","Allow","states:StartExecution","arn:parameter:AWS::Partition:states:parameter:AWS::Region:parameter:AWS::AccountId:stateMachine:agentx-staging-swebench-eval","{}"],
   ["role:BrokerServiceRole","Allow","states:StartExecution","machine:SessionsDeleter","{}"],
   ["role:BrokerServiceRole","Allow","xray:PutTelemetryRecords","*","{}"],
   ["role:BrokerServiceRole","Allow","xray:PutTraceSegments","*","{}"],
@@ -1378,48 +1374,6 @@ const beforeTuples: AccessTuple[] = [
   ["role:DispatcherServiceRole","Allow","states:StartExecution","machine:SessionsProvisioner","{}"],
   ["role:DispatcherServiceRole","Allow","xray:PutTelemetryRecords","*","{}"],
   ["role:DispatcherServiceRole","Allow","xray:PutTraceSegments","*","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","dynamodb:BatchGetItem","table:State","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","dynamodb:BatchGetItem","table:State/index/*","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","dynamodb:BatchWriteItem","table:State","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","dynamodb:BatchWriteItem","table:State/index/*","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","dynamodb:ConditionCheckItem","table:State","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","dynamodb:ConditionCheckItem","table:State/index/*","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","dynamodb:DeleteItem","table:State","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","dynamodb:DeleteItem","table:State/index/*","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","dynamodb:DescribeTable","table:State","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","dynamodb:DescribeTable","table:State/index/*","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","dynamodb:GetItem","table:State","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","dynamodb:GetItem","table:State/index/*","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","dynamodb:GetRecords","table:State","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","dynamodb:GetRecords","table:State/index/*","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","dynamodb:GetShardIterator","table:State","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","dynamodb:GetShardIterator","table:State/index/*","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","dynamodb:PutItem","table:State","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","dynamodb:PutItem","table:State/index/*","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","dynamodb:Query","table:State","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","dynamodb:Query","table:State/index/*","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","dynamodb:Scan","table:State","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","dynamodb:Scan","table:State/index/*","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","dynamodb:UpdateItem","table:State","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","dynamodb:UpdateItem","table:State/index/*","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","ec2:TerminateInstances","arn:parameter:AWS::Partition:ec2:parameter:AWS::Region:parameter:AWS::AccountId:instance/*","{\"StringEquals\":{\"aws:ResourceTag/DeploymentMode\":[\"swebench-eval\"],\"aws:ResourceTag/Environment\":[\"staging\"]}}"],
-  ["role:EvalBatchTickServiceRole","Allow","s3:PutObject","bucket:Artifacts/evals/*","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/eval/runner-features","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/eval/runner-image","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/eval/settings","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-anthropic-secret-arn","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-executor-image","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-image","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-model-id","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-model-provider","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-openai-secret-arn","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-openrouter-providers","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-openrouter-secret-arn","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","ssm:GetParameters","arn:parameter:AWS::Partition:ssm:parameter:AWS::Region:parameter:AWS::AccountId:parameter/agentx/staging/worker-prompt-cache-retention","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","states:DescribeExecution","arn:parameter:AWS::Partition:states:parameter:AWS::Region:parameter:AWS::AccountId:execution:agentx-staging-swebench-eval:*","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","states:StartExecution","arn:parameter:AWS::Partition:states:parameter:AWS::Region:parameter:AWS::AccountId:stateMachine:agentx-staging-swebench-eval","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","xray:PutTelemetryRecords","*","{}"],
-  ["role:EvalBatchTickServiceRole","Allow","xray:PutTraceSegments","*","{}"],
   ["role:external:{\"Fn::Select\":[3,{\"Fn::Split\":[\"/\",{\"Ref\":\"Ec2WorkerInstanceRoleArn\"}]}]}","Allow","secretsmanager:GetSecretValue","parameter:AnthropicSecretArn","{}"],
   ["role:external:{\"Fn::Select\":[3,{\"Fn::Split\":[\"/\",{\"Ref\":\"Ec2WorkerInstanceRoleArn\"}]}]}","Allow","secretsmanager:GetSecretValue","parameter:OpenAISecretArn","{}"],
   ["role:external:{\"Fn::Select\":[3,{\"Fn::Split\":[\"/\",{\"Ref\":\"Ec2WorkerInstanceRoleArn\"}]}]}","Allow","secretsmanager:GetSecretValue","parameter:OpenRouterSecretArn","{}"],
@@ -1456,8 +1410,6 @@ const beforeTuples: AccessTuple[] = [
   ["role:OutboxPublisherServiceRole","Allow","sqs:SendMessage","queue:DispatchQueue","{}"],
   ["role:OutboxPublisherServiceRole","Allow","xray:PutTelemetryRecords","*","{}"],
   ["role:OutboxPublisherServiceRole","Allow","xray:PutTraceSegments","*","{}"],
-  ["role:SchedulerRoleForTarget490aa1","Allow","lambda:InvokeFunction","function:EvalBatchTick:*","{}"],
-  ["role:SchedulerRoleForTarget490aa1","Allow","lambda:InvokeFunction","function:EvalBatchTick","{}"],
   ["role:SchedulerRoleForTarget9cef70","Allow","lambda:InvokeFunction","function:SessionsReaper:*","{}"],
   ["role:SchedulerRoleForTarget9cef70","Allow","lambda:InvokeFunction","function:SessionsReaper","{}"],
   ["role:SchedulerRoleForTargetd4b209","Allow","lambda:InvokeFunction","function:SessionsReconciler:*","{}"],
@@ -1755,8 +1707,8 @@ const BROKER_ARN_ESTIMATE = 144;
 // DEC 254zzz29/254zzz32: +84 for ORG#<id>#SIGNIN_ISSUER (+45) and ORG#<id>#EMAIL#* (+39) in BrokerCompanyImportReads' GetItem keys (6736 before). DefaultPolicy unchanged.
 // DEC 254zzz284: +328 in the existing second inline policy; DefaultPolicy reserve unchanged.
 // BROKER-CODEBUILD-START: BrokerCodeBuildStart (7148 before): the broker's third role policy (the conditional StartBuild Allow and the StartBuildBatch Deny), counted here with every other inline document. The DefaultPolicy estimate drops (StartBuild leaves it).
-const BROKER_RESOLVED_INLINE_SIZE = 8235; // All inline documents after realistic ARN expansion. D1-2: was 8465; the broker no longer invokes the PlanEvidence function (-230).
-const BROKER_INLINE_ESTIMATE = 7136; // D1-2: was 7430; the PlanEvidence invoke statements are gone (-294). This replaces the R3R4 pin. BROKER-CODEBUILD-START: was 7453; StartBuild left the DefaultPolicy (-23).
+const BROKER_RESOLVED_INLINE_SIZE = 7860; // All inline documents after realistic ARN expansion. #1539: was 8235; the SWE-bench settings reads and its StartExecution are gone (-375). D1-2: was 8465; the broker no longer invokes the PlanEvidence function (-230).
+const BROKER_INLINE_ESTIMATE = 6548; // #1539: was 7136; the SWE-bench settings reads and its StartExecution are gone (-588). D1-2: was 7430; the PlanEvidence invoke statements are gone (-294). This replaces the R3R4 pin. BROKER-CODEBUILD-START: was 7453; StartBuild left the DefaultPolicy (-23).
 const BROKER_INLINE_TARGET = 8500;
 const RESERVED = {
   r2: 600, // State stream reads and callback-key read; EC2 belongs to the dispatcher.

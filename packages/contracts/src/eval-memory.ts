@@ -1,6 +1,6 @@
 // Learning v2 W1 (design learning-v2-team-record.md 4.12, 4.13): the MEMORY dimension of an eval batch. A replay can run the same tasks with lessons loaded ("on") and without
 // ("off"), and compare. This file is the contract only. The quality-suite batch that will carry it (`quality-suite.md` Q12: `QualityBatchFile`, `Arm.memory`) is not on this branch, and
-// the batch file of today (`EvalBatchFileSchema`) does not carry it: a file that names `memory` is refused until a runner honours it, so an arm can never silently run with memory
+// no batch file carries it yet (the SWE-bench batch runner was removed, #1539): nothing may run an arm until a runner honours it, so an arm can never silently run with memory
 // it was not meant to have.
 //
 //   - The dimension is a short unique list of NAMED arms (DECISIONS 38/49). `off` loads nothing. `on:<pipeline>` loads a frozen snapshot made by the named lesson pipeline (`on:current`,

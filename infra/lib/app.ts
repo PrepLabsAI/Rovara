@@ -15,7 +15,6 @@ import { ReleasePipelineStack } from "./release-pipeline.js";
 import { RetainExceptOnCreate } from "./retention.js";
 import { EnvironmentRolePath } from "./role-path.js";
 import { SlackOrchestratorStack } from "./slack-orchestrator.js";
-import { SwebenchEvalStack, swebenchNames } from "./swebench-eval.js";
 import { CiRunnerStack } from "./ci-runner.js";
 import { maybeApiAddressStack } from "./api-address.js";
 import { BetaDomainStack } from "./beta-domain.js";
@@ -199,15 +198,6 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
     new BetaDomainStack(app, "AgentXBetaDomain", {
       description: "Beta's address in front of the beta control plane's API",
       env: { region: deploymentRegion ?? "us-east-1" },
-    });
-  }
-  // Spec 043: the SWE-bench eval stack, only when asked for; no release deploys it.
-  if (app.node.tryGetContext("agentxEval") === "enabled") {
-    new SwebenchEvalStack(app, "AgentXEval", {
-      description: "AgentX SWE-bench eval runs: x86 launch template, runner role, state machine and settings",
-      env: { region: deploymentRegion ?? "us-east-1" },
-      naming,
-      stackName: swebenchNames(naming).stackName,
     });
   }
   // The deployment that predates environments has no environment boundary, so its runtime roles (Lambda, ECS task, the worker's instance

@@ -42,8 +42,6 @@ import { askToApply, exportChanges, runCliChange } from "./admin/changes.js";
 import { describeCompanyInvite, inviteExpiryHours, listCompanyInvites } from "./admin/company-invites.js";
 import { companyImportId, describeCompanyImport, previewCompanyImport } from "./admin/company-import.js";
 import { describeSignInClient, listSignInClients, newClientSecret, signInClientId, signInClientRegistration, signInClientUpdate, type SignInClientAddOptions, type SignInClientUpdateOptions } from "./admin/sign-in-clients.js";
-import { batchResultsOutput, evalBatchShowText, evalBatchStartText, fetchEvalBatchResults, showEvalBatch, startEvalBatch, stopEvalBatch } from "./admin/eval-batch.js";
-import { disableEvalChannel, enableEvalChannel, parseMaxCostUsd, showEvalChannel } from "./admin/eval.js";
 import { exportTurns, parseSince } from "./admin/turns.js";
 import { loginWithPkce, openSystemBrowser, tokenStoreKey } from "./auth.js";
 import { loadProjectConfig } from "./config.js";
@@ -939,97 +937,6 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         channelId: options.channel,
       }, services.fetchImplementation);
       services.stdout.write(formatSuccess(result, globals.json));
-    });
-
-  const adminEval = admin.command("eval").description("SWE-bench runs from Slack (spec 043): `@agentx eval swebench <dataset> <instance>` in an enabled channel");
-  const evalChannel = (options: { team: string; channel: string }, settings: { controlPlaneUrl: string }, accessToken: string) => ({
-    controlPlaneUrl: settings.controlPlaneUrl, accessToken, teamId: options.team, channelId: options.channel,
-  });
-  adminEval
-    .command("enable")
-    .description("let any member of a bound channel start SWE-bench runs, each capped at a cost ceiling")
-    .requiredOption("--team <team-id>", "Slack team ID, for example T0123456789")
-    .requiredOption("--channel <channel-id>", "Slack channel ID, for example C0123456789")
-    .option("--max-cost-usd <usd>", "per-run cost ceiling in US dollars, from 1 to 100 (default 10)", parseMaxCostUsd)
-    .action(async (options: { team: string; channel: string; maxCostUsd?: number }, command: Command) => {
-      const globals = globalOptions(command);
-      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
-      const result = await enableEvalChannel({
-        ...evalChannel(options, settings, accessToken),
-        ...(options.maxCostUsd === undefined ? {} : { maxCostUsd: options.maxCostUsd }),
-      }, services.fetchImplementation);
-      services.stdout.write(formatSuccess(result, globals.json));
-    });
-  adminEval
-    .command("show")
-    .description("show whether a channel may start SWE-bench runs, and its cost ceiling")
-    .requiredOption("--team <team-id>", "Slack team ID")
-    .requiredOption("--channel <channel-id>", "Slack channel ID")
-    .action(async (options: { team: string; channel: string }, command: Command) => {
-      const globals = globalOptions(command);
-      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
-      services.stdout.write(formatSuccess(await showEvalChannel(evalChannel(options, settings, accessToken), services.fetchImplementation), globals.json));
-    });
-  adminEval
-    .command("disable")
-    .description("stop a channel from starting SWE-bench runs; a run in progress finishes")
-    .requiredOption("--team <team-id>", "Slack team ID")
-    .requiredOption("--channel <channel-id>", "Slack channel ID")
-    .action(async (options: { team: string; channel: string }, command: Command) => {
-      const globals = globalOptions(command);
-      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
-      services.stdout.write(formatSuccess(await disableEvalChannel(evalChannel(options, settings, accessToken), services.fetchImplementation), globals.json));
-    });
-
-  const adminEvalBatch = adminEval.command("batch").description("batches of eval runs from a file (spec 052): start, show, stop, results");
-  const batchOutput = (globals: { json: boolean }, result: unknown, text: string) => formatSuccess(globals.json ? result : text, globals.json);
-  adminEvalBatch
-    .command("start")
-    .description("start a batch from a YAML file in a bound, eval-enabled channel; prints its batch ID")
-    .requiredOption("--file <path>", "the batch file: benchmark, tasks, models, repeats, order, concurrency, costCapUsd (docs/swebench-eval.md)")
-    .requiredOption("--team <team-id>", "Slack team ID, for example T0123456789")
-    .requiredOption("--channel <channel-id>", "Slack channel ID, for example C0123456789")
-    .option("--label <text>", "start another batch from a file that has already been run in this channel (the same file starts the same batch)")
-    .action(async (options: { file: string; team: string; channel: string; label?: string }, command: Command) => {
-      const globals = globalOptions(command);
-      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
-      const result = await startEvalBatch({
-        controlPlaneUrl: settings.controlPlaneUrl, accessToken, teamId: options.team, channelId: options.channel, filePath: options.file,
-        ...(options.label === undefined ? {} : { label: options.label }),
-      }, services.fetchImplementation);
-      services.stdout.write(batchOutput(globals, result, evalBatchStartText(result)));
-    });
-  adminEvalBatch
-    .command("show")
-    .description("show a batch's progress, spend and final status")
-    .argument("<batch-id>", "the batch ID")
-    .action(async (batchId: string, _options: unknown, command: Command) => {
-      const globals = globalOptions(command);
-      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
-      const result = await showEvalBatch({ controlPlaneUrl: settings.controlPlaneUrl, accessToken, batchId }, services.fetchImplementation);
-      services.stdout.write(batchOutput(globals, result, evalBatchShowText(result)));
-    });
-  adminEvalBatch
-    .command("stop")
-    .description("stop a batch: queued runs are cancelled and runs in flight are stopped; an ended batch reports its final status")
-    .argument("<batch-id>", "the batch ID")
-    .action(async (batchId: string, _options: unknown, command: Command) => {
-      const globals = globalOptions(command);
-      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
-      const result = await stopEvalBatch({ controlPlaneUrl: settings.controlPlaneUrl, accessToken, batchId }, services.fetchImplementation);
-      services.stdout.write(batchOutput(globals, result, evalBatchShowText(result)));
-    });
-  adminEvalBatch
-    .command("results")
-    .description("a batch's results, read through the control plane: the per-model table, or the per-run CSV with --csv")
-    .argument("<batch-id>", "the batch ID")
-    .option("--csv <path>", "write the per-run results.csv here instead of printing the table")
-    .action(async (batchId: string, options: { csv?: string }, command: Command) => {
-      const globals = globalOptions(command);
-      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
-      const result = await fetchEvalBatchResults({ controlPlaneUrl: settings.controlPlaneUrl, accessToken, batchId }, services.fetchImplementation);
-      const text = await batchResultsOutput(result, options.csv);
-      services.stdout.write(batchOutput(globals, globals.json && options.csv !== undefined ? { ...(result as object), csv: undefined, csvPath: options.csv } : result, text));
     });
 
   const adminCredential = admin.command("credential").description("register connector credentials stored in Secrets Manager under agentx/connectors/ or agentx/<env>/connectors/");

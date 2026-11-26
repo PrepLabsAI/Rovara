@@ -9,7 +9,7 @@ import { companyThenInstallLinkCodes, installAdapterLinkCodes, installTeamOnLega
 import { issueLinkCode } from "../../packages/broker/src/aws/channel-links.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
-import { call, createBroker, loadSlackBroker, orchestratorPrincipal, registerSlackProject, SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
+import { call, loadSlackBroker, orchestratorPrincipal, SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 
 const B = "org_bbbbbbbbbbbbbbbbbbbb";
 const OTHER = "T0BBBBBBB", USER = "U0SHARED00", TS = "1700000000.000001";
@@ -146,24 +146,6 @@ describe("the broker's link page sources", () => {
     expect(await sources.channelLinkCodes!.preview("person", code)).toMatchObject({ channel: "acme" });
     const { channelAdapters: _none, ...withoutAdapters } = deps; void _none;
     expect(await module.channelLinkRouteDependencies(withoutAdapters as never).channelLinkCodes!.preview("person", code)).toBeUndefined();
-  });
-});
-
-describe("the install team's legacy view in a company-mode broker", () => {
-  it("treats another team's binding as not bound even on a route the split does not read (admin eval channels)", async () => {
-    const module = await loadSlackBroker();
-    const h = createBroker();
-    await registerSlackProject(h.handler, { bind: false });
-    const admin = { subject: "admin-subject", admin: true };
-    // Today's broker (company mode off) binds OTHER's channel and finds it.
-    expect((await call(h.handler, { method: "PUT", path: `/v1/admin/slack/bindings/${OTHER}/${SLACK_CHANNEL}`, user: admin, body: { projectName: "payments" } })).status).toBe(200);
-    const path = `/v1/admin/evals/channels/${OTHER}/${SLACK_CHANNEL}`;
-    const today = await call(h.handler, { method: "GET", path, user: admin });
-    expect(JSON.stringify(today.body), JSON.stringify(today.body)).toContain("SWE-bench runs are not available in this deployment");
-    // The same storage, company mode on: the request names no team the split reads, so the legacy view serves it, and OTHER's binding is not bound there.
-    const split = module.createAwsBrokerHandler({ ...h.brokerInput, ...companyWorld() } as never);
-    const answer = await call(split, { method: "GET", path, user: admin });
-    expect(JSON.stringify(answer.body)).toContain("bind the channel to a project first");
   });
 });
 
