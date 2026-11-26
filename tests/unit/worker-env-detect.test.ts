@@ -1,6 +1,6 @@
 // Proof and test environment E2: the environment detectors (Python/pytest, Node, CDK and other IaC, SageMaker calls, HTTP hosts) and the proposal built from them and the setup agent's draft.
 import { describe, expect, it } from "vitest";
-import { TestEnvironmentProposalSchema, type SetupDraft } from "@agentx/contracts";
+import { TestEnvironmentProposalSchema, formatCommandLine, type SetupDraft } from "@agentx/contracts";
 import { ENV_DETECT_MAX_FILE_BYTES, ENV_DETECT_MAX_PATHS, boundedReader, buildEnvironmentDraft, proposalFromDraft, runDetectors } from "../../packages/worker/src/env-detect/index.js";
 
 type Files = Record<string, string>;
@@ -72,11 +72,13 @@ describe("the proposal", () => {
     }), { cwd: "service" });
     if (!result.ok) throw new Error(result.reason);
     const checks = result.proposal.environment.repos[0]!.checks;
-    expect(checks.map((check) => [check.id, check.command.executable])).toEqual([["unit", "pytest"], ["lint", "ruff"], ["typecheck", "mypy"], ["model-1", "make"]]);
+    // `make a | tee` is a shell line now (SETUP-L9-SHELL): kept as a check run by a shell; it is no download-and-run, no duplicate, and not flagged. Only the unreadable line (`bad 'quote`) and the flagged download are left out.
+    expect(checks.map((check) => [check.id, check.command.executable])).toEqual([["unit", "pytest"], ["lint", "ruff"], ["typecheck", "mypy"], ["model-1", "make"], ["model-2", "bash"]]);
+    expect(formatCommandLine(checks[4]!.command)).toBe("make a | tee");
     expect(result.proposal.environment.repos[0]!.setupCommands.map((command) => command.executable)).toEqual(["pip", "make"]);
     expect(result.proposal.valueSources).toContainEqual({ field: "repos[0].checks[3]", source: "model" });
     expect(result.proposal.flaggedCommands).toHaveLength(1);
-    expect(result.dropped).toBe(3);
+    expect(result.dropped).toBe(2);
     expect(TestEnvironmentProposalSchema.safeParse(result.proposal).success).toBe(true);
   });
 });

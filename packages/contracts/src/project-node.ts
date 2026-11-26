@@ -36,7 +36,8 @@ const HttpsOrLoopbackUrlSchema = z.string().url().superRefine((value, context) =
  * they change how a process is found, loaded or started. PATH is refused too: put tools at a full
  * path, or set PATH in the devcontainer's own configuration.
  */
-const RESERVED_ENV_NAMES = new Set(["PATH", "HOME", "USER", "LOGNAME", "SHELL", "PWD", "OLDPWD", "IFS", "ENV", "BASH_ENV"]);
+// SHELLOPTS, BASHOPTS, PS4 and BASH_XTRACEFD: a command that starts a shell with `xtrace` already on (or that points its trace at another descriptor) would make Rovara's own session code print the environment.
+const RESERVED_ENV_NAMES = new Set(["PATH", "HOME", "USER", "LOGNAME", "SHELL", "PWD", "OLDPWD", "IFS", "ENV", "BASH_ENV", "SHELLOPTS", "BASHOPTS", "PS4", "BASH_XTRACEFD"]);
 
 const RESERVED_ENV_PREFIXES = ["AGENTX_", "AWS_", "GIT_", "LD_", "DYLD_", "PI_"];
 

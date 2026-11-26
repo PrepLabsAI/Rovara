@@ -22,6 +22,7 @@ import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "../git.js";
 import { runProjectCommand } from "../prepare.js";
 import { SANDBOX_TARGET, executionFor } from "../execution-target.js";
 import { localBashOperations, type TaskSandbox } from "../task-sandbox.js";
+import { closeShellSession, newShellSession, type ShellSession } from "../shell-session.js";
 import { projectBefore, type CheckHistory } from "./check-history.js";
 import type { CommandRecorder, RecordedCommand } from "./recorder.js";
 import type { OriginalCode, OriginalCodeRepository } from "./original-code.js";
@@ -64,9 +65,9 @@ export interface CheckRunners {
   kind?: UnconfirmedKind;
   /**
    * A readiness command, as preparation ran it (devcontainer or host). Rejects when `signal` stops it, even when the
-   * command finished just before the abort: a check round discards that result anyway.
+   * command finished just before the abort: a check round discards that result anyway. `session` (SETUP-L9-SHELL): the round's group of test commands, whose shell lines share one shell session, as in the preparation.
    */
-  runProjectCommand(command: ProjectCommand, signal: AbortSignal): Promise<{ exitCode: number | null; timedOut: boolean; stdout: string; stderr: string }>;
+  runProjectCommand(command: ProjectCommand, signal: AbortSignal, session?: ShellSession): Promise<{ exitCode: number | null; timedOut: boolean; stdout: string; stderr: string }>;
   /**
    * A replayed agent command, through the agent's own bash operations and cwd. Rejects when `signal` stops it, and
    * with a CheckNotRunError when AgentX refuses to replay it.
@@ -243,10 +244,25 @@ export async function runChecks(
   }
 }
 
+/** SETUP-L9-SHELL: the round's test commands are one group (a shell line's `source .venv/bin/activate` is still in effect for the next); the round's own time budget is its limit. */
 async function runChecksRound(
   plan: CheckPlan,
   runners: CheckRunners,
   options: { budgetMs: number; signal: AbortSignal; now?: () => number; abortJoinMs?: number },
+): Promise<CheckRound> {
+  const session = plan.source === "project" ? newShellSession() : undefined;
+  try {
+    return await runChecksRoundIn(plan, runners, options, session);
+  } finally {
+    await closeShellSession(session);
+  }
+}
+
+async function runChecksRoundIn(
+  plan: CheckPlan,
+  runners: CheckRunners,
+  options: { budgetMs: number; signal: AbortSignal; now?: () => number; abortJoinMs?: number },
+  session: ShellSession | undefined,
 ): Promise<CheckRound> {
   const now = options.now ?? Date.now;
   const { signal } = options;
@@ -267,7 +283,7 @@ async function runChecksRound(
   }
   let resetFailed = false;
   let first = true;
-  for (const check of plannedChecks(plan, runners)) {
+  for (const check of plannedChecks(plan, runners, session)) {
     const entry = (after: CheckOutcome, output: string, durationMs = 0, exitCode?: number | null): CheckEntry => ({
       id: check.id,
       label: check.label,
@@ -329,7 +345,7 @@ async function runChecksRound(
   return { entries, stopped: signal.aborted };
 }
 
-function plannedChecks(plan: CheckPlan, runners: CheckRunners): PlannedCheck[] {
+function plannedChecks(plan: CheckPlan, runners: CheckRunners, session?: ShellSession): PlannedCheck[] {
   if (plan.source === "project") {
     return (plan.readiness ?? []).map((command, index) => ({
       id: `readiness:${index}`,
@@ -343,6 +359,7 @@ function plannedChecks(plan: CheckPlan, runners: CheckRunners): PlannedCheck[] {
         const result = await runners.runProjectCommand(
           timeoutSeconds === command.timeoutSeconds ? command : { ...command, timeoutSeconds },
           signal,
+          session,
         );
         return { exitCode: result.exitCode, timedOut: result.timedOut, output: joinedStreams(result.stdout, result.stderr) };
       },
@@ -473,14 +490,14 @@ export function createCheckRunners(options: CheckRunnerOptions): CheckRunners {
   canonicalRoot.catch(() => undefined);
   return {
     kind: devcontainer !== undefined ? "devcontainer" : sandboxCommands !== undefined ? "sandbox" : options.bashOperations !== undefined ? "devcontainer" : "local",
-    async runProjectCommand(command, signal) {
+    async runProjectCommand(command, signal, session) {
       if (signal.aborted) throw new Error("aborted");
       const root = await canonicalRoot;
       try {
         const result = devcontainer !== undefined
-          ? await runDevcontainerCommand(devcontainer.cli, devcontainer.target, command, signal)
+          ? await runDevcontainerCommand(devcontainer.cli, devcontainer.target, command, signal, session)
           : sandboxCommands !== undefined
-            ? await sandboxCommands.runCommand(command, signal)
+            ? await sandboxCommands.runCommand(command, signal, session)
             : await runProjectCommand(command, 0, root, signal, options.local === true);
         if (signal.aborted) throw new Error("aborted");
         return { exitCode: result.exitCode, timedOut: result.timedOut === true, stdout: result.stdout, stderr: result.stderr };

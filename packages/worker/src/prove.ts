@@ -9,6 +9,7 @@
 //   - one overall deadline bounds the run, and a stop signal ends it; either fails the step in progress with `infrastructure`;
 //   - a suite that is longer than the round budget is NOT a failure (it is why test selection exists); a suite that hits its own time limit is.
 import { RunnerKillUnconfirmedError } from "./collected-process.js";
+import { closeShellSession, groupLimitSeconds, newShellSession, type ShellSession } from "./shell-session.js";
 import {
   validPeakMemory,
   type MachineChip,
@@ -28,7 +29,8 @@ type Failure = NonNullable<TestEnvProveReport["steps"][number]["failure"]>;
 export interface ProveCommandResult { exitCode: number | null; timedOut: boolean; stdout: string; stderr: string }
 
 export interface ProvePorts {
-  runCommand(command: ProjectCommand, signal: AbortSignal): Promise<ProveCommandResult>;
+  /** `session`: the group of lines this command belongs to (shell-session.ts): the setup commands are one group, and each later step's commands another, so their shell lines share one shell session. */
+  runCommand(command: ProjectCommand, signal: AbortSignal, session?: ShellSession): Promise<ProveCommandResult>;
   /** Starts the mock of a service from its pinned fixture set; resolves when it answers. Rejects when it cannot. */
   startMock(service: TestEnvironmentBody["services"][number], signal: AbortSignal): Promise<void>;
   /** One call with a canned synthetic payload to the real pre-prod service. True when it answered. */
@@ -105,12 +107,15 @@ export async function proveEnvironment(ports: ProvePorts, input: ProveInput): Pr
   const commandsOf = (kinds: readonly string[]) => env.repos.flatMap((repo) => repo.checks.filter((check) => kinds.includes(check.kind)));
   const runAll = async (commands: Array<{ command: ProjectCommand }>, failure: Failure): Promise<Omit<StepResult, "durationMs"> | undefined> => {
     if (commands.length === 0) return undefined;
-    for (const item of commands) {
-      const result = await ports.runCommand(item.command, controller.signal);
-      if (result.timedOut) return { status: "failed", failure: "round_budget_exceeded", tail: tailOf(result) };
-      if (result.exitCode !== 0) return { status: "failed", failure, tail: tailOf(result) };
-    }
-    return { status: "passed" };
+    const session = newShellSession({ limitSeconds: groupLimitSeconds(commands.map((item) => item.command)) });
+    try {
+      for (const item of commands) {
+        const result = await ports.runCommand(item.command, controller.signal, session);
+        if (result.timedOut) return { status: "failed", failure: "round_budget_exceeded", tail: tailOf(result) };
+        if (result.exitCode !== 0) return { status: "failed", failure, tail: tailOf(result) };
+      }
+      return { status: "passed" };
+    } finally { await closeShellSession(session); }
   };
 
   try {
