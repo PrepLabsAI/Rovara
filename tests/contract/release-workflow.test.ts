@@ -63,6 +63,17 @@ describe("release workflow", () => {
     expect(wf.jobs.test?.if).toBeUndefined();
   });
 
+  it("installs CI's pinned gitleaks in the test job before the tests, so port-guard.test.ts's secret-scan cases do not fail for a missing scanner", async () => {
+    const wf = await workflow();
+    const ci = YAML.parse(await readFile(".github/workflows/ci.yml", "utf8")) as Workflow;
+    const install = (job: Job) => job.steps.findIndex((step) => /^Install gitleaks/.test(step.name ?? ""));
+    const steps = wf.jobs.test!.steps;
+    const index = install(wf.jobs.test!);
+    expect(index).toBeGreaterThanOrEqual(0);
+    expect(steps[index]!.run).toBe(ci.jobs.test!.steps[install(ci.jobs.test!)]!.run);
+    expect(index).toBeLessThan(steps.findIndex((step) => (step.run ?? "").includes("npm test")));
+  });
+
   it("the test job runs typecheck, lint, build, test and infra:synth", async () => {
     const wf = await workflow();
     const testRun = wf.jobs.test!.steps.map((s) => s.run ?? "").join("\n");
