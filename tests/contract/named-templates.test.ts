@@ -29,6 +29,7 @@ import { withoutWorkerCallbackAlarm } from "../support/worker-callback-alarm-tem
 import { withoutPublicApiAllowDomain, withoutPublicApiUrl } from "../support/public-api-url-template.js";
 import { withoutCoreOutboxStreamRelay } from "../support/core-outbox-stream-relay-template.js";
 import { withTaskPeopleInvitationSwitches } from "../support/task-people-invitations-template.js";
+import { withoutCognitoWriteAttributes } from "../support/cognito-write-attributes-template.js";
 
 skipLambdaBundling();
 // CODE-PUBLIC-URL (2026-11-24): the named control plane's external URL bases that now go through the public address helper (the sign-in issuer and its two function variables, CONTROL_PLANE_URL for the notifier,
@@ -346,6 +347,8 @@ describe("named environment templates", () => {
         const currentBeforePublicApi = withoutPublicApiUrl(structuredClone(withoutLinearWebhookGuard(withoutCoreOutboxStreamRelay(structuredClone(withRelayOnly)))), { named: true, sites: PUBLIC_API_SITES });
         template = withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutApiAccessLog(withoutDispatcherLessonsPeople(currentBeforePublicApi), { env: "staging" })));
       }
+      // COGNITO-WRITE-ATTRIBUTES (2026-11-25): the identity stack's client WriteAttributes and the pool's UserAttributeUpdateSettings are asserted exactly and taken out, so the recorded snapshot holds.
+      if (stack.stackName === "agentx-staging-identity") template = withoutCognitoWriteAttributes(structuredClone(template));
       // CODE-PUBLIC-URL (rev 9.2): the foundation's firewall gains one allow-list entry (and its parameter); taken out, the recorded snapshot holds.
       if (stack.stackName === "agentx-staging-foundation") template = withoutPublicApiAllowDomain(structuredClone(template));
       const parity = stack.stackName === "agentx-staging-foundation" ? withoutNatEgressAddresses(withoutDnsFirewall(template))
