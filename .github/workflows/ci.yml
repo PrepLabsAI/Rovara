@@ -410,7 +410,7 @@ jobs:
   # change reaches it (the "changed" step above).
   nightly-tests:
     if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2604
     # About 40 minutes of test time on a small runner (the eval simulation, the detectors' growth check, local-up-flow and the workflow-e2e suites).
     timeout-minutes: 60
     steps:
@@ -435,7 +435,7 @@ jobs:
   linux-runtime:
     needs: plan
     if: needs.plan.outputs.linux == 'true'
-    runs-on: ubuntu-24.04-arm
+    runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     timeout-minutes: 75
     permissions:
       contents: read
@@ -574,7 +574,7 @@ jobs:
     if: needs.plan.outputs.device == 'true'
     # Quarantine: required only when the change touches device files (see the comment above). `needs.plan.outputs.device_required` is empty if the plan script predates it, which also means non-blocking.
     continue-on-error: ${{ needs.plan.outputs.device_required != 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2604
     # 90: up to 3 image builds and up to 3 attempts of the picture test (DEC 254zn retries).
     timeout-minutes: 90
     steps:

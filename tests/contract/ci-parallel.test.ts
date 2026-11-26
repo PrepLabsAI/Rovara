@@ -199,7 +199,7 @@ describe("CI runs its checks side by side, as the plan says (a Markdown-only cha
 
   it("runs the Linux runtime check on an ARM64 runner, behind the same Markdown-only skip as the other heavy jobs", async () => {
     const job = (await workflow()).jobs["linux-runtime"] as Job & { "runs-on"?: string };
-    expect(job["runs-on"]).toBe("ubuntu-24.04-arm");
+    expect(job["runs-on"]).toBe("blacksmith-4vcpu-ubuntu-2404-arm");
     // Only when the plan says its area changed (always in a full run).
     expect(job.if).toBe("needs.plan.outputs.linux == 'true'");
     const run = job.steps.map((step) => step.run ?? "").join("\n");

@@ -81,9 +81,9 @@ describe("the release build plan", () => {
     const YAML = (await import("yaml")).default;
     const parsed = YAML.parse(workflow) as { jobs: { images: { "runs-on": string; "timeout-minutes"?: number; steps: Array<{ uses?: string; with?: { platforms?: string } }> } } };
     const images = parsed.jobs.images;
-    expect(images["runs-on"]).toBe("ubuntu-24.04-arm");
+    expect(images["runs-on"]).toBe("blacksmith-4vcpu-ubuntu-2404-arm");
     const qemu = images.steps.findIndex((step) => step.uses?.startsWith("docker/setup-qemu-action@"));
-    const buildx = images.steps.findIndex((step) => step.uses?.startsWith("docker/setup-buildx-action@"));
+    const buildx = images.steps.findIndex((step) => step.uses?.startsWith("useblacksmith/setup-docker-builder@"));
     expect(qemu).toBeGreaterThanOrEqual(0);
     expect(qemu).toBeLessThan(buildx);
     expect(images.steps[qemu]!.with?.platforms).toBe("amd64");
