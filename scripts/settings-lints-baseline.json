@@ -22,7 +22,7 @@
     "infra/lib/permissions-boundary.ts": 1,
     "infra/lib/port-guard-step.ts": 1,
     "infra/lib/public-api-url.ts": 1,
-    "infra/lib/release-pipeline.ts": 9,
+    "infra/lib/release-pipeline.ts": 3,
     "infra/lib/self-hosted-gateway.ts": 1,
     "infra/lib/session-lifecycle.ts": 1,
     "infra/lib/slack-company-workspaces.ts": 1,
@@ -76,6 +76,7 @@
     "packages/broker/src/aws/worker-machines/machine-size-pick.ts": 1,
     "packages/broker/src/context-sources/server-port.ts": 1,
     "packages/broker/src/context-sources/wiring.ts": 2,
+    "packages/broker/src/core-host/app/evidence.ts": 1,
     "packages/broker/src/core-host/hosted-test-environment-decision.ts": 1,
     "packages/broker/src/core-host/known-failing-routes.ts": 1,
     "packages/broker/src/core-host/known-failing.ts": 3,
@@ -107,7 +108,6 @@
     "packages/broker/src/core/test-env/usable.ts": 3,
     "packages/broker/src/lessons/policy.ts": 2,
     "packages/broker/src/lessons/switch.ts": 3,
-    "packages/broker/src/core-host/app/evidence.ts": 1,
     "packages/broker/src/plugins/module-support.ts": 2
   }
 }

@@ -1,0 +1,65 @@
+{
+  "schema": 1,
+  "about": "Protected resources for Code's model gateway change-set gate (#1578). A change set that removes or replaces (True or Conditional) any listed resource or stateful type fails. Data-rewriting in-place property changes fail. Image-only gateway changes may touch only the five imageRows.",
+  "parts": {
+    "gateway": {
+      "MeterFF56B2C9": "AWS::DynamoDB::GlobalTable",
+      "LedgerB7379752": "AWS::DynamoDB::GlobalTable",
+      "Markers641E0E25": "AWS::DynamoDB::GlobalTable",
+      "PricesEF2AB66A": "AWS::DynamoDB::GlobalTable",
+      "ProductKeys518BAD1E": "AWS::DynamoDB::GlobalTable",
+      "ProductMeterD13BFAA7": "AWS::DynamoDB::GlobalTable",
+      "ProductLedgerE242E3E7": "AWS::DynamoDB::GlobalTable",
+      "ProductMarkersE6119A3F": "AWS::DynamoDB::GlobalTable",
+      "LearningMeter3B321F5B": "AWS::DynamoDB::GlobalTable",
+      "LearningLedger85795E70": "AWS::DynamoDB::GlobalTable",
+      "LearningMarkers0B684C98": "AWS::DynamoDB::GlobalTable",
+      "AnswersMeter11B0BE67": "AWS::DynamoDB::GlobalTable",
+      "AnswersLedger35A363A9": "AWS::DynamoDB::GlobalTable",
+      "AnswersMarkers1E8A3C91": "AWS::DynamoDB::GlobalTable",
+      "EvalStages4B49C2F8": "AWS::DynamoDB::GlobalTable",
+      "ProviderKeysKey3EF4ADE0": "AWS::KMS::Key",
+      "ProductKeysKey3D2EA306": "AWS::KMS::Key",
+      "ProductKeysMacKey82416FCB": "AWS::KMS::Key",
+      "BedrockExternalIdKey85A8D0A1": "AWS::KMS::Key",
+      "ProviderKeyanthropic": "AWS::SecretsManager::Secret",
+      "LoadBalancerBE9EEC3A": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+      "LoadBalancerHttps0C5C99D2": "AWS::ElasticLoadBalancingV2::Listener",
+      "Vpc8378EB38": "AWS::EC2::VPC",
+      "VertexFederationRoleF5D9F2D9": "AWS::IAM::Role",
+      "BedrockBrokerRoleEF230DEA": "AWS::IAM::Role"
+    },
+    "gatewayImages": {
+      "Images2D38C313": "AWS::ECR::Repository"
+    }
+  },
+  "statefulTypes": [
+    "AWS::DynamoDB::GlobalTable",
+    "AWS::DynamoDB::Table",
+    "AWS::KMS::Key",
+    "AWS::S3::Bucket",
+    "AWS::SecretsManager::Secret",
+    "AWS::ECR::Repository",
+    "AWS::ElasticLoadBalancingV2::LoadBalancer",
+    "AWS::EC2::VPC"
+  ],
+  "dataRewrites": {
+    "AWS::SecretsManager::Secret": ["GenerateSecretString", "SecretString"],
+    "AWS::DynamoDB::GlobalTable": ["Replicas", "KeySchema"],
+    "AWS::KMS::Key": ["KeySpec", "KeyUsage", "Origin", "MultiRegion", "CustomerMasterKeySpec"]
+  },
+  "imageRows": [
+    { "resourceType": "AWS::ECS::TaskDefinition", "logicalIdPattern": "^ServeTask[0-9A-F]{8}$" },
+    { "resourceType": "AWS::ECS::TaskDefinition", "logicalIdPattern": "^PriceFetchTask[0-9A-F]{8}$" },
+    { "resourceType": "AWS::ECS::Service", "logicalIdPattern": "^Service[0-9A-F]{8}$" },
+    { "resourceType": "AWS::Events::Rule", "logicalIdPattern": "^PriceFetchSchedule[0-9A-F]{8}$" },
+    { "resourceType": "AWS::IAM::Policy", "logicalIdPattern": "^PriceFetchTaskEventsRoleDefaultPolicy[0-9A-F]{8}$" }
+  ],
+  "imageOnlyCodePaths": [
+    "infra/lib/model-gateway*",
+    "infra/lib/app.ts",
+    "infra/bin/agentx.ts",
+    "infra/package.json",
+    "package-lock.json"
+  ]
+}

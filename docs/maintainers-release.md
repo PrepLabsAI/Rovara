@@ -27,92 +27,52 @@ preparation are separate operations.
 
 ## Continuous production releases
 
-`AgentXReleasePipeline` runs the same release from AWS for every qualifying push to `mainline`,
-first to beta, then, when the owner approves that run, to production (#1242). It is a CodePipeline V2
-pipeline, `AgentXProductionRelease`, with three stages:
+`AgentXReleasePipeline` runs Code's release from AWS for every qualifying push to `mainline`,
+first to beta, then, when the owner approves that run, to production (#1242, #1578). It is a
+Code-only CodePipeline V2 pipeline, `AgentXProductionRelease`, with one source (`GitHub`,
+`PrepLabsAI/Rovara` `mainline`), one trigger (a qualifying `mainline` push), and three stages:
 
 ```
-Source (mainline push, Cloud release tag) → Beta (every run) ⏸ disabled transition → Production (its own approval, per run)
+Source (mainline push) → Beta (every run) ⏸ disabled transition → Production (its own approval, per run)
 ```
 
-The pipeline also deploys the companion Cloud product (the gateway, web and app) next to Code.
-Its repository is a second source, `CloudGitHub`, and its steps are CodeBuild projects that
-belong to a separate private stack, referenced here only by name through parameters. Each stage
-runs, in this order, with Preflight first:
+Code owns and deploys its own model gateway (`packages/model-gateway`,
+`environments/model-gateway/Dockerfile`, `infra/lib/model-gateway*.ts`) directly from this
+pipeline, ahead of the Code release in both stages. Rovara Cloud is released by its own
+independent pipeline and does not appear here. Each stage runs, in this order:
 
 | Action | What it does |
 |---|---|
-| `CodePreflight` | In Production, first of all, closes the transition into Production, so a newer run cannot pass the open transition while the run waits for its approval or runs its gates, and a rejected or timed-out run leaves the transition closed. Then, in both stages, runs the port guard on the Code tree with the private name list (it fails if the list cannot be loaded), whatever the CI proof says. Read-only: its role can clone the Code repository but not push (UseConnection is denied when `ProviderPermissionsRequired` is `read_write`) |
-| `ApproveProduction` | Production only, right after the Code Preflight: a CodePipeline manual approval for THIS run (see "Approving a production run"). Every other Production action, all of them writers, starts only after it is approved |
-| `Preflight` | Read-only: resolves the Cloud ref, pins Code, runs the gates, previews the change sets and writes the manifest; exports the effective `CODE_RELEASE` |
-| `CloudImage`, `CloudGateway`, `GatewayCheck` | The model gateway's image and deploy, then the check that the live gateway satisfies this Code. The gateway is Code's (`packages/model-gateway`, `infra/lib/model-gateway*.ts`): `CloudImage` builds its image from the Code commit this run releases (or, with Code skipped, the Code that stays), and `CloudGateway` makes the stack with this repository's CDK app at that commit (`-c rovaraModelGateway=<env> -c rovaraCodeSha=<commit>`). The stack records the commit as its `DeployedCodeSha` output; a rollback finds the gateway image by that Code commit. The Cloud actions get the Code clone as their `Source` input, so this pipeline needs no other input for it |
-| `ReleaseBeta` / `ReleaseProduction` | The Code release below |
-| `CloudWebApp`, `CloudProof` | Cloud's web and app deploy, then its live proof |
+| `CodePreflight` | In Production, first of all, closes the transition into Production, so a newer run cannot pass the open transition while the run waits for its approval or runs its gates, and a rejected or timed-out run leaves the transition closed. Then, in both stages, runs the port guard on the Code tree with the private name list (it fails if the list cannot be loaded), whatever the CI proof says, and exports `CODE_LIVE_SHA` (the stage's previously released Code commit). Read-only: its role can clone the Code repository but not push (UseConnection is denied when `ProviderPermissionsRequired` is `read_write`) |
+| `ApproveProduction` | Production only, right after `CodePreflight`: a CodePipeline manual approval for THIS run (see "Approving a production run"). Every other Production action, all of them writers, starts only after it is approved |
+| `ModelGatewayImage` | Beta builds the `linux/arm64` model gateway image from the Code commit (`scripts/model-gateway-image.ts`), keyed by its build-context hash (`ctx-<64hex>`): an unchanged context reuses the existing digest in beta's gateway repository (`rovara-cloud-beta-gateway-images`). Production never builds: it copies beta's exact digest with `crane copy` into production's gateway repository and refuses any tag whose digest differs from beta's. In `adopt` mode, verifies the live gateway digest exists in ECR and builds or copies nothing |
+| `ModelGatewayDeploy` | Synthesizes Code's `RovaraModelGateway` stack (`-c rovaraModelGateway=<env> -c rovaraCodeSha=<commit>`) and creates a named change set (`rovara-pipeline-<exec8>`), runs the change-set integrity, protected-resource (including image-only checks), rollback-floor, and first-switch (`gateway-source-switch`) gates on it, executes by name, and waits to settle. In `adopt` mode, verifies the change set is a no-op and discards it without executing |
+| `ModelGatewayCheck` | Verifies the live gateway stack matches the deployed digest and `DeployedCodeSha`, its ECS service is settled on that pinned digest, `/healthz` serves the required `runPrice` version and snapshot, and price-fetch logs are fresh. Records the gateway's last-good state in the release account at `/agentx/release/model-gateway-last-good/<env>` |
+| `ReleaseBeta` / `ReleaseProduction` | The Code release below (`npm run release:prod`). Skipped in `PIPELINE_MODE=adopt` or with `CODE_RELEASE=skip` |
 
-The order is the gateway, then Code, then web and app.
+The order is the model gateway (`ModelGatewayImage`, `ModelGatewayDeploy`, `ModelGatewayCheck`),
+then the Code release (`ReleaseBeta` / `ReleaseProduction`).
 
-- **Beta:** the CodeBuild project `release-agentx-beta` runs the release in the beta
-  account, as that account's `agentx-beta-release` role. CI's proof (below) is read first, in the
-  release account.
+- **Beta:** `release-agentx-model-gateway-beta` and `release-agentx-beta` run in the beta
+  account as that account's `agentx-beta-release` role (`AgentXBetaReleaseAccess`). Release
+  records (`/agentx/release/*`) and CI's proof stay in the release account.
 - **Production:** the transition into it stays disabled. The newest beta run waits in front of
   it; a newer one replaces it (the pipeline runs in SUPERSEDED mode), so one promotion carries every
   merge since the last. `release-agentx-preflight-production` closes the transition again as the first
   command of the stage, before anything else, so each promotion lets one run in whatever happens next. The
   stage's next action, `ApproveProduction`, is a manual approval that belongs to one pipeline execution.
 
-A run starts from a push to `mainline` that changes a deployable path (table below), or from a
-Cloud release tag (`vX.Y.Z`, not `vX.Y.Z-suffix`). A run started by a Cloud tag releases the
-newest `mainline` commit with it, and the other way round.
+A run starts only from a push to `mainline` that changes a deployable path (table below).
 
-Pipeline variables, each with a default so a push or a tag can start a run (override them when
-you start a run by hand):
+Pipeline variables, each with a default so a push can start a run (override them when you start a
+run by hand):
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `CLOUD_REF` | `from-trigger` | The Cloud release tag to deploy. `from-trigger` (what every triggered run carries) means the one `vX.Y.Z` tag on the Cloud commit the run started from (`CLOUD_SOURCE_COMMIT`); Preflight refuses, before any write, when that commit has no such tag or more than one. `latest` (the newest tag on the Cloud trunk) is for a run you start by hand. An older tag is a Cloud rollback and forces `CODE_RELEASE=skip` |
-| `CODE_RELEASE` | `from-trigger` | `from-trigger` (what every triggered run carries) is decided by Beta's Preflight from WHICH SOURCE started the run, see "CODE_RELEASE by trigger" below. `run` releases the Code commit of the run; `skip` releases Cloud only, and the commit's Code waits for a later run. Name `run` or `skip` on every run you start by hand. Preflight may force `skip`, never `run` |
-| `CLOUD_PROD` | `off` | `off` leaves production's Cloud as it is for this run, so no push or tag deploys it. Start the run that promotes with `CLOUD_PROD=on` (and `CLOUD_REF` set to the tag, by hand): a tag push alone never reaches production, which also needs the transition into Production enabled |
-| `PIPELINE_MODE` | `release` | `adopt` only checks that Cloud as deployed is what the pipeline would deploy and changes nothing; run it once per environment before the first `release` run (the stage tool refuses a release run in an environment it never adopted). `rollback` deploys an earlier released Code commit (`CODE_ROLLBACK_TARGET`) and/or an older Cloud tag (`CLOUD_REF`) |
+| `CODE_RELEASE` | `run` | `run` (default) releases the Code commit and its model gateway. A run started by hand can pass `skip` to skip deploying both |
+| `PIPELINE_MODE` | `release` | `release` deploys. `adopt` checks the live model gateway against Code's records (no-op change set preview, live checks, adopts last-good) and changes nothing; run it once per environment before the first `release` run (a `release` run refuses when `/agentx/release/model-gateway-last-good/<env>` is absent). `rollback` deploys an earlier released Code commit (`CODE_ROLLBACK_TARGET`) and/or a recorded model gateway digest (`MODEL_GATEWAY_DIGEST`) |
 | `CODE_ROLLBACK_TARGET` | `none` | With `PIPELINE_MODE=rollback`: the full 40-character Code commit to deploy. It must be in the stage's release history (below). `none` leaves Code as it is. Any other mode requires `none` |
-
-A `skip` run replaces a waiting promotion like any other run, so Preflight says which Code commit
-it leaves unpromoted.
-
-### CODE_RELEASE by trigger
-
-A trigger cannot set a variable, so a Cloud release tag push and a Code mainline push both start a
-run with the defaults, `CODE_RELEASE=from-trigger` among them. Beta's `CodePreflight` reads which source started
-the run from the execution's own record (read-only: `get-pipeline-execution` for the trigger type, `list-action-executions`
-for the output variables of the two source actions; the variables reference says `TagName` is produced only on a run a tag
-trigger started) and passes it to the Cloud Preflight as the last part of `CODE_CTX`. The Cloud Preflight decides, before
-anything is written:
-
-| What started the run | `CODE_RELEASE` | Result |
-|---|---|---|
-| A Cloud release tag push (the tag trigger; its `TagName` must be the one `vX.Y.Z` tag on the Cloud commit) | `from-trigger` | `skip`: Cloud only, so the Cloud-side drift gate is never asked to judge a Code commit that moved ahead of the tag |
-| A Code mainline push | `from-trigger` | `run` |
-| A person (`start-pipeline-execution`) | `run` or `skip` | that value |
-| A person, who left the default | `from-trigger` | refused: name `run` or `skip` |
-| Anything the lookup could not prove (both sources with a tag, a source missing, a failed lookup, another trigger type), or a pushed tag that is not the tag the run resolved | `from-trigger` | refused, nothing released |
-
-The Code builds only ever see the effective `run` or `skip` (a Code build refuses `from-trigger`). The log of Beta's `CodePreflight` says
-`this run was started by: ...` and the Cloud Preflight log says `Code release requested: ...` and why. A run waiting for
-the Production approval shows `from-trigger`; those two logs say what it decided. AWS does not document what the source that did not start a run outputs, so it was checked, read-only, on existing runs (2026-11-25): a Cloud
-tag run (execution cb7408c0) has trigger type `WebhookV2`, its Cloud source's `TagName` is the pushed tag exactly (`v0.13.24`) and the Code source
-has no `TagName`; a Code push run (cb39c169) has trigger type `WebhookV2` and no `TagName` on either source. Both shapes are test fixtures. A shape that
-differs is refused as unproven (safe).
-
-Things to know when running it:
-
-- A failed lookup (a transient CLI or API error) refuses the run, it never guesses: the Preflight log says `trigger type unreadable`
-  or `unknown`, nothing is released, and the answer is to **re-run it** (re-run the failed stage, or push/start again).
-- A run started by hand must name `CODE_RELEASE=run` or `skip` (`start-pipeline-execution` with no variables is refused). Adopt runs, and
-  every other hand-started run, name it too.
-- A later Cloud tag run supersedes a waiting Code-push promotion: a tag run is `skip` (Cloud only), so the Code commit that was waiting for the
-  Production approval is left unpromoted, and Preflight says which one. This changed with `from-trigger`: a tag run used to carry Code (the old default `run`).
-- The first Cloud tag after the pipeline is redeployed must be cut **after** the Cloud change is on the Cloud trunk. A tag run uses the Cloud stage
-  CLI of the tagged commit (the Cloud source), so a tag cut earlier has the old CLI, which rejects `CODE_RELEASE=from-trigger` with USAGE
-  (fails safe, nothing written). Deploy order: Cloud CLI first, then the pipeline redeploy.
+| `MODEL_GATEWAY_DIGEST` | `none` | With `PIPELINE_MODE=rollback` in Beta: the recorded `sha256:<64hex>` model gateway digest from `/agentx/release/model-gateway-last-good/beta` (`none` resolves the recorded digest matching `CODE_ROLLBACK_TARGET`). Production always copies Beta's digest and takes no `MODEL_GATEWAY_DIGEST`. Any other mode requires `none` |
 
 The Code release, in both projects, runs:
 
@@ -120,10 +80,11 @@ The Code release, in both projects, runs:
 npm run release:prod -- --region "$AWS_REGION" --reuse-unchanged-worker --require-existing-foundation
 ```
 
-(the beta one with `--profile agentx-beta`), unless the stage's Preflight exported
-`CODE_RELEASE=skip`, in which case the build installs nothing and deploys nothing. After a release
-that finished, the build's last command records the commit it released in an SSM String
-(`/agentx/release/code-released/beta` or `/production`), which is never written for a `skip` run.
+(the beta one with `--profile agentx-beta`), unless `CODE_RELEASE=skip` or `PIPELINE_MODE=adopt`,
+in which case the build installs nothing and deploys nothing. After a release that finished, the
+build's last command records the commit it released in an SSM String
+(`/agentx/release/code-released/beta` or `/production`), which is never written for a `skip` or
+`adopt` run.
 
 The port guard step trusts only that record. It runs the guard as it was at the previously released
 commit, over everything since (always the whole range from that commit to this one), and refuses, with
@@ -144,62 +105,43 @@ refuses. The repository's merge settings are not what protects this step; the ch
 Each release also keeps a short history of what the stage released: an SSM String beside the record
 (`/agentx/release/code-history/beta` or `/production`), a JSON list of the last 10 commits, newest first. The
 same braced step that records the commit writes it (the history first, the record last, nothing for a failed
-release or a `skip` run), with the same writer rule: only the stage's release build role may write it, and only
+release or a `skip`/`adopt` run), with the same writer rule: only the stage's release build role may write it, and only
 its own. A missing or garbled list does not stop a forward release: the next one starts a new list from what is
 valid. A list it cannot read for any other reason stops the build before anything is written.
 
-**Rolling Code back** is a pipeline run with `PIPELINE_MODE=rollback` and `CODE_ROLLBACK_TARGET=<40-hex sha>`.
-The Code Preflight refuses it, exit 2, before the worktree exists and before any guard runs, unless the stage's
+**Rolling Code and the model gateway back** is a pipeline run with `PIPELINE_MODE=rollback`,
+`CODE_ROLLBACK_TARGET=<40-hex sha>` and/or `MODEL_GATEWAY_DIGEST=<sha256:...>`.
+Run `npm run gateway:release -- <beta|production> rollback-plan` to print the recorded digests and
+whether each passes `scripts/model-gateway-release/rollback-floors.json`.
+The Code Preflight refuses a Code rollback, exit 2, before the worktree exists and before any guard runs, unless the stage's
 history is readable and lists the target, the target is not the commit already released, is in the clone, and is
-older than (an ancestor of) the released commit. A history that is missing or garbled refuses a rollback (it
-never reads as "any commit"). The guard that runs while the private name list is on disk is still the CURRENT
-released commit's, over the range target..released; nothing from the target, or from the commit that started the
-run, runs then. The release build then checks the target out, releases it, and on success records it as the
-released commit and moves it to the head of the history. The run goes through the same gates as any other
-(Preflight, the protected-resource gate, the rollback floors, drift) and, for Production, the same approval (the transition, then
-`ApproveProduction`). A rollback needs `CODE_RELEASE=run` (a Cloud-side `skip` with a target stops the Code build: Code
-would not move) and `PIPELINE_MODE=rollback` with target `none` is a Cloud-only rollback (`CODE_RELEASE=skip`).
-The next forward run is judged from the rolled-back commit: every commit since is scanned again, whole; a
-squash that sits on a later commit than the rolled-back one is refused as a linear landing until a merge commit
-lands.
+older than (an ancestor of) the released commit. The guard that runs while the private name list is on disk is still the CURRENT
+released commit's, over the range target..released. `ModelGatewayImage` verifies the rollback digest is in the
+environment's last-good record (it never builds a new image from old source) and checks the rollback floors;
+Production copies Beta's digest and verifies it is also in Production's own last-good record. The release build
+then checks the Code target out, releases it, and on success records it as the released commit and moves it to
+the head of the history.
 
 The release build repeats the history and ancestor checks on the target before it checks anything out (its role
 can read the history too): the history lists the target, and the target is in the clone and an ancestor of the
-run's commit. So a build that reaches it some other way still cannot deploy a commit that was never released.
-
-The Code Preflight exports ONE value, `CODE_CTX`, to that stage's Cloud Preflight action only (CodePipeline caps
-an action's configuration value at 1000 characters, and the Cloud actions are close to it; every action keeps at
-least 100 characters of headroom, which a test checks). It has no quotes and four parts:
-`live:<40hex>,target:<40hex|none>,supersedes:<execution id|none>,supersedesSha:<40hex|none>`: the stage's released
-commit (the stage tool's rollback pin), the rollback target, and, from Beta's Preflight, the execution waiting in
-front of Production that this run replaces with the Code commit it holds, for the promotion summary. Production's
-Preflight always says `none` for the last two (the stage tool keeps Beta's). The waiting-run lookup is best
-effort: a lookup that fails prints a warning and leaves both `none`.
+run's commit.
 
 Runbook notes for a rollback:
 
 - The history starts at the first release after the pipeline goes live, so the first rollback needs two finished
   releases, or a hand-seeded history: `aws ssm put-parameter --type String --name <history parameter> --value
-  '["<40-hex live sha>"]'` in the release account (an admin act; it only widens the targets to the commit that is
-  live now).
+  '["<40-hex live sha>"]'` in the release account.
 - After a rollback, land the next fix as a merge commit (the merge queue does): the next forward run is judged from
   the rolled-back commit, and a squash that does not sit directly on it is refused as a linear landing until a
   merge commit lands.
-- Production rolls back only to a commit Production itself released: it checks Production's own history, so a
-  commit that only Beta released is refused at Production's Preflight (after Beta has already rolled back; do not
-  approve the run then).
+- Production rolls back only to a commit and gateway digest Production itself released: it checks Production's own
+  history and Production's own `/agentx/release/model-gateway-last-good/production`.
 - Rolling Code back to a commit before `3ce46251e` (the dispatch rule for an owner-only People list) parks every
-  task that has a People record. A People record is created the first time someone opens a task's People view, so
-  any hosted task may have one. The older dispatcher has no owner-only, no-checker branch. Treat such a rollback as
-  one that strands those tasks, and move forward again to a commit that has `3ce46251e` as soon as the reason for the
-  rollback allows. A staging proof is still owed: start a hosted task, open People, and check the next step
-  dispatches.
+  task that has a People record. Treat such a rollback as one that strands those tasks, and move forward again to
+  a commit that has `3ce46251e` as soon as the reason for the rollback allows.
 
-A Cloud rollback run (`CLOUD_REF` set to an older tag) forces `CODE_RELEASE=skip` unless it also names a Code
-rollback target.
-
-There is no other adoption switch: nothing named `ROVARA_ADOPT_*` is a pipeline variable or an action
-input. `PIPELINE_MODE` is the only one, and every Preflight prints the mode as a note.
+There is no other adoption switch: `PIPELINE_MODE=adopt` is the only one, and every Preflight prints
+the mode as a note.
 
 ### Approving a production run
 
@@ -210,9 +152,7 @@ a run back, and they do different jobs:
 - the `ApproveProduction` action, right after the Production `CodePreflight` (which closes the transition
   first, so the gate is closed whether the run is approved, rejected or times out), releases one execution.
   An approval belongs to the execution that waits at it, so an open transition alone can never let a run
-  into Production unapproved. If the transition is enabled while nothing waits, or stays open because the
-  Production `CodePreflight` failed before its first command, the NEXT run enters the stage and stops at its
-  own approval.
+  into Production unapproved.
 
 To promote the commit waiting in front of Production, as the owner:
 
@@ -225,10 +165,9 @@ To promote the commit waiting in front of Production, as the owner:
 
    The waiting run enters Production and stops at `ApproveProduction`.
 2. Open that run's `ApproveProduction` action (**Review** in the console). Its text names the pipeline
-   execution, the Code commit, the Cloud source commit of the run, `CLOUD_REF`, `CLOUD_PROD`, `CODE_RELEASE`,
-   `PIPELINE_MODE` and `CODE_ROLLBACK_TARGET`. Check the execution id against the run you meant to release, and
-   the Cloud tag Beta resolved and deployed in Beta's `Preflight` log (it is not an exported variable, so the
-   approval text cannot show it; the Cloud source commit is not always the commit that tag points at). Then approve, or reject (a rejected run stops and the stage unlocks), or from a terminal:
+   execution, the Code commit, `CODE_RELEASE`, `PIPELINE_MODE`, `CODE_ROLLBACK_TARGET` and
+   `MODEL_GATEWAY_DIGEST`. Check the execution id and Beta's logs before you approve, or reject
+   (a rejected run stops and the stage unlocks), or from a terminal:
 
    ```sh
    aws codepipeline get-pipeline-state --name AgentXProductionRelease   # the approval token of the waiting action
@@ -237,24 +176,23 @@ To promote the commit waiting in front of Production, as the owner:
    ```
 
 An approval that nobody answers fails after 24 hours (the run stops, the stage unlocks, and the next run
-starts its own wait). Rejecting a run, or letting it time out, leaves the transition closed (the Code
-Preflight closed it before the approval), and a later run would stop at its own approval anyway.
+starts its own wait). Rejecting a run, or letting it time out, leaves the transition closed.
 
 No role the template creates may approve, enable the transition, or start, retry or roll back a run: the
 only `codepipeline` rights in it are the Production `CodePreflight`'s `DisableStageTransition` (it can only
 close the gate) and the Beta `CodePreflight`'s read of the pipeline state. Approving is the owner's own
 identity (an administrator or an SSO permission set that holds `codepipeline:PutApprovalResult` on
-`AgentXProductionRelease/Production/ApproveProduction`). Nobody else is to hold it, and the Cloud projects' roles
-(in the private stack) must not either; check that stack when it changes.
+`AgentXProductionRelease/Production/ApproveProduction`).
 
 Nothing waiting means production already runs beta's newest commit. A failed production
 release leaves the transition disabled; the next promotion takes beta's newest commit again.
 
 | A push to `mainline` that changes | Result |
 |---|---|
-| Only docs, specs, top-level `tests/`, `scripts/` or `.github` | No pipeline execution |
-| Any other deployable package (`packages/broker`, `cli`, `code-api`, `gateway`, `mcp`, `orchestrator`, `slack-service`), `environments/` or `infra`, but no worker image input | Checks, then a control-plane deploy. The deployed worker digest is reused and the runtime is unchanged |
-| A worker image input: `packages/worker`, `packages/contracts`, `packages/model-runtime`, the Dockerfile, `.dockerignore`, root `package.json`, `package-lock.json` or tsconfigs, or a workspace `package.json` | Checks, a new ARM64 image, a runtime update to `READY` on that digest, then a control-plane deploy |
+| Only docs, specs, top-level `tests/`, unrelated `scripts/` or `.github` | No pipeline execution |
+| `packages/model-gateway/**`, `environments/model-gateway/**` or `scripts/model-gateway*` | Builds/reuses model gateway image, updates `RovaraModelGateway` by change set, verifies `/healthz` and ECS settle, then runs the Code release |
+| Any other deployable package (`packages/broker`, `cli`, `code-api`, `gateway`, `mcp`, `orchestrator`, `slack-service`), `environments/` or `infra`, but no worker image input | Gateway steps reuse unchanged image digest, checks run, then a control-plane deploy. The deployed worker digest is reused and the runtime is unchanged |
+| A worker image input: `packages/worker`, `packages/contracts`, `packages/model-runtime`, the Dockerfile, `.dockerignore`, root `package.json`, `package-lock.json` or tsconfigs, or a workspace `package.json` | Gateway steps, checks, a new ARM64 worker image, a runtime update to `READY` on that digest, then a control-plane deploy |
 
 Whether the worker changed is judged against the deployed image. The pipeline reads the commit
 from the image's `release-<time>-<commit>` tag and diffs the worker image inputs up to `HEAD`. So
@@ -263,8 +201,7 @@ commit cannot be determined, the pipeline builds a new image. Any change under `
 alters `AgentXProductionFoundation` fails the release until an administrator reviews and deploys
 the foundation manually. The pipeline never creates the foundation and never deploys itself.
 
-One-time setup, with an administrator's credentials. The private Cloud actions stack must exist first
-(CodePipeline refuses an action whose CodeBuild project is missing), and so must its projects' roles:
+One-time setup, with an administrator's credentials:
 
 ```sh
 npm run build --workspace @agentx/infra
@@ -272,53 +209,49 @@ npx cdk deploy AgentXReleasePipeline --app 'node infra/dist/bin/agentx.js' \
   --profile agentx-deployer -c agentxRegion=us-east-1 \
   --parameters GitHubConnectionArn=<codeconnections-arn> \
   --parameters BetaAccountId=<beta-account-id> \
-  --parameters CloudRepoOwner=<cloud-repo-owner> \
-  --parameters CloudRepoName=<cloud-repo-name> \
-  --parameters CloudRepoBranch=<cloud-trunk-branch> \
-  --parameters CloudConnectionArn=<cloud-codeconnections-arn> \
-  --parameters CloudBetaProjectName=<release-... project name> \
-  --parameters CloudProductionProjectName=<release-... project name> \
   --parameters PortGuardNamesParameterName=<ssm parameter name of the private name list> \
   --parameters PortGuardNamesKeyArn=<kms key arn of that parameter>
 ```
 
-`<codeconnections-arn>` is the ARN of the already-authorized GitHub connection in the release account;
-`<cloud-codeconnections-arn>` is the one that can read the Cloud repository (it may be the same).
-Find the values in the private release runbook (kept outside this repository). The two project names
-must start with `release-`: the broker starts only `agentx-*` projects and the legacy runtime
-boundary denies every CodeBuild action on `release-*`. The port guard's name list is an SSM SecureString
-in the release account; the stack takes only its name and the key's ARN. The Cloud projects' roles need the stack's
-`ArtifactBucketName` output (the artifacts pass through that bucket) and `codeconnections:UseConnection`
-on both connections. Redeploying an existing pipeline stack keeps the GitHub connection and beta-account values
-it already has, so those two `--parameters` can be left out. The pipeline never deploys itself, so this is always by hand;
-review the change set first (`--no-execute --require-approval never --change-set-name <name>`).
+`<codeconnections-arn>` is the ARN of the already-authorized GitHub connection in the release account.
+The port guard's name list is an SSM SecureString in the release account; the stack takes only its name
+and the key's ARN. Redeploying an existing pipeline stack keeps the parameters it already has. The
+pipeline never deploys itself, so this is always by hand; review the change set first
+(`--no-execute --require-approval never --change-set-name <name>`).
+
+### Model gateway cross-account pull policy and one-time adoption
+
+Production's `ModelGatewayImage` step never builds an image: it copies beta's exact digest with
+`crane copy` using the production model gateway build role (`ProductionModelGatewayBuildRoleArn`
+stack output, role name `agentx-release-model-gateway-production-build`). Once after deploying
+`AgentXReleasePipeline`, grant that role read-only pull access on beta's model gateway ECR
+repository (`rovara-cloud-beta-gateway-images-*`) in the beta account (using the policy generated
+by `betaModelGatewayPullPolicy(productionBuildRoleArn)` in `infra/lib/release-pipeline.ts`):
+
+```sh
+aws ecr set-repository-policy --profile <beta-profile> --region us-east-1 \
+  --repository-name <beta-gateway-images-repo> \
+  --policy-text file://beta-gateway-pull-policy.json
+```
+
+Before the first `release` run deploys the model gateway from Code's pipeline, run the pipeline
+once with `PIPELINE_MODE=adopt` (Beta, then enable/approve Production): it verifies the live
+gateway digest, previews a no-op change set and discards it, verifies live gateway health, seeds
+`/agentx/release/model-gateway-last-good/<env>`, and changes nothing in AWS stacks or ECR.
 
 ### What each build role may write into the artifact bucket
 
-The bucket is not versioned and holds every artifact of every run, including the `Source` and `CloudSource` artifacts the Production stage
-reads after the approval. So each build role writes only its own output (PH-S3-PREFIXES): `PutObject` and `AbortMultipartUpload` on its own
-output prefix, plus an explicit Deny (`NotResource` of that prefix) of `s3:PutObject*`, `s3:DeleteObject*` and the abort on everything else.
-The two Code roles' prefixes are `<pipeline>/ReleaseMan*` (ReleaseManifest) and `<pipeline>/BetaReleas*` (BetaReleaseManifest); the Cloud
-roles (private stack, same rule) hold `State<Beta|Prod>*`. The Cloud state artifacts are named `State<Beta|Prod><Action>` (for example
-`StateBetaPreflight`) so one short prefix tells an environment's states from every other artifact; nothing is allowed on a bare `Beta*`.
+The bucket is not versioned and holds every artifact of every run, including the `Source` artifact the
+Production stage reads after approval. So each build role writes only its own outputs (PH-S3-PREFIXES):
+`PutObject` and `AbortMultipartUpload` on its own output prefix, plus an explicit Deny (`NotResource`
+of that prefix) of `s3:PutObject*`, `s3:DeleteObject*` and `s3:AbortMultipartUpload` on everything else:
 
-- **First-run check.** The key layout used (`<pipeline name, first 20 characters>/<artifact name, first 10 characters>/<id>`) is the one CodePipeline is
-  believed to use; it has not been read from a real run. After the first beta run, list the keys once (`aws s3 ls s3://<ArtifactBucketName>/ --recursive`
-  from the release account) and check that every artifact sits under `AgentXProductionRele*/` and that the state artifacts sit under
-  folders starting `StateBeta` or `StateProd`. An `AccessDenied` on an artifact upload in the first run means the layout differs: fix the
-  pattern (here and in the private stack), do not widen it to the whole bucket.
-- **Shared folders are expected.** With the 10-character cut, artifacts whose names share their first ten characters share one folder: the four
-  beta states `StateBetaCloudImage`, `StateBetaCloudGateway`, `StateBetaCloudWebApp` and `StateBetaCloudProof` all live under `StateBetaC/` (and
-  likewise `StateProdC/`; the Preflight and GatewayCheck states have `StateBetaP/`, `StateBetaG/`). That is safe: every object id under a folder is unique
-  per artifact and run, a later stage reads an artifact by its exact key, and the grants are by the `StateBeta*` or `StateProd*` prefix, which this does not change.
-- **Deploy-order coupling.** This pipeline and the private Cloud actions stack share the pipeline name, the 20/10 numbers and the state
-  names (one digest of them is pinned in `tests/contract/release-pipeline-s3-prefixes.test.ts` and, as the same literal, in the Cloud
-  repository's `cloud-release-actions.test.ts`). The Cloud stack's new grants refuse the old names (`Beta<Action>State`). First deploy: Cloud actions stack
-  first (projects must exist), then this stack, as above. If an older pipeline with the old names is already running: update THIS stack first
-  (the Cloud stack's old whole-bucket grant works with either names), then the Cloud actions stack, and merge both changes together.
-- **Known, not a regression.** The beta Cloud role can still overwrite `StateBetaCloudProof`, the artifact the Production Preflight reads
-  (it writes its own state; before this change it could write anything). The pipeline's own role and the two source action roles also keep
-  CDK's whole-bucket read-write; scoping them and enabling bucket versioning are follow-ups.
+- Production Code release (`ReleaseBuild`): `<pipeline>/ReleaseMan*` (`ReleaseManifest`)
+- Beta Code release (`BetaReleaseBuild`): `<pipeline>/BetaReleas*` (`BetaReleaseManifest`)
+- Beta model gateway (`BetaModelGatewayBuild`): `<pipeline>/GatewayBet*` (`GatewayBetaImage`, `GatewayBetaDeploy`, `GatewayBetaCheck`)
+- Production model gateway (`ProductionModelGatewayBuild`): `<pipeline>/GatewayPro*` (`GatewayProdImage`, `GatewayProdDeploy`, `GatewayProdCheck`)
+
+The four prefixes are disjoint from each other and from `Source/*`.
 
 The beta account needs, once, before the pipeline's first beta release:
 

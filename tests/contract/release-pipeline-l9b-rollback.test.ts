@@ -13,6 +13,7 @@ import {
   CODE_HISTORY_PARAMETER,
   CODE_RELEASED_PARAMETER,
   PIPELINE_MODE_NOTE,
+  RELEASE_TOOL_INSTALL_COMMANDS,
   ROLLBACK_TARGET_CHECK,
   ReleasePipelineStack,
 } from "../../infra/lib/release-pipeline.js";
@@ -202,43 +203,36 @@ describe("L9b Preflight: a rollback target must be in the stage's release histor
   });
 });
 
-describe("L9b Preflight: what the Cloud Preflight gets, as ONE quote-free value (CODE_CTX)", () => {
-  const exported = 'echo "CTX=$CODE_CTX"';
+describe("L9b Preflight: exports CODE_LIVE_SHA and notes superseded waiting runs", () => {
+  const exported = 'echo "LIVE=$CODE_LIVE_SHA"';
   const uuid = "0a1b2c3d-1111-2222-3333-44445555666a";
-  const ctx = (stdout: string): Record<string, string> => {
-    const value = /^CTX=(.*)$/mu.exec(stdout)![1]!;
-    // The contract: four comma-separated key:value parts (Beta's value has a fifth, trigger, asserted in release-pipeline-code-release-by-trigger.test.ts), nothing that needs quoting or escaping.
-    expect(value).toMatch(/^live:[0-9a-f]{40},target:([0-9a-f]{40}|none),supersedes:([0-9a-f-]{36}|none),supersedesSha:([0-9a-f]{40}|none)(,trigger:[A-Za-z0-9@.-]+)?$/u);
-    expect(value).not.toMatch(/["'\\\s{}]/u);
-    const parts = Object.fromEntries(value.split(",").map((part) => part.split(":") as [string, string]));
-    delete parts.trigger;
-    return parts;
-  };
+  const liveSha = (stdout: string): string => /^LIVE=([0-9a-f]{40})$/mu.exec(stdout)![1]!;
 
-  it("carries the stage's released commit and the rollback target, in a rollback and in a forward run", () => {
+  it("exports the stage's released commit as CODE_LIVE_SHA in both rollback and forward runs", () => {
     const dir = scratch();
     const { repo, c1, c3 } = newRepo(dir);
     const rollback = preflight(dir, repo, rollbackEnv(c3, c1, list(c3, c1)), { tail: exported });
     expect(rollback.result.status, rollback.result.stderr).toBe(0);
-    expect(ctx(rollback.result.stdout)).toEqual({ live: c3, target: c1, supersedes: "none", supersedesSha: "none" });
+    expect(liveSha(rollback.result.stdout)).toBe(c3);
     const forward = scratch();
     const again = newRepo(forward);
     const run = preflight(forward, again.repo, { FAKE_RELEASED_SHA: again.c3 }, { tail: exported });
     expect(run.result.status, run.result.stderr).toBe(0);
-    expect(ctx(run.result.stdout)).toEqual({ live: again.c3, target: "none", supersedes: "none", supersedesSha: "none" });
+    expect(liveSha(run.result.stdout)).toBe(again.c3);
   });
 
-  it("names the execution waiting in front of Production and its Code commit, for the summary (Beta)", () => {
+  it("notes the execution waiting in front of Production and its Code commit (Beta)", () => {
     const dir = scratch();
     const { repo, c3 } = newRepo(dir);
     const { result, log } = preflight(dir, repo, { FAKE_RELEASED_SHA: c3, FAKE_WAITING_EXEC: uuid, FAKE_WAITING_SHA: sha(42), EXEC_ID: "99999999-1111-2222-3333-44445555666b" }, { tail: exported });
     expect(result.status, result.stderr).toBe(0);
-    expect(ctx(result.stdout)).toEqual({ live: c3, target: "none", supersedes: uuid, supersedesSha: sha(42) });
+    expect(liveSha(result.stdout)).toBe(c3);
+    expect(result.stdout).toContain(`NOTE: this run replaces the execution ${uuid} (Code ${sha(42)})`);
     expect(log).toContain("aws codepipeline get-pipeline-state --name AgentXProductionRelease ");
     expect(log).toContain(`aws codepipeline get-pipeline-execution --pipeline-name AgentXProductionRelease --pipeline-execution-id ${uuid} `);
   });
 
-  it("says none when nothing waits, the lookup fails, the value is not an execution id, or it is this run's own", () => {
+  it("does not fail when nothing waits, lookup fails, value is not an execution id, or it is this run's own", () => {
     for (const extra of [
       {},
       { FAKE_WAITING_EXEC: "None" },
@@ -251,28 +245,19 @@ describe("L9b Preflight: what the Cloud Preflight gets, as ONE quote-free value 
       const { repo, c3 } = newRepo(dir);
       const { result } = preflight(dir, repo, { FAKE_RELEASED_SHA: c3, ...extra }, { tail: exported });
       expect(result.status, JSON.stringify(extra)).toBe(0);
-      expect(ctx(result.stdout), JSON.stringify(extra)).toMatchObject({ supersedes: "none", supersedesSha: "none" });
+      expect(liveSha(result.stdout)).toBe(c3);
+      expect(result.stdout).not.toContain("replaces the execution");
       if ("FAKE_CODEPIPELINE_FAIL" in extra) expect(result.stderr).toContain("could not be read");
     }
   });
 
-  it("a waiting execution whose commit cannot be read (or is not a commit id) is still named, with no commit", () => {
-    for (const waitingSha of ["None", "not-a-sha", `${sha(42)}0`]) {
-      const dir = scratch();
-      const { repo, c3 } = newRepo(dir);
-      const { result } = preflight(dir, repo, { FAKE_RELEASED_SHA: c3, FAKE_WAITING_EXEC: uuid, FAKE_WAITING_SHA: waitingSha }, { tail: exported });
-      expect(result.status, result.stderr).toBe(0);
-      expect(ctx(result.stdout)).toMatchObject({ supersedes: uuid, supersedesSha: "none" });
-    }
-  });
-
-  it("Production's Preflight asks for no waiting run (the stage CLI keeps Beta's) and says none", () => {
+  it("Production's Preflight asks for no waiting run and still exports CODE_LIVE_SHA", () => {
     const dir = scratch();
     const { repo, c3 } = newRepo(dir);
     const { result, log } = preflight(dir, repo, { FAKE_RELEASED_SHA: c3, FAKE_WAITING_EXEC: uuid }, { closesGate: true, tail: exported });
     expect(result.status, result.stderr).toBe(0);
     expect(log).not.toContain("codepipeline");
-    expect(ctx(result.stdout)).toEqual({ live: c3, target: "none", supersedes: "none", supersedesSha: "none" });
+    expect(liveSha(result.stdout)).toBe(c3);
   });
 });
 
@@ -311,7 +296,11 @@ describe("L9b release build: the history, the rollback checkout, the record", ()
     const spec = specOf(name);
     // The install commands that are about the run (the mode and target checks, the history checks, the rollback checkout); the tool downloads stay out.
     // They run in ONE shell, as in CodeBuild (the history checks hand variables to each other).
-    const install = spec.phases.install!.commands.filter((command) => command.includes("CODE_ROLLBACK_TARGET") || command.includes("PIPELINE_MODE"));
+    const install = spec.phases.install!.commands.filter(
+      (command) =>
+        !RELEASE_TOOL_INSTALL_COMMANDS.some((tool) => command.includes(tool)) &&
+        (command.includes("CODE_ROLLBACK_TARGET") || command.includes("PIPELINE_MODE")),
+    );
     const result = runShell(r.repo, ["set -e", ...install, ...spec.phases.build!.commands.map((command) => `(${command})`)], {
       PATH: `${bin}:/usr/bin:/bin`,
       CODE_RELEASE: options.codeRelease ?? "run",
@@ -498,6 +487,6 @@ describe("L9b: headroom under CodePipeline's 1000-character limit on every actio
       }
     }
     expect(lengths.filter(([, length]) => length > 900)).toEqual([]);
-    expect(lengths.length).toBeGreaterThan(50);
+    expect(lengths.length).toBeGreaterThan(20);
   });
 });

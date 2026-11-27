@@ -15008,10 +15008,13 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
 {
   "Description": "AgentX production release pipeline for the mainline branch",
   "Outputs": {
-    "ArtifactBucketName": {
-      "Description": "The pipeline's artifact bucket, for the Cloud actions' project roles",
+    "ProductionModelGatewayBuildRoleArn": {
+      "Description": "Principal ARN for beta's model gateway ECR repository pull policy (betaModelGatewayPullPolicy)",
       "Value": {
-        "Ref": "Artifacts82DD59A1",
+        "Fn::GetAtt": [
+          "ProductionModelGatewayBuildRoleD0832BFF",
+          "Arn",
+        ],
       },
     },
   },
@@ -15025,38 +15028,6 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
       "Default": "/cdk-bootstrap/hnb659fds/version",
       "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
       "Type": "AWS::SSM::Parameter::Value<String>",
-    },
-    "CloudBetaProjectName": {
-      "AllowedPattern": "^release-[A-Za-z0-9_-]{1,120}$",
-      "Default": "release-cloud-beta",
-      "Description": "The Cloud actions' CodeBuild project for the Beta stage (owned by the private Cloud actions stack); must start with release-",
-      "Type": "String",
-    },
-    "CloudConnectionArn": {
-      "AllowedPattern": "^arn:aws(-[a-z]+)?:(codeconnections|codestar-connections):[a-z0-9-]+:[0-9]{12}:connection/[0-9a-f-]{36}$",
-      "Description": "Authorized CodeConnections GitHub connection that can read the Cloud repository",
-      "Type": "String",
-    },
-    "CloudProductionProjectName": {
-      "AllowedPattern": "^release-[A-Za-z0-9_-]{1,120}$",
-      "Default": "release-cloud-production",
-      "Description": "The Cloud actions' CodeBuild project for the Production stage (owned by the private Cloud actions stack); must start with release-",
-      "Type": "String",
-    },
-    "CloudRepoBranch": {
-      "AllowedPattern": "^[A-Za-z0-9._/-]{1,100}$",
-      "Description": "The Cloud trunk branch the second source follows; a release resolves its tag on this branch",
-      "Type": "String",
-    },
-    "CloudRepoName": {
-      "AllowedPattern": "^[A-Za-z0-9._-]{1,100}$",
-      "Description": "Name of the Cloud repository, the pipeline's second source",
-      "Type": "String",
-    },
-    "CloudRepoOwner": {
-      "AllowedPattern": "^[A-Za-z0-9-]{1,39}$",
-      "Description": "GitHub owner of the Cloud repository, the pipeline's second source",
-      "Type": "String",
     },
     "GitHubConnectionArn": {
       "AllowedPattern": "^arn:aws(-[a-z]+)?:(codeconnections|codestar-connections):[a-z0-9-]+:[0-9]{12}:connection/[0-9a-f-]{36}$",
@@ -15161,7 +15132,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
           "Type": "NO_CACHE",
         },
         "ConcurrentBuildLimit": 1,
-        "Description": "Runs the port guard on the Code tree with the private name list, before the Beta stage's gates and writes (L14)",
+        "Description": "Runs the port guard on the Code tree with the private name list, before Beta's writes (L14)",
         "EncryptionKey": "alias/aws/s3",
         "Environment": {
           "ComputeType": "BUILD_GENERAL1_MEDIUM",
@@ -15207,7 +15178,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                 ""
     },
     "exported-variables": [
-      "CODE_CTX"
+      "CODE_LIVE_SHA"
     ]
   },
   "phases": {
@@ -15240,14 +15211,8 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
         "git cat-file -e \\"$RELEASED_SHA^{commit}\\" || { echo \\"port-guard: the last released Code commit is not in this clone; refusing to run the release\\" >&2; exit 2; }",
         "SUPERSEDES_EXEC=none; SUPERSEDES_SHA=none",
         "WAITING_EXEC=\\"$(aws codepipeline get-pipeline-state --name AgentXProductionRelease --query 'stageStates[?stageName==\`Production\`].inboundExecution.pipelineExecutionId | [0]' --output text)\\" || { echo \\"WARN: the execution waiting for Production could not be read; the summary will not name it\\" >&2; WAITING_EXEC=; }",
-        "if [[ \\"$WAITING_EXEC\\" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] && [ \\"$WAITING_EXEC\\" != \\"\${EXEC_ID:-}\\" ]; then WAITING_SHA=\\"$(aws codepipeline get-pipeline-execution --pipeline-name AgentXProductionRelease --pipeline-execution-id \\"$WAITING_EXEC\\" --query 'pipelineExecution.artifactRevisions[?name==\`Source\`].revisionId | [0]' --output text)\\" || WAITING_SHA=; [[ \\"$WAITING_SHA\\" =~ ^[0-9a-f]{40}$ ]] || WAITING_SHA=none; SUPERSEDES_EXEC=\\"$WAITING_EXEC\\"; SUPERSEDES_SHA=\\"$WAITING_SHA\\"; echo \\"NOTE: this run replaces the execution $WAITING_EXEC, which is waiting for Production\\"; fi",
-        "TRIGGER_KIND=unknown; TRIGGER_TYPE=; TRIGGER_SOURCES=",
-        "if [[ \\"\${EXEC_ID:-}\\" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then TRIGGER_TYPE=\\"$(aws codepipeline get-pipeline-execution --pipeline-name AgentXProductionRelease --pipeline-execution-id \\"$EXEC_ID\\" --query pipelineExecution.trigger.triggerType --output text)\\" || TRIGGER_TYPE=; TRIGGER_SOURCES=\\"$(aws codepipeline list-action-executions --pipeline-name AgentXProductionRelease --filter \\"pipelineExecutionId=$EXEC_ID\\" --query \\"actionExecutionDetails[?stageName=='Source' && status=='Succeeded'].[actionName,output.outputVariables.CommitId,output.outputVariables.TagName]\\" --output text)\\" || TRIGGER_SOURCES=; fi",
-        "CLOUD_SOURCE=\\"$(printf '%s\\\\n' \\"$TRIGGER_SOURCES\\" | awk -F'\\\\t' '$1==\\"CloudGitHub\\"{print $2\\" \\"$3}')\\"; CODE_SOURCE=\\"$(printf '%s\\\\n' \\"$TRIGGER_SOURCES\\" | awk -F'\\\\t' '$1==\\"GitHub\\"{print $2\\" \\"$3}')\\"",
-        "read -r CLOUD_SOURCE_SHA CLOUD_SOURCE_TAG <<< \\"$CLOUD_SOURCE\\"; read -r CODE_SOURCE_SHA CODE_SOURCE_TAG <<< \\"$CODE_SOURCE\\"",
-        "if [ \\"$TRIGGER_TYPE\\" = StartPipelineExecution ]; then TRIGGER_KIND=manual; elif [ \\"$TRIGGER_TYPE\\" = WebhookV2 ] && [ \\"$(printf '%s\\\\n' \\"$CLOUD_SOURCE\\" | wc -l)\\" -eq 1 ] && [ \\"$(printf '%s\\\\n' \\"$CODE_SOURCE\\" | wc -l)\\" -eq 1 ] && [[ \\"$CLOUD_SOURCE_SHA\\" =~ ^[0-9a-f]{40}$ ]] && [[ \\"$CODE_SOURCE_SHA\\" =~ ^[0-9a-f]{40}$ ]]; then if [[ \\"$CLOUD_SOURCE_TAG\\" =~ ^v[0-9]+\\\\.[0-9]+\\\\.[0-9]+$ ]] && [ \\"$CODE_SOURCE_TAG\\" = None ]; then TRIGGER_KIND=\\"cloud-tag@$CLOUD_SOURCE_TAG\\"; elif [ \\"$CLOUD_SOURCE_TAG\\" = None ] && [ \\"$CODE_SOURCE_TAG\\" = None ]; then TRIGGER_KIND=code-push; fi; fi",
-        "echo \\"NOTE: this run was started by: $TRIGGER_KIND (trigger type \${TRIGGER_TYPE:-unreadable})\\"",
-        "export CODE_CTX=\\"live:$RELEASED_SHA,target:$CODE_ROLLBACK_TARGET,supersedes:$SUPERSEDES_EXEC,supersedesSha:$SUPERSEDES_SHA,trigger:$TRIGGER_KIND\\"",
+        "if [[ \\"$WAITING_EXEC\\" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] && [ \\"$WAITING_EXEC\\" != \\"\${EXEC_ID:-}\\" ]; then WAITING_SHA=\\"$(aws codepipeline get-pipeline-execution --pipeline-name AgentXProductionRelease --pipeline-execution-id \\"$WAITING_EXEC\\" --query 'pipelineExecution.artifactRevisions[?name==\`Source\`].revisionId | [0]' --output text)\\" || WAITING_SHA=; [[ \\"$WAITING_SHA\\" =~ ^[0-9a-f]{40}$ ]] || WAITING_SHA=none; SUPERSEDES_EXEC=\\"$WAITING_EXEC\\"; SUPERSEDES_SHA=\\"$WAITING_SHA\\"; echo \\"NOTE: this run replaces the execution $WAITING_EXEC (Code $SUPERSEDES_SHA), which is waiting for Production\\"; fi",
+        "export CODE_LIVE_SHA=\\"$RELEASED_SHA\\"",
         "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { HIST_VALUE=\\"$(aws ssm get-parameter --name /agentx/release/code-history/beta --query Parameter.Value --output text)\\" || { echo \\"port-guard: the Code release history could not be read; refusing to run the release\\" >&2; exit 2; }; }",
         "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { HIST_FLAT=\\"$(printf '%s' \\"$HIST_VALUE\\" | tr -d ' \\\\t\\\\r\\\\n')\\"; HIST_RE='^\\\\[(\\"[0-9a-f]{40}\\"(,\\"[0-9a-f]{40}\\")*)?\\\\]$'; [[ \\"$HIST_FLAT\\" =~ $HIST_RE ]] || { echo \\"port-guard: the Code release history is not a list of commits; refusing to run the release\\" >&2; exit 2; }; }",
         "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { [[ \\"$HIST_FLAT\\" == *\\"\\\\\\"$CODE_ROLLBACK_TARGET\\\\\\"\\"* ]] || { echo \\"port-guard: the rollback target is not in this stage's Code release history; refusing to run the release\\" >&2; exit 2; }; }",
@@ -15475,7 +15440,6 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
               "Action": [
                 "codepipeline:GetPipelineState",
                 "codepipeline:GetPipelineExecution",
-                "codepipeline:ListActionExecutions",
               ],
               "Effect": "Allow",
               "Resource": {
@@ -15555,6 +15519,439 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
       },
       "Type": "AWS::IAM::Policy",
     },
+    "BetaModelGatewayBuildE587FFE4": {
+      "Properties": {
+        "Artifacts": {
+          "Type": "CODEPIPELINE",
+        },
+        "Cache": {
+          "Modes": [
+            "LOCAL_DOCKER_LAYER_CACHE",
+          ],
+          "Type": "LOCAL",
+        },
+        "ConcurrentBuildLimit": 1,
+        "Description": "Runs Code's beta model gateway release steps (image, deploy, check) (#1578)",
+        "EncryptionKey": "alias/aws/s3",
+        "Environment": {
+          "ComputeType": "BUILD_GENERAL1_LARGE",
+          "EnvironmentVariables": [
+            {
+              "Name": "NODE_OPTIONS",
+              "Type": "PLAINTEXT",
+              "Value": "--max-old-space-size=8192",
+            },
+            {
+              "Name": "GATEWAY_STAGE_ENV",
+              "Type": "PLAINTEXT",
+              "Value": "beta",
+            },
+            {
+              "Name": "ROVARA_EXPECTED_DEPLOY_ACCOUNT",
+              "Type": "PLAINTEXT",
+              "Value": {
+                "Ref": "BetaAccountId",
+              },
+            },
+            {
+              "Name": "BETA_RELEASE_ROLE_ARN",
+              "Type": "PLAINTEXT",
+              "Value": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":iam::",
+                    {
+                      "Ref": "BetaAccountId",
+                    },
+                    ":role/agentx-beta-release",
+                  ],
+                ],
+              },
+            },
+            {
+              "Name": "ROVARA_PIPELINE_PROFILE",
+              "Type": "PLAINTEXT",
+              "Value": "agentx-beta",
+            },
+          ],
+          "Image": "aws/codebuild/amazonlinux-aarch64-standard:3.0",
+          "ImagePullCredentialsType": "CODEBUILD",
+          "PrivilegedMode": true,
+          "Type": "ARM_CONTAINER",
+        },
+        "LogsConfig": {
+          "CloudWatchLogs": {
+            "GroupName": {
+              "Ref": "ReleaseBuildLogsD2C04AA9",
+            },
+            "Status": "ENABLED",
+          },
+        },
+        "Name": "release-agentx-model-gateway-beta",
+        "ServiceRole": {
+          "Fn::GetAtt": [
+            "BetaModelGatewayBuildRoleBF20AD07",
+            "Arn",
+          ],
+        },
+        "Source": {
+          "BuildSpec": "{
+  "version": "0.2",
+  "env": {
+    "shell": "bash",
+    "variables": {
+      "AWS_CLI_VERSION": "2.36.47",
+      "GITLEAKS_VERSION": "8.30.1",
+      "GITLEAKS_SHA256": "<asset-hash>",
+      "CODE_RELEASE": "run",
+      "PIPELINE_MODE": "release",
+      "CODE_ROLLBACK_TARGET": "none",
+      "MODEL_GATEWAY_DIGEST": "none"
+    }
+  },
+  "phases": {
+    "install": {
+      "commands": [
+        "node_version=\\"$(cat .node-version)\\"",
+        "node_archive=\\"node-v\${node_version}-linux-arm64.tar.xz\\"",
+        "curl -fsSL -o \\"/tmp/\${node_archive}\\" \\"https://nodejs.org/dist/v\${node_version}/\${node_archive}\\"",
+        "curl -fsSL \\"https://nodejs.org/dist/v\${node_version}/SHASUMS256.txt\\" | grep \\" \${node_archive}$\\" | (cd /tmp && sha256sum -c -)",
+        "mkdir -p /opt/node && tar -xJf \\"/tmp/\${node_archive}\\" -C /opt/node --strip-components=1",
+        "curl -fsSL -o /tmp/awscliv2.zip \\"https://awscli.amazonaws.com/awscli-exe-linux-aarch64-\${AWS_CLI_VERSION}.zip\\"",
+        "unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install --install-dir /opt/aws-cli --bin-dir /opt/aws-cli/bin",
+        "curl -fsSL -o /tmp/gitleaks.tar.gz \\"https://github.com/gitleaks/gitleaks/releases/download/v\${GITLEAKS_VERSION}/gitleaks_\${GITLEAKS_VERSION}_linux_arm64.tar.gz\\"",
+        "echo \\"\${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz\\" | sha256sum -c -",
+        "mkdir -p /opt/gitleaks && tar -xzf /tmp/gitleaks.tar.gz -C /opt/gitleaks gitleaks",
+        "export PATH=\\"/opt/node/bin:/opt/aws-cli/bin:/opt/gitleaks:$PATH\\"",
+        "node --version && npm --version && aws --version && gitleaks version && docker buildx version",
+        "mkdir -p ~/.aws",
+        "printf '[profile agentx-beta]\\\\nrole_arn = %s\\\\ncredential_source = EcsContainer\\\\nrole_session_name = beta-release\\\\nregion = %s\\\\n' \\"$BETA_RELEASE_ROLE_ARN\\" \\"$AWS_REGION\\" >> ~/.aws/config",
+        "aws sts get-caller-identity --profile agentx-beta"
+      ]
+    },
+    "pre_build": {
+      "commands": [
+        "npm ci --ignore-scripts --no-audit --no-fund"
+      ]
+    },
+    "build": {
+      "commands": [
+        ": \\"\${GATEWAY_STAGE_STEP:?GATEWAY_STAGE_STEP is not set}\\"",
+        "[ \\"$GATEWAY_STAGE_ENV\\" = beta ] || { echo \\"this project runs beta steps only; GATEWAY_STAGE_ENV is '$GATEWAY_STAGE_ENV'\\" >&2; exit 1; }",
+        "case \\"$GATEWAY_STAGE_STEP\\" in image|deploy|check) ;; *) echo \\"unknown GATEWAY_STAGE_STEP '$GATEWAY_STAGE_STEP'\\" >&2; exit 1;; esac",
+        "if [ -n \\"\${PIPELINE_STATE_ARTIFACT:-}\\" ]; then case \\"$PIPELINE_STATE_ARTIFACT\\" in *[!A-Za-z0-9_]*) echo \\"PIPELINE_STATE_ARTIFACT is not an artifact name\\" >&2; exit 1;; esac; state_ref=\\"CODEBUILD_SRC_DIR_\${PIPELINE_STATE_ARTIFACT}\\"; state_dir=\\"\${!state_ref:-}\\"; if [ ! -f \\"$state_dir/manifest.json\\" ]; then echo \\"no manifest.json in previous artifact $PIPELINE_STATE_ARTIFACT\\" >&2; exit 1; fi; export PIPELINE_MANIFEST=\\"$state_dir/manifest.json\\"; fi",
+        "npx --no-install tsx scripts/model-gateway-release/cli.ts \\"$GATEWAY_STAGE_ENV\\" \\"$GATEWAY_STAGE_STEP\\""
+      ]
+    }
+  },
+  "artifacts": {
+    "files": [
+      "**/*"
+    ],
+    "base-directory": "out"
+  }
+}",
+          "Type": "CODEPIPELINE",
+        },
+        "TimeoutInMinutes": 90,
+      },
+      "Type": "AWS::CodeBuild::Project",
+    },
+    "BetaModelGatewayBuildRoleBF20AD07": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "codebuild.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Description": "Runs Code's beta model gateway image, deploy, and check steps (#1578)",
+        "RoleName": "agentx-release-model-gateway-beta-build",
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "BetaModelGatewayBuildRoleDefaultPolicy27CBE3DB": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "codeconnections:UseConnection",
+                "codestar-connections:UseConnection",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "GitHubConnectionArn",
+              },
+            },
+            {
+              "Action": [
+                "ssm:GetParameter",
+                "ssm:PutParameter",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ssm:us-east-1:",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":parameter/agentx/release/model-gateway-last-good/beta",
+                  ],
+                ],
+              },
+              "Sid": "RecordModelGatewayLastGood",
+            },
+            {
+              "Action": "ssm:GetParameter",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ssm:us-east-1:",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":parameter/agentx/release/code-released/beta",
+                  ],
+                ],
+              },
+              "Sid": "ReadReleasedCode",
+            },
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Deny",
+              "Resource": "arn:aws:iam::*:role/OrganizationAccountAccessRole",
+              "Sid": "DenyOrganizationAdminRole",
+            },
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":iam::",
+                    {
+                      "Ref": "BetaAccountId",
+                    },
+                    ":role/agentx-beta-release",
+                  ],
+                ],
+              },
+              "Sid": "AssumeBetaReleaseRole",
+            },
+            {
+              "Action": [
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ReleaseBuildLogsD2C04AA9",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":logs:us-east-1:",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":log-group:/aws/codebuild/",
+                      {
+                        "Ref": "BetaModelGatewayBuildE587FFE4",
+                      },
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":logs:us-east-1:",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":log-group:/aws/codebuild/",
+                      {
+                        "Ref": "BetaModelGatewayBuildE587FFE4",
+                      },
+                      ":*",
+                    ],
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "codebuild:CreateReportGroup",
+                "codebuild:CreateReport",
+                "codebuild:UpdateReport",
+                "codebuild:BatchPutTestCases",
+                "codebuild:BatchPutCodeCoverages",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":codebuild:us-east-1:",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":report-group/",
+                    {
+                      "Ref": "BetaModelGatewayBuildE587FFE4",
+                    },
+                    "-*",
+                  ],
+                ],
+              },
+            },
+            {
+              "Action": [
+                "s3:PutObject*",
+                "s3:DeleteObject*",
+                "s3:AbortMultipartUpload",
+              ],
+              "Effect": "Deny",
+              "NotResource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    {
+                      "Fn::GetAtt": [
+                        "Artifacts82DD59A1",
+                        "Arn",
+                      ],
+                    },
+                    "/AgentXProductionRele*/GatewayBet*",
+                  ],
+                ],
+              },
+              "Sid": "DenyArtifactWritesOutsideOwnOutput",
+            },
+            {
+              "Action": [
+                "s3:GetObject*",
+                "s3:GetBucket*",
+                "s3:List*",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "Artifacts82DD59A1",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "Artifacts82DD59A1",
+                          "Arn",
+                        ],
+                      },
+                      "/*",
+                    ],
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "s3:PutObject",
+                "s3:AbortMultipartUpload",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    {
+                      "Fn::GetAtt": [
+                        "Artifacts82DD59A1",
+                        "Arn",
+                      ],
+                    },
+                    "/AgentXProductionRele*/GatewayBet*",
+                  ],
+                ],
+              },
+            },
+            {
+              "Action": "codestar-connections:UseConnection",
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "GitHubConnectionArn",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "BetaModelGatewayBuildRoleDefaultPolicy27CBE3DB",
+        "Roles": [
+          {
+            "Ref": "BetaModelGatewayBuildRoleBF20AD07",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
     "BetaReleaseBuild11A90FDF": {
       "Properties": {
         "Artifacts": {
@@ -15623,7 +16020,8 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
     "install": {
       "commands": [
         "case \\"$CODE_RELEASE\\" in run|skip) ;; *) echo \\"CODE_RELEASE must be run or skip, got: $CODE_RELEASE\\" >&2; exit 1;; esac",
-        "[ \\"$CODE_RELEASE\\" != skip ] || echo \\"CODE_RELEASE=skip: this run releases Cloud only; Code is not built or deployed\\"",
+        "[ \\"$CODE_RELEASE\\" != skip ] || echo \\"CODE_RELEASE=skip: Code is not built or deployed\\"",
+        "[ \\"$PIPELINE_MODE\\" != adopt ] || echo \\"PIPELINE_MODE=adopt: adopt run checks the live model gateway and leaves Code unchanged\\"",
         "case \\"$PIPELINE_MODE\\" in release|adopt|rollback) ;; *) echo \\"PIPELINE_MODE must be release, adopt or rollback, got: $PIPELINE_MODE\\" >&2; exit 1;; esac",
         "if [ \\"$PIPELINE_MODE\\" = rollback ] && [ \\"$CODE_ROLLBACK_TARGET\\" != none ]; then [[ \\"$CODE_ROLLBACK_TARGET\\" =~ ^[0-9a-f]{40}$ ]] || { echo \\"CODE_ROLLBACK_TARGET must be a full 40-character commit id, or none, got: $CODE_ROLLBACK_TARGET\\" >&2; exit 1; }; echo \\"NOTE: Code rollback target is $CODE_ROLLBACK_TARGET\\"; elif [ \\"$PIPELINE_MODE\\" != rollback ] && [ \\"$CODE_ROLLBACK_TARGET\\" != none ]; then echo \\"CODE_ROLLBACK_TARGET is only for PIPELINE_MODE=rollback; got $CODE_ROLLBACK_TARGET in mode $PIPELINE_MODE\\" >&2; exit 1; fi",
         "if [ \\"$PIPELINE_MODE\\" = rollback ]; then if [ \\"$CODE_ROLLBACK_TARGET\\" = none ]; then [ \\"$CODE_RELEASE\\" = skip ] || { echo \\"a rollback run with no Code rollback target does not release Code, but CODE_RELEASE is $CODE_RELEASE\\" >&2; exit 1; }; else [ \\"$CODE_RELEASE\\" = run ] || { echo \\"a Code rollback target was given but CODE_RELEASE is $CODE_RELEASE, so Code would not be rolled back\\" >&2; exit 1; }; fi; fi",
@@ -15632,29 +16030,29 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
         "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { [[ \\"$HIST_FLAT\\" == *\\"\\\\\\"$CODE_ROLLBACK_TARGET\\\\\\"\\"* ]] || { echo \\"the rollback target is not in this stage's Code release history; Code is not rolled back\\" >&2; exit 1; }; }",
         "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { git cat-file -e \\"$CODE_ROLLBACK_TARGET^{commit}\\" || { echo \\"the rollback target is not in this clone; Code is not rolled back\\" >&2; exit 1; }; }",
         "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { git merge-base --is-ancestor \\"$CODE_ROLLBACK_TARGET\\" HEAD || { echo \\"the rollback target is not an ancestor of this run's commit; Code is not rolled back\\" >&2; exit 1; }; }",
-        "[ \\"$CODE_RELEASE\\" = skip ] || { [ \\"$PIPELINE_MODE\\" != rollback ] || [ \\"$CODE_ROLLBACK_TARGET\\" = none ] || git checkout -q --detach \\"$CODE_ROLLBACK_TARGET\\"; }",
-        "[ \\"$CODE_RELEASE\\" = skip ] || { node_version=\\"$(cat .node-version)\\"; }",
-        "[ \\"$CODE_RELEASE\\" = skip ] || { node_archive=\\"node-v\${node_version}-linux-arm64.tar.xz\\"; }",
-        "[ \\"$CODE_RELEASE\\" = skip ] || { curl -fsSL -o \\"/tmp/\${node_archive}\\" \\"https://nodejs.org/dist/v\${node_version}/\${node_archive}\\"; }",
-        "[ \\"$CODE_RELEASE\\" = skip ] || { curl -fsSL \\"https://nodejs.org/dist/v\${node_version}/SHASUMS256.txt\\" | grep \\" \${node_archive}$\\" | (cd /tmp && sha256sum -c -); }",
-        "[ \\"$CODE_RELEASE\\" = skip ] || { mkdir -p /opt/node && tar -xJf \\"/tmp/\${node_archive}\\" -C /opt/node --strip-components=1; }",
-        "[ \\"$CODE_RELEASE\\" = skip ] || { curl -fsSL -o /tmp/awscliv2.zip \\"https://awscli.amazonaws.com/awscli-exe-linux-aarch64-\${AWS_CLI_VERSION}.zip\\"; }",
-        "[ \\"$CODE_RELEASE\\" = skip ] || { unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install --install-dir /opt/aws-cli --bin-dir /opt/aws-cli/bin; }",
-        "[ \\"$CODE_RELEASE\\" = skip ] || { curl -fsSL -o /tmp/gitleaks.tar.gz \\"https://github.com/gitleaks/gitleaks/releases/download/v\${GITLEAKS_VERSION}/gitleaks_\${GITLEAKS_VERSION}_linux_arm64.tar.gz\\"; }",
-        "[ \\"$CODE_RELEASE\\" = skip ] || { echo \\"\${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz\\" | sha256sum -c -; }",
-        "[ \\"$CODE_RELEASE\\" = skip ] || { mkdir -p /opt/gitleaks && tar -xzf /tmp/gitleaks.tar.gz -C /opt/gitleaks gitleaks; }",
-        "[ \\"$CODE_RELEASE\\" = skip ] || { export PATH=\\"/opt/node/bin:/opt/aws-cli/bin:/opt/gitleaks:$PATH\\"; }",
-        "[ \\"$CODE_RELEASE\\" = skip ] || { node --version && npm --version && aws --version && gitleaks version && docker buildx version; }"
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { [ \\"$PIPELINE_MODE\\" != rollback ] || [ \\"$CODE_ROLLBACK_TARGET\\" = none ] || git checkout -q --detach \\"$CODE_ROLLBACK_TARGET\\"; }",
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { node_version=\\"$(cat .node-version)\\"; }",
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { node_archive=\\"node-v\${node_version}-linux-arm64.tar.xz\\"; }",
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { curl -fsSL -o \\"/tmp/\${node_archive}\\" \\"https://nodejs.org/dist/v\${node_version}/\${node_archive}\\"; }",
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { curl -fsSL \\"https://nodejs.org/dist/v\${node_version}/SHASUMS256.txt\\" | grep \\" \${node_archive}$\\" | (cd /tmp && sha256sum -c -); }",
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { mkdir -p /opt/node && tar -xJf \\"/tmp/\${node_archive}\\" -C /opt/node --strip-components=1; }",
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { curl -fsSL -o /tmp/awscliv2.zip \\"https://awscli.amazonaws.com/awscli-exe-linux-aarch64-\${AWS_CLI_VERSION}.zip\\"; }",
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install --install-dir /opt/aws-cli --bin-dir /opt/aws-cli/bin; }",
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { curl -fsSL -o /tmp/gitleaks.tar.gz \\"https://github.com/gitleaks/gitleaks/releases/download/v\${GITLEAKS_VERSION}/gitleaks_\${GITLEAKS_VERSION}_linux_arm64.tar.gz\\"; }",
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { echo \\"\${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz\\" | sha256sum -c -; }",
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { mkdir -p /opt/gitleaks && tar -xzf /tmp/gitleaks.tar.gz -C /opt/gitleaks gitleaks; }",
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { export PATH=\\"/opt/node/bin:/opt/aws-cli/bin:/opt/gitleaks:$PATH\\"; }",
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { node --version && npm --version && aws --version && gitleaks version && docker buildx version; }"
       ]
     },
     "pre_build": {
       "commands": [
-        "[ \\"$CODE_RELEASE\\" = skip ] || { npm ci; }"
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { npm ci; }"
       ]
     },
     "build": {
       "commands": [
-        "if [ \\"$CODE_RELEASE\\" = skip ]; then mkdir -p cdk.out && printf '{\\"codeRelease\\":\\"skip\\"}\\\\n' > cdk.out/agentx-production-release.json; else if node scripts/release-ci-proof.ts --repository PrepLabsAI/Rovara --github-app-stack AgentXControlPlane --region \\"$AWS_REGION\\"; then RELEASE_CHECKS=--skip-checks; else RELEASE_CHECKS=; fi; mkdir -p ~/.aws && printf '[profile agentx-beta]\\\\nrole_arn = %s\\\\ncredential_source = EcsContainer\\\\nrole_session_name = beta-release\\\\nregion = %s\\\\n' \\"$BETA_RELEASE_ROLE_ARN\\" \\"$AWS_REGION\\" >> ~/.aws/config && aws sts get-caller-identity --profile agentx-beta && npm run release:prod -- --region \\"$AWS_REGION\\" --profile agentx-beta --reuse-unchanged-worker --require-existing-foundation $RELEASE_CHECKS && { if [ \\"$PIPELINE_MODE\\" = rollback ] && [ \\"$CODE_ROLLBACK_TARGET\\" != none ]; then RELEASED_SOURCE=\\"$CODE_ROLLBACK_TARGET\\"; else RELEASED_SOURCE=\\"$CODEBUILD_RESOLVED_SOURCE_VERSION\\"; fi; [[ \\"$RELEASED_SOURCE\\" =~ ^[0-9a-f]{40}$ ]] || { echo \\"the source version of this build is not a commit id; the release is not recorded\\" >&2; exit 1; }; HIST_ERR=\\"$(mktemp)\\" && { HIST_OLD=\\"$(aws ssm get-parameter --name /agentx/release/code-history/beta --query Parameter.Value --output text 2>\\"$HIST_ERR\\")\\" || { grep -q ParameterNotFound \\"$HIST_ERR\\" && HIST_OLD=; } || { cat \\"$HIST_ERR\\" >&2; false; }; } && HIST_NEW=\\"$({ printf '%s\\\\n' \\"$RELEASED_SOURCE\\"; printf '%s\\\\n' \\"$HIST_OLD\\" | { grep -oE '\\"[0-9a-f]{40}\\"' || true; } | tr -d '\\"'; } | awk '!seen[$0]++' | head -n 10 | awk 'BEGIN{printf \\"[\\"} {printf \\"%s\\\\\\"%s\\\\\\"\\", (NR>1?\\",\\":\\"\\"), $0} END{printf \\"]\\"}')\\" && aws ssm put-parameter --name /agentx/release/code-history/beta --type String --overwrite --value \\"$HIST_NEW\\" && aws ssm put-parameter --name /agentx/release/code-released/beta --type String --overwrite --value \\"$RELEASED_SOURCE\\"; }; fi"
+        "if { [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; }; then mkdir -p cdk.out && printf '{\\"codeRelease\\":\\"skip\\"}\\\\n' > cdk.out/agentx-production-release.json; else if node scripts/release-ci-proof.ts --repository PrepLabsAI/Rovara --github-app-stack AgentXControlPlane --region \\"$AWS_REGION\\"; then RELEASE_CHECKS=--skip-checks; else RELEASE_CHECKS=; fi; mkdir -p ~/.aws && printf '[profile agentx-beta]\\\\nrole_arn = %s\\\\ncredential_source = EcsContainer\\\\nrole_session_name = beta-release\\\\nregion = %s\\\\n' \\"$BETA_RELEASE_ROLE_ARN\\" \\"$AWS_REGION\\" >> ~/.aws/config && aws sts get-caller-identity --profile agentx-beta && npm run release:prod -- --region \\"$AWS_REGION\\" --profile agentx-beta --reuse-unchanged-worker --require-existing-foundation $RELEASE_CHECKS && { if [ \\"$PIPELINE_MODE\\" = rollback ] && [ \\"$CODE_ROLLBACK_TARGET\\" != none ]; then RELEASED_SOURCE=\\"$CODE_ROLLBACK_TARGET\\"; else RELEASED_SOURCE=\\"$CODEBUILD_RESOLVED_SOURCE_VERSION\\"; fi; [[ \\"$RELEASED_SOURCE\\" =~ ^[0-9a-f]{40}$ ]] || { echo \\"the source version of this build is not a commit id; the release is not recorded\\" >&2; exit 1; }; HIST_ERR=\\"$(mktemp)\\" && { HIST_OLD=\\"$(aws ssm get-parameter --name /agentx/release/code-history/beta --query Parameter.Value --output text 2>\\"$HIST_ERR\\")\\" || { grep -q ParameterNotFound \\"$HIST_ERR\\" && HIST_OLD=; } || { cat \\"$HIST_ERR\\" >&2; false; }; } && HIST_NEW=\\"$({ printf '%s\\\\n' \\"$RELEASED_SOURCE\\"; printf '%s\\\\n' \\"$HIST_OLD\\" | { grep -oE '\\"[0-9a-f]{40}\\"' || true; } | tr -d '\\"'; } | awk '!seen[$0]++' | head -n 10 | awk 'BEGIN{printf \\"[\\"} {printf \\"%s\\\\\\"%s\\\\\\"\\", (NR>1?\\",\\":\\"\\"), $0} END{printf \\"]\\"}')\\" && aws ssm put-parameter --name /agentx/release/code-history/beta --type String --overwrite --value \\"$HIST_NEW\\" && aws ssm put-parameter --name /agentx/release/code-released/beta --type String --overwrite --value \\"$RELEASED_SOURCE\\"; }; fi"
       ]
     }
   },
@@ -16066,390 +16464,6 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
       },
       "Type": "AWS::IAM::Policy",
     },
-    "CloudSourceActionRole48D7AA73": {
-      "Properties": {
-        "AssumeRolePolicyDocument": {
-          "Statement": [
-            {
-              "Action": "sts:AssumeRole",
-              "Effect": "Allow",
-              "Principal": {
-                "AWS": {
-                  "Fn::Join": [
-                    "",
-                    [
-                      "arn:",
-                      {
-                        "Ref": "AWS::Partition",
-                      },
-                      ":iam::",
-                      {
-                        "Ref": "AWS::AccountId",
-                      },
-                      ":root",
-                    ],
-                  ],
-                },
-              },
-            },
-          ],
-          "Version": "2012-10-17",
-        },
-        "Description": "Reads the Cloud repository through its GitHub connection",
-      },
-      "Type": "AWS::IAM::Role",
-    },
-    "CloudSourceActionRoleDefaultPolicy01EC39A5": {
-      "Properties": {
-        "PolicyDocument": {
-          "Statement": [
-            {
-              "Action": [
-                "codeconnections:UseConnection",
-                "codestar-connections:UseConnection",
-              ],
-              "Effect": "Allow",
-              "Resource": {
-                "Ref": "CloudConnectionArn",
-              },
-            },
-            {
-              "Action": "codestar-connections:UseConnection",
-              "Effect": "Allow",
-              "Resource": {
-                "Ref": "CloudConnectionArn",
-              },
-            },
-            {
-              "Action": [
-                "s3:GetObject*",
-                "s3:GetBucket*",
-                "s3:List*",
-                "s3:DeleteObject*",
-                "s3:PutObject",
-                "s3:PutObjectLegalHold",
-                "s3:PutObjectRetention",
-                "s3:PutObjectTagging",
-                "s3:PutObjectVersionTagging",
-                "s3:Abort*",
-              ],
-              "Effect": "Allow",
-              "Resource": [
-                {
-                  "Fn::GetAtt": [
-                    "Artifacts82DD59A1",
-                    "Arn",
-                  ],
-                },
-                {
-                  "Fn::Join": [
-                    "",
-                    [
-                      {
-                        "Fn::GetAtt": [
-                          "Artifacts82DD59A1",
-                          "Arn",
-                        ],
-                      },
-                      "/*",
-                    ],
-                  ],
-                },
-              ],
-            },
-            {
-              "Action": [
-                "s3:PutObjectAcl",
-                "s3:PutObjectVersionAcl",
-              ],
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    {
-                      "Fn::GetAtt": [
-                        "Artifacts82DD59A1",
-                        "Arn",
-                      ],
-                    },
-                    "/*",
-                  ],
-                ],
-              },
-            },
-          ],
-          "Version": "2012-10-17",
-        },
-        "PolicyName": "CloudSourceActionRoleDefaultPolicy01EC39A5",
-        "Roles": [
-          {
-            "Ref": "CloudSourceActionRole48D7AA73",
-          },
-        ],
-      },
-      "Type": "AWS::IAM::Policy",
-    },
-    "PipelineBetaCloudGatewayCodePipelineActionRoleA68FE313": {
-      "Properties": {
-        "AssumeRolePolicyDocument": {
-          "Statement": [
-            {
-              "Action": "sts:AssumeRole",
-              "Effect": "Allow",
-              "Principal": {
-                "AWS": {
-                  "Fn::GetAtt": [
-                    "PipelineRoleD68726F7",
-                    "Arn",
-                  ],
-                },
-              },
-            },
-          ],
-          "Version": "2012-10-17",
-        },
-      },
-      "Type": "AWS::IAM::Role",
-    },
-    "PipelineBetaCloudGatewayCodePipelineActionRoleDefaultPolicy12A310E5": {
-      "Properties": {
-        "PolicyDocument": {
-          "Statement": [
-            {
-              "Action": [
-                "codebuild:BatchGetBuilds",
-                "codebuild:StartBuild",
-                "codebuild:StopBuild",
-              ],
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
-                    },
-                    ":codebuild:us-east-1:",
-                    {
-                      "Ref": "AWS::AccountId",
-                    },
-                    ":project/",
-                    {
-                      "Ref": "CloudBetaProjectName",
-                    },
-                  ],
-                ],
-              },
-            },
-          ],
-          "Version": "2012-10-17",
-        },
-        "PolicyName": "PipelineBetaCloudGatewayCodePipelineActionRoleDefaultPolicy12A310E5",
-        "Roles": [
-          {
-            "Ref": "PipelineBetaCloudGatewayCodePipelineActionRoleA68FE313",
-          },
-        ],
-      },
-      "Type": "AWS::IAM::Policy",
-    },
-    "PipelineBetaCloudImageCodePipelineActionRoleBF82CDC4": {
-      "Properties": {
-        "AssumeRolePolicyDocument": {
-          "Statement": [
-            {
-              "Action": "sts:AssumeRole",
-              "Effect": "Allow",
-              "Principal": {
-                "AWS": {
-                  "Fn::GetAtt": [
-                    "PipelineRoleD68726F7",
-                    "Arn",
-                  ],
-                },
-              },
-            },
-          ],
-          "Version": "2012-10-17",
-        },
-      },
-      "Type": "AWS::IAM::Role",
-    },
-    "PipelineBetaCloudImageCodePipelineActionRoleDefaultPolicy89675DB6": {
-      "Properties": {
-        "PolicyDocument": {
-          "Statement": [
-            {
-              "Action": [
-                "codebuild:BatchGetBuilds",
-                "codebuild:StartBuild",
-                "codebuild:StopBuild",
-              ],
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
-                    },
-                    ":codebuild:us-east-1:",
-                    {
-                      "Ref": "AWS::AccountId",
-                    },
-                    ":project/",
-                    {
-                      "Ref": "CloudBetaProjectName",
-                    },
-                  ],
-                ],
-              },
-            },
-          ],
-          "Version": "2012-10-17",
-        },
-        "PolicyName": "PipelineBetaCloudImageCodePipelineActionRoleDefaultPolicy89675DB6",
-        "Roles": [
-          {
-            "Ref": "PipelineBetaCloudImageCodePipelineActionRoleBF82CDC4",
-          },
-        ],
-      },
-      "Type": "AWS::IAM::Policy",
-    },
-    "PipelineBetaCloudProofCodePipelineActionRole9624C2C3": {
-      "Properties": {
-        "AssumeRolePolicyDocument": {
-          "Statement": [
-            {
-              "Action": "sts:AssumeRole",
-              "Effect": "Allow",
-              "Principal": {
-                "AWS": {
-                  "Fn::GetAtt": [
-                    "PipelineRoleD68726F7",
-                    "Arn",
-                  ],
-                },
-              },
-            },
-          ],
-          "Version": "2012-10-17",
-        },
-      },
-      "Type": "AWS::IAM::Role",
-    },
-    "PipelineBetaCloudProofCodePipelineActionRoleDefaultPolicyB9FC270E": {
-      "Properties": {
-        "PolicyDocument": {
-          "Statement": [
-            {
-              "Action": [
-                "codebuild:BatchGetBuilds",
-                "codebuild:StartBuild",
-                "codebuild:StopBuild",
-              ],
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
-                    },
-                    ":codebuild:us-east-1:",
-                    {
-                      "Ref": "AWS::AccountId",
-                    },
-                    ":project/",
-                    {
-                      "Ref": "CloudBetaProjectName",
-                    },
-                  ],
-                ],
-              },
-            },
-          ],
-          "Version": "2012-10-17",
-        },
-        "PolicyName": "PipelineBetaCloudProofCodePipelineActionRoleDefaultPolicyB9FC270E",
-        "Roles": [
-          {
-            "Ref": "PipelineBetaCloudProofCodePipelineActionRole9624C2C3",
-          },
-        ],
-      },
-      "Type": "AWS::IAM::Policy",
-    },
-    "PipelineBetaCloudWebAppCodePipelineActionRole009B0E88": {
-      "Properties": {
-        "AssumeRolePolicyDocument": {
-          "Statement": [
-            {
-              "Action": "sts:AssumeRole",
-              "Effect": "Allow",
-              "Principal": {
-                "AWS": {
-                  "Fn::GetAtt": [
-                    "PipelineRoleD68726F7",
-                    "Arn",
-                  ],
-                },
-              },
-            },
-          ],
-          "Version": "2012-10-17",
-        },
-      },
-      "Type": "AWS::IAM::Role",
-    },
-    "PipelineBetaCloudWebAppCodePipelineActionRoleDefaultPolicy53C5E067": {
-      "Properties": {
-        "PolicyDocument": {
-          "Statement": [
-            {
-              "Action": [
-                "codebuild:BatchGetBuilds",
-                "codebuild:StartBuild",
-                "codebuild:StopBuild",
-              ],
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
-                    },
-                    ":codebuild:us-east-1:",
-                    {
-                      "Ref": "AWS::AccountId",
-                    },
-                    ":project/",
-                    {
-                      "Ref": "CloudBetaProjectName",
-                    },
-                  ],
-                ],
-              },
-            },
-          ],
-          "Version": "2012-10-17",
-        },
-        "PolicyName": "PipelineBetaCloudWebAppCodePipelineActionRoleDefaultPolicy53C5E067",
-        "Roles": [
-          {
-            "Ref": "PipelineBetaCloudWebAppCodePipelineActionRole009B0E88",
-          },
-        ],
-      },
-      "Type": "AWS::IAM::Policy",
-    },
     "PipelineBetaCodePreflightCodePipelineActionRoleDefaultPolicyD58CE0CD": {
       "Properties": {
         "PolicyDocument": {
@@ -16502,7 +16516,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
       },
       "Type": "AWS::IAM::Role",
     },
-    "PipelineBetaGatewayCheckCodePipelineActionRole8D5974B0": {
+    "PipelineBetaModelGatewayCheckCodePipelineActionRole93BBAF43": {
       "Properties": {
         "AssumeRolePolicyDocument": {
           "Statement": [
@@ -16524,7 +16538,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
       },
       "Type": "AWS::IAM::Role",
     },
-    "PipelineBetaGatewayCheckCodePipelineActionRoleDefaultPolicyEBA3C212": {
+    "PipelineBetaModelGatewayCheckCodePipelineActionRoleDefaultPolicy45B0C2AD": {
       "Properties": {
         "PolicyDocument": {
           "Statement": [
@@ -16536,38 +16550,25 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
               ],
               "Effect": "Allow",
               "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
-                    },
-                    ":codebuild:us-east-1:",
-                    {
-                      "Ref": "AWS::AccountId",
-                    },
-                    ":project/",
-                    {
-                      "Ref": "CloudBetaProjectName",
-                    },
-                  ],
+                "Fn::GetAtt": [
+                  "BetaModelGatewayBuildE587FFE4",
+                  "Arn",
                 ],
               },
             },
           ],
           "Version": "2012-10-17",
         },
-        "PolicyName": "PipelineBetaGatewayCheckCodePipelineActionRoleDefaultPolicyEBA3C212",
+        "PolicyName": "PipelineBetaModelGatewayCheckCodePipelineActionRoleDefaultPolicy45B0C2AD",
         "Roles": [
           {
-            "Ref": "PipelineBetaGatewayCheckCodePipelineActionRole8D5974B0",
+            "Ref": "PipelineBetaModelGatewayCheckCodePipelineActionRole93BBAF43",
           },
         ],
       },
       "Type": "AWS::IAM::Policy",
     },
-    "PipelineBetaPreflightCodePipelineActionRoleDFF2D06E": {
+    "PipelineBetaModelGatewayDeployCodePipelineActionRole9D5F9B95": {
       "Properties": {
         "AssumeRolePolicyDocument": {
           "Statement": [
@@ -16589,7 +16590,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
       },
       "Type": "AWS::IAM::Role",
     },
-    "PipelineBetaPreflightCodePipelineActionRoleDefaultPolicyCFBB29B8": {
+    "PipelineBetaModelGatewayDeployCodePipelineActionRoleDefaultPolicyB92B9105": {
       "Properties": {
         "PolicyDocument": {
           "Statement": [
@@ -16601,32 +16602,71 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
               ],
               "Effect": "Allow",
               "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
-                    },
-                    ":codebuild:us-east-1:",
-                    {
-                      "Ref": "AWS::AccountId",
-                    },
-                    ":project/",
-                    {
-                      "Ref": "CloudBetaProjectName",
-                    },
-                  ],
+                "Fn::GetAtt": [
+                  "BetaModelGatewayBuildE587FFE4",
+                  "Arn",
                 ],
               },
             },
           ],
           "Version": "2012-10-17",
         },
-        "PolicyName": "PipelineBetaPreflightCodePipelineActionRoleDefaultPolicyCFBB29B8",
+        "PolicyName": "PipelineBetaModelGatewayDeployCodePipelineActionRoleDefaultPolicyB92B9105",
         "Roles": [
           {
-            "Ref": "PipelineBetaPreflightCodePipelineActionRoleDFF2D06E",
+            "Ref": "PipelineBetaModelGatewayDeployCodePipelineActionRole9D5F9B95",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "PipelineBetaModelGatewayImageCodePipelineActionRoleB6FE0C91": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "PipelineRoleD68726F7",
+                    "Arn",
+                  ],
+                },
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "PipelineBetaModelGatewayImageCodePipelineActionRoleDefaultPolicyAA146D08": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "codebuild:BatchGetBuilds",
+                "codebuild:StartBuild",
+                "codebuild:StopBuild",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "BetaModelGatewayBuildE587FFE4",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "PipelineBetaModelGatewayImageCodePipelineActionRoleDefaultPolicyAA146D08",
+        "Roles": [
+          {
+            "Ref": "PipelineBetaModelGatewayImageCodePipelineActionRoleB6FE0C91",
           },
         ],
       },
@@ -16745,51 +16785,6 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                 },
                 "RunOrder": 1,
               },
-              {
-                "ActionTypeId": {
-                  "Category": "Source",
-                  "Owner": "AWS",
-                  "Provider": "CodeStarSourceConnection",
-                  "Version": "1",
-                },
-                "Configuration": {
-                  "BranchName": {
-                    "Ref": "CloudRepoBranch",
-                  },
-                  "ConnectionArn": {
-                    "Ref": "CloudConnectionArn",
-                  },
-                  "FullRepositoryId": {
-                    "Fn::Join": [
-                      "",
-                      [
-                        {
-                          "Ref": "CloudRepoOwner",
-                        },
-                        "/",
-                        {
-                          "Ref": "CloudRepoName",
-                        },
-                      ],
-                    ],
-                  },
-                  "OutputArtifactFormat": "CODEBUILD_CLONE_REF",
-                },
-                "Name": "CloudGitHub",
-                "Namespace": "CloudSourceVariables",
-                "OutputArtifacts": [
-                  {
-                    "Name": "CloudSource",
-                  },
-                ],
-                "RoleArn": {
-                  "Fn::GetAtt": [
-                    "CloudSourceActionRole48D7AA73",
-                    "Arn",
-                  ],
-                },
-                "RunOrder": 1,
-              },
             ],
             "Name": "Source",
           },
@@ -16831,41 +16826,25 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                   "Version": "1",
                 },
                 "Configuration": {
-                  "EnvironmentVariables": {
-                    "Fn::Join": [
-                      "",
-                      [
-                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"beta"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"preflight"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"CODE_CTX","type":"PLAINTEXT","value":"#{BetaCodePreflight.CODE_CTX}"},{"name":"CLOUD_SOURCE_COMMIT","type":"PLAINTEXT","value":"#{CloudSourceVariables.CommitId}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
-                        {
-                          "Ref": "BetaAccountId",
-                        },
-                        ""},{"name":"EXEC_ID","type":"PLAINTEXT","value":"#{codepipeline.PipelineExecutionId}"},{"name":"CODE_SHA","type":"PLAINTEXT","value":"#{CodeSource.CommitId}"}]",
-                      ],
-                    ],
-                  },
-                  "PrimarySource": "CloudSource",
+                  "EnvironmentVariables": "[{"name":"GATEWAY_STAGE_STEP","type":"PLAINTEXT","value":"image"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"CODE_ROLLBACK_TARGET","type":"PLAINTEXT","value":"#{variables.CODE_ROLLBACK_TARGET}"},{"name":"MODEL_GATEWAY_DIGEST","type":"PLAINTEXT","value":"#{variables.MODEL_GATEWAY_DIGEST}"},{"name":"EXEC_ID","type":"PLAINTEXT","value":"#{codepipeline.PipelineExecutionId}"},{"name":"CODE_SHA","type":"PLAINTEXT","value":"#{CodeSource.CommitId}"},{"name":"CODE_LIVE_SHA","type":"PLAINTEXT","value":"#{BetaCodePreflight.CODE_LIVE_SHA}"}]",
                   "ProjectName": {
-                    "Ref": "CloudBetaProjectName",
+                    "Ref": "BetaModelGatewayBuildE587FFE4",
                   },
                 },
                 "InputArtifacts": [
                   {
-                    "Name": "CloudSource",
-                  },
-                  {
                     "Name": "Source",
                   },
                 ],
-                "Name": "Preflight",
-                "Namespace": "BetaPreflight",
+                "Name": "ModelGatewayImage",
                 "OutputArtifacts": [
                   {
-                    "Name": "StateBetaPreflight",
+                    "Name": "GatewayBetaImage",
                   },
                 ],
                 "RoleArn": {
                   "Fn::GetAtt": [
-                    "PipelineBetaPreflightCodePipelineActionRoleDFF2D06E",
+                    "PipelineBetaModelGatewayImageCodePipelineActionRoleB6FE0C91",
                     "Arn",
                   ],
                 },
@@ -16879,43 +16858,29 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                   "Version": "1",
                 },
                 "Configuration": {
-                  "EnvironmentVariables": {
-                    "Fn::Join": [
-                      "",
-                      [
-                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"beta"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"image"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"StateBetaPreflight"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
-                        {
-                          "Ref": "BetaAccountId",
-                        },
-                        ""},{"name":"EXEC_ID","type":"PLAINTEXT","value":"#{codepipeline.PipelineExecutionId}"},{"name":"CODE_SHA","type":"PLAINTEXT","value":"#{CodeSource.CommitId}"}]",
-                      ],
-                    ],
-                  },
-                  "PrimarySource": "CloudSource",
+                  "EnvironmentVariables": "[{"name":"GATEWAY_STAGE_STEP","type":"PLAINTEXT","value":"deploy"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"GatewayBetaImage"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"CODE_ROLLBACK_TARGET","type":"PLAINTEXT","value":"#{variables.CODE_ROLLBACK_TARGET}"},{"name":"MODEL_GATEWAY_DIGEST","type":"PLAINTEXT","value":"#{variables.MODEL_GATEWAY_DIGEST}"},{"name":"EXEC_ID","type":"PLAINTEXT","value":"#{codepipeline.PipelineExecutionId}"},{"name":"CODE_SHA","type":"PLAINTEXT","value":"#{CodeSource.CommitId}"},{"name":"CODE_LIVE_SHA","type":"PLAINTEXT","value":"#{BetaCodePreflight.CODE_LIVE_SHA}"}]",
+                  "PrimarySource": "Source",
                   "ProjectName": {
-                    "Ref": "CloudBetaProjectName",
+                    "Ref": "BetaModelGatewayBuildE587FFE4",
                   },
                 },
                 "InputArtifacts": [
                   {
-                    "Name": "CloudSource",
-                  },
-                  {
                     "Name": "Source",
                   },
                   {
-                    "Name": "StateBetaPreflight",
+                    "Name": "GatewayBetaImage",
                   },
                 ],
-                "Name": "CloudImage",
+                "Name": "ModelGatewayDeploy",
                 "OutputArtifacts": [
                   {
-                    "Name": "StateBetaCloudImage",
+                    "Name": "GatewayBetaDeploy",
                   },
                 ],
                 "RoleArn": {
                   "Fn::GetAtt": [
-                    "PipelineBetaCloudImageCodePipelineActionRoleBF82CDC4",
+                    "PipelineBetaModelGatewayDeployCodePipelineActionRole9D5F9B95",
                     "Arn",
                   ],
                 },
@@ -16929,43 +16894,29 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                   "Version": "1",
                 },
                 "Configuration": {
-                  "EnvironmentVariables": {
-                    "Fn::Join": [
-                      "",
-                      [
-                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"beta"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"gateway"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"StateBetaCloudImage"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
-                        {
-                          "Ref": "BetaAccountId",
-                        },
-                        ""},{"name":"EXEC_ID","type":"PLAINTEXT","value":"#{codepipeline.PipelineExecutionId}"},{"name":"CODE_SHA","type":"PLAINTEXT","value":"#{CodeSource.CommitId}"}]",
-                      ],
-                    ],
-                  },
-                  "PrimarySource": "CloudSource",
+                  "EnvironmentVariables": "[{"name":"GATEWAY_STAGE_STEP","type":"PLAINTEXT","value":"check"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"GatewayBetaDeploy"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"CODE_ROLLBACK_TARGET","type":"PLAINTEXT","value":"#{variables.CODE_ROLLBACK_TARGET}"},{"name":"MODEL_GATEWAY_DIGEST","type":"PLAINTEXT","value":"#{variables.MODEL_GATEWAY_DIGEST}"},{"name":"EXEC_ID","type":"PLAINTEXT","value":"#{codepipeline.PipelineExecutionId}"},{"name":"CODE_SHA","type":"PLAINTEXT","value":"#{CodeSource.CommitId}"},{"name":"CODE_LIVE_SHA","type":"PLAINTEXT","value":"#{BetaCodePreflight.CODE_LIVE_SHA}"}]",
+                  "PrimarySource": "Source",
                   "ProjectName": {
-                    "Ref": "CloudBetaProjectName",
+                    "Ref": "BetaModelGatewayBuildE587FFE4",
                   },
                 },
                 "InputArtifacts": [
                   {
-                    "Name": "CloudSource",
-                  },
-                  {
                     "Name": "Source",
                   },
                   {
-                    "Name": "StateBetaCloudImage",
+                    "Name": "GatewayBetaDeploy",
                   },
                 ],
-                "Name": "CloudGateway",
+                "Name": "ModelGatewayCheck",
                 "OutputArtifacts": [
                   {
-                    "Name": "StateBetaCloudGateway",
+                    "Name": "GatewayBetaCheck",
                   },
                 ],
                 "RoleArn": {
                   "Fn::GetAtt": [
-                    "PipelineBetaCloudGatewayCodePipelineActionRoleA68FE313",
+                    "PipelineBetaModelGatewayCheckCodePipelineActionRole93BBAF43",
                     "Arn",
                   ],
                 },
@@ -16979,57 +16930,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                   "Version": "1",
                 },
                 "Configuration": {
-                  "EnvironmentVariables": {
-                    "Fn::Join": [
-                      "",
-                      [
-                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"beta"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"gateway-check"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"StateBetaCloudGateway"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
-                        {
-                          "Ref": "BetaAccountId",
-                        },
-                        ""},{"name":"EXEC_ID","type":"PLAINTEXT","value":"#{codepipeline.PipelineExecutionId}"},{"name":"CODE_SHA","type":"PLAINTEXT","value":"#{CodeSource.CommitId}"}]",
-                      ],
-                    ],
-                  },
-                  "PrimarySource": "CloudSource",
-                  "ProjectName": {
-                    "Ref": "CloudBetaProjectName",
-                  },
-                },
-                "InputArtifacts": [
-                  {
-                    "Name": "CloudSource",
-                  },
-                  {
-                    "Name": "Source",
-                  },
-                  {
-                    "Name": "StateBetaCloudGateway",
-                  },
-                ],
-                "Name": "GatewayCheck",
-                "OutputArtifacts": [
-                  {
-                    "Name": "StateBetaGatewayCheck",
-                  },
-                ],
-                "RoleArn": {
-                  "Fn::GetAtt": [
-                    "PipelineBetaGatewayCheckCodePipelineActionRole8D5974B0",
-                    "Arn",
-                  ],
-                },
-                "RunOrder": 5,
-              },
-              {
-                "ActionTypeId": {
-                  "Category": "Build",
-                  "Owner": "AWS",
-                  "Provider": "CodeBuild",
-                  "Version": "1",
-                },
-                "Configuration": {
-                  "EnvironmentVariables": "[{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{BetaPreflight.CODE_RELEASE_EFFECTIVE}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"CODE_ROLLBACK_TARGET","type":"PLAINTEXT","value":"#{variables.CODE_ROLLBACK_TARGET}"}]",
+                  "EnvironmentVariables": "[{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"CODE_ROLLBACK_TARGET","type":"PLAINTEXT","value":"#{variables.CODE_ROLLBACK_TARGET}"}]",
                   "ProjectName": {
                     "Ref": "BetaReleaseBuild11A90FDF",
                   },
@@ -17051,107 +16952,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Arn",
                   ],
                 },
-                "RunOrder": 6,
-              },
-              {
-                "ActionTypeId": {
-                  "Category": "Build",
-                  "Owner": "AWS",
-                  "Provider": "CodeBuild",
-                  "Version": "1",
-                },
-                "Configuration": {
-                  "EnvironmentVariables": {
-                    "Fn::Join": [
-                      "",
-                      [
-                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"beta"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"web-app"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"StateBetaGatewayCheck"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
-                        {
-                          "Ref": "BetaAccountId",
-                        },
-                        ""},{"name":"EXEC_ID","type":"PLAINTEXT","value":"#{codepipeline.PipelineExecutionId}"},{"name":"CODE_SHA","type":"PLAINTEXT","value":"#{CodeSource.CommitId}"}]",
-                      ],
-                    ],
-                  },
-                  "PrimarySource": "CloudSource",
-                  "ProjectName": {
-                    "Ref": "CloudBetaProjectName",
-                  },
-                },
-                "InputArtifacts": [
-                  {
-                    "Name": "CloudSource",
-                  },
-                  {
-                    "Name": "Source",
-                  },
-                  {
-                    "Name": "StateBetaGatewayCheck",
-                  },
-                ],
-                "Name": "CloudWebApp",
-                "OutputArtifacts": [
-                  {
-                    "Name": "StateBetaCloudWebApp",
-                  },
-                ],
-                "RoleArn": {
-                  "Fn::GetAtt": [
-                    "PipelineBetaCloudWebAppCodePipelineActionRole009B0E88",
-                    "Arn",
-                  ],
-                },
-                "RunOrder": 7,
-              },
-              {
-                "ActionTypeId": {
-                  "Category": "Build",
-                  "Owner": "AWS",
-                  "Provider": "CodeBuild",
-                  "Version": "1",
-                },
-                "Configuration": {
-                  "EnvironmentVariables": {
-                    "Fn::Join": [
-                      "",
-                      [
-                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"beta"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"proof"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"StateBetaCloudWebApp"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
-                        {
-                          "Ref": "BetaAccountId",
-                        },
-                        ""},{"name":"EXEC_ID","type":"PLAINTEXT","value":"#{codepipeline.PipelineExecutionId}"},{"name":"CODE_SHA","type":"PLAINTEXT","value":"#{CodeSource.CommitId}"}]",
-                      ],
-                    ],
-                  },
-                  "PrimarySource": "CloudSource",
-                  "ProjectName": {
-                    "Ref": "CloudBetaProjectName",
-                  },
-                },
-                "InputArtifacts": [
-                  {
-                    "Name": "CloudSource",
-                  },
-                  {
-                    "Name": "Source",
-                  },
-                  {
-                    "Name": "StateBetaCloudWebApp",
-                  },
-                ],
-                "Name": "CloudProof",
-                "OutputArtifacts": [
-                  {
-                    "Name": "StateBetaCloudProof",
-                  },
-                ],
-                "RoleArn": {
-                  "Fn::GetAtt": [
-                    "PipelineBetaCloudProofCodePipelineActionRole9624C2C3",
-                    "Arn",
-                  ],
-                },
-                "RunOrder": 8,
+                "RunOrder": 5,
               },
             ],
             "Name": "Beta",
@@ -17194,7 +16995,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                   "Version": "1",
                 },
                 "Configuration": {
-                  "CustomData": "Approve THIS run only: pipeline execution #{codepipeline.PipelineExecutionId}. Production releases Code commit #{CodeSource.CommitId} with the Cloud source commit of this run, #{CloudSourceVariables.CommitId}. Cloud ref #{variables.CLOUD_REF}, Cloud production #{variables.CLOUD_PROD}, Code release #{variables.CODE_RELEASE} (from-trigger: a Cloud tag run releases Cloud only, a Code push releases Code), mode #{variables.PIPELINE_MODE}, rollback target #{variables.CODE_ROLLBACK_TARGET}. The Cloud tag Beta resolved and deployed, and whether Code was released or skipped, are in Beta's Preflight log: check them before you approve. Reject any run that is not the one you meant to release.",
+                  "CustomData": "Approve THIS run only: pipeline execution #{codepipeline.PipelineExecutionId}. Production releases Code commit #{CodeSource.CommitId} and its model gateway (using Beta's exact image digest). Code release #{variables.CODE_RELEASE}, mode #{variables.PIPELINE_MODE}, rollback target #{variables.CODE_ROLLBACK_TARGET}, gateway digest #{variables.MODEL_GATEWAY_DIGEST}. Check Beta's logs before you approve. Reject any run that is not the one you meant to release.",
                 },
                 "Name": "ApproveProduction",
                 "RoleArn": {
@@ -17214,44 +17015,29 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                   "Version": "1",
                 },
                 "Configuration": {
-                  "EnvironmentVariables": {
-                    "Fn::Join": [
-                      "",
-                      [
-                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"production"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"preflight"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"StateBetaCloudProof"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"CODE_CTX","type":"PLAINTEXT","value":"#{ProductionCodePreflight.CODE_CTX}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
-                        {
-                          "Ref": "AWS::AccountId",
-                        },
-                        ""},{"name":"EXEC_ID","type":"PLAINTEXT","value":"#{codepipeline.PipelineExecutionId}"},{"name":"CODE_SHA","type":"PLAINTEXT","value":"#{CodeSource.CommitId}"}]",
-                      ],
-                    ],
-                  },
-                  "PrimarySource": "CloudSource",
+                  "EnvironmentVariables": "[{"name":"GATEWAY_STAGE_STEP","type":"PLAINTEXT","value":"image"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"GatewayBetaCheck"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"CODE_ROLLBACK_TARGET","type":"PLAINTEXT","value":"#{variables.CODE_ROLLBACK_TARGET}"},{"name":"MODEL_GATEWAY_DIGEST","type":"PLAINTEXT","value":"#{variables.MODEL_GATEWAY_DIGEST}"},{"name":"EXEC_ID","type":"PLAINTEXT","value":"#{codepipeline.PipelineExecutionId}"},{"name":"CODE_SHA","type":"PLAINTEXT","value":"#{CodeSource.CommitId}"},{"name":"CODE_LIVE_SHA","type":"PLAINTEXT","value":"#{ProductionCodePreflight.CODE_LIVE_SHA}"}]",
+                  "PrimarySource": "Source",
                   "ProjectName": {
-                    "Ref": "CloudProductionProjectName",
+                    "Ref": "ProductionModelGatewayBuildAF0BF63A",
                   },
                 },
                 "InputArtifacts": [
                   {
-                    "Name": "CloudSource",
-                  },
-                  {
                     "Name": "Source",
                   },
                   {
-                    "Name": "StateBetaCloudProof",
+                    "Name": "GatewayBetaCheck",
                   },
                 ],
-                "Name": "Preflight",
-                "Namespace": "ProductionPreflight",
+                "Name": "ModelGatewayImage",
                 "OutputArtifacts": [
                   {
-                    "Name": "StateProdPreflight",
+                    "Name": "GatewayProdImage",
                   },
                 ],
                 "RoleArn": {
                   "Fn::GetAtt": [
-                    "PipelineProductionPreflightCodePipelineActionRole732673C6",
+                    "PipelineProductionModelGatewayImageCodePipelineActionRole6CF3E4CD",
                     "Arn",
                   ],
                 },
@@ -17265,43 +17051,29 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                   "Version": "1",
                 },
                 "Configuration": {
-                  "EnvironmentVariables": {
-                    "Fn::Join": [
-                      "",
-                      [
-                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"production"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"image"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"StateProdPreflight"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
-                        {
-                          "Ref": "AWS::AccountId",
-                        },
-                        ""},{"name":"EXEC_ID","type":"PLAINTEXT","value":"#{codepipeline.PipelineExecutionId}"},{"name":"CODE_SHA","type":"PLAINTEXT","value":"#{CodeSource.CommitId}"}]",
-                      ],
-                    ],
-                  },
-                  "PrimarySource": "CloudSource",
+                  "EnvironmentVariables": "[{"name":"GATEWAY_STAGE_STEP","type":"PLAINTEXT","value":"deploy"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"GatewayProdImage"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"CODE_ROLLBACK_TARGET","type":"PLAINTEXT","value":"#{variables.CODE_ROLLBACK_TARGET}"},{"name":"MODEL_GATEWAY_DIGEST","type":"PLAINTEXT","value":"#{variables.MODEL_GATEWAY_DIGEST}"},{"name":"EXEC_ID","type":"PLAINTEXT","value":"#{codepipeline.PipelineExecutionId}"},{"name":"CODE_SHA","type":"PLAINTEXT","value":"#{CodeSource.CommitId}"},{"name":"CODE_LIVE_SHA","type":"PLAINTEXT","value":"#{ProductionCodePreflight.CODE_LIVE_SHA}"}]",
+                  "PrimarySource": "Source",
                   "ProjectName": {
-                    "Ref": "CloudProductionProjectName",
+                    "Ref": "ProductionModelGatewayBuildAF0BF63A",
                   },
                 },
                 "InputArtifacts": [
                   {
-                    "Name": "CloudSource",
-                  },
-                  {
                     "Name": "Source",
                   },
                   {
-                    "Name": "StateProdPreflight",
+                    "Name": "GatewayProdImage",
                   },
                 ],
-                "Name": "CloudImage",
+                "Name": "ModelGatewayDeploy",
                 "OutputArtifacts": [
                   {
-                    "Name": "StateProdCloudImage",
+                    "Name": "GatewayProdDeploy",
                   },
                 ],
                 "RoleArn": {
                   "Fn::GetAtt": [
-                    "PipelineProductionCloudImageCodePipelineActionRole313C4D9C",
+                    "PipelineProductionModelGatewayDeployCodePipelineActionRole0A6D447C",
                     "Arn",
                   ],
                 },
@@ -17315,43 +17087,29 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                   "Version": "1",
                 },
                 "Configuration": {
-                  "EnvironmentVariables": {
-                    "Fn::Join": [
-                      "",
-                      [
-                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"production"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"gateway"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"StateProdCloudImage"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
-                        {
-                          "Ref": "AWS::AccountId",
-                        },
-                        ""},{"name":"EXEC_ID","type":"PLAINTEXT","value":"#{codepipeline.PipelineExecutionId}"},{"name":"CODE_SHA","type":"PLAINTEXT","value":"#{CodeSource.CommitId}"}]",
-                      ],
-                    ],
-                  },
-                  "PrimarySource": "CloudSource",
+                  "EnvironmentVariables": "[{"name":"GATEWAY_STAGE_STEP","type":"PLAINTEXT","value":"check"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"GatewayProdDeploy"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"CODE_ROLLBACK_TARGET","type":"PLAINTEXT","value":"#{variables.CODE_ROLLBACK_TARGET}"},{"name":"MODEL_GATEWAY_DIGEST","type":"PLAINTEXT","value":"#{variables.MODEL_GATEWAY_DIGEST}"},{"name":"EXEC_ID","type":"PLAINTEXT","value":"#{codepipeline.PipelineExecutionId}"},{"name":"CODE_SHA","type":"PLAINTEXT","value":"#{CodeSource.CommitId}"},{"name":"CODE_LIVE_SHA","type":"PLAINTEXT","value":"#{ProductionCodePreflight.CODE_LIVE_SHA}"}]",
+                  "PrimarySource": "Source",
                   "ProjectName": {
-                    "Ref": "CloudProductionProjectName",
+                    "Ref": "ProductionModelGatewayBuildAF0BF63A",
                   },
                 },
                 "InputArtifacts": [
                   {
-                    "Name": "CloudSource",
-                  },
-                  {
                     "Name": "Source",
                   },
                   {
-                    "Name": "StateProdCloudImage",
+                    "Name": "GatewayProdDeploy",
                   },
                 ],
-                "Name": "CloudGateway",
+                "Name": "ModelGatewayCheck",
                 "OutputArtifacts": [
                   {
-                    "Name": "StateProdCloudGateway",
+                    "Name": "GatewayProdCheck",
                   },
                 ],
                 "RoleArn": {
                   "Fn::GetAtt": [
-                    "PipelineProductionCloudGatewayCodePipelineActionRole3C55E799",
+                    "PipelineProductionModelGatewayCheckCodePipelineActionRole0BDD63BD",
                     "Arn",
                   ],
                 },
@@ -17365,57 +17123,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                   "Version": "1",
                 },
                 "Configuration": {
-                  "EnvironmentVariables": {
-                    "Fn::Join": [
-                      "",
-                      [
-                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"production"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"gateway-check"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"StateProdCloudGateway"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
-                        {
-                          "Ref": "AWS::AccountId",
-                        },
-                        ""},{"name":"EXEC_ID","type":"PLAINTEXT","value":"#{codepipeline.PipelineExecutionId}"},{"name":"CODE_SHA","type":"PLAINTEXT","value":"#{CodeSource.CommitId}"}]",
-                      ],
-                    ],
-                  },
-                  "PrimarySource": "CloudSource",
-                  "ProjectName": {
-                    "Ref": "CloudProductionProjectName",
-                  },
-                },
-                "InputArtifacts": [
-                  {
-                    "Name": "CloudSource",
-                  },
-                  {
-                    "Name": "Source",
-                  },
-                  {
-                    "Name": "StateProdCloudGateway",
-                  },
-                ],
-                "Name": "GatewayCheck",
-                "OutputArtifacts": [
-                  {
-                    "Name": "StateProdGatewayCheck",
-                  },
-                ],
-                "RoleArn": {
-                  "Fn::GetAtt": [
-                    "PipelineProductionGatewayCheckCodePipelineActionRole2C500DE0",
-                    "Arn",
-                  ],
-                },
-                "RunOrder": 6,
-              },
-              {
-                "ActionTypeId": {
-                  "Category": "Build",
-                  "Owner": "AWS",
-                  "Provider": "CodeBuild",
-                  "Version": "1",
-                },
-                "Configuration": {
-                  "EnvironmentVariables": "[{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{ProductionPreflight.CODE_RELEASE_EFFECTIVE}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"CODE_ROLLBACK_TARGET","type":"PLAINTEXT","value":"#{variables.CODE_ROLLBACK_TARGET}"}]",
+                  "EnvironmentVariables": "[{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"CODE_ROLLBACK_TARGET","type":"PLAINTEXT","value":"#{variables.CODE_ROLLBACK_TARGET}"}]",
                   "ProjectName": {
                     "Ref": "ReleaseBuild2D3CBBB5",
                   },
@@ -17437,107 +17145,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Arn",
                   ],
                 },
-                "RunOrder": 7,
-              },
-              {
-                "ActionTypeId": {
-                  "Category": "Build",
-                  "Owner": "AWS",
-                  "Provider": "CodeBuild",
-                  "Version": "1",
-                },
-                "Configuration": {
-                  "EnvironmentVariables": {
-                    "Fn::Join": [
-                      "",
-                      [
-                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"production"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"web-app"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"StateProdGatewayCheck"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
-                        {
-                          "Ref": "AWS::AccountId",
-                        },
-                        ""},{"name":"EXEC_ID","type":"PLAINTEXT","value":"#{codepipeline.PipelineExecutionId}"},{"name":"CODE_SHA","type":"PLAINTEXT","value":"#{CodeSource.CommitId}"}]",
-                      ],
-                    ],
-                  },
-                  "PrimarySource": "CloudSource",
-                  "ProjectName": {
-                    "Ref": "CloudProductionProjectName",
-                  },
-                },
-                "InputArtifacts": [
-                  {
-                    "Name": "CloudSource",
-                  },
-                  {
-                    "Name": "Source",
-                  },
-                  {
-                    "Name": "StateProdGatewayCheck",
-                  },
-                ],
-                "Name": "CloudWebApp",
-                "OutputArtifacts": [
-                  {
-                    "Name": "StateProdCloudWebApp",
-                  },
-                ],
-                "RoleArn": {
-                  "Fn::GetAtt": [
-                    "PipelineProductionCloudWebAppCodePipelineActionRole51A391B8",
-                    "Arn",
-                  ],
-                },
-                "RunOrder": 8,
-              },
-              {
-                "ActionTypeId": {
-                  "Category": "Build",
-                  "Owner": "AWS",
-                  "Provider": "CodeBuild",
-                  "Version": "1",
-                },
-                "Configuration": {
-                  "EnvironmentVariables": {
-                    "Fn::Join": [
-                      "",
-                      [
-                        "[{"name":"STAGE_ENV","type":"PLAINTEXT","value":"production"},{"name":"STAGE_STEP","type":"PLAINTEXT","value":"proof"},{"name":"PIPELINE_STATE_ARTIFACT","type":"PLAINTEXT","value":"StateProdCloudWebApp"},{"name":"CLOUD_REF","type":"PLAINTEXT","value":"#{variables.CLOUD_REF}"},{"name":"CODE_RELEASE","type":"PLAINTEXT","value":"#{variables.CODE_RELEASE}"},{"name":"CLOUD_PROD","type":"PLAINTEXT","value":"#{variables.CLOUD_PROD}"},{"name":"PIPELINE_MODE","type":"PLAINTEXT","value":"#{variables.PIPELINE_MODE}"},{"name":"ROVARA_EXPECTED_DEPLOY_ACCOUNT","type":"PLAINTEXT","value":"",
-                        {
-                          "Ref": "AWS::AccountId",
-                        },
-                        ""},{"name":"EXEC_ID","type":"PLAINTEXT","value":"#{codepipeline.PipelineExecutionId}"},{"name":"CODE_SHA","type":"PLAINTEXT","value":"#{CodeSource.CommitId}"}]",
-                      ],
-                    ],
-                  },
-                  "PrimarySource": "CloudSource",
-                  "ProjectName": {
-                    "Ref": "CloudProductionProjectName",
-                  },
-                },
-                "InputArtifacts": [
-                  {
-                    "Name": "CloudSource",
-                  },
-                  {
-                    "Name": "Source",
-                  },
-                  {
-                    "Name": "StateProdCloudWebApp",
-                  },
-                ],
-                "Name": "CloudProof",
-                "OutputArtifacts": [
-                  {
-                    "Name": "StateProdCloudProof",
-                  },
-                ],
-                "RoleArn": {
-                  "Fn::GetAtt": [
-                    "PipelineProductionCloudProofCodePipelineActionRole0D750651",
-                    "Arn",
-                  ],
-                },
-                "RunOrder": 9,
+                "RunOrder": 6,
               },
             ],
             "Name": "Production",
@@ -17557,7 +17165,9 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                     "Includes": [
                       "environments/**",
                       "infra/**",
-                      "packages/{broker,cli,code-api,contracts,gateway,local-adapters,mcp,model-runtime,orchestrator,slack-service,verifier,worker}/**",
+                      "packages/{broker,cli,code-api,contracts,gateway,local-adapters,mcp,model-gateway,model-runtime,orchestrator,slack-service,verifier,worker}/**",
+                      "scripts/model-gateway-image.ts",
+                      "scripts/model-gateway-release/**",
                       "upstream/e2e-0.20.0.tgz",
                       "{package.json,package-lock.json,tsconfig.json,tsconfig.base.json,.dockerignore}",
                     ],
@@ -17568,50 +17178,27 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
             },
             "ProviderType": "CodeStarSourceConnection",
           },
-          {
-            "GitConfiguration": {
-              "Push": [
-                {
-                  "Tags": {
-                    "Excludes": [
-                      "v*-*",
-                    ],
-                    "Includes": [
-                      "v*.*.*",
-                    ],
-                  },
-                },
-              ],
-              "SourceActionName": "CloudGitHub",
-            },
-            "ProviderType": "CodeStarSourceConnection",
-          },
         ],
         "Variables": [
           {
-            "DefaultValue": "from-trigger",
-            "Description": "Cloud tag (vX.Y.Z); from-trigger (triggered runs) is the one tag on the Cloud commit, else refuse; latest: newest tag, manual runs. An older tag is a Cloud rollback",
-            "Name": "CLOUD_REF",
-          },
-          {
-            "DefaultValue": "from-trigger",
-            "Description": "from-trigger: a Cloud tag push releases Cloud only, a Code push releases Code; by hand name run or skip. Preflight may force skip, never run",
+            "DefaultValue": "run",
+            "Description": "run (default: triggered pushes release Code and the model gateway); skip (manual runs) skips deploying both",
             "Name": "CODE_RELEASE",
           },
           {
-            "DefaultValue": "off",
-            "Description": "off (default: no trigger deploys production Cloud) leaves it as it is; on deploys Cloud in the Production stage. Set on for the run that promotes (per run, not a switch)",
-            "Name": "CLOUD_PROD",
-          },
-          {
             "DefaultValue": "release",
-            "Description": "release deploys; adopt only checks and changes nothing (run it once per environment first); rollback deploys an earlier released Code commit (CODE_ROLLBACK_TARGET) and/or an older Cloud tag",
+            "Description": "release deploys; adopt checks the live model gateway against Code records and changes nothing; rollback deploys an earlier Code commit and/or recorded gateway digest",
             "Name": "PIPELINE_MODE",
           },
           {
             "DefaultValue": "none",
-            "Description": "With PIPELINE_MODE=rollback: the 40-character Code commit to deploy; it must be in the stage release history. none leaves Code alone; any other mode requires none",
+            "Description": "With PIPELINE_MODE=rollback: the 40-character Code commit to deploy (must be in the stage release history). none leaves Code alone; any other mode requires none",
             "Name": "CODE_ROLLBACK_TARGET",
+          },
+          {
+            "DefaultValue": "none",
+            "Description": "With PIPELINE_MODE=rollback: the recorded sha256:... model gateway digest to deploy in Beta (none resolves from CODE_ROLLBACK_TARGET). Any other mode requires none",
+            "Name": "MODEL_GATEWAY_DIGEST",
           },
         ],
       },
@@ -17638,266 +17225,6 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
         },
       },
       "Type": "AWS::IAM::Role",
-    },
-    "PipelineProductionCloudGatewayCodePipelineActionRole3C55E799": {
-      "Properties": {
-        "AssumeRolePolicyDocument": {
-          "Statement": [
-            {
-              "Action": "sts:AssumeRole",
-              "Effect": "Allow",
-              "Principal": {
-                "AWS": {
-                  "Fn::GetAtt": [
-                    "PipelineRoleD68726F7",
-                    "Arn",
-                  ],
-                },
-              },
-            },
-          ],
-          "Version": "2012-10-17",
-        },
-      },
-      "Type": "AWS::IAM::Role",
-    },
-    "PipelineProductionCloudGatewayCodePipelineActionRoleDefaultPolicy17DE4A47": {
-      "Properties": {
-        "PolicyDocument": {
-          "Statement": [
-            {
-              "Action": [
-                "codebuild:BatchGetBuilds",
-                "codebuild:StartBuild",
-                "codebuild:StopBuild",
-              ],
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
-                    },
-                    ":codebuild:us-east-1:",
-                    {
-                      "Ref": "AWS::AccountId",
-                    },
-                    ":project/",
-                    {
-                      "Ref": "CloudProductionProjectName",
-                    },
-                  ],
-                ],
-              },
-            },
-          ],
-          "Version": "2012-10-17",
-        },
-        "PolicyName": "PipelineProductionCloudGatewayCodePipelineActionRoleDefaultPolicy17DE4A47",
-        "Roles": [
-          {
-            "Ref": "PipelineProductionCloudGatewayCodePipelineActionRole3C55E799",
-          },
-        ],
-      },
-      "Type": "AWS::IAM::Policy",
-    },
-    "PipelineProductionCloudImageCodePipelineActionRole313C4D9C": {
-      "Properties": {
-        "AssumeRolePolicyDocument": {
-          "Statement": [
-            {
-              "Action": "sts:AssumeRole",
-              "Effect": "Allow",
-              "Principal": {
-                "AWS": {
-                  "Fn::GetAtt": [
-                    "PipelineRoleD68726F7",
-                    "Arn",
-                  ],
-                },
-              },
-            },
-          ],
-          "Version": "2012-10-17",
-        },
-      },
-      "Type": "AWS::IAM::Role",
-    },
-    "PipelineProductionCloudImageCodePipelineActionRoleDefaultPolicyAB4EB4A6": {
-      "Properties": {
-        "PolicyDocument": {
-          "Statement": [
-            {
-              "Action": [
-                "codebuild:BatchGetBuilds",
-                "codebuild:StartBuild",
-                "codebuild:StopBuild",
-              ],
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
-                    },
-                    ":codebuild:us-east-1:",
-                    {
-                      "Ref": "AWS::AccountId",
-                    },
-                    ":project/",
-                    {
-                      "Ref": "CloudProductionProjectName",
-                    },
-                  ],
-                ],
-              },
-            },
-          ],
-          "Version": "2012-10-17",
-        },
-        "PolicyName": "PipelineProductionCloudImageCodePipelineActionRoleDefaultPolicyAB4EB4A6",
-        "Roles": [
-          {
-            "Ref": "PipelineProductionCloudImageCodePipelineActionRole313C4D9C",
-          },
-        ],
-      },
-      "Type": "AWS::IAM::Policy",
-    },
-    "PipelineProductionCloudProofCodePipelineActionRole0D750651": {
-      "Properties": {
-        "AssumeRolePolicyDocument": {
-          "Statement": [
-            {
-              "Action": "sts:AssumeRole",
-              "Effect": "Allow",
-              "Principal": {
-                "AWS": {
-                  "Fn::GetAtt": [
-                    "PipelineRoleD68726F7",
-                    "Arn",
-                  ],
-                },
-              },
-            },
-          ],
-          "Version": "2012-10-17",
-        },
-      },
-      "Type": "AWS::IAM::Role",
-    },
-    "PipelineProductionCloudProofCodePipelineActionRoleDefaultPolicyB6A34F4E": {
-      "Properties": {
-        "PolicyDocument": {
-          "Statement": [
-            {
-              "Action": [
-                "codebuild:BatchGetBuilds",
-                "codebuild:StartBuild",
-                "codebuild:StopBuild",
-              ],
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
-                    },
-                    ":codebuild:us-east-1:",
-                    {
-                      "Ref": "AWS::AccountId",
-                    },
-                    ":project/",
-                    {
-                      "Ref": "CloudProductionProjectName",
-                    },
-                  ],
-                ],
-              },
-            },
-          ],
-          "Version": "2012-10-17",
-        },
-        "PolicyName": "PipelineProductionCloudProofCodePipelineActionRoleDefaultPolicyB6A34F4E",
-        "Roles": [
-          {
-            "Ref": "PipelineProductionCloudProofCodePipelineActionRole0D750651",
-          },
-        ],
-      },
-      "Type": "AWS::IAM::Policy",
-    },
-    "PipelineProductionCloudWebAppCodePipelineActionRole51A391B8": {
-      "Properties": {
-        "AssumeRolePolicyDocument": {
-          "Statement": [
-            {
-              "Action": "sts:AssumeRole",
-              "Effect": "Allow",
-              "Principal": {
-                "AWS": {
-                  "Fn::GetAtt": [
-                    "PipelineRoleD68726F7",
-                    "Arn",
-                  ],
-                },
-              },
-            },
-          ],
-          "Version": "2012-10-17",
-        },
-      },
-      "Type": "AWS::IAM::Role",
-    },
-    "PipelineProductionCloudWebAppCodePipelineActionRoleDefaultPolicy698E9FB1": {
-      "Properties": {
-        "PolicyDocument": {
-          "Statement": [
-            {
-              "Action": [
-                "codebuild:BatchGetBuilds",
-                "codebuild:StartBuild",
-                "codebuild:StopBuild",
-              ],
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
-                    },
-                    ":codebuild:us-east-1:",
-                    {
-                      "Ref": "AWS::AccountId",
-                    },
-                    ":project/",
-                    {
-                      "Ref": "CloudProductionProjectName",
-                    },
-                  ],
-                ],
-              },
-            },
-          ],
-          "Version": "2012-10-17",
-        },
-        "PolicyName": "PipelineProductionCloudWebAppCodePipelineActionRoleDefaultPolicy698E9FB1",
-        "Roles": [
-          {
-            "Ref": "PipelineProductionCloudWebAppCodePipelineActionRole51A391B8",
-          },
-        ],
-      },
-      "Type": "AWS::IAM::Policy",
     },
     "PipelineProductionCodePreflightCodePipelineActionRoleB8F8D739": {
       "Properties": {
@@ -17951,7 +17278,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
       },
       "Type": "AWS::IAM::Policy",
     },
-    "PipelineProductionGatewayCheckCodePipelineActionRole2C500DE0": {
+    "PipelineProductionModelGatewayCheckCodePipelineActionRole0BDD63BD": {
       "Properties": {
         "AssumeRolePolicyDocument": {
           "Statement": [
@@ -17973,7 +17300,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
       },
       "Type": "AWS::IAM::Role",
     },
-    "PipelineProductionGatewayCheckCodePipelineActionRoleDefaultPolicyE6CDB338": {
+    "PipelineProductionModelGatewayCheckCodePipelineActionRoleDefaultPolicyE56F228A": {
       "Properties": {
         "PolicyDocument": {
           "Statement": [
@@ -17985,38 +17312,25 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
               ],
               "Effect": "Allow",
               "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
-                    },
-                    ":codebuild:us-east-1:",
-                    {
-                      "Ref": "AWS::AccountId",
-                    },
-                    ":project/",
-                    {
-                      "Ref": "CloudProductionProjectName",
-                    },
-                  ],
+                "Fn::GetAtt": [
+                  "ProductionModelGatewayBuildAF0BF63A",
+                  "Arn",
                 ],
               },
             },
           ],
           "Version": "2012-10-17",
         },
-        "PolicyName": "PipelineProductionGatewayCheckCodePipelineActionRoleDefaultPolicyE6CDB338",
+        "PolicyName": "PipelineProductionModelGatewayCheckCodePipelineActionRoleDefaultPolicyE56F228A",
         "Roles": [
           {
-            "Ref": "PipelineProductionGatewayCheckCodePipelineActionRole2C500DE0",
+            "Ref": "PipelineProductionModelGatewayCheckCodePipelineActionRole0BDD63BD",
           },
         ],
       },
       "Type": "AWS::IAM::Policy",
     },
-    "PipelineProductionPreflightCodePipelineActionRole732673C6": {
+    "PipelineProductionModelGatewayDeployCodePipelineActionRole0A6D447C": {
       "Properties": {
         "AssumeRolePolicyDocument": {
           "Statement": [
@@ -18038,7 +17352,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
       },
       "Type": "AWS::IAM::Role",
     },
-    "PipelineProductionPreflightCodePipelineActionRoleDefaultPolicy54D332C3": {
+    "PipelineProductionModelGatewayDeployCodePipelineActionRoleDefaultPolicyC6356410": {
       "Properties": {
         "PolicyDocument": {
           "Statement": [
@@ -18050,32 +17364,71 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
               ],
               "Effect": "Allow",
               "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
-                    },
-                    ":codebuild:us-east-1:",
-                    {
-                      "Ref": "AWS::AccountId",
-                    },
-                    ":project/",
-                    {
-                      "Ref": "CloudProductionProjectName",
-                    },
-                  ],
+                "Fn::GetAtt": [
+                  "ProductionModelGatewayBuildAF0BF63A",
+                  "Arn",
                 ],
               },
             },
           ],
           "Version": "2012-10-17",
         },
-        "PolicyName": "PipelineProductionPreflightCodePipelineActionRoleDefaultPolicy54D332C3",
+        "PolicyName": "PipelineProductionModelGatewayDeployCodePipelineActionRoleDefaultPolicyC6356410",
         "Roles": [
           {
-            "Ref": "PipelineProductionPreflightCodePipelineActionRole732673C6",
+            "Ref": "PipelineProductionModelGatewayDeployCodePipelineActionRole0A6D447C",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "PipelineProductionModelGatewayImageCodePipelineActionRole6CF3E4CD": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::GetAtt": [
+                    "PipelineRoleD68726F7",
+                    "Arn",
+                  ],
+                },
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "PipelineProductionModelGatewayImageCodePipelineActionRoleDefaultPolicy2B87A789": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "codebuild:BatchGetBuilds",
+                "codebuild:StartBuild",
+                "codebuild:StopBuild",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ProductionModelGatewayBuildAF0BF63A",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "PipelineProductionModelGatewayImageCodePipelineActionRoleDefaultPolicy2B87A789",
+        "Roles": [
+          {
+            "Ref": "PipelineProductionModelGatewayImageCodePipelineActionRole6CF3E4CD",
           },
         ],
       },
@@ -18206,16 +17559,6 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
               "Effect": "Allow",
               "Resource": {
                 "Fn::GetAtt": [
-                  "CloudSourceActionRole48D7AA73",
-                  "Arn",
-                ],
-              },
-            },
-            {
-              "Action": "sts:AssumeRole",
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::GetAtt": [
                   "PipelineBetaCodePreflightCodePipelineActionRoleE9AA1EF6",
                   "Arn",
                 ],
@@ -18226,7 +17569,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
               "Effect": "Allow",
               "Resource": {
                 "Fn::GetAtt": [
-                  "PipelineBetaPreflightCodePipelineActionRoleDFF2D06E",
+                  "PipelineBetaModelGatewayImageCodePipelineActionRoleB6FE0C91",
                   "Arn",
                 ],
               },
@@ -18236,7 +17579,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
               "Effect": "Allow",
               "Resource": {
                 "Fn::GetAtt": [
-                  "PipelineBetaCloudImageCodePipelineActionRoleBF82CDC4",
+                  "PipelineBetaModelGatewayDeployCodePipelineActionRole9D5F9B95",
                   "Arn",
                 ],
               },
@@ -18246,17 +17589,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
               "Effect": "Allow",
               "Resource": {
                 "Fn::GetAtt": [
-                  "PipelineBetaCloudGatewayCodePipelineActionRoleA68FE313",
-                  "Arn",
-                ],
-              },
-            },
-            {
-              "Action": "sts:AssumeRole",
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::GetAtt": [
-                  "PipelineBetaGatewayCheckCodePipelineActionRole8D5974B0",
+                  "PipelineBetaModelGatewayCheckCodePipelineActionRole93BBAF43",
                   "Arn",
                 ],
               },
@@ -18267,26 +17600,6 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
               "Resource": {
                 "Fn::GetAtt": [
                   "PipelineBetaReleaseBetaCodePipelineActionRole37D4683C",
-                  "Arn",
-                ],
-              },
-            },
-            {
-              "Action": "sts:AssumeRole",
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::GetAtt": [
-                  "PipelineBetaCloudWebAppCodePipelineActionRole009B0E88",
-                  "Arn",
-                ],
-              },
-            },
-            {
-              "Action": "sts:AssumeRole",
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::GetAtt": [
-                  "PipelineBetaCloudProofCodePipelineActionRole9624C2C3",
                   "Arn",
                 ],
               },
@@ -18316,7 +17629,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
               "Effect": "Allow",
               "Resource": {
                 "Fn::GetAtt": [
-                  "PipelineProductionPreflightCodePipelineActionRole732673C6",
+                  "PipelineProductionModelGatewayImageCodePipelineActionRole6CF3E4CD",
                   "Arn",
                 ],
               },
@@ -18326,7 +17639,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
               "Effect": "Allow",
               "Resource": {
                 "Fn::GetAtt": [
-                  "PipelineProductionCloudImageCodePipelineActionRole313C4D9C",
+                  "PipelineProductionModelGatewayDeployCodePipelineActionRole0A6D447C",
                   "Arn",
                 ],
               },
@@ -18336,17 +17649,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
               "Effect": "Allow",
               "Resource": {
                 "Fn::GetAtt": [
-                  "PipelineProductionCloudGatewayCodePipelineActionRole3C55E799",
-                  "Arn",
-                ],
-              },
-            },
-            {
-              "Action": "sts:AssumeRole",
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::GetAtt": [
-                  "PipelineProductionGatewayCheckCodePipelineActionRole2C500DE0",
+                  "PipelineProductionModelGatewayCheckCodePipelineActionRole0BDD63BD",
                   "Arn",
                 ],
               },
@@ -18357,26 +17660,6 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
               "Resource": {
                 "Fn::GetAtt": [
                   "PipelineProductionReleaseProductionCodePipelineActionRole4E08ECFC",
-                  "Arn",
-                ],
-              },
-            },
-            {
-              "Action": "sts:AssumeRole",
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::GetAtt": [
-                  "PipelineProductionCloudWebAppCodePipelineActionRole51A391B8",
-                  "Arn",
-                ],
-              },
-            },
-            {
-              "Action": "sts:AssumeRole",
-              "Effect": "Allow",
-              "Resource": {
-                "Fn::GetAtt": [
-                  "PipelineProductionCloudProofCodePipelineActionRole0D750651",
                   "Arn",
                 ],
               },
@@ -18448,7 +17731,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                 ""
     },
     "exported-variables": [
-      "CODE_CTX"
+      "CODE_LIVE_SHA"
     ]
   },
   "phases": {
@@ -18481,7 +17764,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
         "[[ \\"$RELEASED_SHA\\" =~ ^[0-9a-f]{40}$ ]] || { echo \\"port-guard: the last released Code commit is not recorded; refusing to run the release\\" >&2; exit 2; }",
         "git cat-file -e \\"$RELEASED_SHA^{commit}\\" || { echo \\"port-guard: the last released Code commit is not in this clone; refusing to run the release\\" >&2; exit 2; }",
         "SUPERSEDES_EXEC=none; SUPERSEDES_SHA=none",
-        "export CODE_CTX=\\"live:$RELEASED_SHA,target:$CODE_ROLLBACK_TARGET,supersedes:$SUPERSEDES_EXEC,supersedesSha:$SUPERSEDES_SHA\\"",
+        "export CODE_LIVE_SHA=\\"$RELEASED_SHA\\"",
         "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { HIST_VALUE=\\"$(aws ssm get-parameter --name /agentx/release/code-history/production --query Parameter.Value --output text)\\" || { echo \\"port-guard: the Code release history could not be read; refusing to run the release\\" >&2; exit 2; }; }",
         "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { HIST_FLAT=\\"$(printf '%s' \\"$HIST_VALUE\\" | tr -d ' \\\\t\\\\r\\\\n')\\"; HIST_RE='^\\\\[(\\"[0-9a-f]{40}\\"(,\\"[0-9a-f]{40}\\")*)?\\\\]$'; [[ \\"$HIST_FLAT\\" =~ $HIST_RE ]] || { echo \\"port-guard: the Code release history is not a list of commits; refusing to run the release\\" >&2; exit 2; }; }",
         "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { [[ \\"$HIST_FLAT\\" == *\\"\\\\\\"$CODE_ROLLBACK_TARGET\\\\\\"\\"* ]] || { echo \\"port-guard: the rollback target is not in this stage's Code release history; refusing to run the release\\" >&2; exit 2; }; }",
@@ -18829,6 +18112,637 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
       },
       "Type": "AWS::IAM::Policy",
     },
+    "ProductionModelGatewayBuildAF0BF63A": {
+      "Properties": {
+        "Artifacts": {
+          "Type": "CODEPIPELINE",
+        },
+        "Cache": {
+          "Modes": [
+            "LOCAL_DOCKER_LAYER_CACHE",
+          ],
+          "Type": "LOCAL",
+        },
+        "ConcurrentBuildLimit": 1,
+        "Description": "Runs Code's production model gateway release steps (image, deploy, check) (#1578)",
+        "EncryptionKey": "alias/aws/s3",
+        "Environment": {
+          "ComputeType": "BUILD_GENERAL1_LARGE",
+          "EnvironmentVariables": [
+            {
+              "Name": "NODE_OPTIONS",
+              "Type": "PLAINTEXT",
+              "Value": "--max-old-space-size=8192",
+            },
+            {
+              "Name": "GATEWAY_STAGE_ENV",
+              "Type": "PLAINTEXT",
+              "Value": "production",
+            },
+            {
+              "Name": "ROVARA_EXPECTED_DEPLOY_ACCOUNT",
+              "Type": "PLAINTEXT",
+              "Value": {
+                "Ref": "AWS::AccountId",
+              },
+            },
+            {
+              "Name": "BETA_ACCOUNT_ID",
+              "Type": "PLAINTEXT",
+              "Value": {
+                "Ref": "BetaAccountId",
+              },
+            },
+          ],
+          "Image": "aws/codebuild/amazonlinux-aarch64-standard:3.0",
+          "ImagePullCredentialsType": "CODEBUILD",
+          "PrivilegedMode": true,
+          "Type": "ARM_CONTAINER",
+        },
+        "LogsConfig": {
+          "CloudWatchLogs": {
+            "GroupName": {
+              "Ref": "ReleaseBuildLogsD2C04AA9",
+            },
+            "Status": "ENABLED",
+          },
+        },
+        "Name": "release-agentx-model-gateway-production",
+        "ServiceRole": {
+          "Fn::GetAtt": [
+            "ProductionModelGatewayBuildRoleD0832BFF",
+            "Arn",
+          ],
+        },
+        "Source": {
+          "BuildSpec": "{
+  "version": "0.2",
+  "env": {
+    "shell": "bash",
+    "variables": {
+      "AWS_CLI_VERSION": "2.36.47",
+      "GITLEAKS_VERSION": "8.30.1",
+      "GITLEAKS_SHA256": "<asset-hash>",
+      "CRANE_VERSION": "0.20.6",
+      "CRANE_SHA256": "<asset-hash>",
+      "CODE_RELEASE": "run",
+      "PIPELINE_MODE": "release",
+      "CODE_ROLLBACK_TARGET": "none",
+      "MODEL_GATEWAY_DIGEST": "none"
+    }
+  },
+  "phases": {
+    "install": {
+      "commands": [
+        "node_version=\\"$(cat .node-version)\\"",
+        "node_archive=\\"node-v\${node_version}-linux-arm64.tar.xz\\"",
+        "curl -fsSL -o \\"/tmp/\${node_archive}\\" \\"https://nodejs.org/dist/v\${node_version}/\${node_archive}\\"",
+        "curl -fsSL \\"https://nodejs.org/dist/v\${node_version}/SHASUMS256.txt\\" | grep \\" \${node_archive}$\\" | (cd /tmp && sha256sum -c -)",
+        "mkdir -p /opt/node && tar -xJf \\"/tmp/\${node_archive}\\" -C /opt/node --strip-components=1",
+        "curl -fsSL -o /tmp/awscliv2.zip \\"https://awscli.amazonaws.com/awscli-exe-linux-aarch64-\${AWS_CLI_VERSION}.zip\\"",
+        "unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install --install-dir /opt/aws-cli --bin-dir /opt/aws-cli/bin",
+        "curl -fsSL -o /tmp/gitleaks.tar.gz \\"https://github.com/gitleaks/gitleaks/releases/download/v\${GITLEAKS_VERSION}/gitleaks_\${GITLEAKS_VERSION}_linux_arm64.tar.gz\\"",
+        "echo \\"\${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz\\" | sha256sum -c -",
+        "mkdir -p /opt/gitleaks && tar -xzf /tmp/gitleaks.tar.gz -C /opt/gitleaks gitleaks",
+        "export PATH=\\"/opt/node/bin:/opt/aws-cli/bin:/opt/gitleaks:$PATH\\"",
+        "node --version && npm --version && aws --version && gitleaks version && docker buildx version",
+        "curl -fsSL -o /tmp/crane.tar.gz \\"https://github.com/google/go-containerregistry/releases/download/v\${CRANE_VERSION}/go-containerregistry_Linux_arm64.tar.gz\\"",
+        "echo \\"\${CRANE_SHA256}  /tmp/crane.tar.gz\\" | sha256sum -c -",
+        "mkdir -p /opt/crane && tar -xzf /tmp/crane.tar.gz -C /opt/crane crane",
+        "export PATH=\\"/opt/crane:$PATH\\"",
+        "crane version"
+      ]
+    },
+    "pre_build": {
+      "commands": [
+        "npm ci --ignore-scripts --no-audit --no-fund"
+      ]
+    },
+    "build": {
+      "commands": [
+        ": \\"\${GATEWAY_STAGE_STEP:?GATEWAY_STAGE_STEP is not set}\\"",
+        "[ \\"$GATEWAY_STAGE_ENV\\" = production ] || { echo \\"this project runs production steps only; GATEWAY_STAGE_ENV is '$GATEWAY_STAGE_ENV'\\" >&2; exit 1; }",
+        "case \\"$GATEWAY_STAGE_STEP\\" in image|deploy|check) ;; *) echo \\"unknown GATEWAY_STAGE_STEP '$GATEWAY_STAGE_STEP'\\" >&2; exit 1;; esac",
+        "if [ -n \\"\${PIPELINE_STATE_ARTIFACT:-}\\" ]; then case \\"$PIPELINE_STATE_ARTIFACT\\" in *[!A-Za-z0-9_]*) echo \\"PIPELINE_STATE_ARTIFACT is not an artifact name\\" >&2; exit 1;; esac; state_ref=\\"CODEBUILD_SRC_DIR_\${PIPELINE_STATE_ARTIFACT}\\"; state_dir=\\"\${!state_ref:-}\\"; if [ ! -f \\"$state_dir/manifest.json\\" ]; then echo \\"no manifest.json in previous artifact $PIPELINE_STATE_ARTIFACT\\" >&2; exit 1; fi; export PIPELINE_MANIFEST=\\"$state_dir/manifest.json\\"; fi",
+        "npx --no-install tsx scripts/model-gateway-release/cli.ts \\"$GATEWAY_STAGE_ENV\\" \\"$GATEWAY_STAGE_STEP\\""
+      ]
+    }
+  },
+  "artifacts": {
+    "files": [
+      "**/*"
+    ],
+    "base-directory": "out"
+  }
+}",
+          "Type": "CODEPIPELINE",
+        },
+        "TimeoutInMinutes": 90,
+      },
+      "Type": "AWS::CodeBuild::Project",
+    },
+    "ProductionModelGatewayBuildRoleD0832BFF": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "codebuild.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Description": "Runs Code's production model gateway image, deploy, and check steps (#1578)",
+        "RoleName": "agentx-release-model-gateway-production-build",
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "ProductionModelGatewayBuildRoleDefaultPolicy3927319D": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "codeconnections:UseConnection",
+                "codestar-connections:UseConnection",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "GitHubConnectionArn",
+              },
+            },
+            {
+              "Action": [
+                "ssm:GetParameter",
+                "ssm:PutParameter",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ssm:us-east-1:",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":parameter/agentx/release/model-gateway-last-good/production",
+                  ],
+                ],
+              },
+              "Sid": "RecordModelGatewayLastGood",
+            },
+            {
+              "Action": "ssm:GetParameter",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ssm:us-east-1:",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":parameter/agentx/release/code-released/production",
+                  ],
+                ],
+              },
+              "Sid": "ReadReleasedCode",
+            },
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Deny",
+              "Resource": "arn:aws:iam::*:role/OrganizationAccountAccessRole",
+              "Sid": "DenyOrganizationAdminRole",
+            },
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":iam::",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":role/cdk-hnb659fds-deploy-role-",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      "-us-east-1",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":iam::",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":role/cdk-hnb659fds-file-publishing-role-",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      "-us-east-1",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":iam::",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":role/cdk-hnb659fds-image-publishing-role-",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      "-us-east-1",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":iam::",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":role/cdk-hnb659fds-lookup-role-",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      "-us-east-1",
+                    ],
+                  ],
+                },
+              ],
+              "Sid": "AssumeCdkBootstrapRoles",
+            },
+            {
+              "Action": "ecr:GetAuthorizationToken",
+              "Effect": "Allow",
+              "Resource": "*",
+              "Sid": "EcrAuthorization",
+            },
+            {
+              "Action": [
+                "ecr:BatchCheckLayerAvailability",
+                "ecr:BatchGetImage",
+                "ecr:DescribeImages",
+                "ecr:GetDownloadUrlForLayer",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ecr:us-east-1:",
+                    {
+                      "Ref": "BetaAccountId",
+                    },
+                    ":repository/rovara-cloud-beta-gateway-images-*",
+                  ],
+                ],
+              },
+              "Sid": "PullBetaModelGatewayImage",
+            },
+            {
+              "Action": [
+                "ecr:BatchCheckLayerAvailability",
+                "ecr:BatchGetImage",
+                "ecr:CompleteLayerUpload",
+                "ecr:DescribeImages",
+                "ecr:GetDownloadUrlForLayer",
+                "ecr:InitiateLayerUpload",
+                "ecr:ListImages",
+                "ecr:PutImage",
+                "ecr:UploadLayerPart",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ecr:us-east-1:",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":repository/rovara-cloud-production-gateway-images-*",
+                  ],
+                ],
+              },
+              "Sid": "ProductionModelGatewayRepository",
+            },
+            {
+              "Action": [
+                "ecs:DescribeServices",
+                "ecs:ListServices",
+                "ecs:DescribeTasks",
+                "ecs:ListTasks",
+              ],
+              "Condition": {
+                "ArnLike": {
+                  "ecs:cluster": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "arn:",
+                        {
+                          "Ref": "AWS::Partition",
+                        },
+                        ":ecs:us-east-1:",
+                        {
+                          "Ref": "AWS::AccountId",
+                        },
+                        ":cluster/rovara-cloud-production-gateway-*",
+                      ],
+                    ],
+                  },
+                },
+              },
+              "Effect": "Allow",
+              "Resource": "*",
+              "Sid": "ModelGatewayServiceReads",
+            },
+            {
+              "Action": "ecs:DescribeTaskDefinition",
+              "Effect": "Allow",
+              "Resource": "*",
+              "Sid": "ModelGatewayTaskDefinitionRead",
+            },
+            {
+              "Action": [
+                "logs:DescribeLogStreams",
+                "logs:GetLogEvents",
+                "logs:FilterLogEvents",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":logs:us-east-1:",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":log-group:rovara-cloud-production-gateway-PriceFetchLogs*",
+                  ],
+                ],
+              },
+              "Sid": "ModelGatewayPriceFetchLogs",
+            },
+            {
+              "Action": "acm:DescribeCertificate",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":acm:us-east-1:",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":certificate/*",
+                  ],
+                ],
+              },
+              "Sid": "ModelGatewayCertificateRead",
+            },
+            {
+              "Action": [
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ReleaseBuildLogsD2C04AA9",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "logs:CreateLogGroup",
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":logs:us-east-1:",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":log-group:/aws/codebuild/",
+                      {
+                        "Ref": "ProductionModelGatewayBuildAF0BF63A",
+                      },
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":logs:us-east-1:",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":log-group:/aws/codebuild/",
+                      {
+                        "Ref": "ProductionModelGatewayBuildAF0BF63A",
+                      },
+                      ":*",
+                    ],
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "codebuild:CreateReportGroup",
+                "codebuild:CreateReport",
+                "codebuild:UpdateReport",
+                "codebuild:BatchPutTestCases",
+                "codebuild:BatchPutCodeCoverages",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":codebuild:us-east-1:",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":report-group/",
+                    {
+                      "Ref": "ProductionModelGatewayBuildAF0BF63A",
+                    },
+                    "-*",
+                  ],
+                ],
+              },
+            },
+            {
+              "Action": [
+                "s3:PutObject*",
+                "s3:DeleteObject*",
+                "s3:AbortMultipartUpload",
+              ],
+              "Effect": "Deny",
+              "NotResource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    {
+                      "Fn::GetAtt": [
+                        "Artifacts82DD59A1",
+                        "Arn",
+                      ],
+                    },
+                    "/AgentXProductionRele*/GatewayPro*",
+                  ],
+                ],
+              },
+              "Sid": "DenyArtifactWritesOutsideOwnOutput",
+            },
+            {
+              "Action": [
+                "s3:GetObject*",
+                "s3:GetBucket*",
+                "s3:List*",
+              ],
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "Artifacts82DD59A1",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "Artifacts82DD59A1",
+                          "Arn",
+                        ],
+                      },
+                      "/*",
+                    ],
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": [
+                "s3:PutObject",
+                "s3:AbortMultipartUpload",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    {
+                      "Fn::GetAtt": [
+                        "Artifacts82DD59A1",
+                        "Arn",
+                      ],
+                    },
+                    "/AgentXProductionRele*/GatewayPro*",
+                  ],
+                ],
+              },
+            },
+            {
+              "Action": "codestar-connections:UseConnection",
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "GitHubConnectionArn",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "ProductionModelGatewayBuildRoleDefaultPolicy3927319D",
+        "Roles": [
+          {
+            "Ref": "ProductionModelGatewayBuildRoleD0832BFF",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
     "ReleaseBuild2D3CBBB5": {
       "Properties": {
         "Artifacts": {
@@ -18884,7 +18798,8 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
     "install": {
       "commands": [
         "case \\"$CODE_RELEASE\\" in run|skip) ;; *) echo \\"CODE_RELEASE must be run or skip, got: $CODE_RELEASE\\" >&2; exit 1;; esac",
-        "[ \\"$CODE_RELEASE\\" != skip ] || echo \\"CODE_RELEASE=skip: this run releases Cloud only; Code is not built or deployed\\"",
+        "[ \\"$CODE_RELEASE\\" != skip ] || echo \\"CODE_RELEASE=skip: Code is not built or deployed\\"",
+        "[ \\"$PIPELINE_MODE\\" != adopt ] || echo \\"PIPELINE_MODE=adopt: adopt run checks the live model gateway and leaves Code unchanged\\"",
         "case \\"$PIPELINE_MODE\\" in release|adopt|rollback) ;; *) echo \\"PIPELINE_MODE must be release, adopt or rollback, got: $PIPELINE_MODE\\" >&2; exit 1;; esac",
         "if [ \\"$PIPELINE_MODE\\" = rollback ] && [ \\"$CODE_ROLLBACK_TARGET\\" != none ]; then [[ \\"$CODE_ROLLBACK_TARGET\\" =~ ^[0-9a-f]{40}$ ]] || { echo \\"CODE_ROLLBACK_TARGET must be a full 40-character commit id, or none, got: $CODE_ROLLBACK_TARGET\\" >&2; exit 1; }; echo \\"NOTE: Code rollback target is $CODE_ROLLBACK_TARGET\\"; elif [ \\"$PIPELINE_MODE\\" != rollback ] && [ \\"$CODE_ROLLBACK_TARGET\\" != none ]; then echo \\"CODE_ROLLBACK_TARGET is only for PIPELINE_MODE=rollback; got $CODE_ROLLBACK_TARGET in mode $PIPELINE_MODE\\" >&2; exit 1; fi",
         "if [ \\"$PIPELINE_MODE\\" = rollback ]; then if [ \\"$CODE_ROLLBACK_TARGET\\" = none ]; then [ \\"$CODE_RELEASE\\" = skip ] || { echo \\"a rollback run with no Code rollback target does not release Code, but CODE_RELEASE is $CODE_RELEASE\\" >&2; exit 1; }; else [ \\"$CODE_RELEASE\\" = run ] || { echo \\"a Code rollback target was given but CODE_RELEASE is $CODE_RELEASE, so Code would not be rolled back\\" >&2; exit 1; }; fi; fi",
@@ -18893,29 +18808,29 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
         "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { [[ \\"$HIST_FLAT\\" == *\\"\\\\\\"$CODE_ROLLBACK_TARGET\\\\\\"\\"* ]] || { echo \\"the rollback target is not in this stage's Code release history; Code is not rolled back\\" >&2; exit 1; }; }",
         "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { git cat-file -e \\"$CODE_ROLLBACK_TARGET^{commit}\\" || { echo \\"the rollback target is not in this clone; Code is not rolled back\\" >&2; exit 1; }; }",
         "[ \\"$CODE_ROLLBACK_TARGET\\" = none ] || { git merge-base --is-ancestor \\"$CODE_ROLLBACK_TARGET\\" HEAD || { echo \\"the rollback target is not an ancestor of this run's commit; Code is not rolled back\\" >&2; exit 1; }; }",
-        "[ \\"$CODE_RELEASE\\" = skip ] || { [ \\"$PIPELINE_MODE\\" != rollback ] || [ \\"$CODE_ROLLBACK_TARGET\\" = none ] || git checkout -q --detach \\"$CODE_ROLLBACK_TARGET\\"; }",
-        "[ \\"$CODE_RELEASE\\" = skip ] || { node_version=\\"$(cat .node-version)\\"; }",
-        "[ \\"$CODE_RELEASE\\" = skip ] || { node_archive=\\"node-v\${node_version}-linux-arm64.tar.xz\\"; }",
-        "[ \\"$CODE_RELEASE\\" = skip ] || { curl -fsSL -o \\"/tmp/\${node_archive}\\" \\"https://nodejs.org/dist/v\${node_version}/\${node_archive}\\"; }",
-        "[ \\"$CODE_RELEASE\\" = skip ] || { curl -fsSL \\"https://nodejs.org/dist/v\${node_version}/SHASUMS256.txt\\" | grep \\" \${node_archive}$\\" | (cd /tmp && sha256sum -c -); }",
-        "[ \\"$CODE_RELEASE\\" = skip ] || { mkdir -p /opt/node && tar -xJf \\"/tmp/\${node_archive}\\" -C /opt/node --strip-components=1; }",
-        "[ \\"$CODE_RELEASE\\" = skip ] || { curl -fsSL -o /tmp/awscliv2.zip \\"https://awscli.amazonaws.com/awscli-exe-linux-aarch64-\${AWS_CLI_VERSION}.zip\\"; }",
-        "[ \\"$CODE_RELEASE\\" = skip ] || { unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install --install-dir /opt/aws-cli --bin-dir /opt/aws-cli/bin; }",
-        "[ \\"$CODE_RELEASE\\" = skip ] || { curl -fsSL -o /tmp/gitleaks.tar.gz \\"https://github.com/gitleaks/gitleaks/releases/download/v\${GITLEAKS_VERSION}/gitleaks_\${GITLEAKS_VERSION}_linux_arm64.tar.gz\\"; }",
-        "[ \\"$CODE_RELEASE\\" = skip ] || { echo \\"\${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz\\" | sha256sum -c -; }",
-        "[ \\"$CODE_RELEASE\\" = skip ] || { mkdir -p /opt/gitleaks && tar -xzf /tmp/gitleaks.tar.gz -C /opt/gitleaks gitleaks; }",
-        "[ \\"$CODE_RELEASE\\" = skip ] || { export PATH=\\"/opt/node/bin:/opt/aws-cli/bin:/opt/gitleaks:$PATH\\"; }",
-        "[ \\"$CODE_RELEASE\\" = skip ] || { node --version && npm --version && aws --version && gitleaks version && docker buildx version; }"
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { [ \\"$PIPELINE_MODE\\" != rollback ] || [ \\"$CODE_ROLLBACK_TARGET\\" = none ] || git checkout -q --detach \\"$CODE_ROLLBACK_TARGET\\"; }",
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { node_version=\\"$(cat .node-version)\\"; }",
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { node_archive=\\"node-v\${node_version}-linux-arm64.tar.xz\\"; }",
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { curl -fsSL -o \\"/tmp/\${node_archive}\\" \\"https://nodejs.org/dist/v\${node_version}/\${node_archive}\\"; }",
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { curl -fsSL \\"https://nodejs.org/dist/v\${node_version}/SHASUMS256.txt\\" | grep \\" \${node_archive}$\\" | (cd /tmp && sha256sum -c -); }",
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { mkdir -p /opt/node && tar -xJf \\"/tmp/\${node_archive}\\" -C /opt/node --strip-components=1; }",
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { curl -fsSL -o /tmp/awscliv2.zip \\"https://awscli.amazonaws.com/awscli-exe-linux-aarch64-\${AWS_CLI_VERSION}.zip\\"; }",
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { unzip -q /tmp/awscliv2.zip -d /tmp && /tmp/aws/install --install-dir /opt/aws-cli --bin-dir /opt/aws-cli/bin; }",
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { curl -fsSL -o /tmp/gitleaks.tar.gz \\"https://github.com/gitleaks/gitleaks/releases/download/v\${GITLEAKS_VERSION}/gitleaks_\${GITLEAKS_VERSION}_linux_arm64.tar.gz\\"; }",
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { echo \\"\${GITLEAKS_SHA256}  /tmp/gitleaks.tar.gz\\" | sha256sum -c -; }",
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { mkdir -p /opt/gitleaks && tar -xzf /tmp/gitleaks.tar.gz -C /opt/gitleaks gitleaks; }",
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { export PATH=\\"/opt/node/bin:/opt/aws-cli/bin:/opt/gitleaks:$PATH\\"; }",
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { node --version && npm --version && aws --version && gitleaks version && docker buildx version; }"
       ]
     },
     "pre_build": {
       "commands": [
-        "[ \\"$CODE_RELEASE\\" = skip ] || { npm ci; }"
+        "{ [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; } || { npm ci; }"
       ]
     },
     "build": {
       "commands": [
-        "if [ \\"$CODE_RELEASE\\" = skip ]; then mkdir -p cdk.out && printf '{\\"codeRelease\\":\\"skip\\"}\\\\n' > cdk.out/agentx-production-release.json; else if node scripts/release-ci-proof.ts --repository PrepLabsAI/Rovara --github-app-stack AgentXControlPlane --region \\"$AWS_REGION\\"; then RELEASE_CHECKS=--skip-checks; else RELEASE_CHECKS=; fi; npm run release:prod -- --region \\"$AWS_REGION\\" --reuse-unchanged-worker --require-existing-foundation $RELEASE_CHECKS && { if [ \\"$PIPELINE_MODE\\" = rollback ] && [ \\"$CODE_ROLLBACK_TARGET\\" != none ]; then RELEASED_SOURCE=\\"$CODE_ROLLBACK_TARGET\\"; else RELEASED_SOURCE=\\"$CODEBUILD_RESOLVED_SOURCE_VERSION\\"; fi; [[ \\"$RELEASED_SOURCE\\" =~ ^[0-9a-f]{40}$ ]] || { echo \\"the source version of this build is not a commit id; the release is not recorded\\" >&2; exit 1; }; HIST_ERR=\\"$(mktemp)\\" && { HIST_OLD=\\"$(aws ssm get-parameter --name /agentx/release/code-history/production --query Parameter.Value --output text 2>\\"$HIST_ERR\\")\\" || { grep -q ParameterNotFound \\"$HIST_ERR\\" && HIST_OLD=; } || { cat \\"$HIST_ERR\\" >&2; false; }; } && HIST_NEW=\\"$({ printf '%s\\\\n' \\"$RELEASED_SOURCE\\"; printf '%s\\\\n' \\"$HIST_OLD\\" | { grep -oE '\\"[0-9a-f]{40}\\"' || true; } | tr -d '\\"'; } | awk '!seen[$0]++' | head -n 10 | awk 'BEGIN{printf \\"[\\"} {printf \\"%s\\\\\\"%s\\\\\\"\\", (NR>1?\\",\\":\\"\\"), $0} END{printf \\"]\\"}')\\" && aws ssm put-parameter --name /agentx/release/code-history/production --type String --overwrite --value \\"$HIST_NEW\\" && aws ssm put-parameter --name /agentx/release/code-released/production --type String --overwrite --value \\"$RELEASED_SOURCE\\"; }; fi"
+        "if { [ \\"$CODE_RELEASE\\" = skip ] || [ \\"$PIPELINE_MODE\\" = adopt ]; }; then mkdir -p cdk.out && printf '{\\"codeRelease\\":\\"skip\\"}\\\\n' > cdk.out/agentx-production-release.json; else if node scripts/release-ci-proof.ts --repository PrepLabsAI/Rovara --github-app-stack AgentXControlPlane --region \\"$AWS_REGION\\"; then RELEASE_CHECKS=--skip-checks; else RELEASE_CHECKS=; fi; npm run release:prod -- --region \\"$AWS_REGION\\" --reuse-unchanged-worker --require-existing-foundation $RELEASE_CHECKS && { if [ \\"$PIPELINE_MODE\\" = rollback ] && [ \\"$CODE_ROLLBACK_TARGET\\" != none ]; then RELEASED_SOURCE=\\"$CODE_ROLLBACK_TARGET\\"; else RELEASED_SOURCE=\\"$CODEBUILD_RESOLVED_SOURCE_VERSION\\"; fi; [[ \\"$RELEASED_SOURCE\\" =~ ^[0-9a-f]{40}$ ]] || { echo \\"the source version of this build is not a commit id; the release is not recorded\\" >&2; exit 1; }; HIST_ERR=\\"$(mktemp)\\" && { HIST_OLD=\\"$(aws ssm get-parameter --name /agentx/release/code-history/production --query Parameter.Value --output text 2>\\"$HIST_ERR\\")\\" || { grep -q ParameterNotFound \\"$HIST_ERR\\" && HIST_OLD=; } || { cat \\"$HIST_ERR\\" >&2; false; }; } && HIST_NEW=\\"$({ printf '%s\\\\n' \\"$RELEASED_SOURCE\\"; printf '%s\\\\n' \\"$HIST_OLD\\" | { grep -oE '\\"[0-9a-f]{40}\\"' || true; } | tr -d '\\"'; } | awk '!seen[$0]++' | head -n 10 | awk 'BEGIN{printf \\"[\\"} {printf \\"%s\\\\\\"%s\\\\\\"\\", (NR>1?\\",\\":\\"\\"), $0} END{printf \\"]\\"}')\\" && aws ssm put-parameter --name /agentx/release/code-history/production --type String --overwrite --value \\"$HIST_NEW\\" && aws ssm put-parameter --name /agentx/release/code-released/production --type String --overwrite --value \\"$RELEASED_SOURCE\\"; }; fi"
       ]
     }
   },
