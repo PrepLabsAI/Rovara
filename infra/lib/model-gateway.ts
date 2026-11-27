@@ -232,6 +232,8 @@ export const MODEL_GATEWAY_LOG_EVENTS = {
   providerError: "provider_error",
   priceFetchFailed: "price_fetch_failed",
   priceFetched: "price_fetched",
+  /** #1583: a task's cold-start seed lost the save race and a read of the shared Prices table gave it the other task's prices (no alarm counts it). */
+  priceReloadedAfterSeed: "price_reloaded_after_seed",
 } as const;
 /** The meter's open-holds index (deploy.ts GATEWAY_METER_INDEXES), read by the sweep of holds whose settle failed. */
 export const MODEL_GATEWAY_METER_INDEXES = {
