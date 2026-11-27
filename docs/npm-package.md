@@ -30,7 +30,7 @@ through the existing installation and confirmation steps.
 Every version after 0.1.0 publishes from `.github/workflows/release.yml` when an admin pushes its
 `vX.Y.Z` tag (see [releases.md](releases.md)), through npm trusted publishing: no token is
 stored, and npm adds provenance. The package's Trusted Publisher is GitHub Actions, organization
-`PrepLabsAI`, repository `Rovara`, workflow `release.yml`; update it, and `repository.url` in
+`PrepLabsAI`, repository `Rovara-Code`, workflow `release.yml`; update it, and `repository.url` in
 `scripts/release/pack-cli.ts`, together if the repository is renamed or moves.
 
 ## Publishing by hand

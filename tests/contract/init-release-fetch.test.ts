@@ -254,7 +254,7 @@ describe("sourceRelease (issue 152)", () => {
   it("refuses when the tag has no published release.json and an image flag is missing, naming both flags", async () => {
     const error = await sourceRelease({ runner: tagged, source: "/src", fetch: github({}) }).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(AgentXError);
-    expect((error as Error).message).toContain("release 1.4.0 has no published release.json at https://github.com/PrepLabsAI/Rovara/releases/download/v1.4.0/release.json, so its images are unknown; pass --worker-image and --slack-image, or --release <dir>");
+    expect((error as Error).message).toContain("release 1.4.0 has no published release.json at https://github.com/PrepLabsAI/Rovara-Code/releases/download/v1.4.0/release.json, so its images are unknown; pass --worker-image and --slack-image, or --release <dir>");
   });
 
   it("with missingReleaseJson allow, reports a release.json from another commit instead of refusing, and uses none of its images (re-review m-1)", async () => {

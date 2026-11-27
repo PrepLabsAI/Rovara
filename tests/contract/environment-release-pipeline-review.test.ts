@@ -57,7 +57,8 @@ describe("P1 review: production pipeline", () => {
     // RELEASE-STACKS-ADDRESS (2026-11-25): re-pinned from 7e66d04fc164d8a3edc90962636c21a8d514ec15369e0275dc04fa8283a30d46; only the two release builds' ReadReleaseStacks statements gained stack/AgentXApiAddress/* (see PRODUCTION_PIPELINE_TEMPLATE_SHA256 in environment-release-pipeline.test.ts).
     // PIPELINE-CODE-RELEASE-BY-TRIGGER (2026-11-25): re-pinned from ddd23afa7a00a60f4559a3fd980009d3b476e0a5cead70d1e3e0307faa5f927b; see PRODUCTION_PIPELINE_TEMPLATE_SHA256 in environment-release-pipeline.test.ts for the changed resources.
     // ISSUE-1578 (2026-11-27): re-pinned from f666faa65ac67edcd17eae5a4387458ea6c299e6bc67d426d08490cdea306e3f; Cloud removed from AgentXProductionRelease and Code deploys its own model gateway (see PRODUCTION_PIPELINE_TEMPLATE_SHA256 in environment-release-pipeline.test.ts).
-    expect(digest).toBe("df1212323e4debfdaa5a5ef1aa49caba306fe23bba2b43c2fa398cc0c2783b8f");
+    // REPO-RENAME (2026-11-27): re-pinned from df1212323e4debfdaa5a5ef1aa49caba306fe23bba2b43c2fa398cc0c2783b8f; the repository is now PrepLabsAI/Rovara-Code, so only the GitHub source action's FullRepositoryId, the connection parameter's description and the two release-ci-proof --repository arguments changed (reverting the name gives the old digest).
+    expect(digest).toBe("5b05c7f56bf04cf2ddd98889a44714025db9c2362a74194843a14d6ec769ab04");
   });
 });
 

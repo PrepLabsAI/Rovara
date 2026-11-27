@@ -242,9 +242,9 @@ export async function packCli(input: PackCliInput): Promise<PackCliResult> {
     publishConfig: { access: "public", registry: "https://registry.npmjs.org/" },
     // release.yml's npm job passes no --provenance flag: npm trusted publishing (OIDC) adds
     // provenance automatically for this public repository. npm cross-checks this field against the
-    // source repository the publish's OIDC token was minted for (PrepLabsAI/Rovara), so a missing
+    // source repository the publish's OIDC token was minted for (PrepLabsAI/Rovara-Code), so a missing
     // or mismatched repository.url would make npm reject the publish. Update it with any rename.
-    repository: { type: "git", url: "git+https://github.com/PrepLabsAI/Rovara.git" },
+    repository: { type: "git", url: "git+https://github.com/PrepLabsAI/Rovara-Code.git" },
   };
   await writeFile(join(packageDir, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   await writeFile(join(packageDir, "README.md"), readmeText(name), "utf8");

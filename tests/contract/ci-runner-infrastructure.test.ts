@@ -19,7 +19,7 @@ describe("the CI test-shard runner stack", () => {
     template.hasResourceProperties("AWS::CodeBuild::Project", {
       Name: CI_RUNNER_PROJECT,
       Environment: { Type: "ARM_CONTAINER", ComputeType: "BUILD_GENERAL1_LARGE", Image: "aws/codebuild/amazonlinux-aarch64-standard:3.0", PrivilegedMode: false },
-      Source: { Type: "GITHUB", Location: "https://github.com/PrepLabsAI/Rovara", Auth: { Type: "CODECONNECTIONS", Resource: { Ref: "GitHubConnectionArn" } } },
+      Source: { Type: "GITHUB", Location: "https://github.com/PrepLabsAI/Rovara-Code", Auth: { Type: "CODECONNECTIONS", Resource: { Ref: "GitHubConnectionArn" } } },
     });
     template.hasResourceProperties("AWS::Logs::LogGroup", { RetentionInDays: 14 });
     expect(Object.keys(template.findResources("AWS::CodeBuild::Project"))).toHaveLength(1);

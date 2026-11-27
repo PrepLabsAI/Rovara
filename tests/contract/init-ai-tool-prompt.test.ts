@@ -40,9 +40,9 @@ describe("the prompt for an AI tool", () => {
       "Read https://rovara.dev/llms.txt, then help me manage it with the rovara CLI",
       "(npm package @preplabsai/rovara-code@1.2.3). Pass --env acme-prod to every command, and --region eu-west-1 to the commands that take it.",
       "To connect this computer, follow \"Use an existing install from another computer\" in the CLI reference:",
-      "https://github.com/PrepLabsAI/Rovara/blob/mainline/docs/cli-reference.md#use-an-existing-install-from-another-computer",
+      "https://github.com/PrepLabsAI/Rovara-Code/blob/mainline/docs/cli-reference.md#use-an-existing-install-from-another-computer",
     ].join("\n"));
-    expect(ANOTHER_COMPUTER_DOCS_URL).toMatch(/^https:\/\/github\.com\/PrepLabsAI\/Rovara\/blob\/mainline\/docs\/cli-reference\.md#/u);
+    expect(ANOTHER_COMPUTER_DOCS_URL).toMatch(/^https:\/\/github\.com\/PrepLabsAI\/Rovara-Code\/blob\/mainline\/docs\/cli-reference\.md#/u);
   });
 
   it("names this computer's own copy, not the package, when the CLI was built from source", () => {

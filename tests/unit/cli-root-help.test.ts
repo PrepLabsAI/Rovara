@@ -12,7 +12,7 @@ function printedHelp(command: Command): string {
   return output;
 }
 
-const DOCS = "Docs: https://github.com/PrepLabsAI/Rovara/blob/mainline/docs/cli-reference.md";
+const DOCS = "Docs: https://github.com/PrepLabsAI/Rovara-Code/blob/mainline/docs/cli-reference.md";
 const AGENT_DOCS = "Docs for AI agents: https://rovara.dev/llms.txt";
 
 describe("root --help", () => {

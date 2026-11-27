@@ -7,7 +7,7 @@ only the Rovara CLI, the GitHub CLI (`gh`, signed in), `tmux`, `git`, and Claude
 > **Status:** **Do**, **Quick**, **Full**, **Review** and **Contribute** are here, with reviews before anything is
 > published, feedback on the pull request, one loop per pull request when a change spans repositories, and Codex as
 > the agent or the critic. Webhooks, Slack approvals and Jira come later
-> ([design, #354](https://github.com/PrepLabsAI/Rovara/issues/354)).
+> ([design, #354](https://github.com/PrepLabsAI/Rovara-Code/issues/354)).
 
 The idea is inspired by [the-loop](https://github.com/MadaraUchiha-314/the-loop) by Rohith Ramakrishnan:
 an agent's work driven through a declared process, from your issue tracker. Rovara loop is Rovara's own

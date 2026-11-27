@@ -434,7 +434,7 @@ The sandbox needs the worker's image (`AGENTX_SANDBOX_IMAGE`); on a developer's 
 
 #### Security follow-ups
 
-Tracked in [#325](https://github.com/PrepLabsAI/Rovara/issues/325):
+Tracked in [#325](https://github.com/PrepLabsAI/Rovara-Code/issues/325):
 
 1. Done for projects without a dev container: they run in the task sandbox (above). Further
    hardening of dev containers is tracked in the same issue.

@@ -222,7 +222,7 @@ export const DEFAULT_CALLBACK_PORT = 8765;
 
 /** The last lines of the root `--help`: where people and AI agents find the docs (issue #1598). */
 export const ROOT_HELP_DOCS_LINES = [
-  "Docs: https://github.com/PrepLabsAI/Rovara/blob/mainline/docs/cli-reference.md",
+  "Docs: https://github.com/PrepLabsAI/Rovara-Code/blob/mainline/docs/cli-reference.md",
   "Docs for AI agents: https://rovara.dev/llms.txt",
 ] as const;
 
