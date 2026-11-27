@@ -156,7 +156,9 @@ jobs:
 
   images:
     needs: test
-    if: vars.AGENTX_PUBLISH_ENABLED == 'true'
+    # #1570: `!cancelled()` and the direct need's own result, never the implicit success(): that is false whenever a job earlier in the chain was skipped,
+    # and a reused CI proof skips typecheck, lint and test-shards on purpose, which skipped every publishing job while the run showed success (v0.5.3).
+    if: "!cancelled() && needs.test.result == 'success' && vars.AGENTX_PUBLISH_ENABLED == 'true'"
     runs-on: blacksmith-4vcpu-ubuntu-2404-arm
     # The emulated amd64 build of the worker (only with AGENTX_PUBLISH_WORKER_AMD64) is slower than a native one; bounded so a stuck build cannot hold the release open.
     timeout-minutes: 90
@@ -304,7 +306,8 @@ jobs:
 
   release:
     needs: images
-    if: vars.AGENTX_PUBLISH_ENABLED == 'true'
+    # #1570: as `images`, on the direct need's result.
+    if: "!cancelled() && needs.images.result == 'success' && vars.AGENTX_PUBLISH_ENABLED == 'true'"
     runs-on: blacksmith-4vcpu-ubuntu-2604
     permissions: { contents: write }
     steps:
@@ -335,7 +338,8 @@ jobs:
 
   npm:
     needs: release
-    if: vars.AGENTX_PUBLISH_ENABLED == 'true'
+    # #1570: as `images`, on the direct need's result.
+    if: "!cancelled() && needs.release.result == 'success' && vars.AGENTX_PUBLISH_ENABLED == 'true'"
     # GitHub-hosted, never Blacksmith (#1568): the npm registry accepts trusted-publishing provenance only from GitHub-hosted runners, and refused
     # v0.5.2's publish from a Blacksmith runner ("Unsupported GitHub Actions runner environment: self-hosted").
     runs-on: ubuntu-latest
@@ -375,7 +379,8 @@ jobs:
   # points at them.
   installer:
     needs: npm
-    if: vars.AGENTX_PUBLISH_ENABLED == 'true' && vars.AGENTX_INSTALLER_BUCKET != ''
+    # #1570: as `images`, on the direct need's result.
+    if: "!cancelled() && needs.npm.result == 'success' && vars.AGENTX_PUBLISH_ENABLED == 'true' && vars.AGENTX_INSTALLER_BUCKET != ''"
     runs-on: blacksmith-4vcpu-ubuntu-2604
     permissions: { contents: read, id-token: write }
     steps:

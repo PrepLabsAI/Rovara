@@ -59,10 +59,16 @@ describe("release workflow", () => {
 
   it("guards every publishing job and runs the verification gate first", async () => {
     const wf = await workflow();
-    for (const name of ["images", "release", "npm"]) {
-      expect(wf.jobs[name]?.if, name).toBe("vars.AGENTX_PUBLISH_ENABLED == 'true'");
+    // #1570: each publishing job waits on its direct need's own result, never on the implicit success(), which is false whenever an earlier job in the
+    // chain was skipped (a reused CI proof skips typecheck, lint and test-shards on purpose). A failed, skipped or cancelled direct need still stops it.
+    const chain = { images: "test", release: "images", npm: "release", installer: "npm" } as const;
+    for (const [name, need] of Object.entries(chain)) {
+      expect(wf.jobs[name]?.needs, name).toBe(need);
+      const condition = wf.jobs[name]?.if ?? "";
+      expect(condition, name).toMatch(new RegExp(`^!cancelled\\(\\) && needs\\.${need}\\.result == 'success' && vars\\.AGENTX_PUBLISH_ENABLED == 'true'`));
+      expect(condition, name).not.toMatch(/\balways\(\)|\bsuccess\(\)|\bfailure\(\)/);
     }
-    expect(wf.jobs.images?.needs).toBe("test");
+    expect(wf.jobs.installer?.if).toContain("vars.AGENTX_INSTALLER_BUCKET != ''");
     expect(wf.jobs.prepare?.if).toBeUndefined();
     expect(wf.jobs.test?.needs).toEqual(["prepare", "typecheck", "lint", "test-shards"]);
     expect(wf.jobs.test?.if).toBe("always() && !cancelled()");
