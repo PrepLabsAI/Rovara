@@ -26,7 +26,7 @@ import {
 import { answer, claims, jwk, keys, kid, mint, now } from "./model-gateway-fixture.js";
 import { WireDynamo } from "./model-gateway-wire-dynamo.js";
 
-// ---- Code's contract, copied from PrepLabsAI/Rovara PR #978 (packages/contracts/src/upkeep.ts at a53f17315) ---------------------------------------------------
+// ---- Code's contract, copied from PrepLabsAI/Rovara-Code PR #978 (packages/contracts/src/upkeep.ts at a53f17315) ---------------------------------------------------
 const CodeUpkeepCapReadSchema = z.object({
   version: z.literal(1), company: z.string().regex(/^org_[0-9a-z]{20}$/), project: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/), month: z.string().regex(/^\d{4}-(?:0[1-9]|1[0-2])$/u), enforced: z.literal(true),
   limitMicros: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER), spentMicros: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),

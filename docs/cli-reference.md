@@ -4,7 +4,7 @@ A short reference for the `agentx` command: how to point it at an environment, h
 output, and the flags of the commands people and AI agents run most. `agentx <command> --help`
 prints every option. [Running Rovara](day-two.md) explains the commands in more depth.
 
-<!-- Source: packages/cli/src/main.ts; packages/cli/src/setup/cli.ts; packages/cli/src/setup/command-context.ts; packages/cli/src/output.ts; packages/cli/src/init/prompts.ts; packages/cli/src/environments/cache.ts; packages/cli/src/setup/admin-session.ts; packages/cli/src/setup/project-add.ts; packages/cli/src/setup/channel-add.ts; packages/cli/src/setup/connectors/revision.ts; PrepLabsAI/Rovara#1594; PrepLabsAI/Rovara#1597. -->
+<!-- Source: packages/cli/src/main.ts; packages/cli/src/setup/cli.ts; packages/cli/src/setup/command-context.ts; packages/cli/src/output.ts; packages/cli/src/init/prompts.ts; packages/cli/src/environments/cache.ts; packages/cli/src/setup/admin-session.ts; packages/cli/src/setup/project-add.ts; packages/cli/src/setup/channel-add.ts; packages/cli/src/setup/connectors/revision.ts; PrepLabsAI/Rovara-Code#1594; PrepLabsAI/Rovara-Code#1597. -->
 
 ## Install
 
@@ -99,7 +99,7 @@ to them too when your AWS configuration has another region.
 ran `project add` (or `init`) has. On another computer, copy `<project>.yaml` into
 `~/.agentx/projects`, or pass `--config-dir <the directory that holds it>`. The first project of a
 Launch in AWS install was written by the installer job, so no computer has its file
-([#1601](https://github.com/PrepLabsAI/Rovara/issues/1601) tracks fetching it from the install).
+([#1601](https://github.com/PrepLabsAI/Rovara-Code/issues/1601) tracks fetching it from the install).
 
 ## Output, errors and exit codes
 
@@ -133,7 +133,7 @@ answer:
 
 **Yes/no questions in `project`, `connector`, `alerts` and `project model-check` are currently
 answered yes with no terminal, even when their default is no**
-([#1595](https://github.com/PrepLabsAI/Rovara/issues/1595)). Until that is fixed, give the answer
+([#1595](https://github.com/PrepLabsAI/Rovara-Code/issues/1595)). Until that is fixed, give the answer
 yourself with flags:
 
 | Command | Answered yes with no terminal | Pass instead |

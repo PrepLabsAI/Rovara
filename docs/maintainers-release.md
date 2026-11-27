@@ -30,7 +30,7 @@ preparation are separate operations.
 `AgentXReleasePipeline` runs Code's release from AWS for every qualifying push to `mainline`,
 first to beta, then, when the owner approves that run, to production (#1242, #1578). It is a
 Code-only CodePipeline V2 pipeline, `AgentXProductionRelease`, with one source (`GitHub`,
-`PrepLabsAI/Rovara` `mainline`), one trigger (a qualifying `mainline` push), and three stages:
+`PrepLabsAI/Rovara-Code` `mainline`), one trigger (a qualifying `mainline` push), and three stages:
 
 ```
 Source (mainline push) → Beta (every run) ⏸ disabled transition → Production (its own approval, per run)

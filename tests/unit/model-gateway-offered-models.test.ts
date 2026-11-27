@@ -22,7 +22,7 @@ import { createSignedTokenVerifier } from "../../packages/model-gateway/src/toke
 import { claims, jwk, keys, kid, mint, now, requestBody } from "./model-gateway-fixture.js";
 import { WireDynamo } from "./model-gateway-wire-dynamo.js";
 
-// ---- Code's contract, copied from PrepLabsAI/Rovara PR #771 (packages/contracts/src/agent-model-choice.ts at 6a2a8d3d3) -----------------
+// ---- Code's contract, copied from PrepLabsAI/Rovara-Code PR #771 (packages/contracts/src/agent-model-choice.ts at 6a2a8d3d3) -----------------
 const AGENT_MODEL_NAME = /^(?:[A-Za-z0-9][A-Za-z0-9._:-]{0,127}|[a-z0-9][a-z0-9._-]{0,62}\/[a-z0-9][a-z0-9._-]{0,62})$/u;
 const CodeOfferedAgentModelsSchema = z.object({
   version: z.literal(1),

@@ -134,7 +134,7 @@ place; this records what it is, so a change to any piece can be made deliberatel
   ```
 
   `272978771` is the PrepLabsAI organization and `1307121896` this repository. GitHub uses
-  immutable subjects for this repository (`gh api repos/PrepLabsAI/Rovara/actions/oidc/customization/sub`),
+  immutable subjects for this repository (`gh api repos/PrepLabsAI/Rovara-Code/actions/oidc/customization/sub`),
   so a rename does not break the role; a transfer to another organization would.
 - **The browser executor repository (not yet created).** Releases from the web/API runtime on
   also push `agentx-executor` (the browser executor image, built from
@@ -174,7 +174,7 @@ place; this records what it is, so a change to any piece can be made deliberatel
   (publishing needs an owner or developer role there; GitHub access does not grant it). Version
   0.1.0 was published by hand from the tag's commit, because npm trusted publishing can only be
   configured on a package that exists. Its Trusted Publisher is GitHub Actions, `PrepLabsAI` /
-  `Rovara` / `release.yml`, and publishing requires two-factor authentication with tokens
+  `Rovara-Code` / `release.yml`, and publishing requires two-factor authentication with tokens
   disallowed. Trusted publishing matches the repository by name, so a rename means updating it on
   npm and the `repository.url` that `scripts/release/pack-cli.ts` writes. See
   [npm-package.md](npm-package.md).

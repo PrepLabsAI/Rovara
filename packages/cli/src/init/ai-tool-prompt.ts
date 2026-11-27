@@ -10,7 +10,7 @@ import { cliCommandLine, type CliInvocation } from "./cli-command.js";
 export const AI_TOOL_PROMPT_LABEL = "Paste this into Claude Code, Codex or Cursor";
 
 /** The CLI reference section on using an install from another computer. */
-export const ANOTHER_COMPUTER_DOCS_URL = "https://github.com/PrepLabsAI/Rovara/blob/mainline/docs/cli-reference.md#use-an-existing-install-from-another-computer";
+export const ANOTHER_COMPUTER_DOCS_URL = "https://github.com/PrepLabsAI/Rovara-Code/blob/mainline/docs/cli-reference.md#use-an-existing-install-from-another-computer";
 
 /** How the AI tool gets the CLI: the published package at this CLI's version, or this computer's
  * own copy when the CLI was built from source (no package to name, as cli-command.ts says). */

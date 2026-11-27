@@ -25,7 +25,7 @@ import { portGuardNamesParameter, portGuardNamesReadStatements, portGuardStepCom
 import { AGENTX_SLACK_ORCHESTRATOR_REPOSITORY } from "./slack-orchestrator.js";
 
 export const AGENTX_RELEASE_REPOSITORY_OWNER = "PrepLabsAI";
-export const AGENTX_RELEASE_REPOSITORY_NAME = "Rovara";
+export const AGENTX_RELEASE_REPOSITORY_NAME = "Rovara-Code";
 export const AGENTX_RELEASE_BRANCH = "mainline";
 // Must not match the broker's `agentx-*` CodeBuild gate allow-list, or a worker could start a release.
 export const AGENTX_RELEASE_PROJECT_NAME = "release-agentx-production";
@@ -195,7 +195,7 @@ export class ReleasePipelineStack extends Stack {
       type: "String",
       allowedPattern:
         "^arn:aws(-[a-z]+)?:(codeconnections|codestar-connections):[a-z0-9-]+:[0-9]{12}:connection/[0-9a-f-]{36}$",
-      description: "Authorized CodeConnections GitHub connection for PrepLabsAI/Rovara",
+      description: "Authorized CodeConnections GitHub connection for PrepLabsAI/Rovara-Code",
     });
     const useConnection = new iam.PolicyStatement({
       actions: ["codeconnections:UseConnection", "codestar-connections:UseConnection"],

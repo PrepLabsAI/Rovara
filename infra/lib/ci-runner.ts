@@ -2,7 +2,7 @@
 // mainline, where waiting for GitHub's free runners took too long. Every other job, and every other branch, stays on GitHub's free runners. Only when
 // asked for (-c agentxCiRunner=enabled): no release deploys it, and it has nothing to do with the production app stacks.
 //
-// The project answers GitHub's WORKFLOW_JOB_QUEUED webhook for PrepLabsAI/Rovara: a job whose runs-on label is `codebuild-rovara-ci-tests-<run id>-<attempt>`
+// The project answers GitHub's WORKFLOW_JOB_QUEUED webhook for PrepLabsAI/Rovara-Code: a job whose runs-on label is `codebuild-rovara-ci-tests-<run id>-<attempt>`
 // runs in a fresh, unprivileged ARM container, one job per build. GitHub is reached through the account's existing CodeConnections GitHub connection (the
 // release pipeline's), so no token is stored.
 //
@@ -24,7 +24,7 @@ export class CiRunnerStack extends Stack {
     const connectionArn = new CfnParameter(this, "GitHubConnectionArn", {
       type: "String",
       allowedPattern: "^arn:aws[a-z-]*:(codestar-connections|codeconnections):[a-z0-9-]+:[0-9]{12}:connection/[0-9a-f-]{36}$",
-      description: "The account's CodeConnections GitHub connection that can read PrepLabsAI/Rovara (the release pipeline's)",
+      description: "The account's CodeConnections GitHub connection that can read PrepLabsAI/Rovara-Code (the release pipeline's)",
     });
     const trustedActors = new CfnParameter(this, "TrustedGitHubActorIds", {
       type: "String",

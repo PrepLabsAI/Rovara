@@ -270,7 +270,7 @@ describe("L4-T3: the cap answer says whether the project's AI key is connected",
     expect(await call({ ...w.opts, connection: source(false, seen) }, ask(A, "../x"))).toEqual(NOT_FOUND);
     expect(seen).toEqual([]);
   });
-  it("is exactly what Code's adapter reads (its CapAnswerSchema, copied from PrepLabsAI/Rovara packages/broker/src/core-host/eval-authority-http.ts): strict, `connected` an optional boolean", async () => {
+  it("is exactly what Code's adapter reads (its CapAnswerSchema, copied from PrepLabsAI/Rovara-Code packages/broker/src/core-host/eval-authority-http.ts): strict, `connected` an optional boolean", async () => {
     const CodeCapAnswer = z.object({ company: z.string().regex(/^org_[0-9a-z]{20}$/), project: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/u), monthlyCapMicros: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER), connected: z.boolean().optional() }).strict();
     const w = world(); await w.seed(A, budgets(9, 4));
     for (const opts of [w.opts, { ...w.opts, connection: source(true) }, { ...w.opts, connection: source(false) }, { ...w.opts, connection: source(undefined) }]) expect(CodeCapAnswer.safeParse((await call(opts, ask())).body).success).toBe(true);

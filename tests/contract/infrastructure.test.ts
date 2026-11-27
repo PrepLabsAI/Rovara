@@ -481,7 +481,7 @@ describe("production release pipeline", () => {
             Namespace: "CodeSource",
             Configuration: {
               ConnectionArn: { Ref: "GitHubConnectionArn" },
-              FullRepositoryId: "PrepLabsAI/Rovara",
+              FullRepositoryId: "PrepLabsAI/Rovara-Code",
               BranchName: "mainline",
               OutputArtifactFormat: "CODEBUILD_CLONE_REF",
             },
@@ -819,7 +819,7 @@ describe("production release pipeline", () => {
     const buildSpec = buildSpecOf(AGENTX_RELEASE_PROJECT_NAME);
     expect(buildSpec).toContain("npm run release:prod");
     // #1145: --skip-checks only behind the CI proof; without it every check runs.
-    expect(buildSpec).toContain("if node scripts/release-ci-proof.ts --repository PrepLabsAI/Rovara --github-app-stack AgentXControlPlane --region ");
+    expect(buildSpec).toContain("if node scripts/release-ci-proof.ts --repository PrepLabsAI/Rovara-Code --github-app-stack AgentXControlPlane --region ");
     expect(buildSpec).toContain("; then RELEASE_CHECKS=--skip-checks; else RELEASE_CHECKS=; fi; ");
     expect(buildSpec).toContain("--require-existing-foundation $RELEASE_CHECKS");
     expect(buildSpec.match(/--skip-checks/gu)).toHaveLength(1);

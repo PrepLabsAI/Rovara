@@ -20,7 +20,7 @@ Use this when you want CDK's own diffs. It deploys the same release.
    commit:
 
    ```sh
-   git clone --branch v<version> --depth 1 https://github.com/PrepLabsAI/Rovara.git agentx-<version>
+   git clone --branch v<version> --depth 1 https://github.com/PrepLabsAI/Rovara-Code.git agentx-<version>
    ```
 
    `<version>` is the version of the `agentx` you run (`npx @preplabsai/rovara-code --version`).

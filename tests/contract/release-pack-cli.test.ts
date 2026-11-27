@@ -33,7 +33,7 @@ describe("publishable CLI package", () => {
     expect(manifest.dependencies).toBeUndefined();
     expect(manifest.files).toEqual(["bin", "README.md", "LICENSE", "LICENSE-APACHE", "RELICENSED.md", "THIRD_PARTY_NOTICES"]);
     expect(manifest.description).toBe("Rovara Code installer and administration CLI");
-    expect(manifest.repository).toEqual({ type: "git", url: "git+https://github.com/PrepLabsAI/Rovara.git" });
+    expect(manifest.repository).toEqual({ type: "git", url: "git+https://github.com/PrepLabsAI/Rovara-Code.git" });
 
     const packagedLicense = await readFile(join(out, "package", "LICENSE"), "utf8");
     expect(packagedLicense).toBe(await readFile(join(repoRoot, "LICENSE"), "utf8"));
