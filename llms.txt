@@ -1,6 +1,6 @@
 # Rovara
 
-> Rovara is an open-source coding agent you install in your own AWS account. People ask it for work in Slack, or from Claude Code, Codex or Cursor; it works on the project's repositories in an isolated EC2 workspace, checks the result and opens pull requests. The `agentx` command (npm package `@preplabsai/rovara-code`) installs and runs an environment: projects, Slack channels, connectors, settings, upgrades.
+> Rovara is an open-source coding agent you install in your own AWS account. People ask it for work in Slack, or from Claude Code, Codex or Cursor; it works on the project's repositories in an isolated EC2 workspace, checks the result and opens pull requests. The npm package `@preplabsai/rovara-code` installs the `rovara` command and its alias `agentx` (the same program; the docs write `agentx`), which installs and runs an environment: projects, Slack channels, connectors, settings, upgrades.
 
 Notes for agents driving the CLI:
 

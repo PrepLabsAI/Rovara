@@ -8,11 +8,12 @@ prints every option. [Running Rovara](day-two.md) explains the commands in more 
 
 ## Install
 
-The npm package is `@preplabsai/rovara-code` and the command it installs is `agentx`. Rovara
-needs Node.js 22.19 or newer.
+The npm package is `@preplabsai/rovara-code`. It installs the command `rovara` and the alias
+`agentx`, which run the same program; this page writes `agentx`, as the other guides do. Rovara
+needs Node.js 22.19 or newer. See [npm package](npm-package.md).
 
 ```sh
-npm install -g @preplabsai/rovara-code   # then: agentx --help
+npm install -g @preplabsai/rovara-code   # then: rovara --help (or agentx --help)
 npx @preplabsai/rovara-code --help       # or run it without installing
 ```
 
