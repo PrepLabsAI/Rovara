@@ -32,7 +32,7 @@ describe("permission boundary", () => {
   it("is a parameter on every environment stack, and every role gets the given boundary or the default", () => {
     const defaultArn = { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":iam::", { Ref: "AWS::AccountId" }, ":policy/agentx/staging/agentx-staging-boundary"]] };
     const stacks = stacksOf(buildAgentXApp({ agentxEnv: "staging" }));
-    expect(stacks.map((s) => s.stackName).sort()).toEqual(["access", "control-plane", "foundation", "identity", "runtime", "slack"].map((p) => `agentx-staging-${p}`));
+    expect(stacks.map((s) => s.stackName).sort()).toEqual(["access", "control-plane", "foundation", "gateway", "identity", "runtime", "slack"].map((p) => `agentx-staging-${p}`));
     let roles = 0;
     for (const stack of stacks) {
       const json = Template.fromStack(stack).toJSON() as { Parameters: Record<string, { Default?: string; AllowedPattern?: string }>; Conditions: Record<string, unknown>; Resources: Record<string, { Type: string; Properties: { PermissionsBoundary?: unknown } }> };

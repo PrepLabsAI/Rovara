@@ -75,6 +75,32 @@ export class CompanyAnswersLimits implements AnswersLimits {
   limitFor(cid: string, signal?: AbortSignal): Promise<number | null | undefined> { return readSpendLimit(this.db, this.table, "answers_month", cid, cid, signal); }
 }
 
+/** Static budget caps for standalone (self-hosted) installs without Cloud's Companies table. */
+export interface StaticBudgetCapsConfig {
+  companyMonth: number;
+  projectMonth?: number;
+  task?: number;
+}
+
+export class StaticBudgetCaps implements CapsSource {
+  constructor(private readonly caps: StaticBudgetCapsConfig) {
+    if (!whole(caps.companyMonth) || caps.companyMonth < 1 || caps.companyMonth > GATEWAY_COMPANY_BUDGET_MAX) throw new Error("invalid company cap");
+    if (caps.projectMonth !== undefined && (!whole(caps.projectMonth) || caps.projectMonth < 1 || caps.projectMonth > GATEWAY_COMPANY_BUDGET_MAX)) throw new Error("invalid project cap");
+    if (caps.task !== undefined && (!whole(caps.task) || caps.task < 1 || caps.task > GATEWAY_COMPANY_BUDGET_MAX)) throw new Error("invalid task cap");
+  }
+
+  async capsFor(scope: CapsScope): Promise<Caps> {
+    if (record(scope) === undefined || typeof scope.cid !== "string" || !COMPANY.test(scope.cid)) return UNAVAILABLE;
+    if (typeof scope.pid !== "string" || !PROJECT.test(scope.pid)) return UNAVAILABLE;
+    if (scope.per !== undefined && (typeof scope.per !== "string" || !PERSON.test(scope.per))) return UNAVAILABLE;
+    return {
+      task: this.caps.task ?? NO_CAP,
+      projectMonth: this.caps.projectMonth ?? NO_CAP,
+      companyMonth: this.caps.companyMonth,
+    };
+  }
+}
+
 export class CompanyBudgetCaps implements CapsSource {
   constructor(private readonly db: Dynamo, private readonly table: string) {}
 

@@ -48,7 +48,9 @@ export interface InstallAnswers {
   operatorExternalId?: string;
   /** Testing only, until the first published release exists: a private-ECR image digest used as-is
    * instead of mapping the release's public image through the pull-through cache. */
-  images?: { worker?: string; slack?: string };
+  images?: { worker?: string; slack?: string; gateway?: string };
+  /** Self-hosted Model Gateway options (issue #1554): optional custom TLS cert/host and the control plane's task-purpose JWKS key IDs. */
+  gateway?: { certificateArn?: string; host?: string; taskKeyIds?: string };
   /** the control plane's SlackAppPostedMessages (spec 014 FR-012); template default accept */
   slackAppPostedMessages?: "accept" | "ignore";
   /** Spec 025 R7: the stored developer sign-in; deployEnvironment reads it from SSM when absent. */
@@ -88,15 +90,21 @@ export const SECRET_PARAMETERS: ReadonlySet<string> = new Set(["CallbackSigningK
  */
 export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>> = operatorParametersFromRows(CODE_SETTING_ROWS);
 
-/** Fresh install order: the control plane needs the GitHub App. The `runtime` part is the EC2 worker settings (#117); the control plane reads them only when it boots a worker. */
-export function installOrder(identityMode: "cognito" | "oidc"): DeployPart[] {
-  const order: DeployPart[] = ["access", "foundation", "identity", "control-plane", "runtime", "slack"];
+/** Fresh install order: control-plane publishes JWKS before gateway, gateway deploys & seeds prices before control-plane is wired and runtime activates workers. */
+export function installOrder(identityMode: "cognito" | "oidc", options: { includeGateway?: boolean } = {}): DeployPart[] {
+  const includeGateway = options.includeGateway ?? true;
+  const order: DeployPart[] = includeGateway
+    ? ["access", "foundation", "identity", "control-plane", "gateway", "runtime", "slack"]
+    : ["access", "foundation", "identity", "control-plane", "runtime", "slack"];
   return withoutIdentityWhenOidc(order, identityMode);
 }
 
-/** Gateway first (preflight), then the price-serving broker, then worker activation. */
-export function upgradeOrder(identityMode: "cognito" | "oidc"): DeployPart[] {
-  const order: DeployPart[] = ["access", "foundation", "identity", "control-plane", "runtime", "slack"];
+/** Upgrade order: gateway (when self-hosted) updates alongside the price-serving broker before worker activation. */
+export function upgradeOrder(identityMode: "cognito" | "oidc", options: { includeGateway?: boolean } = {}): DeployPart[] {
+  const includeGateway = options.includeGateway ?? true;
+  const order: DeployPart[] = includeGateway
+    ? ["access", "foundation", "identity", "control-plane", "gateway", "runtime", "slack"]
+    : ["access", "foundation", "identity", "control-plane", "runtime", "slack"];
   return withoutIdentityWhenOidc(order, identityMode);
 }
 
@@ -172,14 +180,14 @@ function required(outputs: Partial<Record<DeployPart, StackOutputs>>, part: Depl
 }
 
 /** Throws the exact message a release missing an image digest must report. */
-function requiredImage(release: ReleaseManifest, which: "worker" | "slack"): string {
+function requiredImage(release: ReleaseManifest, which: "worker" | "slack" | "gateway"): string {
   const digest = release.images[which];
   if (digest === undefined) throw new Error(`release ${release.version} has no ${which} image digest`);
   return digest;
 }
 
 /** Throws the exact message a non-digest image override must report; otherwise returns it as-is. */
-function checkedImageOverride(uri: string, which: "worker" | "slack"): string {
+function checkedImageOverride(uri: string, which: "worker" | "slack" | "gateway"): string {
   if (!ImageDigest.safeParse(uri).success) throw new Error(`image override for ${which} must be referenced by digest`);
   return uri;
 }
@@ -211,7 +219,7 @@ function checkedWorkerOverride(uri: string, answers: Pick<InstallAnswers, "env" 
  * pull-through cache. Only the non-override path needs the access stack's `PullThroughPrefix`
  * output, so an override lets `runtime`/`slack` resolve without it.
  */
-function resolvedImage(answers: InstallAnswers, which: "worker" | "slack", outputs: Partial<Record<DeployPart, StackOutputs>>): string {
+function resolvedImage(answers: InstallAnswers, which: "worker" | "slack" | "gateway", outputs: Partial<Record<DeployPart, StackOutputs>>): string {
   const override = answers.images?.[which];
   if (override !== undefined) return which === "worker" ? checkedWorkerOverride(override, answers) : checkedImageOverride(override, which);
   const prefix = required(outputs, "access", "PullThroughPrefix", answers.env);
@@ -306,6 +314,48 @@ function validateControlPlaneAnswers(answers: InstallAnswers): asserts answers i
  * uploads its own assets, and CloudFormation refuses a parameter its template does not declare, so
  * the cdk engine passes `packages: false` (Task 20 live check). The option is required so every
  * caller chooses (review M5). */
+function gatewayStackParameters(
+  base: Record<string, string>,
+  secret: Record<string, string>,
+  answers: InstallAnswers,
+  outputs: Partial<Record<DeployPart, StackOutputs>>,
+): Record<string, string> {
+  const gatewayImage = resolvedImage(answers, "gateway", outputs);
+  const workerProvider = answers.models.providers?.worker ?? "amazon-bedrock";
+  const standaloneProvider = workerProvider === "amazon-bedrock" ? "bedrock" : workerProvider;
+  const capMicros = answers.budget !== undefined && answers.budget.monthlyUsd > 0
+    ? String(answers.budget.monthlyUsd * 1_000_000)
+    : "100000000";
+  const taskKeyIds = answers.gateway?.taskKeyIds;
+  if (taskKeyIds === undefined || taskKeyIds.trim() === "") {
+    throw new Error("self-hosted gateway requires the control plane's task-token JWKS key IDs (gateway.taskKeyIds)");
+  }
+  return {
+    ...base,
+    GatewayImageUri: gatewayImage,
+    GatewayImageRepositoryName: ecrRepositoryName(gatewayImage, answers),
+    VpcId: required(outputs, "foundation", "VpcId", answers.env),
+    PrivateSubnetIds: required(outputs, "foundation", "PrivateSubnetIds", answers.env),
+    CodeUrl: orchestratorControlPlaneUrl(answers, () => required(outputs, "control-plane", "ApiEndpoint", answers.env)),
+    CodeTaskKeyIds: taskKeyIds,
+    OperatorAlertsTopicArn: required(outputs, "control-plane", "OperatorAlertsTopicArn", answers.env),
+    DefaultCompanyCapMicros: capMicros,
+    StandaloneProvider: standaloneProvider,
+    ...(answers.gateway?.certificateArn === undefined ? {} : { CertificateArn: answers.gateway.certificateArn }),
+    ...(answers.gateway?.host === undefined ? {} : { GatewayHost: answers.gateway.host }),
+    ...secret,
+  };
+}
+
+function builtInGatewayHostParameter(
+  answers: InstallAnswers,
+  outputs: Partial<Record<DeployPart, StackOutputs>>,
+): Record<string, string> {
+  const host = outputs.gateway?.GatewayHost;
+  const external = answers.coreEngine?.modelGatewayUrl.trim() ?? "";
+  return host !== undefined && external === "" ? { CoreModelGatewayHost: host } : {};
+}
+
 export function stackParameters(part: DeployPart, answers: InstallAnswers, outputs: Partial<Record<DeployPart, StackOutputs>>, options: { packages: boolean }): Record<string, string> {
   const boundary = answers.permissionsBoundaryArn ?? "";
   const base: Record<string, string> = {
@@ -353,7 +403,8 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
         OidcAudience: oidc.audience,
         ...adminParameters(answers.identity),
         CallbackSigningKey: answers.callbackSigningKey,
-        ...(answers.coreEngine === undefined ? {} : coreEngineParameters(answers.coreEngine)),
+        ...(answers.coreEngine === undefined ? {} : coreEngineParameters(answers.coreEngine, { allowDeferredGateway: true })),
+        ...builtInGatewayHostParameter(answers, outputs),
         GitHubAppId: answers.github.appId,
         GitHubAppPrivateKeySecretArn: answers.github.privateKeySecretArn,
         ...(answers.github.credentialRef === undefined ? {} : { GitHubAppCredentialRef: answers.github.credentialRef }),
@@ -371,6 +422,9 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
         ...publicApiUrlParameter(answers),
       };
     }
+
+    case "gateway":
+      return gatewayStackParameters(base, secret, answers, outputs);
 
     case "runtime": {
       return {

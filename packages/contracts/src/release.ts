@@ -65,7 +65,8 @@ export const ReleaseManifestSchema = z
       .refine((documents) => documents === undefined || new Set(documents.map((document) => document.file)).size === documents.length,
         "legal document files must be unique"),
     // `embedder`: the self-hosted embedder's Lambda image (environments/embedder), used where the Team record is built. Absent from releases before it.
-    images: z.object({ worker: ImageDigest.optional(), slack: ImageDigest.optional(), executor: ImageDigest.optional(), embedder: ImageDigest.optional() }).strict(),
+    // `gateway`: the self-hosted Model Gateway Fargate image (environments/model-gateway), issue #1554. Absent from releases before it.
+    images: z.object({ worker: ImageDigest.optional(), slack: ImageDigest.optional(), executor: ImageDigest.optional(), embedder: ImageDigest.optional(), gateway: ImageDigest.optional() }).strict(),
     // Task 10: the SHA-256 of packages/worker/ec2/boot-stage2.sh in this release's source, which is the stage 2 boot script the worker image
     // carries. A deploy writes it as the BootStage2Sha256 setting beside the worker image. Absent from releases before the boot split.
     bootStage2Sha256: Sha256.optional(),

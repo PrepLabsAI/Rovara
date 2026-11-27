@@ -73,9 +73,13 @@ function packedNow(): Golden["brokerSettings"] {
 
 /** The lists the code derives NOW: the golden (the lists as L1a-1 left them) with the code/next changes since the base applied, each stated above. */
 const now = {
-  operatorParameters: Object.fromEntries(Object.entries(golden.operatorParameters).map(([part, names]) => [
-    part, [...names.filter((name) => !(ON_CODE_NEXT_SINCE_BASE.deletedFromKept[part] ?? []).includes(name)), ...(ON_CODE_NEXT_SINCE_BASE.keptAdded[part] ?? [])],
-  ])),
+  operatorParameters: {
+    ...Object.fromEntries(Object.entries(golden.operatorParameters).map(([part, names]) => [
+      part, [...names.filter((name) => !(ON_CODE_NEXT_SINCE_BASE.deletedFromKept[part] ?? []).includes(name)), ...(ON_CODE_NEXT_SINCE_BASE.keptAdded[part] ?? [])],
+    ])),
+    // Issue #1554: self-hosted Model Gateway stack (`agentx-<env>-gateway`) added to STACK_PARTS.
+    gateway: [],
+  },
   namedEnvironmentOnlyParameters: golden.namedEnvironmentOnlyParameters,
   brokerSettings: packedNow(),
 };

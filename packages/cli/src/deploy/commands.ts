@@ -1,4 +1,4 @@
-import { CoreEngineAnswersSchema } from "./core-engine-answers.js";
+import { CoreEngineAnswersSchema, usesBuiltInGateway } from "./core-engine-answers.js";
 // Wires the deploy engines (templates-engine.ts, cdk-engine.ts), the deploy orchestrator
 // (deploy-environment.ts) and the export bundle (export-bundle.ts) together for `agentx deploy` and
 // `agentx init --export`. Everything that would otherwise touch AWS is overridable through
@@ -151,11 +151,12 @@ export function deployIdentityAnswers(identity: z.infer<typeof IdentityAnswersSc
 }
 
 /** A parsed images answer as `DeployAnswers["images"]`, or undefined when there is none. */
-export function deployImagesAnswers(images: { worker?: string | undefined; slack?: string | undefined } | undefined): DeployAnswers["images"] {
+export function deployImagesAnswers(images: { worker?: string | undefined; slack?: string | undefined; gateway?: string | undefined } | undefined): DeployAnswers["images"] {
   if (images === undefined) return undefined;
   return {
     ...(images.worker === undefined ? {} : { worker: images.worker }),
     ...(images.slack === undefined ? {} : { slack: images.slack }),
+    ...(images.gateway === undefined ? {} : { gateway: images.gateway }),
   };
 }
 
@@ -628,7 +629,7 @@ async function deployCommand(options: DeployCommandOptions, deps: DeployCliDepen
       ...(deps.now === undefined ? {} : { now: deps.now }),
     });
 
-    const order = installOrder(answers.identity.mode);
+    const order = installOrder(answers.identity.mode, { includeGateway: usesBuiltInGateway(answers.coreEngine) });
     return {
       ...result,
       env: answers.env,
@@ -835,6 +836,13 @@ function exportModelAnswers(options: InitExportOptions): DeployAnswers["models"]
   });
 }
 
+function defaultExportAgentModel(models: DeployAnswers["models"]): string {
+  const workerProvider = models.providers?.worker ?? "amazon-bedrock";
+  if (workerProvider === "openai") return "gpt-5";
+  if (workerProvider === "openrouter") return models.worker;
+  return "claude-sonnet-4-6";
+}
+
 async function initExport(options: InitExportOptions, deps: DeployCliDependencies): Promise<InitExportResult> {
   if (!REGION_PATTERN.test(options.region)) {
     throw agentXError("CONFIG_INVALID", `--region ${options.region} must look like us-east-1`);
@@ -860,12 +868,13 @@ async function initExport(options: InitExportOptions, deps: DeployCliDependencie
   }
 
   if (options.openrouterProviders && !options.openrouterSecretArn) throw agentXError("CONFIG_INVALID", "--openrouter-providers requires --openrouter-secret-arn");
+  const models = exportModelAnswers(options);
   const answers: DeployAnswers = {
     env: options.env,
     region: options.region,
     account,
-    models: exportModelAnswers(options),
-    coreEngine: CoreEngineAnswersSchema.parse({ modelGatewayUrl: options.modelGatewayUrl ?? "", agentModel: options.agentModel ?? "" }),
+    models,
+    coreEngine: CoreEngineAnswersSchema.parse({ modelGatewayUrl: options.modelGatewayUrl ?? "", agentModel: options.agentModel ?? defaultExportAgentModel(models) }),
     identity: identityAnswers,
     // The export bundle always replaces this with `{{github:...}}` markers (markerAnswers in
     // export-bundle.ts); the GitHub App is not set up until the operator configures it, phase 15d.

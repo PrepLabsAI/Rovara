@@ -20,6 +20,7 @@ import { settingsFields, type SettingsFieldName } from "../../packages/cli/src/i
 import type { ProgressHandle } from "../../packages/cli/src/init/steps.js";
 import { openAdminSession } from "../../packages/cli/src/setup/admin-session.js";
 import { fakeCloudFormation, SIGN_IN_PARAMETERS } from "./fake-cloudformation.js";
+import { builtInGatewayHost } from "./install-gateway.js";
 import { MemoryParameterStore } from "./memory-parameter-store.js";
 import { setupServices } from "./setup-fakes.js";
 
@@ -202,6 +203,11 @@ export function allStackOutputs(env = "staging"): Record<string, StackOutputs> {
       ModelRunPriceVersion: "1",
       OperatorAlertsTopicArn: `arn:aws:sns:us-east-1:123456789012:agentx-${env}-alerts`,
     },
+    [name("gateway")]: {
+      GatewayHost: builtInGatewayHost,
+      GatewayUrl: `https://${builtInGatewayHost}`,
+      InternalGatewayUrl: `https://internal-agentx-${env}-gateway.us-east-1.elb.amazonaws.com`,
+    },
     [name("runtime")]: {},
     [name("slack")]: {},
   };
@@ -232,7 +238,11 @@ export function scriptedDeployer(outputsByStack: Record<string, StackOutputs>, e
 export function fakeRelease(version = "1.2.3"): LoadedRelease {
   const manifest: ReleaseManifest = {
     schemaVersion: 1, version, gitCommit: "a".repeat(40), environmentPlaceholder: "qqenv-placeholderqq", templates: [], packages: [],
-    images: { worker: `public.ecr.aws/agentx/agentx-worker@sha256:${"b".repeat(64)}`, slack: `public.ecr.aws/agentx/agentx-slack@sha256:${"c".repeat(64)}` },
+    images: {
+      worker: `public.ecr.aws/agentx/agentx-worker@sha256:${"b".repeat(64)}`,
+      slack: `public.ecr.aws/agentx/agentx-slack@sha256:${"c".repeat(64)}`,
+      gateway: `public.ecr.aws/agentx/agentx-gateway@sha256:${"d".repeat(64)}`,
+    },
   };
   return { manifest, dir: "/nonexistent", regions: () => ["us-east-1"], template: () => JSON.stringify({ Parameters: { CoreModelGatewayHost: {}, CoreAgentModel: {} }, Outputs: { ModelRunPriceVersion: { Value: "1" } } }), packagePath: () => { throw new Error("not used"); } };
 }

@@ -14,6 +14,7 @@ import { readZipEntries } from "../support/zip-entries.js";
 const sha = (b: Buffer) => createHash("sha256").update(b).digest("hex");
 const worker = `public.ecr.aws/agentx/agentx-worker@sha256:${"a".repeat(64)}`;
 const executor = `public.ecr.aws/agentx/agentx-executor@sha256:${"c".repeat(64)}`;
+const gateway = `public.ecr.aws/agentx/agentx-gateway@sha256:${"d".repeat(64)}`;
 
 describe("release builder", () => {
   // A release build is a CDK synth of every region plus the packages (about a minute on CI), so the file runs two and every test reads them:
@@ -24,7 +25,7 @@ describe("release builder", () => {
 
   beforeAll(async () => {
     const outA = join(await mkdtemp(join(tmpdir(), "agentx-release-")), "r");
-    a = { out: outA, manifest: await buildRelease({ version: "1.2.3", out: outA, gitCommit: "b".repeat(40), images: { worker, executor } }) };
+    a = { out: outA, manifest: await buildRelease({ version: "1.2.3", out: outA, gitCommit: "b".repeat(40), images: { worker, executor, gateway } }) };
 
     // The old (buggy) implementation synthesized under os.tmpdir(), which made the number of ".." segments in the bundle's source map (and, because that
     // changes the bundle's own bytes, the asset id and every downstream checksum) depend on how deep the temp directory sits. And infra/lib/control-plane.ts
@@ -55,8 +56,8 @@ describe("release builder", () => {
       "legal/LICENSE-APACHE",
       "legal/RELICENSED.md",
     ]);
-    // Every supported region's six parts, region by region (SUPPORTED_REGIONS order).
-    const parts = ["access", "foundation", "identity", "runtime", "control-plane", "slack"];
+    // Every supported region's seven parts, region by region (SUPPORTED_REGIONS order).
+    const parts = ["access", "foundation", "identity", "runtime", "control-plane", "gateway", "slack"];
     expect(a.manifest.templates.map((t) => [t.region, t.part])).toEqual(["us-east-1", "us-west-2"].flatMap((region) => parts.map((part) => [region, part])));
     for (const t of a.manifest.templates) {
       expect(t.file).toBe(`templates/${t.region}/${t.part}.template.json`);
@@ -75,8 +76,8 @@ describe("release builder", () => {
     for (const document of a.manifest.legalDocuments ?? []) {
       expect(sha(await readFile(join(a.out, document.file)))).toBe(document.sha256);
     }
-    // The release carries both digests: the worker and the browser executor the worker pulls at boot.
-    expect(a.manifest.images).toEqual({ worker, executor });
+    // The release carries all digests: worker, browser executor, and self-hosted Model Gateway.
+    expect(a.manifest.images).toEqual({ worker, executor, gateway });
   });
 
   it("covers every asset parameter in every template with exactly one package, and ships no unused package", async () => {
@@ -100,12 +101,14 @@ describe("release builder", () => {
   });
 
   it("takes the executor image from --executor-image and refuses one that is not pinned by digest", async () => {
-    expect(parseBuildArgs(["--version", "1.2.3", "--out", "o", "--worker-image", worker, "--executor-image", executor]).images).toEqual({ worker, executor });
+    expect(parseBuildArgs(["--version", "1.2.3", "--out", "o", "--worker-image", worker, "--executor-image", executor, "--gateway-image", gateway]).images).toEqual({ worker, executor, gateway });
     expect(parseBuildArgs(["--version", "1.2.3", "--out", "o", "--executor-image", executor]).images).toEqual({ executor });
     expect(() => parseBuildArgs(["--version", "1.2.3", "--out", "o", "--executor-image"])).toThrow("--executor-image requires a value");
+    expect(() => parseBuildArgs(["--version", "1.2.3", "--out", "o", "--gateway-image"])).toThrow("--gateway-image requires a value");
     const dir = await mkdtemp(join(tmpdir(), "agentx-release-"));
     const out = join(dir, "r");
     await expect(buildRelease({ version: "1.2.3", out, gitCommit: "b".repeat(40), images: { executor: "public.ecr.aws/x/executor:latest" } })).rejects.toThrow(/executor image must be referenced by digest/);
+    await expect(buildRelease({ version: "1.2.3", out, gitCommit: "b".repeat(40), images: { gateway: "public.ecr.aws/x/gateway:latest" } })).rejects.toThrow(/gateway image must be referenced by digest/);
     await expect(readdir(out)).rejects.toThrow();
   });
 

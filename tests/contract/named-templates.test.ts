@@ -11,7 +11,7 @@ import { withoutWorkerSandboxEgress } from "../support/worker-sandbox-egress-tem
 import { withoutCompanyImportReads } from "../support/company-import-reads-template.js";
 import { withoutNatEgressAddresses, withoutNatEgressControlPlane } from "../support/egress-addresses-template.js";
 import { withoutGithubSignIn } from "../support/github-signin-template.js";
-import { withoutDnsFirewall, withoutDnsFirewallAccess, withoutSwitchoverControlPlaneParity } from "../support/switchover-parity-template.js";
+import { withoutDnsFirewall, withoutDnsFirewallAccess, withoutGatewayAccess, withoutSwitchoverControlPlaneParity } from "../support/switchover-parity-template.js";
 import { normalizedTemplate } from "../support/template-snapshot.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { withoutSlackCompanyMode, withoutSlackCompanyService } from "../support/slack-company-template.js";
@@ -294,6 +294,8 @@ describe("named environment templates", () => {
     expect({ CORE_DISPATCH_QUEUE_URL: variables.CORE_DISPATCH_QUEUE_URL, CORE_DISPATCH_DEAD_LETTER_URL: variables.CORE_DISPATCH_DEAD_LETTER_URL }).toMatchSnapshot();
   });
   for (const stack of stacks) {
+    // Issue #1554: agentx-staging-gateway is a new self-hosted stack tested by self-hosted-gateway.test.ts (not in mainline 4a605fd).
+    if (stack.stackName === "agentx-staging-gateway") continue;
     if (stack.stackName === "agentx-staging-control-plane") {
       it("removing only Batch F additions preserves code/next's agentx-staging-control-plane template", () => {
         // F1 L1a-1: the two deleted invitation switches are put back innermost (Rule D, tests/support/task-people-invitations-template.ts), so this older pin holds as recorded.
@@ -353,7 +355,7 @@ describe("named environment templates", () => {
       // CODE-PUBLIC-URL (rev 9.2): the foundation's firewall gains one allow-list entry (and its parameter); taken out, the recorded snapshot holds.
       if (stack.stackName === "agentx-staging-foundation") template = withoutPublicApiAllowDomain(structuredClone(template));
       const parity = stack.stackName === "agentx-staging-foundation" ? withoutNatEgressAddresses(withoutDnsFirewall(template))
-        : stack.stackName === "agentx-staging-access" ? withoutSavedEnvAccess(withoutDnsFirewallAccess(template), "staging")
+        : stack.stackName === "agentx-staging-access" ? withoutSavedEnvAccess(withoutDnsFirewallAccess(withoutGatewayAccess(template, "staging")), "staging")
         // ENV-ROOM 2 (2026-11-17): the broker's names parameter is checked and the names put back in its environment first, as the rest was recorded.
         : stack.stackName === "agentx-staging-control-plane" ? withoutWorkerSandboxEgress(withoutNatEgressControlPlane(withoutGithubSignIn(withoutSwitchoverControlPlaneParity(withoutBrokerNamesParameter(withoutCompanyImportReads(withoutSlackCompanyMode(withoutChatGptKeyDeny(withoutBrokerSlackPoster(withoutSavedEnvSwitch(withoutSavedEnvImages(template, "staging")), "staging")))))), "staging")))
         : stack.stackName === "agentx-staging-slack" ? withoutSlackCompanyService(template) : template;

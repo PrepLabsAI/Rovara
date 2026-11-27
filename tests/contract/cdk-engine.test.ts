@@ -41,7 +41,7 @@ function recordingRunner(outputsDir: string, outputs: Record<string, Record<stri
 
 describe("cdk engine", () => {
   it("maps every part to its construct id", () => {
-    expect(CDK_CONSTRUCT_IDS).toEqual({ access: "AgentXAccess", foundation: "AgentXProductionFoundation", identity: "AgentXIdentity", runtime: "AgentXProductionRuntime", "control-plane": "AgentXControlPlane", slack: "AgentXSlackOrchestrator" });
+    expect(CDK_CONSTRUCT_IDS).toEqual({ access: "AgentXAccess", foundation: "AgentXProductionFoundation", identity: "AgentXIdentity", runtime: "AgentXProductionRuntime", "control-plane": "AgentXControlPlane", gateway: "AgentXModelGateway", slack: "AgentXSlackOrchestrator" });
   });
 
   it("deploys one stack exclusively with its parameters and role, and returns its outputs", async () => {

@@ -10,7 +10,7 @@
 import { EnvironmentNameSchema, environmentStackName, STACK_PARTS, type StackPart } from "@agentx/contracts";
 import type { RetainedResource } from "./inventory.js";
 
-export const DELETE_BEFORE_WORKERS: readonly StackPart[] = ["slack", "runtime", "control-plane"];
+export const DELETE_BEFORE_WORKERS: readonly StackPart[] = ["slack", "runtime", "gateway", "control-plane"];
 export const DELETE_AFTER_WORKERS: readonly StackPart[] = ["identity", "foundation", "access"];
 
 /** Resource types whose names CloudFormation generates from the stack name. */

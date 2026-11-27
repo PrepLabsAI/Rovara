@@ -1,10 +1,10 @@
 import { readDeploymentOutputs } from "./cx-b/stack-outputs.js";
-import { coreEngineParameters } from "./core-engine-answers.js";
+import { coreEngineParameters, usesBuiltInGateway } from "./core-engine-answers.js";
 // The deploy orchestrator: ties a stack deployer engine to install/upgrade order, the environment
 // lock, the callback signing key and environment settings. Phase 15d's `agentx init`/`agentx
 // upgrade` build a StackDeployer (the templates or cdk engine), collect DeployAnswers, and call
 // deployEnvironment; everything else (order, outputs feeding forward, the lock, settings) lives here.
-import { assertBrokerRunPrices, assertGatewayRunPrices, assertBrokerArtifactRunPrices } from "./gateway-price-preflight.js";
+import { assertBrokerRunPrices, assertGatewayRunPrices, assertBrokerArtifactRunPrices, fetchControlPlaneTaskKeyIds, waitForGatewayRunPrices } from "./gateway-price-preflight.js";
 import { agentXError, environmentStackName } from "@agentx/contracts";
 import { PROTECTED_PARTS, type DeployEvent, type DeployRequest, type StackDeployer } from "./deployer.js";
 import { currentLockHolder, withEnvironmentLock } from "../environments/lock.js";
@@ -50,6 +50,10 @@ export interface DeployEnvironmentInput {
    * release does: the cdk engine's synth of its source (issue 152, prepareDeployment). Omitted, they
    * are read from the release's own templates (templateParameterNames), as the templates engine does. */
   declaredParameters?: (part: DeployPart) => ReadonlySet<string>;
+  /** Test seam for reading task-purpose JWKS key IDs from the deployed control plane before deploying the self-hosted gateway. */
+  fetchTaskKeyIds?: (controlPlaneUrl: string) => Promise<string>;
+  /** Test seam for polling the newly deployed self-hosted gateway until /healthz reports runPrice.snapshotVersion >= 1. */
+  waitForGateway?: (origin: string) => Promise<void>;
 }
 
 export interface DeployEnvironmentResult {
@@ -235,22 +239,180 @@ function qualifyReleaseBroker(input: DeployEnvironmentInput): void {
 }
 
 /** Before any secret or stack write, qualify the selected broker, then the effective gateway.
- * Partial upgrades that do not replace the broker must qualify the installed one. */
+ * Partial upgrades that do not replace the broker must qualify the installed one.
+ * When deploying the built-in self-hosted `gateway` stack (empty `coreEngine.modelGatewayUrl`), the
+ * gateway does not exist yet on initial install; it is probed after `gateway` deploys and before
+ * `control-plane` is wired and `runtime` activates workers. */
+const CORE_ENGINE_MISSING = "coreEngine.modelGatewayUrl and coreEngine.agentModel must both be configured before worker activation; supply coreEngine answers to repair this install";
+
+async function resolveGatewayAnswersForPart(
+  part: DeployPart,
+  answers: InstallAnswers,
+  outputs: Partial<Record<DeployPart, StackOutputs>>,
+  env: string,
+  fetchTaskKeyIds: (controlPlaneUrl: string) => Promise<string>,
+): Promise<InstallAnswers> {
+  if (part !== "gateway") return answers;
+  const controlPlaneUrl = controlPlaneUrlOf(outputs["control-plane"] ?? {}, () => requiredOutput(outputs, "control-plane", "ApiEndpoint", env));
+  const taskKeyIds = answers.gateway?.taskKeyIds ?? await fetchTaskKeyIds(controlPlaneUrl);
+  return { ...answers, gateway: { ...answers.gateway, taskKeyIds } };
+}
+
+async function assertRuntimeGatewayReady(
+  outputs: Partial<Record<DeployPart, StackOutputs>>,
+  gatewayParameters: Record<string, string>,
+): Promise<void> {
+  assertBrokerRunPrices(outputs["control-plane"]);
+  const effectiveHost = gatewayParameters.CoreModelGatewayHost ?? outputs.gateway?.GatewayHost;
+  if (!effectiveHost) throw agentXError("CONFIG_INVALID", "coreEngine.modelGatewayUrl and coreEngine.agentModel must both be configured before worker activation");
+  await assertGatewayRunPrices(`https://${effectiveHost}`);
+}
+
+async function wireBuiltInGateway(input: {
+  env: string;
+  outputs: Partial<Record<DeployPart, StackOutputs>>;
+  deferredParameters: Record<string, string> | undefined;
+  deployer: StackDeployer;
+  waitForGateway: (origin: string) => Promise<void>;
+  onEvent?: DeployRequest["onEvent"];
+  confirm?: DeployRequest["confirm"];
+}): Promise<Record<string, string> | undefined> {
+  const gatewayHost = requiredOutput(input.outputs, "gateway", "GatewayHost", input.env);
+  await input.waitForGateway(`https://${gatewayHost}`);
+  if (input.deferredParameters === undefined) return undefined;
+  const wiredParameters = { ...input.deferredParameters, CoreModelGatewayHost: gatewayHost };
+  const roleArn = requiredOutput(input.outputs, "access", "CloudFormationRoleArn", input.env);
+  input.outputs["control-plane"] = await input.deployer.deploy({
+    part: "control-plane",
+    stackName: environmentStackName(input.env, "control-plane"),
+    parameters: wiredParameters,
+    terminationProtection: PROTECTED_PARTS.has("control-plane"),
+    ...(input.onEvent === undefined ? {} : { onEvent: input.onEvent }),
+    ...(input.confirm === undefined ? {} : { confirm: input.confirm }),
+    roleArn,
+  });
+  return wiredParameters;
+}
+
+async function mergeUpgradeParameters(input: {
+  part: DeployPart;
+  stackName: string;
+  parameters: Record<string, string>;
+  deployedParameters: DeployEnvironmentInput["deployedParameters"];
+  declaredFor: (part: DeployPart) => ReadonlySet<string> | undefined;
+  keptAppId: string | undefined;
+  droppedParameters: DeployEnvironmentResult["droppedParameters"];
+  onEvent?: DeployRequest["onEvent"];
+}): Promise<Record<string, string>> {
+  if (OPERATOR_PARAMETERS[input.part].length === 0) return input.parameters;
+  if (input.deployedParameters === undefined) {
+    throw agentXError("CONFIG_INVALID", "an upgrade must read the deployed stacks' parameters to keep what the operator set; this is an AgentX bug, so report it");
+  }
+  const deployed = await input.deployedParameters(input.stackName);
+  const candidates = OPERATOR_PARAMETERS[input.part].filter((name) => deployed?.[name] !== undefined && !Object.hasOwn(input.parameters, name));
+  const declared = candidates.length === 0 ? undefined : input.declaredFor(input.part);
+  const { kept, dropped } = keptOperatorParameters({ part: input.part, computed: input.parameters, deployed, declared });
+  input.droppedParameters.push(...dropped.map((entry) => ({ stackName: input.stackName, ...entry })));
+  const keptFromAnswers = input.part === "control-plane" && input.keptAppId !== undefined ? ["GitHubAppId"] : [];
+  if (candidates.length > 0 || keptFromAnswers.length > 0) {
+    input.onEvent?.({ kind: "kept", stackName: input.stackName, kept: [...Object.keys(kept), ...keptFromAnswers], dropped: dropped.map((entry) => entry.parameter) });
+  }
+  return { ...kept, ...input.parameters };
+}
+
+function buildDeployRequest(input: {
+  part: DeployPart;
+  stackName: string;
+  parameters: Record<string, string>;
+  allowDeferredGateway: boolean;
+  roleArn: string | undefined;
+  onEvent?: DeployRequest["onEvent"];
+  confirm?: DeployRequest["confirm"];
+}): DeployRequest {
+  return {
+    part: input.part,
+    stackName: input.stackName,
+    parameters: input.parameters,
+    terminationProtection: PROTECTED_PARTS.has(input.part),
+    ...(input.allowDeferredGateway ? { allowDeferredGateway: true } : {}),
+    ...(input.onEvent === undefined ? {} : { onEvent: input.onEvent }),
+    ...(input.confirm === undefined ? {} : { confirm: input.confirm }),
+    ...(input.roleArn === undefined ? {} : { roleArn: input.roleArn }),
+  };
+}
+
+function buildEnvironmentSettings(input: {
+  env: string;
+  engine: DeployEnvironmentInput["engine"];
+  answers: DeployAnswers;
+  version: string;
+  outputs: Partial<Record<DeployPart, StackOutputs>>;
+  existing: EnvironmentSettings | undefined;
+  now: () => number;
+}): EnvironmentSettings | undefined {
+  const { env, engine, answers, version, outputs, existing, now } = input;
+  const controlPlaneOutputs = outputs["control-plane"];
+  const identityKnown = answers.identity.mode === "cognito" ? outputs.identity !== undefined : answers.identity.clientId !== undefined;
+  if (controlPlaneOutputs === undefined || !identityKnown) return undefined;
+  const foundationStack = outputs.foundation === undefined ? undefined : environmentStackName(env, "foundation");
+  const runtimeStack = outputs.runtime === undefined ? undefined : environmentStackName(env, "runtime");
+  const slackStack = outputs.slack === undefined ? undefined : environmentStackName(env, "slack");
+  if (foundationStack === undefined || runtimeStack === undefined || slackStack === undefined) return undefined;
+  return {
+    schemaVersion: 1,
+    env,
+    account: answers.account,
+    region: answers.region,
+    engine,
+    version,
+    naming: "environment",
+    stacks: {
+      ...(outputs.access === undefined ? {} : { access: environmentStackName(env, "access") }),
+      foundation: foundationStack,
+      ...(outputs.identity === undefined ? {} : { identity: environmentStackName(env, "identity") }),
+      ...(outputs.gateway === undefined ? {} : { gateway: environmentStackName(env, "gateway") }),
+      runtime: runtimeStack,
+      "control-plane": environmentStackName(env, "control-plane"),
+      slack: slackStack,
+    },
+    controlPlaneUrl: controlPlaneUrlOf(controlPlaneOutputs, () => requiredOutput(outputs, "control-plane", "ApiEndpoint", env)),
+    identity: identitySettingsFor(answers.identity, outputs, env),
+    models: answers.models,
+    ...(existing?.alertAddress === undefined ? {} : { alertAddress: existing.alertAddress }),
+    ...(outputs.access === undefined
+      ? {}
+      : {
+          access: {
+            artifactBucket: requiredOutput(outputs, "access", "ArtifactBucketName", env),
+            cloudFormationRoleArn: requiredOutput(outputs, "access", "CloudFormationRoleArn", env),
+            operatorRoleArn: requiredOutput(outputs, "access", "OperatorRoleArn", env),
+            pullThroughPrefix: requiredOutput(outputs, "access", "PullThroughPrefix", env),
+            ...(answers.permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn: answers.permissionsBoundaryArn }),
+          },
+        }),
+    updatedAt: new Date(now()).toISOString(),
+  };
+}
+
 export async function assertDeployGatewayReady(input: DeployEnvironmentInput, deploySet: ReadonlySet<DeployPart>, declaredFor: (part: DeployPart) => ReadonlySet<string> | undefined): Promise<Record<string, string>> {
   const stackName = environmentStackName(input.answers.env, "control-plane");
+  const builtIn = usesBuiltInGateway(input.answers.coreEngine);
   const keepInstalled = input.mode === "upgrade" && (input.answers.coreEngine === undefined || !deploySet.has("control-plane"));
-  const computed = keepInstalled ? {} : coreEngineParameters(input.answers.coreEngine);
+  const computed = keepInstalled ? {} : coreEngineParameters(input.answers.coreEngine, { allowDeferredGateway: builtIn });
   const deployed = input.mode === "upgrade" ? await input.deployedParameters?.(stackName) : undefined;
-  const kept = keptOperatorParameters({ part: "control-plane", computed, deployed, declared: input.mode === "upgrade" && deploySet.has("control-plane") ? declaredFor("control-plane") : undefined }).kept;
-  const effective = { ...kept, ...computed };
+  const declared = input.mode === "upgrade" && deploySet.has("control-plane") ? declaredFor("control-plane") : undefined;
+  const effective = { ...keptOperatorParameters({ part: "control-plane", computed, deployed, declared }).kept, ...computed };
   if (input.mode === "install" || deploySet.has("control-plane")) {
-    if (input.deployer.qualifyBroker !== undefined) await input.deployer.qualifyBroker();
-    else qualifyReleaseBroker(input);
+    await (input.deployer.qualifyBroker ? input.deployer.qualifyBroker() : Promise.resolve(qualifyReleaseBroker(input)));
   } else {
     assertBrokerRunPrices(await input.deployer.outputs(stackName));
   }
+  if (!effective.CoreAgentModel) throw agentXError("CONFIG_INVALID", CORE_ENGINE_MISSING);
   const host = effective.CoreModelGatewayHost;
-  if (!host || !effective.CoreAgentModel) throw agentXError("CONFIG_INVALID", "coreEngine.modelGatewayUrl and coreEngine.agentModel must both be configured before worker activation; supply coreEngine answers to repair this install");
+  if (!host) {
+    if (builtIn && input.mode === "install") return effective;
+    throw agentXError("CONFIG_INVALID", CORE_ENGINE_MISSING);
+  }
   await assertGatewayRunPrices(`https://${host}`);
   return effective;
 }
@@ -271,7 +433,8 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
   const declaredFor = (part: DeployPart): ReadonlySet<string> | undefined => (declaredBy === undefined ? templateParameterNames(release, part, env) : declaredBy(part));
   const now = input.now ?? Date.now;
 
-  assertDeployAllowed(await readEnvironmentSettings(store, env), mode, engine, input.parts, env);
+  const existingBeforeLock = await readEnvironmentSettings(store, env);
+  assertDeployAllowed(existingBeforeLock, mode, engine, input.parts, env);
   if (answers.identity.mode === "oidc" && answers.identity.clientId === undefined) {
     throw agentXError("CONFIG_INVALID", "bringing your own OIDC provider requires clientId to write environment settings (needed for agentx login)");
   }
@@ -279,7 +442,12 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
   // read the deployed parameters would reset every operator parameter to its template default.
   // The order and the parts are read once, here, and the deploy loop below uses these same values, so
   // the parts this guard checks are exactly the parts that deploy.
-  const fullOrder = mode === "install" ? installOrder(answers.identity.mode) : upgradeOrder(answers.identity.mode);
+  const includeGateway = mode === "install"
+    ? usesBuiltInGateway(answers.coreEngine)
+    : existingBeforeLock?.stacks.gateway !== undefined;
+  const fullOrder = mode === "install"
+    ? installOrder(answers.identity.mode, { includeGateway })
+    : upgradeOrder(answers.identity.mode, { includeGateway });
   const deploySet = new Set(input.parts ?? fullOrder);
   if (mode === "upgrade" && input.deployedParameters === undefined && [...deploySet].some((part) => OPERATOR_PARAMETERS[part].length > 0)) {
     throw agentXError("CONFIG_INVALID", "an upgrade must read the deployed stacks' parameters to keep what the operator set; this is an AgentX bug, so report it");
@@ -329,104 +497,53 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
 
     await readDeploymentOutputs({ existing, deployer, env, fullOrder, deploySet, outputs });
 
+    let deferredControlPlaneParameters: Record<string, string> | undefined;
+    const fetchTaskKeyIds = input.fetchTaskKeyIds ?? fetchControlPlaneTaskKeyIds;
+    const waitForGateway = input.waitForGateway ?? waitForGatewayRunPrices;
+
     for (const part of fullOrder) {
       if (!deploySet.has(part)) continue;
       const stackName = environmentStackName(env, part);
-      const rawParameters = stackParameters(part, answersWithAddress, outputs, { packages: engine === "templates" });
+      const effectiveAnswers = await resolveGatewayAnswersForPart(part, answersWithAddress, outputs, env, fetchTaskKeyIds);
+      const rawParameters = stackParameters(part, effectiveAnswers, outputs, { packages: engine === "templates" });
       // F24: only when this deploy is actually sending a stored sign-in choice to the control plane
       // are the declared parameters even consulted (every other deploy never calls `release.template`).
       let parameters = part === "control-plane" && developerSignIn !== undefined
         ? withoutUnsetSlackTeamId(withDeclaredSignIn(rawParameters, declaredFor("control-plane")), developerSignIn)
         : rawParameters;
       parameters = withDeclaredPublicApiUrlFor(parameters, part, declaredFor);
-      if (mode === "upgrade" && OPERATOR_PARAMETERS[part].length > 0) {
-        // The F6 guard above already refused this before anything deployed. Never skip carrying the
-        // parameters: skipping would reset them to the template defaults, the bug this code prevents.
-        if (input.deployedParameters === undefined) {
-          throw agentXError("CONFIG_INVALID", "an upgrade must read the deployed stacks' parameters to keep what the operator set; this is an AgentX bug, so report it");
-        }
-        const deployed = await input.deployedParameters(stackName);
-        // The template is read only when there is something to keep: most upgrades read none.
-        const candidates = OPERATOR_PARAMETERS[part].filter((name) => deployed?.[name] !== undefined && !Object.hasOwn(parameters, name));
-        const declared = candidates.length === 0 ? undefined : declaredFor(part);
-        const { kept, dropped } = keptOperatorParameters({ part, computed: parameters, deployed, declared });
-        parameters = { ...kept, ...parameters };
-        droppedParameters.push(...dropped.map((entry) => ({ stackName, ...entry })));
-        const keptFromAnswers = part === "control-plane" && keptAppId !== undefined ? ["GitHubAppId"] : [];
-        if (candidates.length > 0 || keptFromAnswers.length > 0) {
-          input.onEvent?.({ kind: "kept", stackName, kept: [...Object.keys(kept), ...keptFromAnswers], dropped: dropped.map((entry) => entry.parameter) });
-        }
+      if (mode === "upgrade") {
+        parameters = await mergeUpgradeParameters({
+          part, stackName, parameters, deployedParameters: input.deployedParameters, declaredFor, keptAppId, droppedParameters,
+          ...(input.onEvent === undefined ? {} : { onEvent: input.onEvent }),
+        });
       }
       const roleArn = part === "access" ? undefined : requiredOutput(outputs, "access", "CloudFormationRoleArn", env);
-      const request: DeployRequest = {
-        part,
-        stackName,
-        parameters,
-        terminationProtection: PROTECTED_PARTS.has(part),
+      const allowDeferredGateway = part === "control-plane" && includeGateway && !parameters.CoreModelGatewayHost;
+      const request = buildDeployRequest({
+        part, stackName, parameters, allowDeferredGateway, roleArn,
         ...(input.onEvent === undefined ? {} : { onEvent: input.onEvent }),
         ...(input.confirm === undefined ? {} : { confirm: input.confirm }),
-        ...(roleArn === undefined ? {} : { roleArn }),
-      };
-      if (part === "control-plane") gatewayParameters = parameters;
-      if (part === "runtime") {
-        assertBrokerRunPrices(outputs["control-plane"]);
-        await assertGatewayRunPrices(`https://${gatewayParameters.CoreModelGatewayHost}`);
+      });
+      if (part === "control-plane") {
+        gatewayParameters = parameters;
+        deferredControlPlaneParameters = allowDeferredGateway ? parameters : deferredControlPlaneParameters;
       }
+      if (part === "runtime") await assertRuntimeGatewayReady(outputs, gatewayParameters);
       outputs[part] = await deployer.deploy(request);
+
+      if (part === "gateway") {
+        const wired = await wireBuiltInGateway({
+          env, outputs, deferredParameters: deferredControlPlaneParameters, deployer, waitForGateway,
+          ...(input.onEvent === undefined ? {} : { onEvent: input.onEvent }),
+          ...(input.confirm === undefined ? {} : { confirm: input.confirm }),
+        });
+        if (wired !== undefined) { gatewayParameters = wired; deferredControlPlaneParameters = undefined; }
+      }
     }
 
-    const controlPlaneOutputs = outputs["control-plane"];
-    const identityKnown = answers.identity.mode === "cognito" ? outputs.identity !== undefined : answers.identity.clientId !== undefined;
-    if (controlPlaneOutputs === undefined || !identityKnown) return { outputs, settingsWritten: false, droppedParameters };
-
-    const identitySettings = identitySettingsFor(answers.identity, outputs, env);
-
-    const foundationStack = outputs.foundation === undefined ? undefined : environmentStackName(env, "foundation");
-    const runtimeStack = outputs.runtime === undefined ? undefined : environmentStackName(env, "runtime");
-    const controlPlaneStack = environmentStackName(env, "control-plane");
-    const slackStack = outputs.slack === undefined ? undefined : environmentStackName(env, "slack");
-    if (foundationStack === undefined || runtimeStack === undefined || slackStack === undefined) {
-      // Every part this environment needs (foundation, runtime, control-plane, slack) is required by
-      // the settings schema; if control-plane is known but one of the others somehow is not, nothing
-      // was written rather than writing settings that lie about what is deployed.
-      return { outputs, settingsWritten: false, droppedParameters };
-    }
-
-    const settings: EnvironmentSettings = {
-      schemaVersion: 1,
-      env,
-      account: answers.account,
-      region: answers.region,
-      engine,
-      version: release.manifest.version,
-      naming: "environment",
-      stacks: {
-        ...(outputs.access === undefined ? {} : { access: environmentStackName(env, "access") }),
-        foundation: foundationStack,
-        ...(outputs.identity === undefined ? {} : { identity: environmentStackName(env, "identity") }),
-        runtime: runtimeStack,
-        "control-plane": controlPlaneStack,
-        slack: slackStack,
-      },
-      // CODE-PUBLIC-URL: the control plane's permanent address where the install has one (what `agentx login` names and the sign-in callbacks are built on), else its API endpoint, as before.
-      controlPlaneUrl: controlPlaneUrlOf(controlPlaneOutputs, () => requiredOutput(outputs, "control-plane", "ApiEndpoint", env)),
-      identity: identitySettings,
-      models: answers.models,
-      // F16: set after install (agentx setup alerts, agentx config set alerts.address); no deploy's answers carry it.
-      ...(existing?.alertAddress === undefined ? {} : { alertAddress: existing.alertAddress }),
-      ...(outputs.access === undefined
-        ? {}
-        : {
-            access: {
-              artifactBucket: requiredOutput(outputs, "access", "ArtifactBucketName", env),
-              cloudFormationRoleArn: requiredOutput(outputs, "access", "CloudFormationRoleArn", env),
-              operatorRoleArn: requiredOutput(outputs, "access", "OperatorRoleArn", env),
-              pullThroughPrefix: requiredOutput(outputs, "access", "PullThroughPrefix", env),
-              ...(answers.permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn: answers.permissionsBoundaryArn }),
-            },
-          }),
-      updatedAt: new Date(now()).toISOString(),
-    };
+    const settings = buildEnvironmentSettings({ env, engine, answers, version: release.manifest.version, outputs, existing, now });
+    if (settings === undefined) return { outputs, settingsWritten: false, droppedParameters };
     await writeEnvironmentSettings(store, settings, { onLegacyKeysDropped: (keys) => input.onEvent?.({ kind: "settings-legacy-keys-dropped", env, keys }) });
     return { outputs, settingsWritten: true, droppedParameters };
   };

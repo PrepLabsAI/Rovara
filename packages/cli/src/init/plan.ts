@@ -6,6 +6,7 @@ import {
   keyedProviderSecretName, KEYED_MODEL_PROVIDERS, defaultBoundaryName, environmentCloudFormationRoleName, environmentOperatorRoleName, environmentRolePath, environmentStackName,
 } from "@agentx/contracts";
 import type { DirectProvider } from "../deploy/answer-schemas.js";
+import { usesBuiltInGateway } from "../deploy/core-engine-answers.js";
 import { installOrder } from "../deploy/parameters.js";
 import { callbackSigningKeySecretName } from "../deploy/signing-key.js";
 import { openRouterSecretName } from "./answers.js";
@@ -23,7 +24,7 @@ export interface PlanExtras { storesOpenRouterKey?: boolean; openRouterProviders
 
 export function installPlanText(answers: InitAnswers, estimate: CostEstimate, notes: readonly string[], extras: PlanExtras = {}): string {
   const { env } = answers;
-  const stacks = installOrder(answers.identity.mode).map((part) => environmentStackName(env, part));
+  const stacks = installOrder(answers.identity.mode, { includeGateway: usesBuiltInGateway(answers.coreEngine) }).map((part) => environmentStackName(env, part));
   const boundary = answers.permissionsBoundaryArn ?? defaultBoundaryName(env);
   const secrets = [
     callbackSigningKeySecretName(env), `agentx/${env}/github-app`, `agentx/${env}/slack`,

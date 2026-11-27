@@ -1,11 +1,13 @@
 // FR-050: that stacks exist and are healthy, that they run the release the settings name, the engine
 // they were deployed with, and their last drift result.
 import { environmentStackName, type ReleaseManifest } from "@agentx/contracts";
+import { assertGatewayRunPrices } from "../deploy/gateway-price-preflight.js";
 import { installOrder, type DeployPart } from "../deploy/parameters.js";
 import { check, type DoctorCheck, type DoctorContext, type DoctorStack } from "./checks.js";
 
 const HEALTHY = new Set(["CREATE_COMPLETE", "UPDATE_COMPLETE", "IMPORT_COMPLETE"]);
-const IMAGE_PARAMETERS: Partial<Record<DeployPart, { parameter: string; image: "worker" | "slack" }>> = {
+const IMAGE_PARAMETERS: Partial<Record<DeployPart, { parameter: string; image: "worker" | "slack" | "gateway" }>> = {
+  gateway: { parameter: "GatewayImageUri", image: "gateway" },
   runtime: { parameter: "WorkerImageUri", image: "worker" },
   slack: { parameter: "OrchestratorImageUri", image: "slack" },
 };
@@ -46,25 +48,48 @@ function stackHealth(env: string, region: string, part: DeployPart, name: string
   return check("stacks", name, "fail", status, `see its events (${events})`);
 }
 
+async function gatewayHealthCheck(
+  entry: { name: string; stack: DoctorStack | undefined } | undefined,
+  fetchFn: DoctorContext["services"]["fetch"],
+): Promise<DoctorCheck | undefined> {
+  const outputs = entry?.stack?.outputs;
+  const gatewayUrl = outputs?.GatewayUrl ?? (outputs?.GatewayHost ? `https://${outputs.GatewayHost}` : undefined);
+  if (gatewayUrl === undefined || entry === undefined) return undefined;
+  try {
+    await assertGatewayRunPrices(gatewayUrl, fetchFn);
+    return check("stacks", "model gateway", "ok", `${gatewayUrl}/healthz reports runPrice snapshot ready`);
+  } catch {
+    return check("stacks", "model gateway", "fail", `${gatewayUrl}/healthz is not serving ready run prices`, `check the ${entry.name} ECS service logs and verify Prices snapshot seeding completed`);
+  }
+}
+
+function engineCheck(env: string, engine: string, described: Map<DeployPart, { name: string; stack: DoctorStack | undefined }>): DoctorCheck {
+  const wrongEngine = [...described.values()].flatMap(({ name, stack }) => {
+    if (stack === undefined) return [];
+    const used = deployedWithCdk(stack) ? "cdk" : "templates";
+    return used === engine ? [] : [`${name} (${used})`];
+  });
+  return wrongEngine.length === 0
+    ? check("stacks", "engine", "ok", `every stack was deployed with the ${engine} engine`)
+    : check("stacks", "engine", "fail", `the settings say ${engine}, but ${wrongEngine.join(", ")} ${wrongEngine.length === 1 ? "was" : "were"} deployed with the other engine; switching engines is not supported`, `redeploy with the ${engine} engine: agentx --env ${env} upgrade uses the engine in the settings`);
+}
+
 export async function stackChecks(context: DoctorContext): Promise<DoctorCheck[]> {
   const { env, settings, services } = context;
   const described = new Map<DeployPart, { name: string; stack: DoctorStack | undefined }>();
   const checks: DoctorCheck[] = [];
-  for (const part of installOrder(settings.identity.mode)) {
+  for (const part of installOrder(settings.identity.mode, { includeGateway: settings.stacks.gateway !== undefined })) {
     const name = settings.stacks[part] ?? environmentStackName(env, part);
     const stack = await services.stacks.describe(name);
     described.set(part, { name, stack });
     checks.push(stackHealth(env, settings.region, part, name, stack));
   }
 
-  const wrongEngine = [...described.values()].flatMap(({ name, stack }) => {
-    if (stack === undefined) return [];
-    const used = deployedWithCdk(stack) ? "cdk" : "templates";
-    return used === settings.engine ? [] : [`${name} (${used})`];
-  });
-  checks.push(wrongEngine.length === 0
-    ? check("stacks", "engine", "ok", `every stack was deployed with the ${settings.engine} engine`)
-    : check("stacks", "engine", "fail", `the settings say ${settings.engine}, but ${wrongEngine.join(", ")} ${wrongEngine.length === 1 ? "was" : "were"} deployed with the other engine; switching engines is not supported`, `redeploy with the ${settings.engine} engine: agentx --env ${env} upgrade uses the engine in the settings`));
+  // Self-hosted Model Gateway health + runPrice readiness check (issue #1554).
+  const gatewayCheck = await gatewayHealthCheck(described.get("gateway"), services.fetch);
+  if (gatewayCheck !== undefined) checks.push(gatewayCheck);
+
+  checks.push(engineCheck(env, settings.engine, described));
 
   const existing = [...described.values()].filter((entry): entry is { name: string; stack: DoctorStack } => entry.stack !== undefined);
   const drifted = existing.filter(({ stack }) => stack.drift === "DRIFTED").map(({ name }) => name);

@@ -42,7 +42,7 @@ async function releaseDir(version = "1.2.3", regions = ["us-east-1"]): Promise<s
   const templates = [];
   for (const region of regions) {
     await mkdir(join(dir, "templates", region), { recursive: true });
-    for (const part of ["access", "foundation", "identity", "control-plane", "runtime", "slack"]) {
+    for (const part of ["access", "foundation", "identity", "control-plane", "gateway", "runtime", "slack"]) {
       const file = `templates/${region}/${part}.template.json`;
       const content = part === "control-plane" ? brokerTemplate() : "{}";
       await writeFile(join(dir, file), content);
@@ -51,7 +51,11 @@ async function releaseDir(version = "1.2.3", regions = ["us-east-1"]): Promise<s
   }
   await writeFile(join(dir, "release.json"), JSON.stringify({
     schemaVersion: 1, version, gitCommit: "a".repeat(40), environmentPlaceholder: "qqenv-placeholderqq", templates, packages: [],
-    images: { worker: `public.ecr.aws/agentx/worker@sha256:${"a".repeat(64)}`, slack: `public.ecr.aws/agentx/slack@sha256:${"b".repeat(64)}` },
+    images: {
+      worker: `public.ecr.aws/agentx/worker@sha256:${"a".repeat(64)}`,
+      slack: `public.ecr.aws/agentx/slack@sha256:${"b".repeat(64)}`,
+      gateway: `public.ecr.aws/agentx/gateway@sha256:${"c".repeat(64)}`,
+    },
   }));
   return dir;
 }
@@ -283,7 +287,7 @@ describe("agentx init", () => {
     expect(prompter.remaining()).toBe(0);
     expect(h.plane.registered).toHaveLength(1);
     expect(h.plane.bindings).toEqual(["T0TEAM/C0PAY00001"]);
-    expect(h.deployer.requests.map((request) => request.part)).toEqual(["access", "foundation", "identity", "control-plane", "runtime", "slack"]);
+    expect(h.deployer.requests.map((request) => request.part)).toEqual(["access", "foundation", "identity", "control-plane", "gateway", "control-plane", "runtime", "slack"]);
     const progress = await readInstallProgress(h.store, "staging");
     expect(INIT_STEP_IDS.every((id) => progress?.steps[id]?.status === "done")).toBe(true);
     expect((await readEnvironmentSettings(h.store, "staging"))?.engine).toBe("templates");
@@ -353,7 +357,7 @@ describe("agentx init", () => {
     expect(await h.run([], { prompter: scriptedPrompter([...SLACK, ...SIGNIN, ...FINISH]) })).toBe(0);
     expect(h.printed()).toContain("Resuming the install of environment staging.");
     expect(h.github.conversions).toHaveLength(1);
-    expect(h.deployer.requests.map((request) => request.part)).toEqual(["control-plane", "runtime", "slack"]);
+    expect(h.deployer.requests.map((request) => request.part)).toEqual(["control-plane", "gateway", "control-plane", "runtime", "slack"]);
   });
 
   // Fix round 1: the terminal path has no page and no onStepFailure hook, so a step's own stop
@@ -678,7 +682,8 @@ describe("agentx init", () => {
     const HEAD = "e".repeat(40);
     const WORKER = `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-staging/worker@sha256:${"d".repeat(64)}`;
     const SLACK_IMAGE = `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx/slack@sha256:${"e".repeat(64)}`;
-    const IMAGES = ["--worker-image", WORKER, "--slack-image", SLACK_IMAGE];
+    const GATEWAY_IMAGE = `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx/gateway@sha256:${"f".repeat(64)}`;
+    const IMAGES = ["--worker-image", WORKER, "--slack-image", SLACK_IMAGE, "--gateway-image", GATEWAY_IMAGE];
     const MANIFEST_URL = "https://github.com/PrepLabsAI/Rovara/releases/download/v1.4.0/release.json";
     /** A clean checkout at tag v1.4.0. */
     const taggedSource = { async run(_command: string, args: string[]) {
@@ -700,7 +705,7 @@ describe("agentx init", () => {
     const publishedManifest = JSON.stringify({
       schemaVersion: 1, version: "1.4.0", gitCommit: HEAD, environmentPlaceholder: "qqenv-placeholderqq",
       templates: ["us-east-1", "us-west-2"].map((region) => ({ region, part: "access", file: `templates/${region}/access.template.json`, sha256: "0".repeat(64) })),
-      packages: [], images: { worker: `public.ecr.aws/agentx/agentx-worker@sha256:${"b".repeat(64)}`, slack: `public.ecr.aws/agentx/agentx-slack@sha256:${"c".repeat(64)}` },
+      packages: [], images: { worker: `public.ecr.aws/agentx/agentx-worker@sha256:${"b".repeat(64)}`, slack: `public.ecr.aws/agentx/agentx-slack@sha256:${"c".repeat(64)}`, gateway: `public.ecr.aws/agentx/agentx-gateway@sha256:${"d".repeat(64)}` },
     });
 
     it("installs with both image flags and no release: the version is the tag's, and nothing is downloaded", async () => {
@@ -985,7 +990,7 @@ describe("agentx init with OpenRouter", () => {
     expect(h.printed()).toContain("agentx/staging/openrouter");
     expect((await readInstallAnswers(h.store, "staging"))?.models.openRouter).toEqual({ secretArn: OPENROUTER_ARN });
     const openRouterParameters = h.deployer.requests.filter((request) => "OpenRouterSecretArn" in request.parameters);
-    expect(openRouterParameters.map((request) => request.part)).toEqual(["control-plane", "runtime", "slack"]);
+    expect(openRouterParameters.map((request) => request.part)).toEqual(["control-plane", "gateway", "control-plane", "runtime", "slack"]);
     expect(openRouterParameters.every((request) => request.parameters.OpenRouterSecretArn === OPENROUTER_ARN)).toBe(true);
     const everywhere = await everywhereButSecrets(h);
     expect(everywhere).not.toContain(OPENROUTER_KEY);

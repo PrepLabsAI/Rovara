@@ -49,6 +49,7 @@ export const BUDGET_TAG_NOTE =
 
 export interface InitFlags {
   modelGatewayUrl?: string; agentModel?: string;
+  gatewayCertificateArn?: string; gatewayHost?: string;
   engine?: "templates" | "cdk";
   identity?: "cognito" | "oidc";
   oidcIssuer?: string; oidcAudience?: string; oidcClientId?: string; adminClaim?: string; adminValues?: string;
@@ -76,7 +77,7 @@ export interface InitFlags {
   budgetScope?: "tag" | "account";
   githubAccount?: string; githubAccountType?: "organization" | "user"; githubAppName?: string;
   slackAppName?: string; slackAppPostedMessages?: "accept" | "ignore";
-  workerImage?: string; slackImage?: string;
+  workerImage?: string; slackImage?: string; gatewayImage?: string;
 }
 
 export interface CollectedAnswers {
@@ -138,10 +139,18 @@ function digestFlag(value: string | undefined, flag: string): string | undefined
 type PlatformAnswers = Pick<InitAnswers, "engine" | "identity" | "models" | "permissionsBoundaryArn" | "operatorPrincipalArn" | "operatorExternalId">;
 type SettingsValues = Readonly<Record<string, string>>;
 
-function collectCoreEngineAnswers(fixed: BundleAnswers | undefined, flags: InitFlags, typed: (name: SettingsFieldName) => string | undefined): NonNullable<InitAnswers["coreEngine"]> {
+/** Recommended core agent model name (gateway model name) for the chosen worker provider. */
+export function defaultCoreAgentModel(models: InitAnswers["models"]): string {
+  const provider = models.providers?.worker ?? "amazon-bedrock";
+  if (provider === "openai") return "gpt-5";
+  if (provider === "openrouter") return models.worker;
+  return "claude-sonnet-4-6";
+}
+
+function collectCoreEngineAnswers(fixed: BundleAnswers | undefined, flags: InitFlags, typed: (name: SettingsFieldName) => string | undefined, models: InitAnswers["models"]): NonNullable<InitAnswers["coreEngine"]> {
   return CoreEngineAnswersSchema.parse(fixed?.coreEngine ?? {
     modelGatewayUrl: flags.modelGatewayUrl ?? typed(SETTINGS_FIELD.modelGatewayUrl) ?? "",
-    agentModel: flags.agentModel ?? typed(SETTINGS_FIELD.agentModel) ?? "",
+    agentModel: flags.agentModel ?? typed(SETTINGS_FIELD.agentModel) ?? defaultCoreAgentModel(models),
   });
 }
 
@@ -150,6 +159,27 @@ function collectCoreEngineAnswers(fixed: BundleAnswers | undefined, flags: InitF
  * field, so the field is left out. Only the follow-ups (your own OIDC's values, a model id for
  * "Another Bedrock model id", OpenRouter's model ids and key, an alert webhook, and the GitHub
  * owner's type when GitHub cannot say) are asked after it. */
+function optionalGatewayAnswers(flags: InitFlags): Partial<Pick<InitAnswers, "gateway">> {
+  if (flags.gatewayCertificateArn === undefined && flags.gatewayHost === undefined) return {};
+  return {
+    gateway: {
+      ...(flags.gatewayCertificateArn === undefined ? {} : { certificateArn: flags.gatewayCertificateArn }),
+      ...(flags.gatewayHost === undefined ? {} : { host: flags.gatewayHost }),
+    },
+  };
+}
+
+function optionalImageAnswers(worker: string | undefined, slack: string | undefined, gateway: string | undefined): Partial<Pick<InitAnswers, "images">> {
+  if (worker === undefined && slack === undefined && gateway === undefined) return {};
+  return {
+    images: {
+      ...(worker === undefined ? {} : { worker }),
+      ...(slack === undefined ? {} : { slack }),
+      ...(gateway === undefined ? {} : { gateway }),
+    },
+  };
+}
+
 export async function collectInitAnswers(input: {
   env: string; region: string; account: string; releaseVersion: string;
   flags: InitFlags; prompter: Prompter; processEnv: NodeJS.ProcessEnv; now: () => number;
@@ -169,6 +199,7 @@ export async function collectInitAnswers(input: {
   if (input.adminEmail !== undefined && emailProblem(input.adminEmail) !== undefined) throw agentXError("CONFIG_INVALID", `--admin-email ${input.adminEmail} is not an email address`);
   const workerImage = digestFlag(flags.workerImage, "--worker-image");
   const slackImage = digestFlag(flags.slackImage, "--slack-image");
+  const gatewayImage = digestFlag(flags.gatewayImage, "--gateway-image");
   const recommended = estimateMonthlyCost({ orchestrator: DEFAULT_ORCHESTRATOR_MODEL, classifier: DEFAULT_CLASSIFIER_MODEL, worker: DEFAULT_WORKER_MODEL });
   const fields = settingsFields({
     env: input.env, flags, fixed: input.fixed !== undefined, budgetWhy: budgetWhy(recommended),
@@ -268,13 +299,12 @@ export async function collectInitAnswers(input: {
     env, region: input.region, account: input.account, engine: platform.engine, releaseVersion: input.releaseVersion,
     identity: platform.identity,
     models: platform.models,
-    coreEngine: collectCoreEngineAnswers(input.fixed, flags, typed),
+    coreEngine: collectCoreEngineAnswers(input.fixed, flags, typed, platform.models),
+    ...optionalGatewayAnswers(flags),
     ...(platform.permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn: platform.permissionsBoundaryArn }),
     ...(platform.operatorPrincipalArn === undefined ? {} : { operatorPrincipalArn: platform.operatorPrincipalArn }),
     ...(platform.operatorExternalId === undefined ? {} : { operatorExternalId: platform.operatorExternalId }),
-    ...(workerImage === undefined && slackImage === undefined
-      ? {}
-      : { images: { ...(workerImage === undefined ? {} : { worker: workerImage }), ...(slackImage === undefined ? {} : { slack: slackImage }) } }),
+    ...optionalImageAnswers(workerImage, slackImage, gatewayImage),
     alert,
     ...(budget === undefined ? {} : { budget }),
     github: { account: githubAccount, accountType, appName },
@@ -487,6 +517,7 @@ const RESUME_CHECKS: Array<{ flag: string; key: keyof InitFlags; kind?: ResumeCh
   { flag: "--slack-app-posted-messages", key: "slackAppPostedMessages", stored: (a) => a.slack.appPostedMessages },
   { flag: "--worker-image", key: "workerImage", stored: (a) => a.images?.worker },
   { flag: "--slack-image", key: "slackImage", stored: (a) => a.images?.slack },
+  { flag: "--gateway-image", key: "gatewayImage", stored: (a) => a.images?.gateway },
 ];
 
 /** Trims, then applies the one further normalization `kind` calls for: a URL (the OIDC issuer)

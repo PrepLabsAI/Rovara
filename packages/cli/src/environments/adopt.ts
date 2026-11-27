@@ -13,7 +13,7 @@ import { readEnvironmentSettings, settingsParameterName, writeEnvironmentSetting
  * predates the identity and access stacks, so it has no entry for either here; adopted settings
  * leave stacks.identity and stacks.access unset.
  */
-export const ADOPTED_STACK_NAMES: Record<Exclude<StackPart, "identity" | "access">, string> = {
+export const ADOPTED_STACK_NAMES: Record<Exclude<StackPart, "identity" | "access" | "gateway">, string> = {
   foundation: "AgentXProductionFoundation",
   runtime: "AgentXProductionRuntime",
   "control-plane": "AgentXControlPlane",

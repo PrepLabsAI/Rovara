@@ -7,7 +7,7 @@ import { ControlPlaneStack } from "./control-plane.js";
 import { IdentityStack } from "./identity.js";
 import { INSTALLER_DESCRIPTION, InstallerStack } from "./installer.js";
 import { applyLegacyRuntimeBoundaries } from "./legacy-runtime-boundary.js";
-import { namingFromContext } from "./naming.js";
+import { type AgentXNaming, namingFromContext } from "./naming.js";
 import { applyPermissionsBoundaryParameter } from "./permissions-boundary.js";
 import { ProductionFoundationStack } from "./production-foundation.js";
 import { maybeEnvironmentReleasePipeline } from "./environment-release-pipeline.js";
@@ -21,6 +21,7 @@ import { BetaDomainStack } from "./beta-domain.js";
 import { BetaReleaseAccessStack } from "./beta-release-access.js";
 import { WorkerSettingsStack } from "./worker-settings.js";
 import { maybeModelGateway } from "./model-gateway-app.js";
+import { SelfHostedModelGatewayStack } from "./self-hosted-gateway.js";
 
 /** The context the App will go on to use, with CDK's own precedence (moved out of buildAgentXApp unchanged, to keep its complexity under the ratchet). */
 function mergedAppContext(context: Record<string, unknown>): Record<string, unknown> {
@@ -148,6 +149,9 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
       env: { region: deploymentRegion ?? "us-east-1" },
     });
   }
+  // The self-hosted Model Gateway runs inside foundation's existing VPC for named environments
+  // (issue #1554). The legacy deployment brings its own external gateway.
+  maybeSelfHostedGatewayStack(app, naming, deploymentRegion);
   // The runtime stack holds EC2 worker settings.
   new WorkerSettingsStack(app, "AgentXProductionRuntime", {
     description: "AgentX worker image and model settings for EC2 workers",
@@ -222,4 +226,15 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
   // The permanent public address (-c agentxApiAddress=<domain>), only when asked for, by hand; created after the boundary loop on purpose (it declares no role, so it takes no boundary parameter). No release deploys it.
   maybeApiAddressStack(app, naming, deploymentRegion);
   return app;
+}
+
+function maybeSelfHostedGatewayStack(app: App, naming: AgentXNaming, deploymentRegion: string | undefined): void {
+  if (naming.env === undefined) return;
+  new SelfHostedModelGatewayStack(app, "AgentXModelGateway", {
+    description: "Self-hosted Model Gateway for a named environment: ECS Fargate service, DynamoDB meter/prices, internal ALB and HTTPS entry point",
+    stackName: naming.stackName("gateway"),
+    terminationProtection: true,
+    naming,
+    env: { region: deploymentRegion ?? "us-east-1" },
+  });
 }

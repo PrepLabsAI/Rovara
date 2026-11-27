@@ -112,6 +112,7 @@ export interface SettingsFieldsInput {
 
 function coreProblem(name: "modelGatewayUrl" | "agentModel") {
   return (value: string): string | undefined => {
+    if (value === "") return undefined;
     const result = CoreEngineAnswersSchema.safeParse({ modelGatewayUrl: "https://gateway.example", agentModel: "claude-sonnet-4-6", [name]: value });
     return result.success ? undefined : result.error.issues[0]?.message;
   };
@@ -120,10 +121,26 @@ function coreProblem(name: "modelGatewayUrl" | "agentModel") {
 function coreSettingsFields(flags: InitFlags, fixed: true | undefined): FormField[] {
   const fields: FormField[] = [];
   if ((fixed ?? flags.modelGatewayUrl) === undefined) {
-    fields.push({ name: SETTINGS_FIELD.modelGatewayUrl, question: "Signed-price model gateway URL", flag: "--model-gateway-url", validate: coreProblem("modelGatewayUrl") });
+    fields.push({
+      name: SETTINGS_FIELD.modelGatewayUrl,
+      section: "advanced",
+      question: "External signed-price model gateway URL",
+      flag: "--model-gateway-url",
+      defaultValue: "",
+      validate: coreProblem("modelGatewayUrl"),
+      help: { hint: "Optional. Leave empty to deploy the built-in self-hosted gateway." },
+    });
   }
   if ((fixed ?? flags.agentModel) === undefined) {
-    fields.push({ name: SETTINGS_FIELD.agentModel, question: "Core agent model", flag: "--agent-model", validate: coreProblem("agentModel") });
+    fields.push({
+      name: SETTINGS_FIELD.agentModel,
+      section: "advanced",
+      question: "Core agent model",
+      flag: "--agent-model",
+      defaultValue: "",
+      validate: coreProblem("agentModel"),
+      help: { hint: "Optional. Leave empty to use the chosen provider's recommended model." },
+    });
   }
   return fields;
 }

@@ -15,7 +15,7 @@ export interface BuildReleaseInput {
   version: string;
   out: string;
   gitCommit: string;
-  images?: { worker?: string; slack?: string; executor?: string };
+  images?: { worker?: string; slack?: string; executor?: string; gateway?: string };
 }
 
 // scripts/release/build.ts -> repo root is two levels up. NodejsFunction's esbuild bundles embed
@@ -50,6 +50,11 @@ function checkedImages(images: BuildReleaseInput["images"]): ReleaseManifest["im
     const parsed = ImageDigest.safeParse(images.executor);
     if (!parsed.success) throw new Error(`executor image must be referenced by digest, not ${JSON.stringify(images.executor)}`);
     result.executor = parsed.data;
+  }
+  if (images?.gateway !== undefined) {
+    const parsed = ImageDigest.safeParse(images.gateway);
+    if (!parsed.success) throw new Error(`gateway image must be referenced by digest, not ${JSON.stringify(images.gateway)}`);
+    result.gateway = parsed.data;
   }
   return result;
 }
@@ -330,14 +335,27 @@ export async function buildRelease(input: BuildReleaseInput): Promise<ReleaseMan
 function usage(): string {
   return (
     "Usage: tsx scripts/release/build.ts --version <version> --out <dir> " +
-    "[--worker-image <uri@sha256:...>] [--slack-image <uri@sha256:...>] [--executor-image <uri@sha256:...>]\n"
+    "[--worker-image <uri@sha256:...>] [--slack-image <uri@sha256:...>] [--executor-image <uri@sha256:...>] [--gateway-image <uri@sha256:...>]\n"
   );
 }
 
 interface CliArgs {
   version: string;
   out: string;
-  images?: { worker?: string; slack?: string; executor?: string };
+  images?: { worker?: string; slack?: string; executor?: string; gateway?: string };
+}
+
+function collectBuildImages(valueAfter: (flag: string) => string | undefined): CliArgs["images"] {
+  const entries = ([
+    ["worker", "--worker-image"],
+    ["slack", "--slack-image"],
+    ["executor", "--executor-image"],
+    ["gateway", "--gateway-image"],
+  ] as const).flatMap(([key, flag]) => {
+    const value = valueAfter(flag);
+    return value === undefined ? [] : [[key, value] as const];
+  });
+  return entries.length === 0 ? undefined : Object.fromEntries(entries);
 }
 
 export function parseBuildArgs(argv: readonly string[]): CliArgs {
@@ -348,7 +366,7 @@ export function parseBuildArgs(argv: readonly string[]): CliArgs {
     if (!value || value.startsWith("--")) throw new Error(`${flag} requires a value`);
     return value;
   };
-  const known = new Set(["--version", "--out", "--worker-image", "--slack-image", "--executor-image", "--help"]);
+  const known = new Set(["--version", "--out", "--worker-image", "--slack-image", "--executor-image", "--gateway-image", "--help"]);
   for (const argument of argv) {
     if (argument.startsWith("--") && !known.has(argument)) throw new Error(`unknown option ${argument}`);
   }
@@ -356,16 +374,8 @@ export function parseBuildArgs(argv: readonly string[]): CliArgs {
   const out = valueAfter("--out");
   if (version === undefined) throw new Error("--version is required");
   if (out === undefined) throw new Error("--out is required");
-  const worker = valueAfter("--worker-image");
-  const slack = valueAfter("--slack-image");
-  const executor = valueAfter("--executor-image");
-  return {
-    version,
-    out,
-    ...(worker !== undefined || slack !== undefined || executor !== undefined
-      ? { images: { ...(worker !== undefined ? { worker } : {}), ...(slack !== undefined ? { slack } : {}), ...(executor !== undefined ? { executor } : {}) } }
-      : {}),
-  };
+  const images = collectBuildImages(valueAfter);
+  return { version, out, ...(images === undefined ? {} : { images }) };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

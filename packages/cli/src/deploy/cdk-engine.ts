@@ -47,8 +47,9 @@ export const CDK_CONSTRUCT_IDS: Record<DeployPart, string> = {
   access: "AgentXAccess",
   foundation: "AgentXProductionFoundation",
   identity: "AgentXIdentity",
-  runtime: "AgentXProductionRuntime",
   "control-plane": "AgentXControlPlane",
+  gateway: "AgentXModelGateway",
+  runtime: "AgentXProductionRuntime",
   slack: "AgentXSlackOrchestrator",
 };
 
@@ -209,8 +210,12 @@ export function cdkDeployer(input: {
       if (request.part === "control-plane") {
         await qualifyBroker();
         const host = request.parameters.CoreModelGatewayHost;
-        if (!host || !request.parameters.CoreAgentModel) throw agentXError("CONFIG_INVALID", "coreEngine gateway and agent model must be configured before worker activation");
-        await assertGatewayRunPrices(`https://${host}`);
+        if (!request.parameters.CoreAgentModel) throw agentXError("CONFIG_INVALID", "coreEngine gateway and agent model must be configured before worker activation");
+        if (!host) {
+          if (request.allowDeferredGateway !== true) throw agentXError("CONFIG_INVALID", "coreEngine gateway and agent model must be configured before worker activation");
+        } else {
+          await assertGatewayRunPrices(`https://${host}`);
+        }
       }
       const outputsFile = join(input.outputsDir, `${request.part}.json`);
       const args = [...cdkArguments(input, request, "deploy"), "--require-approval", "never", "--outputs-file", outputsFile, ...(request.roleArn === undefined ? [] : ["--role-arn", request.roleArn])];

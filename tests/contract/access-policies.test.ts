@@ -89,9 +89,9 @@ describe("service role policy", () => {
     expect(serviceRoleStatements(scope).find((s) => s.Sid === "IamRoles")!.Action).toContain("iam:UpdateRoleDescription");
   });
 
-  it("creates only the ECS and Route 53 Resolver service-linked roles", () => {
+  it("creates only the ECS, Elastic Load Balancing, and Route 53 Resolver service-linked roles", () => {
     const linked = serviceRoleStatements(scope).find((s) => s.Sid === "ServiceLinkedRoles")!;
-    expect(linked.Condition).toEqual({ StringLike: { "iam:AWSServiceName": ["ecs.amazonaws.com", "route53resolver.amazonaws.com"] } });
+    expect(linked.Condition).toEqual({ StringLike: { "iam:AWSServiceName": ["ecs.amazonaws.com", "elasticloadbalancing.amazonaws.com", "route53resolver.amazonaws.com"] } });
   });
 
   it("manages the DNS firewall only in this account and region, and only lists it on any resource", () => {
@@ -152,7 +152,7 @@ describe("operator role policy", () => {
   it("changes only this environment's stacks, settings and secrets", () => {
     const byId = Object.fromEntries(operatorRoleStatements(scope).map((s) => [s.Sid, [s.Resource].flat()]));
     const stack = (part: string) => `arn:aws:cloudformation:us-east-1:123456789012:stack/agentx-staging-${part}/*`;
-    const deployed = ["foundation", "identity", "runtime", "control-plane", "slack"].map(stack);
+    const deployed = ["foundation", "identity", "runtime", "control-plane", "gateway", "slack"].map(stack);
     expect(byId.Stacks).toEqual([stack("access"), ...deployed]);
     expect(byId.ChangeSets).toEqual(deployed);
     expect(byId.Settings).toEqual(["arn:aws:ssm:us-east-1:123456789012:parameter/agentx/staging", "arn:aws:ssm:us-east-1:123456789012:parameter/agentx/staging/*"]);
@@ -188,7 +188,7 @@ describe("operator role policy", () => {
     const statements = operatorRoleStatements(scope).filter((s) => s.Action.includes("cloudformation:UpdateTerminationProtection"));
     expect(statements.map((s) => s.Sid)).toEqual(["ChangeSets"]);
     const stack = (part: string) => `arn:aws:cloudformation:us-east-1:123456789012:stack/agentx-staging-${part}/*`;
-    expect([statements[0]!.Resource].flat()).toEqual(["foundation", "identity", "runtime", "control-plane", "slack"].map(stack));
+    expect([statements[0]!.Resource].flat()).toEqual(["foundation", "identity", "runtime", "control-plane", "gateway", "slack"].map(stack));
   });
 
   it("may create the environment's admin user only in a user pool tagged for this environment", () => {
@@ -307,7 +307,7 @@ describe("deploy permission boundary (the CloudFormation service role and the op
     expect(byId.ServiceLinkedRoles).toEqual({
       Sid: "ServiceLinkedRoles", Effect: "Allow", Action: ["iam:CreateServiceLinkedRole"],
       Resource: "arn:aws:iam::123456789012:role/aws-service-role/*",
-      Condition: { StringLike: { "iam:AWSServiceName": ["ecs.amazonaws.com", "route53resolver.amazonaws.com"] } },
+      Condition: { StringLike: { "iam:AWSServiceName": ["ecs.amazonaws.com", "elasticloadbalancing.amazonaws.com", "route53resolver.amazonaws.com"] } },
     });
   });
 

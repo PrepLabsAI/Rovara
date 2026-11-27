@@ -223,14 +223,14 @@ export type AdminWorkspacesResponse = z.infer<typeof AdminWorkspacesResponseSche
 export const HEALTH_ALARM_SUFFIXES = [
   "BedrockThrottling", "CanarySessionInvocations", "CanarySessionMints", "CanarySessionRefused", "ChannelRequestDeadLetters", "ChannelEventDeadLetters", "CheckerFailures", "ClassifierThrottling", "ConnectorBroken", "ConnectorNotConnected", "CoreDispatchDeadLetters",
   "DeveloperNoticeDeadLetters", "DeveloperNoticeStreamFailures", "DispatchDeadLetters", "DispatchStaleAddress", "EmptyResponses",
-  "GithubWebhookRejected", "LinearWebhookRejected",
+  "GatewayHealthyTasks", "GatewaySettleFailures", "GatewayTarget5xx", "GithubWebhookRejected", "LinearWebhookRejected",
   "ReconcilerLostInstances", "ReconcilerQualifiedAmiReadFailures", "ReconcilerQuarantinedVolumes", "ReconcilerStuckProvisioning", "RecordingFailures",
   "RuntimeRequalifyAgeUnreadable", "RuntimeRequalifyMachineFailures", "RuntimeRequalifyStale", "RuntimeRequalifyStepErrors",
   "SessionDeleterFailures", "SessionProvisionerFailures", "SessionReaperErrors", "SessionReconcilerErrors", "SessionStuckStopping", "SetupMachineUnverified",
   "SlackDeadLetters", "SlackDeliveryFailed", "SlackHandOffFailures", "SlowTurns", "StuckCancels", "TestAlarm", "TurnErrors", "UnwaitedTaskFailures", "WorkerTerminalCallbackFailed",
 ] as const;
-/** The listed alarms an environment creates only on Amazon Bedrock (or, for RuntimeRequalify*, only with the automatic renewal on; for CanarySession*, only the beta install that holds the canary session function), so their absence is expected. */
-export const HEALTH_ALARM_CONDITIONAL_SUFFIXES = ["BedrockThrottling", "CanarySessionInvocations", "CanarySessionMints", "CanarySessionRefused", "ClassifierThrottling", "RuntimeRequalifyAgeUnreadable", "RuntimeRequalifyMachineFailures", "RuntimeRequalifyStale", "RuntimeRequalifyStepErrors"] as const satisfies ReadonlyArray<typeof HEALTH_ALARM_SUFFIXES[number]>;
+/** The listed alarms an environment creates only on Amazon Bedrock (or, for Gateway*, only when the self-hosted gateway stack is deployed; for RuntimeRequalify*, only with the automatic renewal on; for CanarySession*, only the beta install that holds the canary session function), so their absence is expected. */
+export const HEALTH_ALARM_CONDITIONAL_SUFFIXES = ["BedrockThrottling", "CanarySessionInvocations", "CanarySessionMints", "CanarySessionRefused", "ClassifierThrottling", "GatewayHealthyTasks", "GatewaySettleFailures", "GatewayTarget5xx", "RuntimeRequalifyAgeUnreadable", "RuntimeRequalifyMachineFailures", "RuntimeRequalifyStale", "RuntimeRequalifyStepErrors"] as const satisfies ReadonlyArray<typeof HEALTH_ALARM_SUFFIXES[number]>;
 /** The state the health route gives a listed alarm CloudWatch did not return. */
 export const MISSING_ALARM_STATE = "MISSING";
 

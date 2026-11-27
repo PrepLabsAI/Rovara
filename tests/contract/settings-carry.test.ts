@@ -99,7 +99,12 @@ describe("the carried-by values are the code's own (S4)", () => {
   const digest = (character: string) => character.repeat(64);
   const release: ReleaseManifest = {
     schemaVersion: 1, version: "1.0.0", gitCommit: "a".repeat(40), environmentPlaceholder: "qqenv-placeholderqq", templates: [], packages: [],
-    images: { worker: `public.ecr.aws/agentx/agentx-worker@sha256:${digest("b")}`, slack: `public.ecr.aws/agentx/agentx-slack@sha256:${digest("c")}`, executor: `public.ecr.aws/agentx/agentx-executor@sha256:${digest("d")}` },
+    images: {
+      worker: `public.ecr.aws/agentx/agentx-worker@sha256:${digest("b")}`,
+      slack: `public.ecr.aws/agentx/agentx-slack@sha256:${digest("c")}`,
+      executor: `public.ecr.aws/agentx/agentx-executor@sha256:${digest("d")}`,
+      gateway: `public.ecr.aws/agentx/agentx-gateway@sha256:${digest("e")}`,
+    },
   };
   const arn = (service: string, resource: string) => `arn:aws:${service}:us-east-1:123456789012:${resource}`;
   const outputs = {
@@ -133,6 +138,7 @@ describe("the carried-by values are the code's own (S4)", () => {
     operatorPrincipalArn: "arn:aws:iam::210987654321:role/operator", operatorExternalId: "an-external-id-1",
     slackAppPostedMessages: "accept", budget: { monthlyUsd: 150, scope: "account" }, setupPageUrl: "https://setup.example.com",
     coreEngine: { modelGatewayUrl: "https://gateway.example.dev", agentModel: "claude-sonnet-4-6" },
+    gateway: { taskKeyIds: "abcdefghijklmnop", certificateArn: arn("acm", "certificate/11111111-2222-3333-4444-555555555555"), host: "gw.example.dev" },
     developerSignIn: {
       slackTeamId: "T0TEAM1",
       settings: {
@@ -154,7 +160,7 @@ describe("the carried-by values are the code's own (S4)", () => {
     }
     return names;
   };
-  const named = new Map((["access", "foundation", "identity", "runtime", "control-plane", "slack"] as DeployPart[]).map((part) => [part, namedBy(part)]));
+  const named = new Map((["access", "foundation", "identity", "control-plane", "gateway", "runtime", "slack"] as DeployPart[]).map((part) => [part, namedBy(part)]));
   const rowsOfKind = (kind: CarriedByKind) => INSTALL_ROWS.flatMap((row) => (row.install.carriedBy.includes(kind) ? rowStackParameters(row).filter((each) => each.part === row.install.part).map((each) => ({ row, ...each })) : []));
 
   it.each(["answers", "stack-outputs", "control-plane-outputs", "ssm-sign-in", "settings-models"] as CarriedByKind[])("names every %s row on its stack when given everything it can take", (kind) => {
@@ -175,11 +181,12 @@ describe("the carried-by values are the code's own (S4)", () => {
   // old value. This enumerates every parameter `stackParameters` sends only sometimes (named with the fullest answers and outputs, not with the least) and requires each to be either in
   // CARRY_ON_PURPOSE below, with the reason carrying is right, or sent always. A new conditional parameter fails here until someone decides which.
   const minimalAnswers = (): InstallAnswers => ({
-    env: "staging", region: "us-east-1", account: "123456789012", release: { ...release, images: { worker: release.images.worker, slack: release.images.slack } },
+    env: "staging", region: "us-east-1", account: "123456789012", release: { ...release, images: { worker: release.images.worker, slack: release.images.slack, gateway: release.images.gateway } },
     models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "us.anthropic.claude-haiku-4-5-20251001-v1:0", worker: "us.anthropic.claude-sonnet-4-6" },
     identity: { mode: "cognito" },
     github: { appId: "123", privateKeySecretArn: arn("secretsmanager", "secret:agentx/staging/github-app-AbCdEf") },
     callbackSigningKey: "k".repeat(40),
+    gateway: { taskKeyIds: "abcdefghijklmnop" },
   });
   const minimalOutputs = () => ({
     ...outputs,
@@ -199,6 +206,11 @@ describe("the carried-by values are the code's own (S4)", () => {
     "control-plane/AnthropicSecretArn": "the provider's key ARN from the settings when configured; a key set by hand must survive a settings file without it (deferred check: stale grant if the provider is dropped)",
     "control-plane/OpenAISecretArn": "same as AnthropicSecretArn (deferred check)",
     "control-plane/OpenRouterSecretArn": "the plan's choice: settings without models.openRouter must not clear a key (kept list)",
+    "gateway/CertificateArn": "optional operator ACM certificate ARN; omitted on default zero-domain self-hosted installs and kept across upgrades",
+    "gateway/GatewayHost": "optional custom gateway hostname; omitted on default zero-domain self-hosted installs and kept across upgrades",
+    "gateway/AnthropicSecretArn": "same as the control plane's AnthropicSecretArn (deferred check)",
+    "gateway/OpenAISecretArn": "same as the control plane's OpenAISecretArn (deferred check)",
+    "gateway/OpenRouterSecretArn": "same as the control plane's OpenRouterSecretArn (kept list)",
     "runtime/AnthropicSecretArn": "same as the control plane's (deferred check)",
     "runtime/OpenAISecretArn": "same as the control plane's (deferred check)",
     "runtime/OpenRouterSecretArn": "the plan's choice (kept list)",
@@ -213,7 +225,7 @@ describe("the carried-by values are the code's own (S4)", () => {
     "slack/SlackAdapterCommandsUrl": "from the control plane's outputs, as the request queue above (kept list)",
     "slack/SlackAdapterSecretName": "from the control plane's outputs, as the request queue above (kept list)",
   };
-  const conditionalNames = (): string[] => (["access", "foundation", "identity", "runtime", "control-plane", "slack"] as DeployPart[]).flatMap((part) => {
+  const conditionalNames = (): string[] => (["access", "foundation", "identity", "control-plane", "gateway", "runtime", "slack"] as DeployPart[]).flatMap((part) => {
     const always = new Set(Object.keys(stackParameters(part, minimalAnswers(), minimalOutputs(), { packages: false })));
     return [...named.get(part)!].filter((name) => !always.has(name)).map((name) => `${part}/${name}`);
   });
