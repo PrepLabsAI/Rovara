@@ -98,7 +98,8 @@ to them too when your AWS configuration has another region.
 `connector add` builds on the project's file in `~/.agentx/projects`, which only the computer that
 ran `project add` (or `init`) has. On another computer, copy `<project>.yaml` into
 `~/.agentx/projects`, or pass `--config-dir <the directory that holds it>`. The first project of a
-Launch in AWS install was written by the installer job, so no computer has its file.
+Launch in AWS install was written by the installer job, so no computer has its file
+([#1601](https://github.com/PrepLabsAI/Rovara/issues/1601) tracks fetching it from the install).
 
 ## Output, errors and exit codes
 
