@@ -205,9 +205,23 @@ const FIXED_NAME_ROLE_LOOKUP_ACTIONS = [
 ];
 const ECR_TEMPLATE_SERVICE = "ecr.amazonaws.com";
 
+/** One IAM name pattern for the saved environment image push and pull roles (`agentx-<env>-img-push`, `agentx-<env>-img-pull`): `?` is exactly one character. */
+export function savedEnvPushPullLookupPattern(env: string): string {
+  const push = savedEnvPushRoleName(env);
+  const pull = savedEnvPullRoleName(env);
+  const pattern = `${push.slice(0, -2)}??`;
+  if (pull.length !== push.length || !pull.startsWith(push.slice(0, -2))) throw new Error(`the image push and pull role names no longer share one lookup pattern: ${push}, ${pull}`);
+  return pattern;
+}
+
+/** The broker's fixed role name in a named environment (infra control-plane.ts sets it): `agentx-<env>-broker-role`. */
+export function namedBrokerRoleName(env: string): string {
+  return `agentx-${env}-broker-role`;
+}
+
 /** The broker's role, as the three session roles' trust and the boundary's condition name it: `agentx-<env>-broker-role` under the environment's path. */
 export function brokerRoleArn(scope: Pick<PolicyScope, "env" | "partition" | "account">): string {
-  return `arn:${scope.partition}:iam::${scope.account}:role${environmentRolePath(scope.env)}agentx-${scope.env}-broker-role`;
+  return `arn:${scope.partition}:iam::${scope.account}:role${environmentRolePath(scope.env)}${namedBrokerRoleName(scope.env)}`;
 }
 
 /** The three roles the broker assumes for a saved environment image (push, pull, manage), by their exact ARNs under the environment's path. */
@@ -263,7 +277,16 @@ function fixedNameRoleLookupStatement(scope: Pick<PolicyScope, "env" | "partitio
     Effect: "Allow",
     Action: [...FIXED_NAME_ROLE_LOOKUP_ACTIONS],
     // R5 step 1: the Slack token reader role is fixed-name too (contracts slack-company-tokens.ts), so its lookup is listed with the three image roles and (PRIVATE-PACKAGES P1b) the company-secrets role.
-    Resource: [...[savedEnvPushRoleName(scope.env), savedEnvPullRoleName(scope.env), savedEnvManageRoleName(scope.env), companySecretsRoleName(scope.env)].map((name) => `arn:${scope.partition}:iam::${scope.account}:role/${name}`), slackTokenReaderLookupResource(scope)],
+    // #1579: and the broker's role, fixed-name in named environments since fc5df010e (infra control-plane.ts brokerRoleName): without it a fresh install's control plane
+    // failed on iam:GetRole for agentx-<env>-broker-role and its rollback on iam:DetachRolePolicy. An install that already has the role never hit it (its lookup finds the path).
+    // The image push and pull roles share one pattern, `agentx-<env>-img-pu??` (IAM's `?` is exactly one character), so the broker's entry fits the deploy boundary's
+    // 6,144-character limit at the longest environment name on the longest partition. It names exactly those two: no other role of this or any environment has that shape.
+    Resource: [
+      `arn:${scope.partition}:iam::${scope.account}:role/${savedEnvPushPullLookupPattern(scope.env)}`,
+      ...[savedEnvManageRoleName(scope.env), companySecretsRoleName(scope.env)].map((name) => `arn:${scope.partition}:iam::${scope.account}:role/${name}`),
+      slackTokenReaderLookupResource(scope),
+      `arn:${scope.partition}:iam::${scope.account}:role/${namedBrokerRoleName(scope.env)}`,
+    ],
   };
 }
 

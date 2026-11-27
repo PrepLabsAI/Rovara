@@ -356,7 +356,10 @@ describe("saved environment images: the registry side (L4-SE6)", () => {
           expect(allowedUnderBoundary(deploy, deployBoundary, { action, resource, context: { "iam:PermissionsBoundary": `arn:aws:iam::${ACCOUNT}:policy/agentx/staging/agentx-staging-boundary` } }), `${kind} ${action}`).toBe(false);
         }
       }
-      for (const resource of [`arn:aws:iam::${ACCOUNT}:role/agentx-staging-broker-role`, `arn:aws:iam::${ACCOUNT}:role/agentx-staging-img-create`, `arn:aws:iam::${ACCOUNT}:role/agentx-staging-img-*`, `arn:aws:iam::${ACCOUNT}:role/agentx-prod-img-push`, `arn:aws:iam::${ACCOUNT}:role/agentx-staging-operator`]) {
+      // #1579: the broker's role is fixed-name too, so its path-less lookup is allowed now (tests/contract/fixed-name-role-lookup.test.ts); push and pull share the
+      // pattern agentx-staging-img-pu??, which matches no longer or shorter name.
+      for (const action of lookups) expect(allowedUnderBoundary(deploy, deployBoundary, { action, resource: `arn:aws:iam::${ACCOUNT}:role/agentx-staging-broker-role` }), `broker ${action}`).toBe(true);
+      for (const resource of [`arn:aws:iam::${ACCOUNT}:role/agentx-staging-img-create`, `arn:aws:iam::${ACCOUNT}:role/agentx-staging-img-*`, `arn:aws:iam::${ACCOUNT}:role/agentx-staging-img-pushes`, `arn:aws:iam::${ACCOUNT}:role/agentx-staging-img-pu`, `arn:aws:iam::${ACCOUNT}:role/agentx-prod-img-push`, `arn:aws:iam::${ACCOUNT}:role/agentx-staging-operator`, `arn:aws:iam::${ACCOUNT}:role/agentx-staging-cloudformation`]) {
         expect(allowedUnderBoundary(deploy, deployBoundary, { action: "iam:GetRole", resource }), resource).toBe(false);
       }
     });

@@ -41,12 +41,14 @@ describe("service role policy", () => {
       } else if (statement.Sid === "IamFixedNameRolesNotYetCreated") {
         // L4-SE6: the three saved environment image roles, and (PRIVATE-PACKAGES P1b) the company-secrets role, by their PATH-LESS ARN (what CloudFormation looks up before it creates a fixed-name role): lookups and deletes, never a create or change.
         expect(resources).toEqual([
-          "arn:aws:iam::123456789012:role/agentx-staging-img-push",
-          "arn:aws:iam::123456789012:role/agentx-staging-img-pull",
+          // #1579: push and pull share one pattern (IAM's `?` is one character), to make room for the broker's role in the deploy boundary.
+          "arn:aws:iam::123456789012:role/agentx-staging-img-pu??",
           "arn:aws:iam::123456789012:role/agentx-staging-img-manage",
           "arn:aws:iam::123456789012:role/agentx-staging-company-secrets",
           // R5 step 1: the Slack token reader role (fixed name).
           "arn:aws:iam::123456789012:role/agentx-staging-slk",
+          // #1579: the broker's role (fixed name in a named environment).
+          "arn:aws:iam::123456789012:role/agentx-staging-broker-role",
         ]);
         expect(statement.Action).toEqual(["iam:GetRole", "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies", "iam:DeleteRolePolicy", "iam:DetachRolePolicy", "iam:DeleteRole"]);
       } else if (statement.Sid === "IamInstanceProfiles") {
