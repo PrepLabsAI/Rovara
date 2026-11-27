@@ -205,6 +205,7 @@ allocation tags; until then the budget reads 0.
 ## After the install
 
 - Check it any time with `agentx --env <env> doctor --region <region>`.
+- Using it from another computer, or handing commands to an AI agent: [Use an existing install from another computer](cli-reference.md#use-an-existing-install-from-another-computer).
 - Upgrades, settings, more projects, channels and connectors: [docs/day-two.md](day-two.md).
 - Removing it: [docs/teardown.md](teardown.md).
 - Moving it to another AWS account: [docs/move-account.md](move-account.md).
