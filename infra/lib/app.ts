@@ -21,7 +21,7 @@ import { BetaDomainStack } from "./beta-domain.js";
 import { BetaReleaseAccessStack } from "./beta-release-access.js";
 import { WorkerSettingsStack } from "./worker-settings.js";
 import { maybeModelGateway } from "./model-gateway-app.js";
-import { SelfHostedModelGatewayStack } from "./self-hosted-gateway.js";
+import { SelfHostedModelGatewayStack } from "./self-hosted-model-gateway.js";
 
 /** The context the App will go on to use, with CDK's own precedence (moved out of buildAgentXApp unchanged, to keep its complexity under the ratchet). */
 function mergedAppContext(context: Record<string, unknown>): Record<string, unknown> {

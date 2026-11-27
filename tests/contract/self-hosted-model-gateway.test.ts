@@ -5,7 +5,7 @@ import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
 import { HEALTH_ALARM_SUFFIXES, STACK_PARTS, environmentStackName, type ReleaseManifest } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
-import { GATEWAY_TLS_CERT_CODE, SelfHostedModelGatewayStack } from "../../infra/lib/self-hosted-gateway.js";
+import { GATEWAY_TLS_CERT_CODE, SelfHostedModelGatewayStack } from "../../infra/lib/self-hosted-model-gateway.js";
 import { deployEnvironment } from "../../packages/cli/src/deploy/deploy-environment.js";
 import type { DeployRequest, StackDeployer, StackOutputs } from "../../packages/cli/src/deploy/deployer.js";
 import type { LoadedRelease } from "../../packages/cli/src/deploy/release.js";
@@ -15,7 +15,7 @@ import { skipLambdaBundling } from "../support/skip-bundling.js";
 
 skipLambdaBundling();
 
-const FAKE_GATEWAY_HOST = "abc1234567.execute-api.us-east-1.amazonaws.com";
+const FAKE_GATEWAY_HOST = "example.execute-api.us-east-1.amazonaws.com";
 const FAKE_TASK_KID = "abcdefghijklmnop";
 
 function fakeRelease(): LoadedRelease {
