@@ -497,11 +497,11 @@
       "reason": "issue #1554: adds StaticBudgetCaps for standalone self-hosted installs without GATEWAY_COMPANY_TABLE"
     },
     "packages/model-gateway/src/deploy.ts": {
-      "blob": "blob:825854b3aeb31b6596565fb24c2b640a52b903c1",
+      "blob": "blob:f9b00d2a48f4abff17e8a03296f46a45e19b7934",
       "reason": "issue #1554: adds standalone env var names (default caps, provider secrets, standaloneProvider, seedPricesOnStart)"
     },
     "packages/model-gateway/src/process.ts": {
-      "blob": "blob:2c137dce653064e9fb08ef92c6a41fb81e98e56e",
+      "blob": "blob:acb67d1aa7e635d3eddb58702a59c35b3389fe7f",
       "reason": "issue #1554: supports standalone mode (optional GATEWAY_COMPANY_TABLE and GATEWAY_ANTHROPIC_KEY_SECRET, StaticBudgetCaps, createStandaloneKeySource, cold-start Prices seeding)"
     },
     "packages/model-gateway/src/secrets.ts": {

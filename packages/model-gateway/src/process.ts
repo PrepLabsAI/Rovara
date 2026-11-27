@@ -22,7 +22,7 @@ import { BedrockExternalIds, type MacGenerator } from "./bedrock-byo.js";
 import { BedrockSessions } from "./bedrock-byo-sessions.js";
 import { createBedrockTransport } from "./bedrock-transport.js";
 import { createBedrockProductTransport } from "./product-bedrock.js";
-import { GATEWAY_AGENT_KEY_MODES, GATEWAY_ANSWERS_ENV, GATEWAY_COMPANY_BUDGET_MAX, GATEWAY_ENV, GATEWAY_LEARNING_ENV, GATEWAY_LOG_EVENTS, GATEWAY_MODES, GATEWAY_PRODUCT_ENV, GATEWAY_STANDALONE_PROVIDERS, type GatewayAgentKeyMode, type GatewayStandaloneProvider } from "./deploy.js";
+import { GATEWAY_AGENT_KEY_MODES, GATEWAY_ANSWERS_ENV, GATEWAY_COMPANY_BUDGET_MAX, GATEWAY_ENV, GATEWAY_LEARNING_ENV, GATEWAY_LOG_EVENTS, GATEWAY_MODES, GATEWAY_PRODUCT_ENV, GATEWAY_STANDALONE_ENV, GATEWAY_STANDALONE_PROVIDERS, type GatewayAgentKeyMode, type GatewayStandaloneProvider } from "./deploy.js";
 import { DynamoEvalStageStore } from "./dynamo-eval-stages.js";
 import { DynamoProductKeyTable } from "./dynamo-product-keys.js";
 import { DynamoProductOverrunTasks } from "./dynamo-product-overrun.js";
@@ -124,9 +124,9 @@ function readStandaloneDefaults(env: GatewayEnv, need: NeedEnv, standalone: bool
   if (!standalone) return undefined;
   const parseMicros = (name: string): number => Number(need(name, (value) =>
     /^[1-9]\d{0,15}$/u.test(value) && Number.isSafeInteger(Number(value)) && Number(value) >= 1 && Number(value) <= GATEWAY_COMPANY_BUDGET_MAX));
-  const companyMonth = parseMicros(GATEWAY_ENV.defaultCompanyCapMicros);
-  const projectMonth = env[GATEWAY_ENV.defaultProjectCapMicros] === undefined ? undefined : parseMicros(GATEWAY_ENV.defaultProjectCapMicros);
-  const task = env[GATEWAY_ENV.defaultTaskCapMicros] === undefined ? undefined : parseMicros(GATEWAY_ENV.defaultTaskCapMicros);
+  const companyMonth = parseMicros(GATEWAY_STANDALONE_ENV.defaultCompanyCapMicros);
+  const projectMonth = env[GATEWAY_STANDALONE_ENV.defaultProjectCapMicros] === undefined ? undefined : parseMicros(GATEWAY_STANDALONE_ENV.defaultProjectCapMicros);
+  const task = env[GATEWAY_STANDALONE_ENV.defaultTaskCapMicros] === undefined ? undefined : parseMicros(GATEWAY_STANDALONE_ENV.defaultTaskCapMicros);
   return { companyMonth, ...(projectMonth === undefined ? {} : { projectMonth }), ...(task === undefined ? {} : { task }) };
 }
 
@@ -163,9 +163,9 @@ function readStandaloneProvider(
   providers: { rovaraAi: RovaraAiConfig | undefined; anthropic: string | undefined; openai: string | undefined; openrouter: string | undefined },
 ): GatewayStandaloneProvider | undefined {
   let provider: GatewayStandaloneProvider | undefined;
-  if (env[GATEWAY_ENV.standaloneProvider] !== undefined) {
-    if (!standalone) throw new GatewayConfigError(GATEWAY_ENV.standaloneProvider);
-    provider = need(GATEWAY_ENV.standaloneProvider, (value) => (GATEWAY_STANDALONE_PROVIDERS as readonly string[]).includes(value)) as GatewayStandaloneProvider;
+  if (env[GATEWAY_STANDALONE_ENV.standaloneProvider] !== undefined) {
+    if (!standalone) throw new GatewayConfigError(GATEWAY_STANDALONE_ENV.standaloneProvider);
+    provider = need(GATEWAY_STANDALONE_ENV.standaloneProvider, (value) => (GATEWAY_STANDALONE_PROVIDERS as readonly string[]).includes(value)) as GatewayStandaloneProvider;
   }
   if (!standalone) return provider;
   const hasAny = providers.rovaraAi !== undefined || providers.anthropic !== undefined || providers.openai !== undefined || providers.openrouter !== undefined;
@@ -173,8 +173,8 @@ function readStandaloneProvider(
   const requiredEnv: Record<GatewayStandaloneProvider, { ok: boolean; env: string }> = {
     bedrock: { ok: providers.rovaraAi !== undefined, env: GATEWAY_ENV.rovaraAiModels },
     anthropic: { ok: providers.anthropic !== undefined, env: GATEWAY_ENV.anthropicKeySecret },
-    openai: { ok: providers.openai !== undefined, env: GATEWAY_ENV.openaiKeySecret },
-    openrouter: { ok: providers.openrouter !== undefined, env: GATEWAY_ENV.openrouterKeySecret },
+    openai: { ok: providers.openai !== undefined, env: GATEWAY_STANDALONE_ENV.openaiKeySecret },
+    openrouter: { ok: providers.openrouter !== undefined, env: GATEWAY_STANDALONE_ENV.openrouterKeySecret },
   };
   if (provider !== undefined && !requiredEnv[provider].ok) throw new GatewayConfigError(requiredEnv[provider].env);
   return provider;
@@ -203,8 +203,8 @@ export function readGatewayConfig(env: GatewayEnv): GatewayConfig {
   const anthropicKeySecret = standalone
     ? readOptionalSecretArn(env, need, GATEWAY_ENV.anthropicKeySecret)
     : need(GATEWAY_ENV.anthropicKeySecret, (value) => SECRET_ARN.test(value));
-  const openaiKeySecret = readOptionalSecretArn(env, need, GATEWAY_ENV.openaiKeySecret);
-  const openrouterKeySecret = readOptionalSecretArn(env, need, GATEWAY_ENV.openrouterKeySecret);
+  const openaiKeySecret = readOptionalSecretArn(env, need, GATEWAY_STANDALONE_ENV.openaiKeySecret);
+  const openrouterKeySecret = readOptionalSecretArn(env, need, GATEWAY_STANDALONE_ENV.openrouterKeySecret);
   const tables: ServeConfig["tables"] = {
     meter: table(GATEWAY_ENV.meterTable),
     ledger: table(GATEWAY_ENV.ledgerTable),
@@ -277,8 +277,8 @@ export function readGatewayConfig(env: GatewayEnv): GatewayConfig {
   // DEC 254zzz96 (2): "on" only; any other value is a broken setting (never read as off or on by guess).
   const pricesSetting = env[GATEWAY_ENV.offeredPrices];
   if (pricesSetting !== undefined && pricesSetting !== "on") throw new GatewayConfigError(GATEWAY_ENV.offeredPrices);
-  const seedSetting = env[GATEWAY_ENV.seedPricesOnStart];
-  if (seedSetting !== undefined && seedSetting !== "on") throw new GatewayConfigError(GATEWAY_ENV.seedPricesOnStart);
+  const seedSetting = env[GATEWAY_STANDALONE_ENV.seedPricesOnStart];
+  if (seedSetting !== undefined && seedSetting !== "on") throw new GatewayConfigError(GATEWAY_STANDALONE_ENV.seedPricesOnStart);
   let aiSourceKinds: ReadonlySet<string> | undefined;
   if (env[GATEWAY_ENV.aiSourceKinds] !== undefined) {
     if (!standalone && agentKeys !== "company") throw new GatewayConfigError(GATEWAY_ENV.agentKeys);

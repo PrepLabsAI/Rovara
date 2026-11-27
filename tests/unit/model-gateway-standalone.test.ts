@@ -5,7 +5,7 @@ import { EventEmitter } from "node:events";
 import { Readable } from "node:stream";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { StaticBudgetCaps, NO_CAP } from "../../packages/model-gateway/src/company-caps.js";
-import { GATEWAY_ENV } from "../../packages/model-gateway/src/deploy.js";
+import { GATEWAY_ENV, GATEWAY_STANDALONE_ENV } from "../../packages/model-gateway/src/deploy.js";
 import { Dynamo } from "../../packages/model-gateway/src/dynamo.js";
 import { OFFERED_MODELS_PATH, SERVICE_TOKEN_AUDIENCE } from "../../packages/model-gateway/src/offered-models.js";
 import { LITELLM_URL } from "../../packages/model-gateway/src/price-sources.js";
@@ -31,10 +31,10 @@ const BASE_STANDALONE_ENV = {
   [GATEWAY_ENV.ledgerTable]: TABLES.ledger,
   [GATEWAY_ENV.markersTable]: TABLES.markers,
   [GATEWAY_ENV.pricesTable]: TABLES.prices,
-  [GATEWAY_ENV.defaultCompanyCapMicros]: "100000000",
+  [GATEWAY_STANDALONE_ENV.defaultCompanyCapMicros]: "100000000",
   [GATEWAY_ENV.rovaraAiModels]: "on",
-  [GATEWAY_ENV.standaloneProvider]: "bedrock",
-  [GATEWAY_ENV.seedPricesOnStart]: "on",
+  [GATEWAY_STANDALONE_ENV.standaloneProvider]: "bedrock",
+  [GATEWAY_STANDALONE_ENV.seedPricesOnStart]: "on",
 };
 
 class FakeResponse extends EventEmitter {
@@ -98,10 +98,10 @@ describe("standalone model-gateway config (issue #1554 phase 1)", () => {
     const anthropicOnly = readGatewayConfig({
       ...BASE_STANDALONE_ENV,
       [GATEWAY_ENV.rovaraAiModels]: undefined,
-      [GATEWAY_ENV.standaloneProvider]: "anthropic",
+      [GATEWAY_STANDALONE_ENV.standaloneProvider]: "anthropic",
       [GATEWAY_ENV.anthropicKeySecret]: ANTHROPIC_SECRET,
-      [GATEWAY_ENV.defaultProjectCapMicros]: "50000000",
-      [GATEWAY_ENV.defaultTaskCapMicros]: "10000000",
+      [GATEWAY_STANDALONE_ENV.defaultProjectCapMicros]: "50000000",
+      [GATEWAY_STANDALONE_ENV.defaultTaskCapMicros]: "10000000",
     }) as ServeConfig;
     expect(anthropicOnly.anthropicKeySecret).toBe(ANTHROPIC_SECRET);
     expect(anthropicOnly.defaultCaps).toEqual({ companyMonth: 100_000_000, projectMonth: 50_000_000, task: 10_000_000 });
@@ -109,27 +109,27 @@ describe("standalone model-gateway config (issue #1554 phase 1)", () => {
     const openaiOnly = readGatewayConfig({
       ...BASE_STANDALONE_ENV,
       [GATEWAY_ENV.rovaraAiModels]: undefined,
-      [GATEWAY_ENV.standaloneProvider]: "openai",
-      [GATEWAY_ENV.openaiKeySecret]: OPENAI_SECRET,
+      [GATEWAY_STANDALONE_ENV.standaloneProvider]: "openai",
+      [GATEWAY_STANDALONE_ENV.openaiKeySecret]: OPENAI_SECRET,
     }) as ServeConfig;
     expect(openaiOnly.openaiKeySecret).toBe(OPENAI_SECRET);
 
     const openrouterOnly = readGatewayConfig({
       ...BASE_STANDALONE_ENV,
       [GATEWAY_ENV.rovaraAiModels]: undefined,
-      [GATEWAY_ENV.standaloneProvider]: "openrouter",
-      [GATEWAY_ENV.openrouterKeySecret]: OPENROUTER_SECRET,
+      [GATEWAY_STANDALONE_ENV.standaloneProvider]: "openrouter",
+      [GATEWAY_STANDALONE_ENV.openrouterKeySecret]: OPENROUTER_SECRET,
     }) as ServeConfig;
     expect(openrouterOnly.openrouterKeySecret).toBe(OPENROUTER_SECRET);
   });
 
   it("refuses missing default company cap, no provider, or mismatched standaloneProvider", () => {
     const cases: Array<[string, Record<string, string | undefined>]> = [
-      [GATEWAY_ENV.defaultCompanyCapMicros, { ...BASE_STANDALONE_ENV, [GATEWAY_ENV.defaultCompanyCapMicros]: undefined }],
-      [GATEWAY_ENV.defaultCompanyCapMicros, { ...BASE_STANDALONE_ENV, [GATEWAY_ENV.defaultCompanyCapMicros]: "0" }],
-      [GATEWAY_ENV.anthropicKeySecret, { ...BASE_STANDALONE_ENV, [GATEWAY_ENV.rovaraAiModels]: undefined, [GATEWAY_ENV.standaloneProvider]: undefined }],
-      [GATEWAY_ENV.openaiKeySecret, { ...BASE_STANDALONE_ENV, [GATEWAY_ENV.standaloneProvider]: "openai" }],
-      [GATEWAY_ENV.seedPricesOnStart, { ...BASE_STANDALONE_ENV, [GATEWAY_ENV.seedPricesOnStart]: "yes" }],
+      [GATEWAY_STANDALONE_ENV.defaultCompanyCapMicros, { ...BASE_STANDALONE_ENV, [GATEWAY_STANDALONE_ENV.defaultCompanyCapMicros]: undefined }],
+      [GATEWAY_STANDALONE_ENV.defaultCompanyCapMicros, { ...BASE_STANDALONE_ENV, [GATEWAY_STANDALONE_ENV.defaultCompanyCapMicros]: "0" }],
+      [GATEWAY_ENV.anthropicKeySecret, { ...BASE_STANDALONE_ENV, [GATEWAY_ENV.rovaraAiModels]: undefined, [GATEWAY_STANDALONE_ENV.standaloneProvider]: undefined }],
+      [GATEWAY_STANDALONE_ENV.openaiKeySecret, { ...BASE_STANDALONE_ENV, [GATEWAY_STANDALONE_ENV.standaloneProvider]: "openai" }],
+      [GATEWAY_STANDALONE_ENV.seedPricesOnStart, { ...BASE_STANDALONE_ENV, [GATEWAY_STANDALONE_ENV.seedPricesOnStart]: "yes" }],
     ];
     for (const [variable, env] of cases) {
       let caught: unknown;
