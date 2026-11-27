@@ -347,6 +347,8 @@ export interface ServeDependencies {
   geminiTransport?: ProviderTransport;
   env?: GatewayEnv; log?: GatewayLog; credentials?: CredentialSource; db?: Dynamo;
   fetch?: typeof fetch; transport?: ProviderTransport; keys?: ProviderKeys; caps?: CapsSource; modelLimits?: ModelLimitsSource;
+  /** #1583: the wait between the shared Prices table reads after a cold-start seed that left no prices (default SEED_RELOAD_DELAY_MS; tests: 0). */
+  seedReloadDelayMs?: number;
   /**
    * The product-AI route (docs/model-gateway-product-ai.md): its resolver, its OWN meter (separate tables, combined with the agent
    * meter's company row and in-flight marker: DynamoMeterOptions.combinedCompany, DEC 228c) and its caps. Absent: every product path is 404. Its open holds, expiry and corrections run in
@@ -442,6 +444,15 @@ async function seedPricesIfEmpty(input: {
   else input.log({ event: GATEWAY_LOG_EVENTS.priceFetchFailed });
 }
 
+/** How many times, and how far apart, a task whose own cold-start seed left it with no prices reads the shared Prices table again (#1583). */
+export const SEED_RELOAD_ATTEMPTS = 6;
+export const SEED_RELOAD_DELAY_MS = 2_000;
+
+const hasPrices = (prices: SnapshotPriceSource): boolean => {
+  const health = prices.health();
+  return health.litellm.count > 0 || health.aws.count > 0;
+};
+
 async function maybeSeedPrices(input: {
   enabled: boolean;
   prices: SnapshotPriceSource;
@@ -449,9 +460,19 @@ async function maybeSeedPrices(input: {
   fetchFn: typeof fetch;
   now: () => number;
   log: GatewayLog;
+  reloadDelayMs: number;
+  sleep: (ms: number) => Promise<void>;
 }): Promise<void> {
   if (!input.enabled) return;
   try { await seedPricesIfEmpty(input); } catch { input.log({ event: GATEWAY_LOG_EVENTS.priceFetchFailed }); }
+  // #1583: a self-hosted gateway runs two tasks, and both seed an empty table at the same moment: one writes the prices, the other's seed can fail
+  // (seen live: 14 ms later). That task served with no prices until the five-minute reload, and /healthz answered 200 for it, so half of the install's
+  // readiness checks failed. Read the shared table again at once, and a few more times while it is still empty.
+  for (let attempt = 0; attempt < SEED_RELOAD_ATTEMPTS && !hasPrices(input.prices); attempt += 1) {
+    if (attempt > 0) await input.sleep(input.reloadDelayMs);
+    try { await input.prices.reload(); } catch { /* the next attempt, or the five-minute maintenance reload, reads it again */ }
+    if (hasPrices(input.prices)) input.log({ event: "price_reloaded_after_seed", attempt: attempt + 1 });
+  }
 }
 
 function buildStandaloneKeys(config: ServeConfig, credentials: NonNullable<ServeDependencies["credentials"]>, now: () => number): LearningKeySource {
@@ -529,7 +550,10 @@ export async function startServe(config: ServeConfig, deps: ServeDependencies = 
   const priceStore = new DynamoPriceSnapshotStore(db, config.tables.prices);
   const prices = new SnapshotPriceSource(priceStore, { now });
   await prices.reload();
-  const runSeedIfEmpty = () => maybeSeedPrices({ enabled: config.seedPricesOnStart === true, prices, priceStore, fetchFn: deps.fetch ?? fetch, now, log });
+  const runSeedIfEmpty = () => maybeSeedPrices({
+    enabled: config.seedPricesOnStart === true, prices, priceStore, fetchFn: deps.fetch ?? fetch, now, log,
+    reloadDelayMs: deps.seedReloadDelayMs ?? SEED_RELOAD_DELAY_MS, sleep: (ms) => new Promise<void>((resolve) => { setTimeout(resolve, ms); }),
+  });
   await runSeedIfEmpty();
   const standalone = config.tables.companies === undefined;
   const caps = deps.caps ?? (standalone ? new StaticBudgetCaps(config.defaultCaps!) : new CompanyBudgetCaps(db, config.tables.companies!));

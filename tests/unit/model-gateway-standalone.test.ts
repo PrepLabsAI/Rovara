@@ -9,7 +9,7 @@ import { GATEWAY_ENV, GATEWAY_STANDALONE_ENV } from "../../packages/model-gatewa
 import { Dynamo } from "../../packages/model-gateway/src/dynamo.js";
 import { OFFERED_MODELS_PATH, SERVICE_TOKEN_AUDIENCE } from "../../packages/model-gateway/src/offered-models.js";
 import { LITELLM_URL } from "../../packages/model-gateway/src/price-sources.js";
-import { GatewayConfigError, readGatewayConfig, startServe, type RunningGateway, type ServeConfig } from "../../packages/model-gateway/src/process.js";
+import { GatewayConfigError, readGatewayConfig, SEED_RELOAD_ATTEMPTS, startServe, type RunningGateway, type ServeConfig } from "../../packages/model-gateway/src/process.js";
 import { RATE_QUOTE_AUDIENCE } from "../../packages/model-gateway/src/rate-quote.js";
 import { createStandaloneKeySource } from "../../packages/model-gateway/src/secrets.js";
 import { claims, jwk, keys, kid, mint, now, scope, sse } from "./model-gateway-fixture.js";
@@ -170,6 +170,45 @@ describe("standalone model-gateway config (issue #1554 phase 1)", () => {
 });
 
 describe("standalone model-gateway serving & cold-start price seeding", () => {
+  it("#1583: a task whose seed loses the save race to the other task (its conditional save is refused) reads the table again and serves prices", async () => {
+    const wire = new WireDynamo(Object.values(TABLES));
+    const db = new Dynamo({ region: "us-west-2", credentials: async () => ({ accessKeyId: "AKIDEXAMPLE", secretAccessKey: "test-secret" }), transport: wire.transport });
+    const config: ServeConfig = { ...(readGatewayConfig(BASE_STANDALONE_ENV) as ServeConfig), port: 0 };
+    // Both tasks start on an empty table. Task B fetches prices fine, but before it saves, task A seeds and saves first, so B's save (on
+    // "the table is still at version 0") is refused and its refresher returns without reading the table again (btntest: B failed 14 ms after A).
+    let taskA: RunningGateway | undefined;
+    const losingFetch: typeof fetch = async (input) => {
+      const url = input instanceof Request ? input.url : input instanceof URL ? input.href : input;
+      if (url === LITELLM_URL) taskA ??= await startServe(config, { db, fetch: jwksAndPricesFetch, now: () => now, listen: false, log: () => undefined });
+      return jwksAndPricesFetch(input);
+    };
+    const lines: Array<Record<string, unknown>> = [];
+    const taskB = await startServe(config, { db, fetch: losingFetch, now: () => now, listen: false, log: (line) => { lines.push(line); }, seedReloadDelayMs: 0 });
+    running.push(taskB);
+    if (taskA !== undefined) running.push(taskA);
+    expect(taskA).toBeDefined();
+    expect(lines.map((line) => line.event)).toEqual(expect.arrayContaining(["price_fetch_failed", "price_reloaded_after_seed"]));
+    const health = JSON.parse((await request(taskB.server, "GET", "/healthz")).text()) as { runPrice?: { snapshotVersion: number } };
+    expect(health.runPrice?.snapshotVersion).toBeGreaterThanOrEqual(1);
+  });
+
+  it("#1583: a task with no prices anywhere stops reading the table after SEED_RELOAD_ATTEMPTS and still starts (the five-minute reload takes over)", async () => {
+    const wire = new WireDynamo(Object.values(TABLES));
+    const db = new Dynamo({ region: "us-west-2", credentials: async () => ({ accessKeyId: "AKIDEXAMPLE", secretAccessKey: "test-secret" }), transport: wire.transport });
+    const config: ServeConfig = { ...(readGatewayConfig(BASE_STANDALONE_ENV) as ServeConfig), port: 0 };
+    const failingFetch: typeof fetch = async (input) => {
+      const url = input instanceof Request ? input.url : input instanceof URL ? input.href : input;
+      if (url === LITELLM_URL) throw new Error("no prices source");
+      return jwksAndPricesFetch(input);
+    };
+    const lines: Array<Record<string, unknown>> = [];
+    const gateway = await startServe(config, { db, fetch: failingFetch, now: () => now, listen: false, log: (line) => { lines.push(line); }, seedReloadDelayMs: 0 });
+    running.push(gateway);
+    expect(lines.map((line) => line.event)).toContain("price_fetch_failed");
+    expect(lines.map((line) => line.event)).not.toContain("price_reloaded_after_seed");
+    expect(SEED_RELOAD_ATTEMPTS).toBeGreaterThan(1);
+  });
+
   it("seeds Prices on cold start, serves /healthz with runPrice.snapshotVersion >= 1, rate-quote?runPrice=1, offered-models, and signed-price /v1/messages on Bedrock", async () => {
     const wire = new WireDynamo(Object.values(TABLES));
     const db = new Dynamo({ region: "us-west-2", credentials: async () => ({ accessKeyId: "AKIDEXAMPLE", secretAccessKey: "test-secret" }), transport: wire.transport });

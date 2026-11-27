@@ -22,22 +22,36 @@ export async function assertGatewayRunPrices(origin: string, transport: typeof f
   }
 }
 
-/** Poll a newly deployed self-hosted gateway until cold-start price seeding finishes and /healthz reports runPrice.snapshotVersion >= 1. */
+/**
+ * #1583: a self-hosted gateway runs two tasks behind its load balancer, round-robin, and one can start with no prices (it lost the cold-start seeding race) while
+ * /healthz still answers 200 for it. So one good answer is not readiness: the wait needs GATEWAY_READY_STREAK good answers in a row, and lasts longer than the
+ * gateway's five-minute prices reload, by which time a task that started without prices has them.
+ */
+export const GATEWAY_READY_STREAK = 3;
+export const GATEWAY_READY_TIMEOUT_MS = 420_000;
+
+/** Poll a newly deployed self-hosted gateway until cold-start price seeding finishes and /healthz reports runPrice.snapshotVersion >= 1, GATEWAY_READY_STREAK times in a row. */
 export async function waitForGatewayRunPrices(
   origin: string,
-  options: { transport?: typeof fetch; timeoutMs?: number; pollMs?: number; now?: () => number; sleep?: (ms: number) => Promise<void> } = {},
+  options: { transport?: typeof fetch; timeoutMs?: number; pollMs?: number; streak?: number; now?: () => number; sleep?: (ms: number) => Promise<void> } = {},
 ): Promise<void> {
   const transport = options.transport ?? fetch;
-  const timeoutMs = options.timeoutMs ?? 180_000;
+  const timeoutMs = options.timeoutMs ?? GATEWAY_READY_TIMEOUT_MS;
   const pollMs = options.pollMs ?? 5_000;
+  const streak = Math.max(1, options.streak ?? GATEWAY_READY_STREAK);
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   const deadline = now() + timeoutMs;
+  let good = 0;
   for (;;) {
     try {
       await assertGatewayRunPrices(origin, transport);
-      return;
+      good += 1;
+      if (good >= streak) return;
+      // Good answers in a row are asked for at once: they are meant to reach the other task too, not to wait out the poll.
+      continue;
     } catch (error) {
+      good = 0;
       if (now() >= deadline) throw error;
       await sleep(Math.min(pollMs, Math.max(0, deadline - now())));
     }

@@ -501,8 +501,8 @@
       "reason": "issue #1554: adds standalone env var names (default caps, provider secrets, standaloneProvider, seedPricesOnStart)"
     },
     "packages/model-gateway/src/process.ts": {
-      "blob": "blob:acb67d1aa7e635d3eddb58702a59c35b3389fe7f",
-      "reason": "issue #1554: supports standalone mode (optional GATEWAY_COMPANY_TABLE and GATEWAY_ANTHROPIC_KEY_SECRET, StaticBudgetCaps, createStandaloneKeySource, cold-start Prices seeding)"
+      "blob": "blob:89ec49c8fbee2035aae2a61b3efad3a3e439f6fc",
+      "reason": "issue #1554: supports standalone mode (optional GATEWAY_COMPANY_TABLE and GATEWAY_ANTHROPIC_KEY_SECRET, StaticBudgetCaps, createStandaloneKeySource, cold-start Prices seeding) #1583: after the cold-start seed, a task left with no prices (its conditional save lost to the other task's) reads the shared Prices table again, up to SEED_RELOAD_ATTEMPTS times, SEED_RELOAD_DELAY_MS apart (ServeDependencies.seedReloadDelayMs for tests), logging price_reloaded_after_seed."
     },
     "packages/model-gateway/src/secrets.ts": {
       "blob": "blob:62900f5d5fe69db5c2db5e3e45d131e5f38a51eb",
