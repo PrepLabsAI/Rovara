@@ -220,6 +220,12 @@ export function environmentSsmClient(region?: string): SSMClient {
  */
 export const DEFAULT_CALLBACK_PORT = 8765;
 
+/** The last lines of the root `--help`: where people and AI agents find the docs (issue #1598). */
+export const ROOT_HELP_DOCS_LINES = [
+  "Docs: https://github.com/PrepLabsAI/Rovara/blob/mainline/docs/cli-reference.md",
+  "Docs for AI agents: https://rovara.dev/llms.txt",
+] as const;
+
 export function createCliProgram(dependencies: CliDependencies = {}): Command {
   const services = {
     fetchImplementation: dependencies.fetchImplementation ?? fetch,
@@ -297,7 +303,9 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--env <name>", "AgentX environment", DEFAULT_ENVIRONMENT)
     .option("--allow-loopback", "allow loopback HTTP endpoints for local testing only", false)
     .option("--accept-unchecked-model <reason>", "register a project whose default model failed its check anyway (project add, setup-approve, connector add, admin project register); the reason is recorded with the revision")
-    .option("--json", "emit stable machine-readable output", false);
+    .option("--json", "emit stable machine-readable output", false)
+    // Root help only: commander's "after" text is not shown in a subcommand's help.
+    .addHelpText("after", `\n${ROOT_HELP_DOCS_LINES.join("\n")}`);
 
   // Refuse an invalid --env before any command runs, so a malformed name never reaches AWS.
   program.hook("preAction", (_program, actionCommand) => {
