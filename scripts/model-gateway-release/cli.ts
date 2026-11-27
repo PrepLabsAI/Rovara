@@ -36,20 +36,26 @@ export interface ParsedCli {
   flags: Record<string, string | true>;
 }
 
+function consumeFlag(argv: readonly string[], index: number, flags: Record<string, string | true>): number {
+  const name = argv[index]!.slice(2);
+  if (BOOLEAN_FLAGS.includes(name)) {
+    flags[name] = true;
+    return index;
+  }
+  if (!VALUE_FLAGS.includes(name)) throw new StageError("USAGE", `unknown flag --${name}`);
+  const value = argv[index + 1];
+  if (value === undefined || value.startsWith("--")) throw new StageError("USAGE", `--${name} needs a value`);
+  flags[name] = value;
+  return index + 1;
+}
+
 export function parseArgs(argv: readonly string[]): ParsedCli {
   const flags: Record<string, string | true> = {};
   const positional: string[] = [];
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]!;
-    if (!arg.startsWith("--")) { positional.push(arg); continue; }
-    const name = arg.slice(2);
-    if (BOOLEAN_FLAGS.includes(name)) flags[name] = true;
-    else if (VALUE_FLAGS.includes(name)) {
-      const value = argv[i + 1];
-      if (value === undefined || value.startsWith("--")) throw new StageError("USAGE", `--${name} needs a value`);
-      flags[name] = value;
-      i += 1;
-    } else throw new StageError("USAGE", `unknown flag --${name}`);
+    if (!arg.startsWith("--")) positional.push(arg);
+    else i = consumeFlag(argv, i, flags);
   }
   if (flags.help === true) throw new StageError("USAGE", "help");
   const [env, step, extra] = positional;
@@ -116,6 +122,75 @@ export interface CliDeps {
   repoDir?: string;
 }
 
+function optionalNone(value: string | null): string | null {
+  return value === null || value === "none" ? null : value;
+}
+
+interface RunConfig {
+  execId: string;
+  mode: PipelineMode;
+  codeRelease: "run" | "skip";
+  codeSha: string;
+  codeLiveSha: string | null;
+  codeRollbackTarget: string | null;
+  gatewayDigest: string | null;
+  expectedAccount: string;
+  betaAccountId: string | null;
+  region: string;
+  dryRun: boolean;
+  outDir: string;
+  manifestPath: string | null;
+  workDir: string;
+  gatewayUrlOverride: string | null;
+}
+
+function readRunConfig(flags: Record<string, string | true>, envVars: Record<string, string | undefined>): RunConfig {
+  const execId = pickValue(flags, envVars, "exec-id", "EXEC_ID");
+  if (execId === null) throw new StageError("USAGE", "EXEC_ID is not set");
+  return {
+    execId,
+    mode: parseMode(pickValue(flags, envVars, "mode", "PIPELINE_MODE")),
+    codeRelease: parseCodeRelease(pickValue(flags, envVars, "code-release", "CODE_RELEASE")),
+    codeSha: pickValue(flags, envVars, "code-sha", "CODE_SHA") ?? "",
+    codeLiveSha: pickValue(flags, envVars, "code-live-sha", "CODE_LIVE_SHA"),
+    codeRollbackTarget: optionalNone(pickValue(flags, envVars, "code-target", "CODE_ROLLBACK_TARGET")),
+    gatewayDigest: optionalNone(pickValue(flags, envVars, "gateway-digest", "MODEL_GATEWAY_DIGEST")),
+    expectedAccount: pickValue(flags, envVars, "expected-account", "ROVARA_EXPECTED_DEPLOY_ACCOUNT") ?? "",
+    betaAccountId: pickValue(flags, envVars, "beta-account", "BETA_ACCOUNT_ID"),
+    region: envVars.AWS_REGION ?? MODEL_GATEWAY_DEFAULT_REGION,
+    dryRun: flags["dry-run"] === true || envVars.PIPELINE_DRY_RUN === "1",
+    outDir: pickValue(flags, envVars, "out", "PIPELINE_OUT") ?? "out",
+    manifestPath: pickValue(flags, envVars, "manifest", "PIPELINE_MANIFEST"),
+    workDir: envVars.PIPELINE_WORK ?? `/tmp/rovara-gateway-${execId.slice(0, 8)}`,
+    gatewayUrlOverride: pickValue(flags, envVars, "gateway-url", "MODEL_GATEWAY_URL"),
+  };
+}
+
+async function dispatchStep(
+  step: GatewayStepName,
+  env: PipelineEnv,
+  cfg: RunConfig,
+  ports: Ports,
+  repoDir: string,
+  out: (line: string) => void,
+): Promise<GatewayManifest> {
+  if (step === "image") {
+    if (cfg.codeRelease !== "skip" && !SHA40.test(cfg.codeSha)) throw new StageError("USAGE", "CODE_SHA must be a 40-character lowercase hex commit sha");
+    const prev = readManifestFile(ports, cfg.manifestPath, env === "production" && cfg.mode !== "adopt" && cfg.codeRelease !== "skip");
+    return imageStep({
+      env, mode: cfg.mode, codeRelease: cfg.codeRelease, execId: cfg.execId, codeSha: cfg.codeSha,
+      codeLiveSha: cfg.codeLiveSha, codeRollbackTarget: cfg.codeRollbackTarget, gatewayDigest: cfg.gatewayDigest,
+      expectedAccount: cfg.expectedAccount, betaAccountId: cfg.betaAccountId, region: cfg.region,
+      repoDir, workDir: cfg.workDir, dryRun: cfg.dryRun, previousManifest: prev, ports, log: out,
+    });
+  }
+  const manifest = readManifestFile(ports, cfg.manifestPath, true)!;
+  if (step === "deploy") {
+    return deployStep({ env, region: cfg.region, repoDir, workDir: cfg.workDir, dryRun: cfg.dryRun, manifest, ports, log: out });
+  }
+  return checkStep({ env, repoDir, dryRun: cfg.dryRun, manifest, gatewayUrlOverride: cfg.gatewayUrlOverride, ports, log: out });
+}
+
 async function executeRunStep(
   step: GatewayStepName,
   env: PipelineEnv,
@@ -125,42 +200,26 @@ async function executeRunStep(
   repoDir: string,
   out: (line: string) => void,
 ): Promise<void> {
-  const execId = pickValue(flags, envVars, "exec-id", "EXEC_ID");
-  if (execId === null) throw new StageError("USAGE", "EXEC_ID is not set");
-  const mode = parseMode(pickValue(flags, envVars, "mode", "PIPELINE_MODE"));
-  const codeRelease = parseCodeRelease(pickValue(flags, envVars, "code-release", "CODE_RELEASE"));
-  const codeSha = pickValue(flags, envVars, "code-sha", "CODE_SHA") ?? "";
-  const codeLiveSha = pickValue(flags, envVars, "code-live-sha", "CODE_LIVE_SHA");
-  const targetRaw = pickValue(flags, envVars, "code-target", "CODE_ROLLBACK_TARGET");
-  const codeRollbackTarget = targetRaw === null || targetRaw === "none" ? null : targetRaw;
-  const digestRaw = pickValue(flags, envVars, "gateway-digest", "MODEL_GATEWAY_DIGEST");
-  const gatewayDigest = digestRaw === null || digestRaw === "none" ? null : digestRaw;
-  const expectedAccount = pickValue(flags, envVars, "expected-account", "ROVARA_EXPECTED_DEPLOY_ACCOUNT") ?? "";
-  const betaAccountId = pickValue(flags, envVars, "beta-account", "BETA_ACCOUNT_ID");
-  const region = envVars.AWS_REGION ?? MODEL_GATEWAY_DEFAULT_REGION;
-  const dryRun = flags["dry-run"] === true || envVars.PIPELINE_DRY_RUN === "1";
-  const outDir = pickValue(flags, envVars, "out", "PIPELINE_OUT") ?? "out";
-  const manifestPath = pickValue(flags, envVars, "manifest", "PIPELINE_MANIFEST");
-  const workDir = envVars.PIPELINE_WORK ?? `/tmp/rovara-gateway-${execId.slice(0, 8)}`;
+  const cfg = readRunConfig(flags, envVars);
+  const updated = await dispatchStep(step, env, cfg, ports, repoDir, out);
+  ports.fs.mkdirp(cfg.outDir);
+  ports.fs.writeText(join(cfg.outDir, "manifest.json"), `${JSON.stringify(updated, null, 2)}\n`);
+}
 
-  let updated: GatewayManifest;
-  if (step === "image") {
-    if (codeRelease !== "skip" && !SHA40.test(codeSha)) throw new StageError("USAGE", "CODE_SHA must be a 40-character lowercase hex commit sha");
-    const prev = readManifestFile(ports, manifestPath, env === "production" && mode !== "adopt" && codeRelease !== "skip");
-    updated = await imageStep({
-      env, mode, codeRelease, execId, codeSha, codeLiveSha, codeRollbackTarget, gatewayDigest,
-      expectedAccount, betaAccountId, region, repoDir, workDir, dryRun, previousManifest: prev, ports, log: out,
-    });
-  } else if (step === "deploy") {
-    const manifest = readManifestFile(ports, manifestPath, true)!;
-    updated = await deployStep({ env, region, repoDir, workDir, dryRun, manifest, ports, log: out });
-  } else {
-    const manifest = readManifestFile(ports, manifestPath, true)!;
-    const gatewayUrlOverride = pickValue(flags, envVars, "gateway-url", "MODEL_GATEWAY_URL");
-    updated = await checkStep({ env, repoDir, dryRun, manifest, gatewayUrlOverride, ports, log: out });
+function resolveProfile(env: PipelineEnv, envVars: Record<string, string | undefined>): string | null {
+  const configured = envVars.ROVARA_PIPELINE_PROFILE;
+  if (configured !== undefined && configured !== "") return configured;
+  return env === "beta" ? "agentx-beta" : null;
+}
+
+function handleCliError(error: unknown, where: string, out: (line: string) => void): number {
+  if (error instanceof StageError) {
+    if (error.exitName === "USAGE") out(error.message === "help" ? USAGE : `${error.message}\n${USAGE}`);
+    else out(`GATEWAY-STAGE-FAILED ${where} ${error.exitName}: ${error.message}`);
+    return error.message === "help" ? EXIT.OK : EXIT[error.exitName];
   }
-  ports.fs.mkdirp(outDir);
-  ports.fs.writeText(join(outDir, "manifest.json"), `${JSON.stringify(updated, null, 2)}\n`);
+  out(`GATEWAY-STAGE-FAILED ${where} FAILED: ${error instanceof Error ? error.message : String(error)}`);
+  return EXIT.FAILED;
 }
 
 export async function main(argv: readonly string[], envVars: Record<string, string | undefined>, deps: CliDeps = {}): Promise<number> {
@@ -171,10 +230,8 @@ export async function main(argv: readonly string[], envVars: Record<string, stri
     where = `${parsed.env} ${parsed.step}`;
     const region = envVars.AWS_REGION ?? MODEL_GATEWAY_DEFAULT_REGION;
     const execId = pickValue(parsed.flags, envVars, "exec-id", "EXEC_ID") ?? "local000";
-    const profile = envVars.ROVARA_PIPELINE_PROFILE !== undefined && envVars.ROVARA_PIPELINE_PROFILE !== ""
-      ? envVars.ROVARA_PIPELINE_PROFILE
-      : parsed.env === "beta" ? "agentx-beta" : null;
-    const ports = (deps.makePorts ?? ((a) => createRealPorts(a)))({ region, exec8: execId.slice(0, 8), profile });
+    const makePorts = deps.makePorts ?? createRealPorts;
+    const ports = makePorts({ region, exec8: execId.slice(0, 8), profile: resolveProfile(parsed.env, envVars) });
     const repoDir = deps.repoDir ?? process.cwd();
     if (parsed.step === "last-good" || parsed.step === "rollback-plan") {
       return await runReadOnly(parsed.step, parsed.env, ports, repoDir, out);
@@ -182,13 +239,7 @@ export async function main(argv: readonly string[], envVars: Record<string, stri
     await executeRunStep(parsed.step, parsed.env, parsed.flags, envVars, ports, repoDir, out);
     return EXIT.OK;
   } catch (error) {
-    if (error instanceof StageError) {
-      if (error.exitName === "USAGE") out(error.message === "help" ? USAGE : `${error.message}\n${USAGE}`);
-      else out(`GATEWAY-STAGE-FAILED ${where} ${error.exitName}: ${error.message}`);
-      return error.message === "help" ? EXIT.OK : EXIT[error.exitName];
-    }
-    out(`GATEWAY-STAGE-FAILED ${where} FAILED: ${error instanceof Error ? error.message : String(error)}`);
-    return EXIT.FAILED;
+    return handleCliError(error, where, out);
   }
 }
 

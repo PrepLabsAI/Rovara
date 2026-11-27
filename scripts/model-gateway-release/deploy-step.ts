@@ -29,6 +29,15 @@ export interface DeployStepArgs {
   floorsPath?: string;
 }
 
+function adoptRowFailures(record: ChangeSetRecord): string[] {
+  const failures: string[] = [];
+  for (const row of record.rows) {
+    if (row.action === "Modify" && row.resourceType === "AWS::CDK::Metadata") continue;
+    failures.push(`${record.stack}: adopt mode must change nothing, but ${row.action} ${row.logicalId} (${row.resourceType})`);
+  }
+  return failures;
+}
+
 function judgeIntegrity(manifest: GatewayManifest, record: ChangeSetRecord): GateVerdict {
   const failures: string[] = [];
   const expected = changeSetNameFor(manifest.exec8);
@@ -39,14 +48,11 @@ function judgeIntegrity(manifest: GatewayManifest, record: ChangeSetRecord): Gat
       failures.push(`${record.stack}: change set is ${record.status}/${record.executionStatus}, not CREATE_COMPLETE/AVAILABLE`);
     }
   }
-  if (manifest.mode === "adopt") {
-    for (const row of record.rows) {
-      if (!(row.action === "Modify" && row.resourceType === "AWS::CDK::Metadata")) {
-        failures.push(`${record.stack}: adopt mode must change nothing, but ${row.action} ${row.logicalId} (${row.resourceType})`);
-      }
-    }
-  }
-  return { name: "change-set-integrity", phase: "change-sets", result: failures.length === 0 ? "pass" : "fail", ...(failures.length === 0 ? {} : { failures }) };
+  if (manifest.mode === "adopt") failures.push(...adoptRowFailures(record));
+  const result = failures.length === 0 ? "pass" : "fail";
+  return failures.length === 0
+    ? { name: "change-set-integrity", phase: "change-sets", result }
+    : { name: "change-set-integrity", phase: "change-sets", result, failures };
 }
 
 async function isImageOnlyChange(args: DeployStepArgs, list: ProtectedList, notes: string[]): Promise<boolean> {
