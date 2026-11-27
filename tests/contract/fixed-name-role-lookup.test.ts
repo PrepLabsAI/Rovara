@@ -44,7 +44,7 @@ function iamPattern(arn: string): RegExp {
 function listed(statements: ReturnType<typeof serviceRoleStatements>): string[] {
   const statement = statements.find((each) => each.Sid === "IamFixedNameRolesNotYetCreated");
   expect(statement, "the IamFixedNameRolesNotYetCreated statement").toBeDefined();
-  return [statement!.Resource].flat();
+  return [statement!.Resource].flat().filter((resource): resource is string => typeof resource === "string");
 }
 
 describe("fixed-name roles a fresh install creates", () => {
