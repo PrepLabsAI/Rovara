@@ -35,7 +35,12 @@ import type { SecondReview } from "../../core/second-review/index.js";
 import { rethrowMembershipReadFailure } from "../../core/membership-read.js";
 
 const json = (statusCode: number, value: unknown): BrokerResponse => ({ statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(value) });
-const SESSIONS = /^\/v1\/app\/sessions(?:\/([A-Za-z0-9_-]{1,100})(?:\/(stop|retry|messages|answers|revise-plan|follow|unfollow|presence|close|log|activity))?)?$/u;
+/**
+ * The actions this route serves under `/v1/app/sessions/<id>/`. Hosted Code refuses a method and path with no row in its route table (packages/code-api/src/routes.ts) before anyone is signed in, so
+ * each action needs a row there too; tests/contract/core-app-routes.test.ts fails for one that has none (#1589: `activity` shipped without its row and hosted Code answered it "route not found").
+ */
+export const SESSION_ROUTE_ACTIONS = ["stop", "retry", "messages", "answers", "revise-plan", "follow", "unfollow", "presence", "close", "log", "activity"] as const;
+const SESSIONS = new RegExp(`^/v1/app/sessions(?:/([A-Za-z0-9_-]{1,100})(?:/(${SESSION_ROUTE_ACTIONS.join("|")}))?)?$`, "u");
 /** `POST /v1/app/sessions/<id>/ask` asks about a task; `GET /v1/app/sessions/<id>/asks/<askId>` reads it back, for the person who asked. */
 const ASK_PATH = /^\/v1\/app\/sessions\/([A-Za-z0-9_-]{1,100})\/(?:ask|asks\/(ask_[0-9a-z]{20}))$/u;
 
