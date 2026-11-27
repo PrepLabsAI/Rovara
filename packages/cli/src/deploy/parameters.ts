@@ -314,6 +314,48 @@ function validateControlPlaneAnswers(answers: InstallAnswers): asserts answers i
  * uploads its own assets, and CloudFormation refuses a parameter its template does not declare, so
  * the cdk engine passes `packages: false` (Task 20 live check). The option is required so every
  * caller chooses (review M5). */
+function gatewayStackParameters(
+  base: Record<string, string>,
+  secret: Record<string, string>,
+  answers: InstallAnswers,
+  outputs: Partial<Record<DeployPart, StackOutputs>>,
+): Record<string, string> {
+  const gatewayImage = resolvedImage(answers, "gateway", outputs);
+  const workerProvider = answers.models.providers?.worker ?? "amazon-bedrock";
+  const standaloneProvider = workerProvider === "amazon-bedrock" ? "bedrock" : workerProvider;
+  const capMicros = answers.budget !== undefined && answers.budget.monthlyUsd > 0
+    ? String(answers.budget.monthlyUsd * 1_000_000)
+    : "100000000";
+  const taskKeyIds = answers.gateway?.taskKeyIds;
+  if (taskKeyIds === undefined || taskKeyIds.trim() === "") {
+    throw new Error("self-hosted gateway requires the control plane's task-token JWKS key IDs (gateway.taskKeyIds)");
+  }
+  return {
+    ...base,
+    GatewayImageUri: gatewayImage,
+    GatewayImageRepositoryName: ecrRepositoryName(gatewayImage, answers),
+    VpcId: required(outputs, "foundation", "VpcId", answers.env),
+    PrivateSubnetIds: required(outputs, "foundation", "PrivateSubnetIds", answers.env),
+    CodeUrl: orchestratorControlPlaneUrl(answers, () => required(outputs, "control-plane", "ApiEndpoint", answers.env)),
+    CodeTaskKeyIds: taskKeyIds,
+    OperatorAlertsTopicArn: required(outputs, "control-plane", "OperatorAlertsTopicArn", answers.env),
+    DefaultCompanyCapMicros: capMicros,
+    StandaloneProvider: standaloneProvider,
+    ...(answers.gateway?.certificateArn === undefined ? {} : { CertificateArn: answers.gateway.certificateArn }),
+    ...(answers.gateway?.host === undefined ? {} : { GatewayHost: answers.gateway.host }),
+    ...secret,
+  };
+}
+
+function builtInGatewayHostParameter(
+  answers: InstallAnswers,
+  outputs: Partial<Record<DeployPart, StackOutputs>>,
+): Record<string, string> {
+  const host = outputs.gateway?.GatewayHost;
+  const external = answers.coreEngine?.modelGatewayUrl.trim() ?? "";
+  return host !== undefined && external === "" ? { CoreModelGatewayHost: host } : {};
+}
+
 export function stackParameters(part: DeployPart, answers: InstallAnswers, outputs: Partial<Record<DeployPart, StackOutputs>>, options: { packages: boolean }): Record<string, string> {
   const boundary = answers.permissionsBoundaryArn ?? "";
   const base: Record<string, string> = {
@@ -362,7 +404,7 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
         ...adminParameters(answers.identity),
         CallbackSigningKey: answers.callbackSigningKey,
         ...(answers.coreEngine === undefined ? {} : coreEngineParameters(answers.coreEngine, { allowDeferredGateway: true })),
-        ...(outputs.gateway?.GatewayHost !== undefined && (answers.coreEngine?.modelGatewayUrl.trim() ?? "") === "" ? { CoreModelGatewayHost: outputs.gateway.GatewayHost } : {}),
+        ...builtInGatewayHostParameter(answers, outputs),
         GitHubAppId: answers.github.appId,
         GitHubAppPrivateKeySecretArn: answers.github.privateKeySecretArn,
         ...(answers.github.credentialRef === undefined ? {} : { GitHubAppCredentialRef: answers.github.credentialRef }),
@@ -381,33 +423,8 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
       };
     }
 
-    case "gateway": {
-      const gatewayImage = resolvedImage(answers, "gateway", outputs);
-      const workerProvider = answers.models.providers?.worker ?? "amazon-bedrock";
-      const standaloneProvider = workerProvider === "amazon-bedrock" ? "bedrock" : workerProvider;
-      const capMicros = answers.budget !== undefined && answers.budget.monthlyUsd > 0
-        ? String(answers.budget.monthlyUsd * 1_000_000)
-        : "100000000";
-      const taskKeyIds = answers.gateway?.taskKeyIds;
-      if (taskKeyIds === undefined || taskKeyIds.trim() === "") {
-        throw new Error(`self-hosted gateway requires the control plane's task-token JWKS key IDs (gateway.taskKeyIds)`);
-      }
-      return {
-        ...base,
-        GatewayImageUri: gatewayImage,
-        GatewayImageRepositoryName: ecrRepositoryName(gatewayImage, answers),
-        VpcId: required(outputs, "foundation", "VpcId", answers.env),
-        PrivateSubnetIds: required(outputs, "foundation", "PrivateSubnetIds", answers.env),
-        CodeUrl: orchestratorControlPlaneUrl(answers, () => required(outputs, "control-plane", "ApiEndpoint", answers.env)),
-        CodeTaskKeyIds: taskKeyIds,
-        OperatorAlertsTopicArn: required(outputs, "control-plane", "OperatorAlertsTopicArn", answers.env),
-        DefaultCompanyCapMicros: capMicros,
-        StandaloneProvider: standaloneProvider,
-        ...(answers.gateway?.certificateArn === undefined ? {} : { CertificateArn: answers.gateway.certificateArn }),
-        ...(answers.gateway?.host === undefined ? {} : { GatewayHost: answers.gateway.host }),
-        ...secret,
-      };
-    }
+    case "gateway":
+      return gatewayStackParameters(base, secret, answers, outputs);
 
     case "runtime": {
       return {

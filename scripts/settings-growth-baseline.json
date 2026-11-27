@@ -96,6 +96,7 @@
     "infra/lib/release-pipeline.ts::CloudRepoOwner": 1,
     "infra/lib/release-pipeline.ts::GitHubConnectionArn": 1,
     "infra/lib/release-pipeline.ts::PortGuardNamesKeyArn": 1,
+    "infra/lib/self-hosted-gateway.ts::name": 1,
     "infra/lib/session-lifecycle.ts::name": 1,
     "infra/lib/slack-company-workspaces.ts::SlackCompanyWorkspaces": 1,
     "infra/lib/slack-orchestrator.ts::ChannelEventQueueUrl": 1,

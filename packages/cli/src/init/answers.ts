@@ -159,6 +159,27 @@ function collectCoreEngineAnswers(fixed: BundleAnswers | undefined, flags: InitF
  * field, so the field is left out. Only the follow-ups (your own OIDC's values, a model id for
  * "Another Bedrock model id", OpenRouter's model ids and key, an alert webhook, and the GitHub
  * owner's type when GitHub cannot say) are asked after it. */
+function optionalGatewayAnswers(flags: InitFlags): Partial<Pick<InitAnswers, "gateway">> {
+  if (flags.gatewayCertificateArn === undefined && flags.gatewayHost === undefined) return {};
+  return {
+    gateway: {
+      ...(flags.gatewayCertificateArn === undefined ? {} : { certificateArn: flags.gatewayCertificateArn }),
+      ...(flags.gatewayHost === undefined ? {} : { host: flags.gatewayHost }),
+    },
+  };
+}
+
+function optionalImageAnswers(worker: string | undefined, slack: string | undefined, gateway: string | undefined): Partial<Pick<InitAnswers, "images">> {
+  if (worker === undefined && slack === undefined && gateway === undefined) return {};
+  return {
+    images: {
+      ...(worker === undefined ? {} : { worker }),
+      ...(slack === undefined ? {} : { slack }),
+      ...(gateway === undefined ? {} : { gateway }),
+    },
+  };
+}
+
 export async function collectInitAnswers(input: {
   env: string; region: string; account: string; releaseVersion: string;
   flags: InitFlags; prompter: Prompter; processEnv: NodeJS.ProcessEnv; now: () => number;
@@ -279,20 +300,11 @@ export async function collectInitAnswers(input: {
     identity: platform.identity,
     models: platform.models,
     coreEngine: collectCoreEngineAnswers(input.fixed, flags, typed, platform.models),
-    ...(flags.gatewayCertificateArn === undefined && flags.gatewayHost === undefined
-      ? {}
-      : {
-          gateway: {
-            ...(flags.gatewayCertificateArn === undefined ? {} : { certificateArn: flags.gatewayCertificateArn }),
-            ...(flags.gatewayHost === undefined ? {} : { host: flags.gatewayHost }),
-          },
-        }),
+    ...optionalGatewayAnswers(flags),
     ...(platform.permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn: platform.permissionsBoundaryArn }),
     ...(platform.operatorPrincipalArn === undefined ? {} : { operatorPrincipalArn: platform.operatorPrincipalArn }),
     ...(platform.operatorExternalId === undefined ? {} : { operatorExternalId: platform.operatorExternalId }),
-    ...(workerImage === undefined && slackImage === undefined && gatewayImage === undefined
-      ? {}
-      : { images: { ...(workerImage === undefined ? {} : { worker: workerImage }), ...(slackImage === undefined ? {} : { slack: slackImage }), ...(gatewayImage === undefined ? {} : { gateway: gatewayImage }) } }),
+    ...optionalImageAnswers(workerImage, slackImage, gatewayImage),
     alert,
     ...(budget === undefined ? {} : { budget }),
     github: { account: githubAccount, accountType, appName },

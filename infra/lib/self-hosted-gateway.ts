@@ -39,6 +39,15 @@ import {
 import { grantProviderKeySecrets, providerKeyParameters } from "./model-keys.js";
 import type { AgentXNaming } from "./naming.js";
 
+/** Standalone-only Model Gateway env var names (mirroring packages/model-gateway/src/deploy.ts). */
+const STANDALONE_GATEWAY_ENV = {
+  defaultCompanyCapMicros: "GATEWAY_DEFAULT_COMPANY_CAP_MICROS",
+  openaiKeySecret: "GATEWAY_OPENAI_KEY_SECRET",
+  openrouterKeySecret: "GATEWAY_OPENROUTER_KEY_SECRET",
+  standaloneProvider: "GATEWAY_STANDALONE_PROVIDER",
+  seedPricesOnStart: "GATEWAY_SEED_PRICES_ON_START",
+} as const;
+
 /**
  * Pure Node 22 inline CloudFormation custom resource (< 4 KB): generates a per-install ECDSA P-256
  * CA and server certificate for the internal ALB DNS name, imports the leaf + CA chain into ACM,
@@ -425,13 +434,13 @@ export class SelfHostedModelGatewayStack extends Stack {
           { name: MODEL_GATEWAY_ENV.ledgerTable, value: ledger.tableName },
           { name: MODEL_GATEWAY_ENV.markersTable, value: markers.tableName },
           { name: MODEL_GATEWAY_ENV.pricesTable, value: prices.tableName },
-          { name: MODEL_GATEWAY_ENV.defaultCompanyCapMicros, value: defaultCompanyCapMicros.valueAsString },
-          { name: MODEL_GATEWAY_ENV.standaloneProvider, value: standaloneProvider.valueAsString },
+          { name: STANDALONE_GATEWAY_ENV.defaultCompanyCapMicros, value: defaultCompanyCapMicros.valueAsString },
+          { name: STANDALONE_GATEWAY_ENV.standaloneProvider, value: standaloneProvider.valueAsString },
           { name: MODEL_GATEWAY_ENV.rovaraAiModels, value: "on" },
-          { name: MODEL_GATEWAY_ENV.seedPricesOnStart, value: "on" },
+          { name: STANDALONE_GATEWAY_ENV.seedPricesOnStart, value: "on" },
           Fn.conditionIf(providerConditionId("anthropic"), { Name: MODEL_GATEWAY_ENV.anthropicKeySecret, Value: providerKeys.anthropic.valueAsString }, Aws.NO_VALUE),
-          Fn.conditionIf(providerConditionId("openai"), { Name: MODEL_GATEWAY_ENV.openaiKeySecret, Value: providerKeys.openai.valueAsString }, Aws.NO_VALUE),
-          Fn.conditionIf(providerConditionId("openrouter"), { Name: MODEL_GATEWAY_ENV.openrouterKeySecret, Value: providerKeys.openrouter.valueAsString }, Aws.NO_VALUE),
+          Fn.conditionIf(providerConditionId("openai"), { Name: STANDALONE_GATEWAY_ENV.openaiKeySecret, Value: providerKeys.openai.valueAsString }, Aws.NO_VALUE),
+          Fn.conditionIf(providerConditionId("openrouter"), { Name: STANDALONE_GATEWAY_ENV.openrouterKeySecret, Value: providerKeys.openrouter.valueAsString }, Aws.NO_VALUE),
         ],
         logConfiguration: {
           logDriver: "awslogs",

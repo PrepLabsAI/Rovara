@@ -345,6 +345,19 @@ interface CliArgs {
   images?: { worker?: string; slack?: string; executor?: string; gateway?: string };
 }
 
+function collectBuildImages(valueAfter: (flag: string) => string | undefined): CliArgs["images"] {
+  const entries = ([
+    ["worker", "--worker-image"],
+    ["slack", "--slack-image"],
+    ["executor", "--executor-image"],
+    ["gateway", "--gateway-image"],
+  ] as const).flatMap(([key, flag]) => {
+    const value = valueAfter(flag);
+    return value === undefined ? [] : [[key, value] as const];
+  });
+  return entries.length === 0 ? undefined : Object.fromEntries(entries);
+}
+
 export function parseBuildArgs(argv: readonly string[]): CliArgs {
   const valueAfter = (flag: string): string | undefined => {
     const index = argv.indexOf(flag);
@@ -361,17 +374,8 @@ export function parseBuildArgs(argv: readonly string[]): CliArgs {
   const out = valueAfter("--out");
   if (version === undefined) throw new Error("--version is required");
   if (out === undefined) throw new Error("--out is required");
-  const worker = valueAfter("--worker-image");
-  const slack = valueAfter("--slack-image");
-  const executor = valueAfter("--executor-image");
-  const gateway = valueAfter("--gateway-image");
-  return {
-    version,
-    out,
-    ...(worker !== undefined || slack !== undefined || executor !== undefined || gateway !== undefined
-      ? { images: { ...(worker !== undefined ? { worker } : {}), ...(slack !== undefined ? { slack } : {}), ...(executor !== undefined ? { executor } : {}), ...(gateway !== undefined ? { gateway } : {}) } }
-      : {}),
-  };
+  const images = collectBuildImages(valueAfter);
+  return { version, out, ...(images === undefined ? {} : { images }) };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

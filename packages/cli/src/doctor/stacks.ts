@@ -48,6 +48,32 @@ function stackHealth(env: string, region: string, part: DeployPart, name: string
   return check("stacks", name, "fail", status, `see its events (${events})`);
 }
 
+async function gatewayHealthCheck(
+  entry: { name: string; stack: DoctorStack | undefined } | undefined,
+  fetchFn: DoctorContext["services"]["fetch"],
+): Promise<DoctorCheck | undefined> {
+  const outputs = entry?.stack?.outputs;
+  const gatewayUrl = outputs?.GatewayUrl ?? (outputs?.GatewayHost ? `https://${outputs.GatewayHost}` : undefined);
+  if (gatewayUrl === undefined || entry === undefined) return undefined;
+  try {
+    await assertGatewayRunPrices(gatewayUrl, fetchFn);
+    return check("stacks", "model gateway", "ok", `${gatewayUrl}/healthz reports runPrice snapshot ready`);
+  } catch {
+    return check("stacks", "model gateway", "fail", `${gatewayUrl}/healthz is not serving ready run prices`, `check the ${entry.name} ECS service logs and verify Prices snapshot seeding completed`);
+  }
+}
+
+function engineCheck(env: string, engine: string, described: Map<DeployPart, { name: string; stack: DoctorStack | undefined }>): DoctorCheck {
+  const wrongEngine = [...described.values()].flatMap(({ name, stack }) => {
+    if (stack === undefined) return [];
+    const used = deployedWithCdk(stack) ? "cdk" : "templates";
+    return used === engine ? [] : [`${name} (${used})`];
+  });
+  return wrongEngine.length === 0
+    ? check("stacks", "engine", "ok", `every stack was deployed with the ${engine} engine`)
+    : check("stacks", "engine", "fail", `the settings say ${engine}, but ${wrongEngine.join(", ")} ${wrongEngine.length === 1 ? "was" : "were"} deployed with the other engine; switching engines is not supported`, `redeploy with the ${engine} engine: agentx --env ${env} upgrade uses the engine in the settings`);
+}
+
 export async function stackChecks(context: DoctorContext): Promise<DoctorCheck[]> {
   const { env, settings, services } = context;
   const described = new Map<DeployPart, { name: string; stack: DoctorStack | undefined }>();
@@ -60,26 +86,10 @@ export async function stackChecks(context: DoctorContext): Promise<DoctorCheck[]
   }
 
   // Self-hosted Model Gateway health + runPrice readiness check (issue #1554).
-  const gatewayEntry = described.get("gateway");
-  const gatewayUrl = gatewayEntry?.stack?.outputs.GatewayUrl
-    ?? (gatewayEntry?.stack?.outputs.GatewayHost ? `https://${gatewayEntry.stack.outputs.GatewayHost}` : undefined);
-  if (gatewayUrl !== undefined) {
-    try {
-      await assertGatewayRunPrices(gatewayUrl, services.fetch);
-      checks.push(check("stacks", "model gateway", "ok", `${gatewayUrl}/healthz reports runPrice snapshot ready`));
-    } catch {
-      checks.push(check("stacks", "model gateway", "fail", `${gatewayUrl}/healthz is not serving ready run prices`, `check the ${gatewayEntry!.name} ECS service logs and verify Prices snapshot seeding completed`));
-    }
-  }
+  const gatewayCheck = await gatewayHealthCheck(described.get("gateway"), services.fetch);
+  if (gatewayCheck !== undefined) checks.push(gatewayCheck);
 
-  const wrongEngine = [...described.values()].flatMap(({ name, stack }) => {
-    if (stack === undefined) return [];
-    const used = deployedWithCdk(stack) ? "cdk" : "templates";
-    return used === settings.engine ? [] : [`${name} (${used})`];
-  });
-  checks.push(wrongEngine.length === 0
-    ? check("stacks", "engine", "ok", `every stack was deployed with the ${settings.engine} engine`)
-    : check("stacks", "engine", "fail", `the settings say ${settings.engine}, but ${wrongEngine.join(", ")} ${wrongEngine.length === 1 ? "was" : "were"} deployed with the other engine; switching engines is not supported`, `redeploy with the ${settings.engine} engine: agentx --env ${env} upgrade uses the engine in the settings`));
+  checks.push(engineCheck(env, settings.engine, described));
 
   const existing = [...described.values()].filter((entry): entry is { name: string; stack: DoctorStack } => entry.stack !== undefined);
   const drifted = existing.filter(({ stack }) => stack.drift === "DRIFTED").map(({ name }) => name);

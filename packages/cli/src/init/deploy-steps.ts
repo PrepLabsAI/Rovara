@@ -28,6 +28,16 @@ const IDLE_POLL_MS = 15_000;
  * not read it. The control plane deploys before the github-app step, so until that step records the
  * app it gets the app's secret still empty (`githubSecretArn`) and no app id: the broker then reads
  * the id from the secret, once the github-app step has stored it there. */
+function initGatewayOverrides(gateway: InitAnswers["gateway"]): Partial<Pick<DeployAnswers, "gateway">> {
+  if (gateway === undefined) return {};
+  return {
+    gateway: {
+      ...(gateway.certificateArn === undefined ? {} : { certificateArn: gateway.certificateArn }),
+      ...(gateway.host === undefined ? {} : { host: gateway.host }),
+    },
+  };
+}
+
 export function initDeployAnswers(answers: InitAnswers, progress: InstallProgress, parts: readonly DeployPart[], githubSecretArn?: string): DeployAnswers {
   let github: DeployAnswers["github"] = { account: "", appId: "", installationId: "", privateKeySecretArn: "" };
   if (parts.includes("control-plane")) {
@@ -47,12 +57,7 @@ export function initDeployAnswers(answers: InitAnswers, progress: InstallProgres
     account: answers.account,
     models: answers.models,
     ...(answers.coreEngine === undefined ? {} : { coreEngine: answers.coreEngine }),
-    ...(answers.gateway === undefined ? {} : {
-      gateway: {
-        ...(answers.gateway.certificateArn === undefined ? {} : { certificateArn: answers.gateway.certificateArn }),
-        ...(answers.gateway.host === undefined ? {} : { host: answers.gateway.host }),
-      },
-    }),
+    ...initGatewayOverrides(answers.gateway),
     identity: deployIdentityAnswers(answers.identity),
     github,
     ...(answers.permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn: answers.permissionsBoundaryArn }),

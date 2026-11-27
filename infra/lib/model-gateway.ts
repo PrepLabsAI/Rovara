@@ -208,13 +208,6 @@ export const MODEL_GATEWAY_ENV = {
   bedrockExternalIdKey: "GATEWAY_BEDROCK_EXTERNAL_ID_KEY",
   aiSourceKinds: "GATEWAY_AI_SOURCE_KINDS",
   offeredPrices: "GATEWAY_OFFERED_PRICES",
-  defaultCompanyCapMicros: "GATEWAY_DEFAULT_COMPANY_CAP_MICROS",
-  defaultProjectCapMicros: "GATEWAY_DEFAULT_PROJECT_CAP_MICROS",
-  defaultTaskCapMicros: "GATEWAY_DEFAULT_TASK_CAP_MICROS",
-  openaiKeySecret: "GATEWAY_OPENAI_KEY_SECRET",
-  openrouterKeySecret: "GATEWAY_OPENROUTER_KEY_SECRET",
-  standaloneProvider: "GATEWAY_STANDALONE_PROVIDER",
-  seedPricesOnStart: "GATEWAY_SEED_PRICES_ON_START",
 } as const;
 /** The eval stage table's due-stages index (deploy.ts GATEWAY_EVAL_STAGE_INDEXES). */
 export const MODEL_GATEWAY_EVAL_STAGE_INDEXES = {

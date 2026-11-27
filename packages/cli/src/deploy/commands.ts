@@ -836,6 +836,13 @@ function exportModelAnswers(options: InitExportOptions): DeployAnswers["models"]
   });
 }
 
+function defaultExportAgentModel(models: DeployAnswers["models"]): string {
+  const workerProvider = models.providers?.worker ?? "amazon-bedrock";
+  if (workerProvider === "openai") return "gpt-5";
+  if (workerProvider === "openrouter") return models.worker;
+  return "claude-sonnet-4-6";
+}
+
 async function initExport(options: InitExportOptions, deps: DeployCliDependencies): Promise<InitExportResult> {
   if (!REGION_PATTERN.test(options.region)) {
     throw agentXError("CONFIG_INVALID", `--region ${options.region} must look like us-east-1`);
@@ -862,14 +869,12 @@ async function initExport(options: InitExportOptions, deps: DeployCliDependencie
 
   if (options.openrouterProviders && !options.openrouterSecretArn) throw agentXError("CONFIG_INVALID", "--openrouter-providers requires --openrouter-secret-arn");
   const models = exportModelAnswers(options);
-  const workerProvider = models.providers?.worker ?? "amazon-bedrock";
-  const defaultAgentModel = workerProvider === "openai" ? "gpt-5" : workerProvider === "openrouter" ? models.worker : "claude-sonnet-4-6";
   const answers: DeployAnswers = {
     env: options.env,
     region: options.region,
     account,
     models,
-    coreEngine: CoreEngineAnswersSchema.parse({ modelGatewayUrl: options.modelGatewayUrl ?? "", agentModel: options.agentModel ?? defaultAgentModel }),
+    coreEngine: CoreEngineAnswersSchema.parse({ modelGatewayUrl: options.modelGatewayUrl ?? "", agentModel: options.agentModel ?? defaultExportAgentModel(models) }),
     identity: identityAnswers,
     // The export bundle always replaces this with `{{github:...}}` markers (markerAnswers in
     // export-bundle.ts); the GitHub App is not set up until the operator configures it, phase 15d.
