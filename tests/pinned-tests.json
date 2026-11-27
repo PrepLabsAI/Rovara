@@ -269,8 +269,8 @@
     },
     {
       "path": "tests/journeys/web-task.test.ts",
-      "minimumTests": 9,
-      "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): journeys 1, 5 (web) and 9 (a web task start to close, quick and full path, default and self-approval merge rules, stop, another company; after a stop the worker's repository grant buys no push or clone credential, grant G1). A whole task on the real core and real worker, in every pull request run; the floor is the file's 9 runnable declarations, and deleting or trimming one is a reviewed edit.",
+      "minimumTests": 10,
+      "reason": "A1 journey tests on the core engine (DEC 254zzz459: journey tests in the merge gate): journeys 1, 5 (web) and 9 (a web task start to close, quick and full path, default and self-approval merge rules, stop, another company; after a stop the worker's repository grant buys no push or clone credential, grant G1; the agent's activity read on the web and with the CLI through hosted Code's route table, #1589). A whole task on the real core and real worker, in every pull request run; the floor is the file's 10 runnable declarations, and deleting or trimming one is a reviewed edit.",
       "decision": "DEC 254zzz459"
     },
     {

@@ -2,7 +2,10 @@
 // A1-0 spike: journey 1 (QUICK path) on the real core, with the real-core proof. See briefs/arch-cleanup/A1-JOURNEY-TESTS-PLAN.md.
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
+import { SessionActivityPageSchema } from "../../packages/contracts/src/index.js";
+import { taskSessionId } from "../../packages/broker/src/core/sessions/create.js";
 import { createJourneyWorld, MAYA, type JourneyWorld } from "./harness/hosted-core.js";
+import { bearerRequest, writeCliSession } from "./harness/surviving.js";
 import { buildUntilPullRequest, hostReady, planFullToImplement, planUntilCard, startTask } from "./harness/task.js";
 import { decide, fixUntilPush, openPullRequest, reviewRound } from "./harness/feedback.js";
 
@@ -205,6 +208,25 @@ describe("journey 1: the web task, start to close", () => {
     expect(stopped.status, JSON.stringify(stopped.body).slice(0, 300)).toBe(200);
     const after = await world.exchangeGrant(workspaceId, preparing.invocation.operationId, grant, "clone");
     expectRefusedWithTheGrantsId(world, [after], ["clone"]);
+    world.proof.assertAllCore();
+  }, 120_000);
+
+  it("the agent's activity (#1589): the owner follows it on the web and with the CLI through hosted Code's route table; another company's member is told there is no such session", async () => {
+    world = await createJourneyWorld();
+    const taskId = await startTask(world);
+    await planUntilCard(world, taskId);
+    const path = `/v1/app/sessions/${taskSessionId(taskId)}/activity`;
+    // The web app's panel and `rovara session watch` read the same route; with no row in the route table both were refused "route not found" before anyone was signed in.
+    const web = await world.maya("GET", path);
+    expect(web.status, JSON.stringify(web.body).slice(0, 300)).toBe(200);
+    const page = SessionActivityPageSchema.parse(web.body);
+    expect(page.operations.length, "the steps that ran so far").toBeGreaterThan(0);
+    expect(page.events.length, "the agent's saved events").toBeGreaterThan(0);
+    const cli = await bearerRequest(world, writeCliSession(world, MAYA, Math.floor(Date.now() / 1000) + 6 * 86_400), "GET", path);
+    expect(cli.status, cli.text.slice(0, 300)).toBe(200);
+    expect(SessionActivityPageSchema.parse(cli.json()).events).toEqual(page.events);
+    // Someone who cannot see the task gets the session route's own answer for a session that is not there, not the route table's.
+    expect(told(await world.omar("GET", path))).toEqual({ status: 404, error: { code: "NOT_FOUND", message: "There is no such session." } });
     world.proof.assertAllCore();
   }, 120_000);
 

@@ -314,6 +314,8 @@ export const ROUTES: readonly Route[] = [
   { method: "GET", path: "/v1/app/sessions/{sessionId}", requires: "tasks:read" },
   // The task's log of questions, answers and decisions (B5): the same readers as the session; one more row, nothing existing changed.
   { method: "GET", path: "/v1/app/sessions/{sessionId}/log", requires: "tasks:read" },
+  // The task's agent activity (#1548, #1589): the same readers as the session and its log.
+  { method: "GET", path: "/v1/app/sessions/{sessionId}/activity", requires: "tasks:read" },
   { method: "POST", path: "/v1/app/sessions/{sessionId}/follow", requires: "tasks:read" },
   { method: "DELETE", path: "/v1/app/sessions/{sessionId}/follow", requires: "tasks:read" },
   { method: "POST", path: "/v1/app/sessions/{sessionId}/unfollow", requires: "tasks:read" },

@@ -16,9 +16,10 @@ describe("the one route table", () => {
     // RD-2.0 (Code API 1.5): four rows for the task page's new reads (spec, checks, changes, timeline) after the proof index (176 became 180).
     // D1-2 (owner DEC 254zzz519): the unconnected `POST /v1/dev/tasks/{taskId}/merge` row is deleted (180 became 179). No other row moved; the digest below is the one of this table without that row.
     // RD-2d: one app row for the file behind a link of the checks read, GET /v1/app/tasks/{taskId}/evidence/{sha}, after the merge rows (111 became 112). It carries only its scope: no schema, no version bump.
-    expect([DEV_ROUTES.length, APP_ROUTES.length]).toEqual([179, 112]);
+    // #1589: one app row for the task's agent activity, GET /v1/app/sessions/{sessionId}/activity, after the session log's row (112 became 113). Only its scope, as RD-2d's.
+    expect([DEV_ROUTES.length, APP_ROUTES.length]).toEqual([179, 113]);
     expect(digest(DEV_ROUTES.map(keyOf))).toBe("50d4111fb426355a956f2101b7045cd11f4605e86aea6322d2b6f522b9d5a720");
-    expect(digest(APP_ROUTES.map(keyOf))).toBe("eb8d562ca509716ec37d2d6594a3f4ef86fde68633cd8a047a1bc559a7f065c4");
+    expect(digest(APP_ROUTES.map(keyOf))).toBe("f40c2f404a4db5174de53b97ac33d9888dbaae998201a32d83ac7139fe75c68e");
   });
 
   it("is the developer rows then the app rows, each row once, and only the rows that carry a schema carry more than method, path and scope (F2-B: `tasks.read`; RD-2.0: the ten task reads)", () => {

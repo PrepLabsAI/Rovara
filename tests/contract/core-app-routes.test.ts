@@ -16,6 +16,7 @@ import type { CoreTaskEntry, CoreEntryCaller } from "../../packages/broker/src/a
 import { createCoreHostApp } from "../../packages/broker/src/core-host/index.js";
 import { NOT_ON_THE_CORE_YET, createCoreDevRoutes } from "../../packages/broker/src/core-host/dev-routes.js";
 import { createPersonEraseRoute } from "../../packages/broker/src/core-host/person-erase-route.js";
+import { SESSION_ROUTE_ACTIONS } from "../../packages/broker/src/core-host/app/session-routes.js";
 import { noLearningToErase, noWikiToErase } from "../../packages/broker/src/core/people/erase.js";
 import { createOwnerTaskAccess } from "../../packages/broker/src/core/task-flow/access.js";
 import type { BrokerRequest, BrokerResponse } from "../../packages/broker/src/handler.js";
@@ -106,6 +107,8 @@ describe("the /v1/app route table", () => {
     ["GET", "/v1/app/projects/payments/ci-eval-check", "full"], ["PUT", "/v1/app/projects/payments/ci-eval-check", "full"],
     // L4-B5: the task's log of questions, answers and decisions (core/task-log/read.ts), for whoever may read the session.
     ["GET", "/v1/app/sessions/s1/log", "tasks:read"],
+    // #1589: the task's agent activity (core-host/app/session-activity.ts), for whoever may read the session; missing, hosted Code refused it "route not found" before auth.
+    ["GET", "/v1/app/sessions/s1/activity", "tasks:read"],
     // Lead 4 PCF: the plan card's "Change" lists the open features (the same people as the filing).
     ["GET", "/v1/app/tasks/t1/feature-choices", "full"],
     // L4-P3: the company's one control over Rovara's automatic runs.
@@ -125,6 +128,11 @@ describe("the /v1/app route table", () => {
   ];
   it.each(SERVED)("has a row for %s %s needing %s", (method, path, scope) => {
     expect(appRouteOf(method, path)?.requires).toBe(scope);
+  });
+
+  // #1589: the core served `GET .../activity` with no row here, so hosted Code refused it for everyone. A new session action without a row fails this test instead of shipping unreachable.
+  it.each(SESSION_ROUTE_ACTIONS)("has a row for the core's session action %s", (action) => {
+    expect(APP_ROUTES.filter((route) => route.path === `/v1/app/sessions/{sessionId}/${action}`).length, `no route-table row for /v1/app/sessions/{sessionId}/${action}`).toBeGreaterThan(0);
   });
 
 });
