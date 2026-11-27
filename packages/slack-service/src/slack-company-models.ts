@@ -27,6 +27,17 @@ export const refusalWords = (reason: SlackModelRefusal): string => SLACK_MODEL_W
 
 const MAX_ACCESS_BYTES = 16_384;
 
+/**
+ * #1586: the broker's `json()` adds its own `requestId` to every body (broker-primitives.ts), and the access result is strict, so the plain reply
+ * `{"status":"install","requestId":"…"}` read as a fault and every Slack turn said the "couldn't reach" words. Only that one key, as a string, is taken off;
+ * anything else unexpected still fails the strict parse.
+ */
+export function withoutBrokerRequestId(value: unknown): unknown {
+  if (value === null || typeof value !== "object" || Array.isArray(value) || !Object.hasOwn(value, "requestId")) return value;
+  const { requestId, ...rest } = value as Record<string, unknown>;
+  return typeof requestId === "string" ? rest : value;
+}
+
 /** What the broker said, or the refusal that stands for "it did not say" (never an exception). */
 async function askAccess(options: { controlPlaneUrl: string; signedFetch: typeof fetch; signal?: AbortSignal | undefined }) {
   try {
@@ -37,7 +48,7 @@ async function askAccess(options: { controlPlaneUrl: string; signedFetch: typeof
     if (response.status !== 200) return "fault" as const;
     const text = await response.text();
     if (text.length > MAX_ACCESS_BYTES) return "fault" as const;
-    const parsed = SlackModelAccessResultSchema.safeParse(JSON.parse(text) as unknown);
+    const parsed = SlackModelAccessResultSchema.safeParse(withoutBrokerRequestId(JSON.parse(text) as unknown));
     return parsed.success ? parsed.data : "fault" as const;
   } catch {
     return "fault" as const;

@@ -1,3 +1,4 @@
+import { SLACK_MODEL_WORDS } from "@agentx/contracts";
 import { describe, expect, it } from "vitest";
 import { firstProjectStep } from "../../packages/cli/src/init/finish-steps.js";
 import { readSlackBotToken, SLACK_BOT_SCOPES } from "../../packages/cli/src/init/slack-app.js";
@@ -124,6 +125,30 @@ describe("the stored bot token (F25)", () => {
 });
 
 describe("waiting for the threaded reply (FR-018 step 11)", () => {
+
+  it("does not count a fixed refusal as the first reply, and says which words came back (#1586)", async () => {
+    const plane = fakeControlPlane();
+    const refusal = turn({ subject: `${TEAM}/C0PAY00001/3.1`, receivedAt: new Date(T0 + 1000).toISOString(), disposition: "answered", responseText: SLACK_MODEL_WORDS.unavailable });
+    plane.turns = [refusal];
+    const reported = new Set<string>();
+    await expect(waitForThreadedReply({ env: "staging", session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx init", write: () => undefined, ...clock(), reported }))
+      .rejects.toThrow(`AgentX answered in #payments, but only with its fixed refusal "${SLACK_MODEL_WORDS.unavailable}": it made no model call.`);
+    expect([...reported]).toEqual([String(refusal.eventId)]);
+    // A real answer after it is the first reply.
+    const real = turn({ subject: `${TEAM}/C0PAY00001/4.1`, receivedAt: new Date(T0 + 2000).toISOString(), disposition: "answered", responseText: "I can review code, fix bugs and open pull requests." });
+    plane.turns = [refusal, real];
+    await expect(waitForThreadedReply({ env: "staging", session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx init", write: () => undefined, ...clock(), reported }))
+      .resolves.toMatchObject({ eventId: real.eventId });
+  });
+
+  it("treats every fixed refusal the same way", async () => {
+    for (const words of Object.values(SLACK_MODEL_WORDS)) {
+      const plane = fakeControlPlane();
+      plane.turns = [turn({ subject: `${TEAM}/C0PAY00001/5.1`, receivedAt: new Date(T0 + 1000).toISOString(), disposition: "answered", responseText: words })];
+      await expect(waitForThreadedReply({ env: "staging", session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx init", write: () => undefined, ...clock() }), words)
+        .rejects.toThrow("only with its fixed refusal");
+    }
+  });
 
   it("skips turns already reported, and adds a newly failed one before it throws (spec 040 FR-051)", async () => {
     const plane = fakeControlPlane();

@@ -14,7 +14,8 @@ import type { TokenSigner } from "../../packages/broker/src/developer/tokens.js"
 import { ANSWERS_STEP } from "../../packages/broker/src/core-host/gateway-answers.js";
 import { CORE_AGENT_MODEL_VARIABLE, CORE_MODEL_GATEWAY_URL_VARIABLE, taskKeySigner } from "../../packages/broker/src/core-host/gateway-model-access.js";
 import { askSlackModelAccessForIdentity, type SlackModelAccessWiring } from "../../packages/broker/src/aws/slack-model-access.js";
-import { classifierForTurn, refusalWords, requestRouterFor, resolveTurnModels, turnRefusalWords } from "../../packages/slack-service/src/slack-company-models.js";
+import { classifierForTurn, refusalWords, requestRouterFor, resolveTurnModels, turnRefusalWords, withoutBrokerRequestId } from "../../packages/slack-service/src/slack-company-models.js";
+import { json as brokerJson } from "../../packages/broker/src/aws/broker-primitives.js";
 import { createCompanyGatewayRuntime } from "../../packages/orchestrator/src/gateway-model.js";
 
 const ORG_A = "org_slackmodela000000000" as const;
@@ -159,7 +160,9 @@ function world(options: { answerFor?: (team: string, n: number) => Response | Pr
   const brokerFor = (team: string): typeof fetch => (async (url: unknown) => {
     brokerCalls.push({ url: String(url), team });
     if (options.answerFor !== undefined) return options.answerFor(team, brokerCalls.length);
-    return new Response(JSON.stringify(await askSlackModelAccessForIdentity(w, identityOf(team))), { status: 200, headers: { "content-type": "application/json" } });
+    // #1586: the broker's own json() (it adds requestId to the body), never a hand-made body, so these tests read exactly what the broker sends.
+    const reply = brokerJson(await askSlackModelAccessForIdentity(w, identityOf(team)), "Hf9lHiHjIAMEPeg=");
+    return new Response(reply.body, { status: reply.statusCode, headers: reply.headers });
   });
   const gatewayFetch = vi.fn(async (url: unknown, init?: RequestInit) => {
     const headers = init?.headers as Record<string, string>;
@@ -377,5 +380,31 @@ describe("the gateway runtime on its own", () => {
     await runtime.runtime.completeSimple(model, ask);
     expect(calls[0]).toBe("u".repeat(40));
     await expect(createCompanyGatewayRuntime({ baseUrl: `${GATEWAY}/v1/answers`, model: ANSWERS_MODEL, token: async () => { throw new Error("no token"); }, fetch: (async () => sse("x")) })).rejects.toThrow();
+  });
+});
+
+describe("the broker's reply as the Slack service reads it (#1586)", () => {
+  const broker = (value: unknown): typeof fetch => async () => {
+    const reply = brokerJson(value, "Hf9lHiHjIAMEPeg=");
+    return new Response(reply.body, { status: reply.statusCode, headers: reply.headers });
+  };
+  const gateway: typeof fetch = async () => sse("hello");
+  const resolveWith = (value: unknown) => resolveTurnModels({ controlPlaneUrl: "https://control.example", signedFetch: broker(value), fetch: gateway });
+
+  it("reads install through the broker's json(), which adds requestId: the install's own runtime, never the couldn't-reach words", async () => {
+    expect(JSON.parse(brokerJson({ status: "install" }, "Hf9lHiHjIAMEPeg=").body)).toEqual({ status: "install", requestId: "Hf9lHiHjIAMEPeg=" });
+    await expect(resolveWith({ status: "install" })).resolves.toEqual({ kind: "install" });
+  });
+
+  it("reads unavailable as not set up, not as a fault", async () => {
+    await expect(resolveWith({ status: "unavailable" })).resolves.toEqual({ kind: "refused", reason: "notSetUp" });
+  });
+
+  it("takes off only a string requestId; any other unexpected key is still a fault", async () => {
+    expect(withoutBrokerRequestId({ status: "install", requestId: "r1" })).toEqual({ status: "install" });
+    expect(withoutBrokerRequestId({ status: "install", requestId: 7 })).toEqual({ status: "install", requestId: 7 });
+    expect(withoutBrokerRequestId(["install"])).toEqual(["install"]);
+    expect(withoutBrokerRequestId(null)).toBeNull();
+    await expect(resolveWith({ status: "install", extra: true })).resolves.toEqual({ kind: "refused", reason: "unavailable" });
   });
 });
