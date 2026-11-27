@@ -4,7 +4,7 @@ A short reference for the `agentx` command: how to point it at an environment, h
 output, and the flags of the commands people and AI agents run most. `agentx <command> --help`
 prints every option. [Running Rovara](day-two.md) explains the commands in more depth.
 
-<!-- Source: packages/cli/src/main.ts; packages/cli/src/setup/cli.ts; packages/cli/src/setup/command-context.ts; packages/cli/src/output.ts; packages/cli/src/init/prompts.ts; PrepLabsAI/Rovara#1594. -->
+<!-- Source: packages/cli/src/main.ts; packages/cli/src/setup/cli.ts; packages/cli/src/setup/command-context.ts; packages/cli/src/output.ts; packages/cli/src/init/prompts.ts; packages/cli/src/environments/cache.ts; packages/cli/src/setup/admin-session.ts; packages/cli/src/setup/project-add.ts; packages/cli/src/setup/channel-add.ts; packages/cli/src/setup/connectors/revision.ts; PrepLabsAI/Rovara#1594; PrepLabsAI/Rovara#1597. -->
 
 ## Install
 
@@ -62,6 +62,44 @@ once before running commands unattended:
 agentx --env <name> login --admin
 ```
 
+## Use an existing install from another computer
+
+Use this on a computer that has never run `agentx` against the install, for example after an
+install made with the Launch in AWS button. The button's defaults are the install name `prod` and
+the region `us-east-1`; use your own if you changed them.
+
+```sh
+aws login                                     # AWS CLI credentials for the install's account
+agentx env list --region us-east-1            # shows prod
+agentx --env prod env use --region us-east-1  # saves prod's settings on this computer
+agentx --env prod login --admin               # the admin email and the password from the setup page
+agentx --env prod doctor --region us-east-1
+```
+
+1. **AWS CLI credentials** for the AWS account the install is in: `aws login`, or an SSO profile
+   (`aws configure sso`, then `--profile` or `AWS_PROFILE`). See the AWS CLI guide,
+   [Authentication and access credentials](https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-authentication.html).
+   If the install named an operator principal, assume the operator role as
+   [The operator role](day-two.md#the-operator-role) shows.
+2. **`env list`** shows the installs in that account and region. If it prints none, check the
+   account and the region.
+3. **`env use`** saves the install's settings on this computer, in `~/.agentx`. Admin sign-in reads
+   them from there. Without this step, `login --admin` fails with
+   `no settings for environment prod on this machine; run agentx --env prod env use`.
+4. **`login --admin`** opens a browser on this computer. Sign in with the admin email given to the
+   installer and the password chosen on the setup page. A person has to finish this sign-in. The
+   sign-in is stored on this computer and reused until it expires.
+5. **`doctor`** checks every part of the install and says how to fix what fails.
+
+`project`, `channel` and `connector` commands read the install's settings from AWS, not from
+`~/.agentx`, so they need only the AWS credentials and the admin sign-in. Pass `--region us-east-1`
+to them too when your AWS configuration has another region.
+
+`connector add` builds on the project's file in `~/.agentx/projects`, which only the computer that
+ran `project add` (or `init`) has. On another computer, copy `<project>.yaml` into
+`~/.agentx/projects`, or pass `--config-dir <the directory that holds it>`. The first project of a
+Launch in AWS install was written by the installer job, so no computer has its file.
+
 ## Output, errors and exit codes
 
 - Progress and questions go to **stderr**. The result goes to **stdout**.
@@ -104,6 +142,29 @@ yourself with flags:
 | `connector add mcp --auth oauth` | Registering Rovara as the server's OAuth client | `--register-client`, or `--client-id` for your own app |
 | `project model-check test` | Running the paid driving test | Run it only when you mean to |
 | `alerts test` | "Did the test alarm arrive?" | Run it at a terminal |
+
+## Steps that need a person
+
+Some steps need a person in a browser, in GitHub or in Slack. An AI agent should stop and ask the
+person to do them, then run the command again, instead of retrying.
+
+- **Finishing the admin sign-in.** `login --admin`, or the first `project`, `channel` or
+  `connector` command with no stored sign-in, prints a sign-in address and opens a browser. The
+  person signs in there, on the same computer. Over SSH, forward the port first:
+  `ssh -L 8765:127.0.0.1:8765 <that machine>`.
+- **Giving Rovara's GitHub App access to a repository.** `project add` only sees the repositories
+  the App's installation can see. For any other repository it stops with
+  `the GitHub App cannot see <owner/name>`. The person adds the repository in the App's installation
+  settings on GitHub.
+- **Inviting the bot to a private Slack channel.** A bot cannot join a private channel by itself.
+  `channel add` prints `/invite <@bot>` and waits up to 10 minutes for someone to type it in the
+  channel. A public channel needs no invite: the bot joins it.
+- **Mentioning the bot for the channel check.** After linking, `channel add` waits up to 10 minutes
+  for someone to mention the bot in the channel, and checks for a threaded reply. Pass `--no-check`
+  to link the channel without waiting.
+- **Signing in as the bot user for an OAuth connector.** `connector add asana` and
+  `connector add mcp --auth oauth` print an address. The person opens it on the same computer (or
+  through the same SSH port forward), in a private window, and signs in with the bot user's account.
 
 ## Recipes
 
