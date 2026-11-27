@@ -17,8 +17,8 @@
 //   stray-file      an editor, merge or sed backup/scratch file (`*-E`, `*.orig`, `*.rej`, `*.bak`, `*~`, `*.swp`, `*.tmp`, `.DS_Store` and kin): a stray
 //                   copy can hold raw Cloud source under a name no other rule reads (a lane once committed 27 `*.ts-E` files from `sed -i -E`)
 //   build-detector  the internal build-system detector (decision 45.11: an optional plug-in package, never core)
-//   private-name    a prospect or customer name (matched against a salted hash list, so no name is written in this file), the staging account id, an account id inside an ARN, an API Gateway host, a
-//                   host under the product's dev domain, or a private branch name (an integration or Cloud lane branch), on an added line. The
+//   private-name    a prospect or customer name (matched against a salted hash list, so no name is written in this file), the staging account id, an account id inside an ARN, an API Gateway host, or
+//                   a private branch name (an integration or Cloud lane branch), on an added line. The
 //                   Cloud repository's name is no longer on the list: the model gateway's AWS resources carry it and are public in Code (#1478)
 //   link            a symlink or a submodule (a link can point at a Cloud-only file, and the scan reads blobs, not targets)
 //   scan-bypass     an inline allow comment for gitleaks, or a gitleaks config / ignore file (they would switch the secret scan off)
@@ -829,8 +829,6 @@ export function hasPrivateBranch(raw: string): boolean {
   return PRIVATE_BRANCHES.some((pattern) => pattern.test(text));
 }
 
-/** Not names but shapes: a host under the product's dev domain. */
-const DEV_HOST = new RegExp(`rovara\\.${join("d", "ev")}(?![a-z0-9-])`, "i");
 
 /**
  * The private extended list: one regular expression per line; blank lines and lines starting with # are skipped; lines are trimmed (write \s
@@ -912,7 +910,6 @@ export function splitNameFindings(lines: readonly string[], names: NameSource = 
 export function lineFindings(raw: string, names: NameSource = DEFAULT_NAMES): string[] {
   const line = foldToAscii(raw);
   const out: string[] = [...nameLabels(raw, names)];
-  if (DEV_HOST.test(line)) out.push("a host under the product's dev domain");
   if (hasPrivateBranch(raw)) out.push(BRANCH_LABEL);
   for (const match of line.matchAll(ARN_ACCOUNT)) {
     if (!PLACEHOLDER_ACCOUNTS.has(match[1] ?? "")) out.push("an account id inside an ARN");
