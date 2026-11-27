@@ -333,7 +333,9 @@ jobs:
   npm:
     needs: release
     if: vars.AGENTX_PUBLISH_ENABLED == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2604
+    # GitHub-hosted, never Blacksmith (#1568): the npm registry accepts trusted-publishing provenance only from GitHub-hosted runners, and refused
+    # v0.5.2's publish from a Blacksmith runner ("Unsupported GitHub Actions runner environment: self-hosted").
+    runs-on: ubuntu-latest
     permissions: { contents: read, id-token: write }
     steps:
       - uses: actions/checkout@v5

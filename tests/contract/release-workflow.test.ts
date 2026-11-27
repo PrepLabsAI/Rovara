@@ -156,6 +156,11 @@ describe("release workflow", () => {
     expect(wf.jobs.npm?.permissions).toEqual({ contents: "read", "id-token": "write" });
   });
 
+  it("publishes to npm from a GitHub-hosted runner, the only kind npm's provenance check accepts (#1568)", async () => {
+    const wf = await workflow();
+    expect(wf.jobs.npm?.["runs-on"]).toBe("ubuntu-latest");
+  });
+
   it("builds the images with buildx (the worker for arm64, and amd64 when AGENTX_PUBLISH_WORKER_AMD64 is true: see worker-image-platforms.test.ts), pushes one digest per image, and cross-checks the registry digest before publishing", async () => {
     const wf = await workflow();
     const steps = wf.jobs.images!.steps;
