@@ -80,6 +80,7 @@ export function stateEntries(state: WizardState, where: string): CopyEntry[] {
       entries.push(at(command.label, `${card.id} command`, context), at(command.command, `${card.id} command`, context));
       if (command.group !== undefined) entries.push(at(command.group, `${card.id} command group`));
     }
+    if (card.prompt !== undefined) entries.push(at(card.prompt.label, `${card.id} prompt`, context), at(card.prompt.text, `${card.id} prompt`, context));
     for (const line of card.details ?? []) entries.push(at(line, `${card.id} details`, "details"));
   }
   if (state.link !== undefined) entries.push(at(state.link.label, "run link"), ...(state.link.note === undefined ? [] : [at(state.link.note, "run link")]));

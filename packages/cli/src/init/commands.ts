@@ -1118,7 +1118,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     // form that works as shown; the terminal and the log file keep readyText, the same facts.
     if (surface !== undefined && settings !== undefined && progress !== undefined) {
       surface.card(readyCard({
-        env, controlPlaneUrl: settings.controlPlaneUrl, progress,
+        env, region, controlPlaneUrl: settings.controlPlaneUrl, progress,
         botName: botNameOf(progress, finalAnswers.slack.appName), invocation: session.invocation,
         root: isRootUser(caller.arn), alertsOn: finalAnswers.alert.kind !== "none",
         created: installOrder(finalAnswers.identity.mode, { includeGateway: usesBuiltInGateway(finalAnswers.coreEngine) }).map((part) => environmentStackName(env, part)),
@@ -1130,7 +1130,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
       ...(settings === undefined ? {} : { controlPlaneUrl: settings.controlPlaneUrl }),
       ...(settings === undefined || progress === undefined ? {} : {
         ready: readyText({
-          env, controlPlaneUrl: settings.controlPlaneUrl, progress,
+          env, region, controlPlaneUrl: settings.controlPlaneUrl, progress,
           botName: botNameOf(progress, finalAnswers.slack.appName), invocation: session.invocation,
         }),
       }),

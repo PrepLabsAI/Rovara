@@ -61,7 +61,7 @@ describe("the message init ends with", () => {
 
   it("repeats a connector's warning at the end (owner decision 6)", () => {
     const text = readyText({
-      env: "staging", controlPlaneUrl: "https://cp.example.test", botName: "agentx-acme-staging", invocation: TEST_CLI_INVOCATION,
+      env: "staging", region: "us-east-1", controlPlaneUrl: "https://cp.example.test", botName: "agentx-acme-staging", invocation: TEST_CLI_INVOCATION,
       progress: {
         ...emptyProgress("staging", T0),
         project: { name: "payments-api", revision: 2 },
