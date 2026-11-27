@@ -294,7 +294,7 @@ describe("named environment templates", () => {
     expect({ CORE_DISPATCH_QUEUE_URL: variables.CORE_DISPATCH_QUEUE_URL, CORE_DISPATCH_DEAD_LETTER_URL: variables.CORE_DISPATCH_DEAD_LETTER_URL }).toMatchSnapshot();
   });
   for (const stack of stacks) {
-    // Issue #1554: agentx-staging-gateway is a new self-hosted stack tested by self-hosted-gateway.test.ts (not in mainline 4a605fd).
+    // Issue #1554: agentx-staging-gateway is a new self-hosted stack tested by self-hosted-model-gateway.test.ts (not in mainline 4a605fd).
     if (stack.stackName === "agentx-staging-gateway") continue;
     if (stack.stackName === "agentx-staging-control-plane") {
       it("removing only Batch F additions preserves code/next's agentx-staging-control-plane template", () => {

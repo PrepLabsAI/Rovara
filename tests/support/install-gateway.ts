@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, vi } from "vitest";
 export const readyCoreEngine = { modelGatewayUrl: "https://gateway.example", agentModel: "claude-sonnet-4-6" };
-export const builtInGatewayHost = "gw12345678.execute-api.us-east-1.amazonaws.com";
+export const builtInGatewayHost = "examplehost.execute-api.us-east-1.amazonaws.com";
 export const controlPlaneOrigin = "https://abc123.execute-api.us-east-1.amazonaws.com";
 export const brokerTemplate = () => JSON.stringify({ Parameters: { CoreModelGatewayHost: {}, CoreAgentModel: {} }, Outputs: { ModelRunPriceVersion: { Value: "1" } } });
 export function installGatewayFixture(): void {
