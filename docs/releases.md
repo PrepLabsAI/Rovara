@@ -20,9 +20,10 @@ A release directory looks like this:
 - `packages/<assetId>.zip`: the Lambda code each template references, one zip per package, named
   by the hash of its contents so the same code always produces the same file. Code packages are
   shared across every region a release covers, because asset hashes don't depend on region.
-- Two container images (the worker and the Slack listener), pushed to ECR Public and referenced
+- Three container images (the worker, the Slack listener and the self-hosted model gateway, built from
+  `environments/model-gateway/Dockerfile`), pushed to ECR Public and referenced
   only by digest (a fixed fingerprint), never by a tag that could later point at something else.
-  The Slack listener is built for `arm64` only, the chip the installer's runtime uses. The worker
+  The Slack listener and the gateway are built for `arm64` only, the chip the installer's runtime uses. The worker
   is built for `arm64` only too, unless the repository variable `AGENTX_PUBLISH_WORKER_AMD64` is
   `true` (default off, #1563). With it on, the worker is one multi-architecture image: its `linux/arm64` image serves
   ARM workers, and its `linux/amd64` image serves workers on x86 machine sizes (DEC 254zm). The release has one worker
@@ -118,11 +119,11 @@ directly for that environment name would have produced (FR-012).
 The first release, v0.1.0, shipped on 2026-10-06 from commit `87d28a2d`. Everything below is in
 place; this records what it is, so a change to any piece can be made deliberately.
 
-- **ECR Public repositories.** `agentx-worker` and `agentx-slack` in the release account (`<release-account-id>`, found in the private release runbook)
+- **ECR Public repositories.** `agentx-worker`, `agentx-slack` and `agentx-gateway` (created 2026-11-26 for v0.5.4, #1572) in the release account (`<release-account-id>`, found in the private release runbook)
   in `us-east-1`, under the registry alias `i7z2k3a8`. A shorter alias, `agentx`, is requested and
   waiting on AWS's approval; switching to it means changing `AGENTX_ECR_PUBLIC_ALIAS`.
 - **The publish role.** `arn:aws:iam::<release-account-id>:role/agentx-github-release` can push images
-  only to those two repositories, plus the two sign-in permissions ECR Public requires
+  only to those three repositories (its inline policy `publish-images`), plus the two sign-in permissions ECR Public requires
   (`ecr-public:GetAuthorizationToken` and `sts:GetServiceBearerToken`). Its trust policy accepts
   GitHub's OIDC token only for this repository's version tags, matched by immutable ID rather than
   name:
@@ -139,7 +140,7 @@ place; this records what it is, so a change to any piece can be made deliberatel
   also push `agentx-executor` (the browser executor image, built from
   `environments/e2e-executor/Dockerfile`; the worker pulls it at boot as `EXECUTOR_IMAGE`) and record
   its digest in release.json. Before the first such release, an owner creates the ECR Public
-  repository `agentx-executor` beside the other two and adds it to the publish role's push
+  repository `agentx-executor` beside the other three and adds it to the publish role's push
   permissions; until then the `images` job fails at that image. `release-test.yml` does not push it
   yet: the release test installs without an executor image, which the runtime stack allows.
   The release workflow builds and publishes the executor only when the repository variable
