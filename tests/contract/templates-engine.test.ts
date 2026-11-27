@@ -338,6 +338,28 @@ describe("templates engine", () => {
     expect(req.events.map((event) => event.kind)).toEqual(["changes", "deploying", "deployed"]);
   });
 
+  it("sends the access template minified, so an indented release template over the inline limit still deploys inline (#1575)", async () => {
+    // As the release writes it: indented. 0.5.6's access template was 90,645 bytes this way and 31,940 minified.
+    const big = { Resources: Object.fromEntries(Array.from({ length: 400 }, (_, index) => [`Role${index}`, { Type: "AWS::IAM::Role", Properties: { RoleName: `agentx-staging-role-${index}` } }])) };
+    const indented = JSON.stringify(big, null, 2);
+    expect(Buffer.byteLength(indented, "utf8")).toBeGreaterThan(51_200);
+    expect(Buffer.byteLength(JSON.stringify(big), "utf8")).toBeLessThan(51_200);
+    const fake = fakeClients({
+      DescribeStacks: [stackAbsent("agentx-staging-access"), stack("CREATE_COMPLETE", { ArtifactBucketName: "bucket" })],
+      CreateChangeSet: [{}],
+      DescribeChangeSet: [ready(), executed()],
+      ExecuteChangeSet: [{}],
+      UpdateTerminationProtection: [{}],
+    });
+    const release = makeRelease((part, region, env) => (part === "access" ? indented : JSON.stringify({ part, region, env })));
+
+    await deployer(fake, { release }).deploy(request("access", { parameters: { PermissionsBoundaryArn: "", OperatorPrincipalArn: "" } }));
+
+    const [input] = fake.inputs("CreateChangeSet") as Array<{ TemplateBody?: string }>;
+    expect(input?.TemplateBody).toBe(JSON.stringify(big));
+    expect(fake.calls.filter((call) => call.client === "s3")).toEqual([]);
+  });
+
   it("follows the stack when the executed change set is already gone (CloudFormation removed it after executing)", async () => {
     // Seen live on 2026-09-27: the access stack reached CREATE_COMPLETE, but DescribeChangeSet right after
     // ExecuteChangeSet answered "ChangeSet [...] does not exist", and the deploy failed before protecting it.
@@ -583,10 +605,12 @@ describe("templates engine", () => {
     });
   });
 
-  it("refuses an access template too large to deploy inline, before calling AWS", async () => {
+  it("refuses an access template too large to deploy inline even minified, before calling AWS, and says how large it is (#1575)", async () => {
     const fake = fakeClients({});
-    const release = makeRelease(() => "x".repeat(51_201));
-    await expect(deployer(fake, { release }).deploy(request("access"))).rejects.toThrow("the access template is too large to deploy inline");
+    const huge = { Resources: Object.fromEntries(Array.from({ length: 1_200 }, (_, index) => [`Role${index}`, { Type: "AWS::IAM::Role", Properties: { RoleName: `agentx-staging-role-${index}` } }])) };
+    expect(Buffer.byteLength(JSON.stringify(huge), "utf8")).toBeGreaterThan(51_200);
+    const release = makeRelease(() => JSON.stringify(huge, null, 2));
+    await expect(deployer(fake, { release }).deploy(request("access"))).rejects.toThrow(/the access template is too large to deploy inline \(\d+ bytes minified; the limit is 51200\)/);
     expect(fake.calls).toEqual([]);
   });
 
