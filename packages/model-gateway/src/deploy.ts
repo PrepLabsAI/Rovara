@@ -149,8 +149,6 @@ export const GATEWAY_LOG_EVENTS = {
   priceFetchFailed: "price_fetch_failed",
   /** A price fetch that saved (counted daily; no count for three days raises the staleness alarm). */
   priceFetched: "price_fetched",
-  /** #1583: a cold-start seed left this task with no prices, and a read of the shared table (which another task had seeded) gave it them. */
-  priceReloadedAfterSeed: "price_reloaded_after_seed",
 } as const;
 
 /**

@@ -471,7 +471,7 @@ async function maybeSeedPrices(input: {
   for (let attempt = 0; attempt < SEED_RELOAD_ATTEMPTS && !hasPrices(input.prices); attempt += 1) {
     if (attempt > 0) await input.sleep(input.reloadDelayMs);
     try { await input.prices.reload(); } catch { /* the next attempt, or the five-minute maintenance reload, reads it again */ }
-    if (hasPrices(input.prices)) input.log({ event: GATEWAY_LOG_EVENTS.priceReloadedAfterSeed, attempt: attempt + 1 });
+    if (hasPrices(input.prices)) input.log({ event: "price_reloaded_after_seed", attempt: attempt + 1 });
   }
 }
 
