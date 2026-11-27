@@ -11,7 +11,7 @@ import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
 import { EnvironmentReleasePipelineStack } from "../../infra/lib/environment-release-pipeline.js";
 import {
-  AGENTX_RELEASE_PIPELINE_NAME, ARTIFACT_KEY_NAME_CHARS, ARTIFACT_KEY_PIPELINE_CHARS, CLOUD_SOURCE_NAMESPACE, CODE_SOURCE_NAMESPACE, ReleasePipelineStack, artifactKeyPattern,
+  AGENTX_RELEASE_PIPELINE_NAME, ARTIFACT_KEY_NAME_CHARS, ARTIFACT_KEY_PIPELINE_CHARS, CODE_SOURCE_NAMESPACE, ReleasePipelineStack, artifactKeyPattern,
 } from "../../infra/lib/release-pipeline.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 
@@ -192,26 +192,21 @@ describe.each(Object.entries(pipelines))("CodePipeline create-time rules: %s", (
   });
 });
 
-describe("CodePipeline create-time rules: the release pipeline's Cloud source", () => {
+describe("CodePipeline create-time rules: the Code-only release pipeline source", () => {
   const pipeline = pipelines["release pipeline"]!;
-  const cloudSource = flatten(pipeline).find(({ action }) => action.Name === "CloudGitHub")!.action;
-  const codeSource = flatten(pipeline).find(({ action }) => action.Name === "GitHub")!.action;
+  const sourceActions = flatten(pipeline).filter(({ action }) => action.ActionTypeId.Category === "Source").map(({ action }) => action);
 
-  it("the Cloud source keeps its OUTPUT ARTIFACT name CloudSource (the Cloud stack's S3 grants and PH-S3-PREFIXES name it) and its namespace is a different name; the Code source namespace is not an artifact either", () => {
-    expect(cloudSource.OutputArtifacts).toEqual([{ Name: "CloudSource" }]);
-    expect(cloudSource.Namespace).toBe(CLOUD_SOURCE_NAMESPACE);
-    expect(CLOUD_SOURCE_NAMESPACE).toBe("CloudSourceVariables");
-    expect(codeSource.Namespace).toBe(CODE_SOURCE_NAMESPACE);
-    expect(codeSource.OutputArtifacts).toEqual([{ Name: "Source" }]);
+  it("has only the Code GitHub source (no Cloud source), with a namespace distinct from its artifact name", () => {
+    expect(sourceActions.map((a) => a.Name)).toEqual(["GitHub"]);
+    expect(sourceActions[0]!.Namespace).toBe(CODE_SOURCE_NAMESPACE);
+    expect(sourceActions[0]!.OutputArtifacts).toEqual([{ Name: "Source" }]);
   });
 
-  it("artifact key layout: CloudSource is longer than the 10 characters of the key cut, so its grant pattern is `CloudSourc*`, which no other artifact of the pipeline matches", () => {
+  it("keeps distinct artifact key prefixes for Source, ReleaseManifest, BetaReleaseManifest, GatewayBeta*, and GatewayProd*", () => {
     expect(ARTIFACT_KEY_PIPELINE_CHARS).toBe(20);
     expect(ARTIFACT_KEY_NAME_CHARS).toBe(10);
-    expect(artifactKeyPattern("arn:aws:s3:::b", "CloudSource")).toBe(`arn:aws:s3:::b/${AGENTX_RELEASE_PIPELINE_NAME.slice(0, 20)}*/CloudSourc*`);
-    const others = [...new Set(artifactNames(pipeline))].filter((name) => name !== "CloudSource");
-    expect(others.filter((name) => name.slice(0, ARTIFACT_KEY_NAME_CHARS).startsWith("CloudSourc"))).toEqual([]);
-    // The cut of two different artifacts may be equal (the Cloud states share folders by design, and that is safe); none of those shared cuts is CloudSource's.
-    expect(others.filter((name) => name.slice(0, ARTIFACT_KEY_NAME_CHARS) === "CloudSource".slice(0, ARTIFACT_KEY_NAME_CHARS))).toEqual([]);
+    expect(artifactKeyPattern("arn:aws:s3:::b", "Source")).toBe(`arn:aws:s3:::b/${AGENTX_RELEASE_PIPELINE_NAME.slice(0, 20)}*/Source/*`);
+    expect(artifactKeyPattern("arn:aws:s3:::b", "GatewayBetaImage")).toBe(`arn:aws:s3:::b/${AGENTX_RELEASE_PIPELINE_NAME.slice(0, 20)}*/GatewayBet*`);
+    expect(artifactKeyPattern("arn:aws:s3:::b", "GatewayProdImage")).toBe(`arn:aws:s3:::b/${AGENTX_RELEASE_PIPELINE_NAME.slice(0, 20)}*/GatewayPro*`);
   });
 });

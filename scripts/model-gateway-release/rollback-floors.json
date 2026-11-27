@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "about": "Rollback floors for Code's model gateway release pipeline (#1578). Read from the pipeline tree (never from a rollback target). A gateway Code commit must equal or descend from every gatewayCode floor; a Code rollback target must equal or descend from every code floor; a digest listed under gatewayDigests.belowFloor is refused.",
+  "floors": {
+    "code": [
+      {
+        "sha": "5e6c41b127a3be962f8e9790f98dc6420b0f3c1e",
+        "reason": "older readers reject the stored Bedrock model state no_answer and read the whole company product-AI document as unavailable"
+      }
+    ],
+    "gatewayCode": [
+      {
+        "sha": "d531e8357c4056a9d2a7e54776deecc541971f42",
+        "reason": "first Code commit holding the model gateway source with price bands, quota-aware routing, and failed-call settle"
+      },
+      {
+        "sha": "5e6c41b127a3be962f8e9790f98dc6420b0f3c1e",
+        "reason": "older readers reject the stored Bedrock model state no_answer and read the whole company product-AI document as unavailable"
+      }
+    ]
+  },
+  "gatewayDigests": {
+    "belowFloor": [
+      {
+        "digest": "sha256:68af1b9e9f2639e55f627f3604c829b6926f48be90cc06e37fd8bed923724292",
+        "reason": "image 68af1b9e has no price bands and must not be deployed by the pipeline"
+      }
+    ]
+  }
+}

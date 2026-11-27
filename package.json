@@ -12,6 +12,7 @@
   ],
   "scripts": {
     "gateway:image": "tsx scripts/model-gateway-image.ts",
+    "gateway:release": "tsx scripts/model-gateway-release/cli.ts",
     "build": "tsc -b",
     "clean": "tsc -b --clean",
     "lint": "node scripts/lint-shards.ts",

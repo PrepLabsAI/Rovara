@@ -918,4 +918,8 @@ function regionPattern(): string {
 //   2. BetaCodePreflight (the CodeBuild project): six commands before the CODE_CTX export (which source started the run) and a fifth trigger part in the Beta CODE_CTX value; Production's Code Preflight is unchanged.
 //   3. BetaCodePreflightRoleDefaultPolicy: ReadWaitingRun gains codepipeline:ListActionExecutions (this pipeline only; read-only).
 // No parameter, output, bucket, trigger, other variable, other role or other policy moved.
-const PRODUCTION_PIPELINE_TEMPLATE_SHA256 = "f666faa65ac67edcd17eae5a4387458ea6c299e6bc67d426d08490cdea306e3f";
+// ISSUE-1578 (2026-11-27; pin before it: f666faa65ac67edcd17eae5a4387458ea6c299e6bc67d426d08490cdea306e3f): take Rovara Cloud out of AgentXProductionRelease and have Code release its own model gateway.
+//   1. Removed all Cloud parameters (CloudRepoOwner, CloudRepoName, CloudRepoBranch, CloudConnectionArn, CloudBetaProjectName, CloudProductionProjectName), ArtifactBucketName output, CloudGitHub source & role, Cloud tag trigger, CLOUD_REF/CLOUD_PROD variables, all 12 Cloud actions and StateBeta*/StateProd* artifacts, and CODE_CTX / from-trigger logic.
+//   2. Added Code-owned BetaModelGatewayBuild and ProductionModelGatewayBuild CodeBuild projects and roles (with ProductionModelGatewayBuildRoleArn output), scoped to GatewayBet* and GatewayPro* artifact prefixes with DenyArtifactWritesOutsideOwnOutput and DenyOrganizationAdminRole.
+//   3. Wired ModelGatewayImage -> ModelGatewayDeploy -> ModelGatewayCheck before ReleaseBeta (Beta) and after ApproveProduction before ReleaseProduction (Production), added MODEL_GATEWAY_DIGEST variable, restored CODE_RELEASE default to run (skipping on CODE_RELEASE=skip or PIPELINE_MODE=adopt), and added model-gateway paths to the mainline push trigger.
+const PRODUCTION_PIPELINE_TEMPLATE_SHA256 = "df1212323e4debfdaa5a5ef1aa49caba306fe23bba2b43c2fa398cc0c2783b8f";

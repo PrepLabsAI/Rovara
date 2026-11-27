@@ -78,9 +78,9 @@ describe("every Production deploy waits for its own approval", () => {
     for (const action of others) expect(approval.RunOrder, `${action.Name} must run after the approval`).toBeLessThan(action.RunOrder);
     // No other action of the stage may share the approval's run order (a same-order action would start beside it, before the approval), and the run orders are contiguous.
     expect(new Set(production.Actions.map((action) => action.RunOrder)).size).toBe(production.Actions.length);
-    expect(production.Actions.map((action) => action.RunOrder)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(production.Actions.map((action) => action.RunOrder)).toEqual([1, 2, 3, 4, 5, 6]);
     expect(production.Actions.map((action) => `${action.RunOrder}:${action.Name}`)).toEqual([
-      "1:CodePreflight", "2:ApproveProduction", "3:Preflight", "4:CloudImage", "5:CloudGateway", "6:GatewayCheck", "7:ReleaseProduction", "8:CloudWebApp", "9:CloudProof",
+      "1:CodePreflight", "2:ApproveProduction", "3:ModelGatewayImage", "4:ModelGatewayDeploy", "5:ModelGatewayCheck", "6:ReleaseProduction",
     ]);
   });
 
@@ -145,29 +145,25 @@ describe("every Production deploy waits for its own approval", () => {
     template.hasResourceProperties("AWS::CodePipeline::Pipeline", { ExecutionMode: "SUPERSEDED" });
   });
 
-  it("names this run in the approval: the execution, the Code commit, the Cloud commit and the variables that decide what the run does", () => {
+  it("names this run in the approval: the execution, the Code commit and the Code-only variables that decide what the run does", () => {
     const text = String(approval.Configuration.CustomData);
     expect(text).toContain("#{codepipeline.PipelineExecutionId}");
     expect(text).toContain("#{CodeSource.CommitId}");
-    expect(text).toContain("#{CloudSourceVariables.CommitId}");
-    // The Cloud commit is the Cloud SOURCE commit of this run, not "the commit Beta resolved its Cloud ref from" (a Code-push run with no tag on it deploys Beta's last-good tag instead).
-    expect(text).toContain("the Cloud source commit of this run");
-    expect(text).not.toMatch(/resolved its Cloud ref/u);
-    expect(text).toContain("Beta's Preflight log");
-    for (const name of ["CLOUD_REF", "CLOUD_PROD", "CODE_RELEASE", "PIPELINE_MODE", "CODE_ROLLBACK_TARGET"]) expect(text).toContain(`#{variables.${name}}`);
-    // Every reference resolves in a Production action that runs before the approval was needed: an unresolved one would fail the approval action itself.
+    expect(text).not.toContain("CloudSource");
+    expect(text).not.toContain("CLOUD_REF");
+    expect(text).not.toContain("CLOUD_PROD");
+    for (const name of ["CODE_RELEASE", "PIPELINE_MODE", "CODE_ROLLBACK_TARGET", "MODEL_GATEWAY_DIGEST"]) expect(text).toContain(`#{variables.${name}}`);
     for (const reference of text.match(/#\{[^}]+\}/gu) ?? []) {
-      expect(reference).toMatch(/^#\{(codepipeline\.PipelineExecutionId|CodeSource\.CommitId|CloudSourceVariables\.CommitId|variables\.(CLOUD_REF|CLOUD_PROD|CODE_RELEASE|PIPELINE_MODE|CODE_ROLLBACK_TARGET))\}$/u);
+      expect(reference).toMatch(/^#\{(codepipeline\.PipelineExecutionId|CodeSource\.CommitId|variables\.(CODE_RELEASE|PIPELINE_MODE|CODE_ROLLBACK_TARGET|MODEL_GATEWAY_DIGEST))\}$/u);
     }
-    // CodePipeline refuses an action configuration value over 1000 characters; the text is unresolved here and the resolved values are short (a uuid, two 40-hex shas, five short words).
     const resolved = text
       .replace("#{codepipeline.PipelineExecutionId}", "00000000-0000-0000-0000-000000000000")
-      .replace(/#\{(CodeSource|CloudSourceVariables)\.CommitId\}/gu, "0".repeat(40))
+      .replace("#{CodeSource.CommitId}", "0".repeat(40))
       .replace("#{variables.CODE_ROLLBACK_TARGET}", "0".repeat(40))
-      .replace(/#\{variables\.[A-Z_]+\}/gu, "from-trigger");
+      .replace("#{variables.MODEL_GATEWAY_DIGEST}", `sha256:${"0".repeat(64)}`)
+      .replace(/#\{variables\.[A-Z_]+\}/gu, "rollback");
     expect(resolved.length).toBeLessThanOrEqual(1000);
     expect(text.length).toBeLessThanOrEqual(1000);
-    // Nothing secret or private: no account id, host or domain.
     expect(text).not.toMatch(/\b[0-9]{12}\b|execute-api|rovara\.dev/u);
   });
 
@@ -193,7 +189,7 @@ describe("no role this template creates can approve, open the gate, or start, re
     }
     expect(granted.filter((pattern) => pattern === "*" || /^codepipeline:\*$/iu.test(pattern))).toEqual([]);
     expect(granted.filter((pattern) => pattern.toLowerCase().startsWith("codepipeline:")).sort()).toEqual([
-      "codepipeline:DisableStageTransition", "codepipeline:GetPipelineExecution", "codepipeline:GetPipelineState", "codepipeline:ListActionExecutions",
+      "codepipeline:DisableStageTransition", "codepipeline:GetPipelineExecution", "codepipeline:GetPipelineState",
     ]);
   });
 

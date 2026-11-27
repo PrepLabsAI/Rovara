@@ -5,7 +5,12 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { applyLegacyRuntimeBoundary, legacyRuntimeBoundaryName, legacyRuntimeBoundaryStatements } from "../../infra/lib/legacy-runtime-boundary.js";
 import { environmentNaming, legacyNaming } from "../../infra/lib/naming.js";
-import { AGENTX_BETA_RELEASE_PROJECT_NAME, AGENTX_RELEASE_PROJECT_NAME } from "../../infra/lib/release-pipeline.js";
+import {
+  AGENTX_BETA_MODEL_GATEWAY_PROJECT_NAME,
+  AGENTX_BETA_RELEASE_PROJECT_NAME,
+  AGENTX_PRODUCTION_MODEL_GATEWAY_PROJECT_NAME,
+  AGENTX_RELEASE_PROJECT_NAME,
+} from "../../infra/lib/release-pipeline.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { legacyProductionStacks } from "../support/template-snapshot.js";
 import { withoutLegacyRuntimeBoundary } from "../support/legacy-runtime-boundary-template.js";
@@ -129,8 +134,8 @@ describe("legacy runtime boundary: which roles carry it", () => {
 
   it("is on no release pipeline role, and no other legacy stack gets a boundary policy", () => {
     const pipeline = rolesOf(PIPELINE_STACK);
-    // 6 before L1: the pipeline role, the source role, the two release build roles and the two stage action roles. L1 adds the two Code Preflight project roles, the Cloud source role and one CDK action role for each of 14 new actions. PROD-APPROVAL-BOUND adds one more action role, for the Production approval (no policy of its own).
-    expect(pipeline).toHaveLength(24);
+    // 19 (#1578): pipeline role, source role, 2 Code release roles, 2 Code preflight roles, 2 model gateway build roles, and 11 CDK stage action roles (5 Beta + 6 Production).
+    expect(pipeline).toHaveLength(19);
     for (const [id, role] of pipeline) expect(role.Properties.PermissionsBoundary, id).toBeUndefined();
     for (const stackName of [PIPELINE_STACK, "AgentXProductionRuntime"]) {
       expect(JSON.stringify(template(stackName)), stackName).not.toContain("PermissionsBoundary");
@@ -333,7 +338,7 @@ describe("legacy runtime boundary: the statements", () => {
   });
 
   it("the release projects are named so the broker's agentx-* project grant cannot reach them", () => {
-    for (const project of [AGENTX_RELEASE_PROJECT_NAME, AGENTX_BETA_RELEASE_PROJECT_NAME]) {
+    for (const project of [AGENTX_RELEASE_PROJECT_NAME, AGENTX_BETA_RELEASE_PROJECT_NAME, AGENTX_BETA_MODEL_GATEWAY_PROJECT_NAME, AGENTX_PRODUCTION_MODEL_GATEWAY_PROJECT_NAME]) {
       expect(glob("agentx-*", project, false), project).toBe(false);
       expect(glob("release-*", project, false), project).toBe(true);
     }
