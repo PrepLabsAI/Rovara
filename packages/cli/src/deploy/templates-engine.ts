@@ -195,8 +195,11 @@ export function templatesDeployer(input: {
     const text = installTemplate(request);
     const declared = declaredParameterNames(text);
     if (request.part === "access") {
-      if (Buffer.byteLength(text, "utf8") > MAX_INLINE_TEMPLATE_BYTES) throw new Error("the access template is too large to deploy inline");
-      return { source: { TemplateBody: text }, declared };
+      // #1575: the release writes its templates indented, and 0.5.6's access template was 90,645 bytes as written but 31,940 minified. Whitespace means
+      // nothing to CloudFormation, so the body goes minified, and only its minified size is held to the inline limit.
+      const body = JSON.stringify(JSON.parse(text));
+      if (Buffer.byteLength(body, "utf8") > MAX_INLINE_TEMPLATE_BYTES) throw new Error(`the access template is too large to deploy inline (${Buffer.byteLength(body, "utf8")} bytes minified; the limit is ${MAX_INLINE_TEMPLATE_BYTES})`);
+      return { source: { TemplateBody: body }, declared };
     }
     const bucket = input.artifactBucket();
     await uploadPackages(request, bucket, emit);
