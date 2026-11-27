@@ -25,7 +25,7 @@ export function aiToolPrompt(input: { env: string; region: string; invocation: C
   return [
     `I run a self-hosted Rovara install named ${env} in AWS region ${region}.`,
     "Read https://rovara.dev/llms.txt, then help me manage it with the rovara CLI",
-    `(${cliSource(input.invocation)}). Always pass --env ${env} --region ${region}.`,
+    `(${cliSource(input.invocation)}). Pass --env ${env} to every command, and --region ${region} to the commands that take it.`,
     "To connect this computer, follow \"Use an existing install from another computer\" in the CLI reference:",
     ANOTHER_COMPUTER_DOCS_URL,
   ].join("\n");

@@ -38,7 +38,7 @@ describe("the prompt for an AI tool", () => {
     expect(aiToolPrompt({ env: "acme-prod", region: "eu-west-1", invocation: PUBLISHED })).toBe([
       "I run a self-hosted Rovara install named acme-prod in AWS region eu-west-1.",
       "Read https://rovara.dev/llms.txt, then help me manage it with the rovara CLI",
-      "(npm package @preplabsai/rovara-code@1.2.3). Always pass --env acme-prod --region eu-west-1.",
+      "(npm package @preplabsai/rovara-code@1.2.3). Pass --env acme-prod to every command, and --region eu-west-1 to the commands that take it.",
       "To connect this computer, follow \"Use an existing install from another computer\" in the CLI reference:",
       "https://github.com/PrepLabsAI/Rovara/blob/mainline/docs/cli-reference.md#use-an-existing-install-from-another-computer",
     ].join("\n"));
@@ -47,7 +47,7 @@ describe("the prompt for an AI tool", () => {
 
   it("names this computer's own copy, not the package, when the CLI was built from source", () => {
     const prompt = aiToolPrompt({ env: "acme-prod", region: "eu-west-1", invocation: FROM_SOURCE });
-    expect(prompt).toContain("(built from source; on this computer: node /opt/agentx/dist/main.js). Always pass --env acme-prod --region eu-west-1.");
+    expect(prompt).toContain("(built from source; on this computer: node /opt/agentx/dist/main.js). Pass --env acme-prod to every command, and --region eu-west-1 to the commands that take it.");
     expect(prompt).not.toContain("@preplabsai/rovara-code");
   });
 
