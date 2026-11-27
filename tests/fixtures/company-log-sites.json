@@ -26,6 +26,7 @@
   "packages/broker/src/aws/operation-events.ts": 1,
   "packages/broker/src/aws/outbox-failure.ts": 3,
   "packages/broker/src/aws/outbox-publisher.ts": 2,
+  "packages/broker/src/aws/project-lifecycle-routes.ts": 1,
   "packages/broker/src/aws/project-settings.ts": 1,
   "packages/broker/src/aws/runtime-requalify-heartbeat.ts": 1,
   "packages/broker/src/aws/runtime-requalify-steps.ts": 2,
