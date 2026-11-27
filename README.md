@@ -452,6 +452,7 @@ the `agentx` CLI.
 | [Install overview](docs/getting-started.md)                   | `init`, day-2 commands and developer sign-in on one page                       |
 | [Installing Rovara](docs/install.md)                          | Published templates, CDK, platform-team export, CloudShell                     |
 | [Running Rovara](docs/day-two.md)                             | The operator role, `doctor`, `upgrade`, `config`, projects and connectors      |
+| [CLI reference](docs/cli-reference.md) · [llms.txt](llms.txt)  | `--env`, JSON output, exit codes, unattended runs, and the commands' flags; an index for AI agents |
 | [How Rovara works](docs/how-it-works.md)                      | Request path, the check report, context files, usage records, stack names     |
 | [Production architecture](docs/architecture-production.md)    | EC2 workers, EBS, networking, devcontainers, isolation and release             |
 | [Working in Slack](docs/slack.md)                             | Threads, connectors, confirmations, shared tasks, memory, diagnostics         |

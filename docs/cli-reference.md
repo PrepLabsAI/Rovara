@@ -1,0 +1,195 @@
+# CLI reference
+
+A short reference for the `agentx` command: how to point it at an environment, how to read its
+output, and the flags of the commands people and AI agents run most. `agentx <command> --help`
+prints every option. [Running Rovara](day-two.md) explains the commands in more depth.
+
+<!-- Source: packages/cli/src/main.ts; packages/cli/src/setup/cli.ts; packages/cli/src/setup/command-context.ts; packages/cli/src/output.ts; packages/cli/src/init/prompts.ts; PrepLabsAI/Rovara#1594. -->
+
+## Install
+
+The npm package is `@preplabsai/rovara-code` and the command it installs is `agentx`. Rovara
+needs Node.js 22.19 or newer.
+
+```sh
+npm install -g @preplabsai/rovara-code   # then: agentx --help
+npx @preplabsai/rovara-code --help       # or run it without installing
+```
+
+## Choose the environment: `--env`
+
+An environment is one Rovara install. You name it when you install, for example `prod` or
+`staging`: lower-case letters, digits and hyphens. One AWS account can hold several environments,
+and the name tells them apart in AWS, GitHub and Slack.
+
+Pass `--env <name>` to every command. **Without it, `agentx` uses the environment named
+`production`**, which is rarely what you want. Only `destroy` refuses to run without it.
+
+```sh
+agentx env list --region <region>      # the environments in this AWS account and region
+agentx --env <name> env use            # rebuild this computer's settings cache for <name>
+```
+
+Commands that change an environment read its settings from AWS Systems Manager in `--region`,
+which defaults to your AWS configuration's region. If the environment is not found there, the
+error says so and suggests `--region` or `agentx env list`.
+
+## Global options
+
+| Option | Meaning |
+|---|---|
+| `--env <name>` | The environment. Default `production`. |
+| `--project <name>` | The project a command acts on (`channel add`, `connector add`, `admin slack bind`). |
+| `--json` | Print the result as one JSON document on stdout. |
+| `--config-dir <dir>` | Where project files live. Default `~/.agentx/projects`. |
+| `--accept-unchecked-model <reason>` | Register a project whose default model failed its check anyway, with the reason recorded. |
+
+## Credentials
+
+| Commands | Needs |
+|---|---|
+| `init`, `destroy` | AWS administrator credentials. |
+| `doctor`, `upgrade`, `config`, `signin`, `env` | The operator role `init` created (`agentx-<env>-operator`). See [The operator role](day-two.md#the-operator-role). |
+| `project`, `channel`, `connector`, `alerts` | AWS credentials that can read the environment's settings, plus an admin sign-in. |
+| `login <url>`, `whoami`, `workspaces`, `sessions`, `session`, `mcp` | A developer sign-in; no AWS credentials. |
+
+An admin sign-in is stored on this computer and reused until it expires. If there is none, the
+command prints a sign-in address and opens a browser; a person has to finish that sign-in. Do it
+once before running commands unattended:
+
+```sh
+agentx --env <name> login --admin
+```
+
+## Output, errors and exit codes
+
+- Progress and questions go to **stderr**. The result goes to **stdout**.
+- With `--json`, stdout is one line: `{"ok":true,"data":...}` on success, or
+  `{"ok":false,"error":{"code":"...","message":"..."}}` on failure.
+- Error messages name the fix, for example `--project is required; pass --project <name>`.
+
+| Exit code | Meaning |
+|---|---|
+| 0 | Success |
+| 1 | Unexpected internal error |
+| 2 | Invalid input, including a question that needs a flag (see below). `doctor` also exits 2 when a check fails. |
+| 3 | Login required |
+| 4 | Forbidden or not found |
+| 5 | The workspace is busy or not ready |
+| 6 | The control plane is unavailable |
+| 7 | Any other Rovara error |
+
+## Running without a terminal
+
+AI agents, CI and piped input usually run with no terminal. Then `agentx` never waits for an
+answer:
+
+- A question with a typed answer takes its default. If it has none, or it asks you to choose
+  between several options (such as which repository to use), the command stops with exit code 2
+  and a message naming the flag that answers it.
+- A secret is never read from a prompt. Pass it as a file (`--<name>-file <path>`) or an
+  environment variable (`--<name>-env <NAME>`), never as a value on the command line.
+- `init` and `upgrade` stop unless you pass `--yes`.
+
+**Yes/no questions in `project`, `connector`, `alerts` and `project model-check` are currently
+answered yes with no terminal, even when their default is no**
+([#1595](https://github.com/PrepLabsAI/Rovara/issues/1595)). Until that is fixed, give the answer
+yourself with flags:
+
+| Command | Answered yes with no terminal | Pass instead |
+|---|---|---|
+| `project add` | The detected setup and test commands, and the setup plan | `--setup-command` and `--test-command`, and read the plan it prints |
+| `connector add mcp` | Approving write tools that no ownership rule limits | `--tools` with read tools only, or an ownership rule in `--config-file`; `--acknowledge-unscoped-writes` only on purpose |
+| `connector add mcp --auth oauth` | Registering Rovara as the server's OAuth client | `--register-client`, or `--client-id` for your own app |
+| `project model-check test` | Running the paid driving test | Run it only when you mean to |
+| `alerts test` | "Did the test alarm arrive?" | Run it at a terminal |
+
+## Recipes
+
+Add a repository as a project, then link a Slack channel to it:
+
+```sh
+agentx --env <env> project add --repository <owner/name> \
+  --setup-command "npm ci" --test-command "npm test"
+agentx --env <env> --project <project> channel add --channel <channel-name>
+```
+
+`channel add` invites the bot, then waits for someone to mention it in the channel and checks for a
+threaded reply. Add `--no-check` to link the channel without waiting.
+
+Add a connector:
+
+```sh
+agentx --env <env> --project <project> connector add linear \
+  --linear-key-env LINEAR_API_KEY --linear-team <team>
+agentx --env <env> --project <project> connector add mcp \
+  --endpoint https://mcp.example.com/mcp --auth key --key-env VENDOR_KEY --tools "search:read"
+```
+
+Check an environment and read the result as JSON:
+
+```sh
+agentx --env <env> doctor --json
+```
+
+## Commands
+
+### Projects and channels
+
+| Command | What it does |
+|---|---|
+| `project add` | Register a project from a repository the GitHub App can see, and write its file to `~/.agentx/projects/<name>.yaml`. |
+| `project setup-approve --project-name <name>` | Show a project's setup plan again and approve or decline it. |
+| `project model-check discover` | List the models this account can use for AI navigation. |
+| `project model-check test [--model <id>] [--yes]` | Run a small, real navigation test of a model. Shows the worst-case cost and asks first. |
+| `channel add --channel <name> [--no-check]` | Link a Slack channel to `--project`, invite the bot and check for a reply. Linking another channel replaces the current one. |
+| `admin slack bind --team <id> --channel <id>` / `unbind` | Link or unlink a channel by Slack IDs, for installs not made with `init`. |
+
+`project add` options:
+
+| Option | Meaning |
+|---|---|
+| `--repository <owner/name>` | The repository. Required when the GitHub App sees more than one. |
+| `--project-name <name>` | The project's name. Default: the repository's name. |
+| `--setup-command <command>` | The setup command, or `""` for none. Default: the detected one. |
+| `--test-command <command>` | The test command, or `""` for none. Default: the detected one. |
+
+### Connectors
+
+All take `--project <name>`, test a read, and register the project's next revision.
+
+| Command | Options |
+|---|---|
+| `connector add linear` | `--linear-key-file` or `--linear-key-env`, `--linear-team <id or key>` |
+| `connector add jira` | `--jira-site <site>`, `--jira-project <key>`, `--jira-token-file` or `--jira-token-env` |
+| `connector add asana` | `--asana-client-id`, `--asana-client-secret-file` or `-env`, `--asana-bot-email`, `--asana-project <gid>` |
+| `connector add mcp` | `--endpoint <url>`, `--name`, `--auth key\|oauth`, `--key-file` or `--key-env`, `--tools <list>`, and more in [custom-mcp.md](connectors/custom-mcp.md) |
+
+### Environment
+
+| Command | What it does |
+|---|---|
+| `init` | Install an environment, step by step; running it again resumes. Every question has a flag. See [Installing Rovara](install.md). |
+| `doctor` | Check every part of the environment and say how to fix what fails. |
+| `upgrade [--to <version>] [--yes]` | Upgrade to a newer release. See [Upgrade](day-two.md#upgrade). |
+| `config list` / `get <key>` / `set <key> [value] [--yes]` | Read and change settings: models, limits, Slack, alerts, budget. |
+| `signin show` / `enable <method>` / `disable <method>` / `check` | Choose how developers sign in: `slack`, `oidc` or `github`. |
+| `alerts test` | Send a test alarm and ask whether it arrived. |
+| `env list` / `use` / `adopt` | List, re-cache or adopt environments. |
+| `destroy [--keep-data]` | Remove an environment. Needs an explicit `--env`; you type its name to confirm. |
+
+### Developers
+
+| Command | What it does |
+|---|---|
+| `login <url>` / `logout` / `whoami` | Sign in to an environment, sign out, and see your projects. |
+| `workspaces [--no-ui]` | Your projects and the workspaces in them. |
+| `sessions [--mine\|--shared\|--project <name>]` | List sessions. |
+| `session start <instructions> --project <name>` | Start work on a project and print the link to its page. |
+| `session show\|watch\|comment\|tell\|answer\|stop\|retry\|share <session-id>` | Look at, steer or share a session. |
+| `mcp install --client claude-code\|codex\|cursor` | Add Rovara's MCP server to your AI tool. See [mcp-install.md](mcp-install.md). |
+| `chatgpt connect` / `status` / `disconnect` | Use your own ChatGPT plan. See [chatgpt.md](chatgpt.md). |
+
+Other commands, for administrators of an install: `admin` (project registration, workspaces,
+credentials, turn exports, task sharing), `adapter` ([channel adapters](channel-adapters.md)),
+`loop` ([Rovara loop](loop.md)) and `deploy` (used by `init` and `upgrade`).

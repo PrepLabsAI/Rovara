@@ -114,7 +114,8 @@ and continue, within the project's `developerTasks` settings:
 agentx --env <name> admin task share-mode --task <task-id> --mode view|continue
 ```
 
-Run `agentx --help` or `agentx <command> --help` for the complete surface: `init`, `deploy`,
+The [CLI reference](cli-reference.md) lists the common commands with their flags, the JSON output
+and how commands behave without a terminal. Run `agentx --help` or `agentx <command> --help` for the complete surface: `init`, `deploy`,
 `upgrade`, `config list|get|set`, `doctor`, `destroy`, `env list|use|adopt`,
 `signin show|enable|disable|check`, `project add`, `channel add`,
 `connector add linear|jira|asana|mcp`, `alerts test`, `login`, `logout`, `whoami`, `workspaces`,
