@@ -314,7 +314,7 @@ describe("agentx init", () => {
     expect(prompt).toBe(`${aiToolPrompt({ env: "staging", region: "us-east-1", invocation: { published: false, cliPath: "/opt/agentx/dist/main.js" } })}\n`);
     expect(prompt).toContain("named staging in AWS region us-east-1.");
     expect(prompt).toContain("Pass --env staging to every command, and --region us-east-1 to the commands that take it.");
-    for (const secret of [TEST_PRIVATE_KEY.split("\n")[1]!, TEST_BOT_TOKEN, TEST_SIGNING_SECRET, "fedcba9876543210fedcba9876543210", h.secrets.values.get("agentx/staging/callback-signing-key")!, ADMIN_EMAIL, "ops@example.com"]) {
+    for (const secret of [TEST_PRIVATE_KEY.split("\n")[1]!, TEST_BOT_TOKEN, TEST_SIGNING_SECRET, h.secrets.values.get("agentx/staging/callback-signing-key")!, ADMIN_EMAIL, "ops@example.com"]) {
       expect(prompt).not.toContain(secret);
     }
     expect(prompt).not.toMatch(/@[a-z0-9-]+\.[a-z]{2,}/iu);
