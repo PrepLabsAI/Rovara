@@ -451,7 +451,6 @@ describe("port-guard on a temp repository", () => {
       ["an account id inside an ARN", `const arn = "arn:aws:iam::${"4".repeat(12)}:role/x";\n`],
       ["an account id inside an ARN with a region", `const arn = "arn:aws:sns:us-east-1:${"5".repeat(12)}:topic";\n`],
       ["an API Gateway host", `const url = "https://${"k3j4h5g6f7"}.execute-api.us-east-1.amazonaws.com/v1";\n`],
-      ["a rovara dev host", `const url = "https://app.rovara.${j("d", "ev")}/x";\n`],
       ["the private repository", "// see Zorblax Vault\n"],
     ])("fails %s", (_name, line) => {
       lane.write("packages/worker/src/engine.ts", line);
@@ -979,6 +978,14 @@ describe("port-guard hardening (review of lane L0)", () => {
     lane.write("packages/worker/src/engine.ts", line);
     lane.commit();
     expect(rules(lane.guard())).toEqual(["private-name"]);
+  });
+});
+
+describe("the product's own domain", () => {
+  it("is not a finding: the public website and its hosts live there", () => {
+    const site = `rovara.${j("d", "ev")}`;
+    expect(lineFindings(`Docs for AI agents: https://${site}/llms.txt`)).toEqual([]);
+    expect(lineFindings(`const url = "https://beta.${site}/x";`)).toEqual([]);
   });
 });
 
