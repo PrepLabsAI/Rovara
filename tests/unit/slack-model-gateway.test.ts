@@ -384,11 +384,12 @@ describe("the gateway runtime on its own", () => {
 });
 
 describe("the broker's reply as the Slack service reads it (#1586)", () => {
-  const broker = (value: unknown): typeof fetch => (async () => {
+  const broker = (value: unknown): typeof fetch => async () => {
     const reply = brokerJson(value, "Hf9lHiHjIAMEPeg=");
     return new Response(reply.body, { status: reply.statusCode, headers: reply.headers });
-  }) as unknown as typeof fetch;
-  const resolveWith = (value: unknown) => resolveTurnModels({ controlPlaneUrl: "https://control.example", signedFetch: broker(value), fetch: (async () => sse("hello")) as unknown as typeof fetch });
+  };
+  const gateway: typeof fetch = async () => sse("hello");
+  const resolveWith = (value: unknown) => resolveTurnModels({ controlPlaneUrl: "https://control.example", signedFetch: broker(value), fetch: gateway });
 
   it("reads install through the broker's json(), which adds requestId: the install's own runtime, never the couldn't-reach words", async () => {
     expect(JSON.parse(brokerJson({ status: "install" }, "Hf9lHiHjIAMEPeg=").body)).toEqual({ status: "install", requestId: "Hf9lHiHjIAMEPeg=" });
