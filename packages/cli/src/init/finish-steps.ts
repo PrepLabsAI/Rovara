@@ -14,6 +14,7 @@ import { addLinear } from "../setup/connectors/linear.js";
 import { addProject } from "../setup/project-add.js";
 import { installationToken } from "../setup/project-files.js";
 import { REPLY_WAIT_MS, waitForThreadedReply } from "../setup/reply-watch.js";
+import { AI_TOOL_PROMPT_LABEL, aiToolPrompt } from "./ai-tool-prompt.js";
 import { BUDGET_TAG_NOTE, checkAlertWebhook } from "./answers.js";
 import { cliCommandLine, type CliInvocation } from "./cli-command.js";
 import type { InitContext } from "./context.js";
@@ -377,8 +378,9 @@ export function finishSteps(): InitStep<InitContext>[] {
 
 /** The message a finished agentx init ends with: where to talk to AgentX, how developers sign in,
  * and the day-2 commands. FR-058, FR-059 and #222: the bot is named by its handle, never a raw
- * Slack mention, and every command is built from the CLI's own invocation, so it works as shown. */
-export function readyText(input: { env: string; controlPlaneUrl: string; progress: InstallProgress; botName: string; invocation: CliInvocation }): string {
+ * Slack mention, and every command is built from the CLI's own invocation, so it works as shown.
+ * #1599: it ends with the block to paste into an AI tool, unindented so it copies cleanly. */
+export function readyText(input: { env: string; region: string; controlPlaneUrl: string; progress: InstallProgress; botName: string; invocation: CliInvocation }): string {
   const { env, progress } = input;
   const cli = (args: string) => cliCommandLine(input.invocation, `--env ${env} ${args}`);
   const { project } = progress;
@@ -397,5 +399,8 @@ export function readyText(input: { env: string; controlPlaneUrl: string; progres
     `  Send a test alarm any time: ${cli("alerts test")}.`,
     // The plan points here for removing everything, on the terminal path (--no-ui, --yes) too.
     `  Remove it: ${cli("destroy")}. It deletes the coding machines' disks too.`,
+    "",
+    `${AI_TOOL_PROMPT_LABEL}:`,
+    aiToolPrompt(input),
   ].join("\n");
 }

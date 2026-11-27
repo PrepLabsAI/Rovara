@@ -115,6 +115,9 @@ export interface WizardPlan {
  * `group` is the subheading it sits under; the page starts a new one where the group changes. */
 export interface WizardCommand { label: string; command: string; group?: string }
 
+/** A block of text with a heading and a Copy button, such as the ready card's prompt for an AI tool. */
+export interface WizardPrompt { label: string; text: string }
+
 /** One line of a checklist card, such as one prerequisite. */
 export interface WizardCheck { label: string; ok: boolean; detail: string }
 
@@ -130,6 +133,8 @@ export interface WizardCard {
   /** Technical details, shown collapsed: raw messages, IDs, ARNs (FR-027, FR-060). */
   details?: string[];
   commands?: WizardCommand[];
+  /** #1599: a block of text to paste into an AI tool, shown with a Copy button. */
+  prompt?: WizardPrompt;
   /** FR-034: an ISO time the page counts down to. */
   waitUntil?: string;
 }

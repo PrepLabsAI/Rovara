@@ -5,6 +5,7 @@
 // so the page's words are tested in one place and the page only lays text out. No builder takes a
 // secret, so no card can carry one (FR-012).
 import { COGNITO_SENDER } from "../../setup/admin-user.js";
+import { AI_TOOL_PROMPT_LABEL, aiToolPrompt } from "../ai-tool-prompt.js";
 import { cliCommandLine, type CliInvocation } from "../cli-command.js";
 import { CONNECTOR_LABELS, type InstallProgress } from "../install-state.js";
 import { ADMIN_USER_GUIDE_URL, DEDICATED_ACCOUNT_NOTE, ROOT_WARNING, type PrerequisiteCheck } from "../prerequisites.js";
@@ -438,7 +439,7 @@ export function replyCard(input: ReplyCardInput): WizardCard {
 export const READY_GROUPS = { invite: "Invite your developers", lookAfter: "Look after it" } as const;
 
 export function readyCard(input: {
-  env: string; controlPlaneUrl: string; progress: InstallProgress; botName: string; invocation: CliInvocation;
+  env: string; region: string; controlPlaneUrl: string; progress: InstallProgress; botName: string; invocation: CliInvocation;
   root: boolean; alertsOn: boolean; created: string[]; logPath?: string;
 }): WizardCard {
   const cli = (args: string) => cliCommandLine(input.invocation, `--env ${input.env} ${args}`);
@@ -468,6 +469,8 @@ export function readyCard(input: {
         { label: "Remove Rovara", command: cli("destroy") },
       ].map((command) => ({ ...command, group: READY_GROUPS.lookAfter })),
     ],
+    // #1599: built from the install's name and region only, so it holds no secret.
+    prompt: { label: AI_TOOL_PROMPT_LABEL, text: aiToolPrompt(input) },
     ...(input.created.length === 0 ? {} : { details: [`What was created: ${input.created.join(", ")}`] }),
     ...(project?.channelId === undefined || project.channelName === undefined || teamId === undefined
       ? {} : { link: { url: slackChannelLink(teamId, project.channelId), label: `Open #${project.channelName} in Slack` } }),

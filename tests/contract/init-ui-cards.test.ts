@@ -171,7 +171,7 @@ describe("spec 048 the ready screen", () => {
 
   it("FR-016: names the commands that need an admin user when the install ran as root", () => {
     const card = readyCard({
-      env: "staging", controlPlaneUrl: "https://abc.example.com", progress: READY_PROGRESS, botName: "agentx-acme-staging",
+      env: "staging", region: "us-east-1", controlPlaneUrl: "https://abc.example.com", progress: READY_PROGRESS, botName: "agentx-acme-staging",
       invocation: FROM_SOURCE, root: true, alertsOn: true, created: [],
     });
     expect(card.lines).toContain("You installed as the AWS root user. The day-two commands below need an admin user: AWS does not let the root user use the Rovara operator role.");
@@ -179,7 +179,7 @@ describe("spec 048 the ready screen", () => {
 
   it("names the published package only when the CLI is the published one", () => {
     const card = readyCard({
-      env: "staging", controlPlaneUrl: "https://abc.example.com", progress: READY_PROGRESS, botName: "agentx-acme-staging",
+      env: "staging", region: "us-east-1", controlPlaneUrl: "https://abc.example.com", progress: READY_PROGRESS, botName: "agentx-acme-staging",
       invocation: { published: true, version: "1.2.3", cliPath: "/x" }, root: false, alertsOn: true, created: [],
     });
     expect(card.commands?.[0]?.command).toBe("npx @preplabsai/rovara-code@1.2.3 login https://abc.example.com");

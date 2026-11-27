@@ -138,17 +138,27 @@ function linkBlock(link) {
   return wrap;
 }
 
-function commandRow(command) {
-  const row = el("div", "command");
+function copyButton(text) {
   const copy = el("button", "", "Copy");
   copy.type = "button";
   copy.addEventListener("click", () => {
     const done = () => { copy.textContent = "Copied"; };
     const failed = () => { copy.textContent = "Select it and copy"; };
-    if (navigator.clipboard) navigator.clipboard.writeText(command.command).then(done, failed); else failed();
+    if (navigator.clipboard) navigator.clipboard.writeText(text).then(done, failed); else failed();
   });
-  row.append(el("span", "", command.label + ":"), el("code", "", command.command), copy);
+  return copy;
+}
+
+function commandRow(command) {
+  const row = el("div", "command");
+  row.append(el("span", "", command.label + ":"), el("code", "", command.command), copyButton(command.command));
   return row;
+}
+
+function promptBlock(prompt) {
+  const buttons = el("div", "buttons");
+  buttons.append(copyButton(prompt.text));
+  return [el("h3", "", prompt.label), el("pre", "", prompt.text), buttons];
 }
 
 function detailsBlock(lines) {
@@ -218,6 +228,7 @@ function renderCard(card) {
     group = command.group;
     section.append(commandRow(command));
   }
+  if (card.prompt) section.append(...promptBlock(card.prompt));
   if (card.id === "ready" && !installerClosed) {
     const buttons = el("div", "buttons");
     const close = el("button", "primary", "Close installer");
