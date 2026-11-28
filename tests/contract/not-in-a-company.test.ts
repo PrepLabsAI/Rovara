@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { NOT_IN_A_COMPANY_MESSAGE } from "@agentx/contracts";
+import { NOT_IN_A_COMPANY_MESSAGE, type DocumentStore } from "@agentx/contracts";
 import { companyMembershipFromStore, resolveCompany } from "../../packages/broker/src/aws/company-check.js";
 import { CORE_APP_SIGN_IN_AGAIN, coreAppEntryFrom } from "../../packages/broker/src/aws/core-app-routes.js";
 import type { CoreEntryCaller } from "../../packages/broker/src/aws/engine-boundary.js";
@@ -17,7 +17,10 @@ const PERSON = "a".repeat(64);
 const COMPANY = "org_0123456789abcdefghij";
 const TIME = "2026-11-27T12:00:00.000Z";
 const row = (patch: Record<string, unknown> = {}) => ({ entityType: "COMPANY_MEMBERSHIP", personId: PERSON, companyId: COMPANY, role: "member", joinedAt: TIME, ...patch });
-const storeWith = (item: unknown) => ({ get: vi.fn(async () => item) });
+const storeWith = (item: unknown): Pick<DocumentStore, "get"> & { reads: ReturnType<typeof vi.fn> } => {
+  const reads = vi.fn();
+  return { reads, get: (async (key: unknown) => { reads(key); return item; }) as DocumentStore["get"] };
+};
 
 describe("the membership reader tells a person who never joined from a removed one", () => {
   it("is absent only when there is no membership row at all", async () => {
@@ -30,8 +33,8 @@ describe("the membership reader tells a person who never joined from a removed o
   it("reads nothing for a malformed person id, and a read that fails is the retryable error", async () => {
     const store = storeWith(undefined);
     for (const person of ["", "x#y", "x y", "x".repeat(257)]) expect(await companyMembershipFromStore(store).absent!(person)).toBe(false);
-    expect(store.get).not.toHaveBeenCalled();
-    const failing = companyMembershipFromStore({ get: async () => { throw new Error("private-canary"); } });
+    expect(store.reads).not.toHaveBeenCalled();
+    const failing = companyMembershipFromStore({ get: (async () => { throw new Error("private-canary"); }) as DocumentStore["get"] });
     await expect(failing.absent!(PERSON)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
   });
 
