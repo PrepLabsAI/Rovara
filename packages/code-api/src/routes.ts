@@ -292,6 +292,9 @@ export const ROUTES: readonly Route[] = [
   // DEC 254zzz63: the company's own lessons learning model (read: any member; change: live owner/admin, a Claude model the gateway offers the company now).
   { method: "GET", path: "/v1/dev/company/learning-model", requires: "full" },
   { method: "PUT", path: "/v1/dev/company/learning-model", requires: "full" },
+  // #1613: the caller's own company (read: any member; rename: live owner/admin, written by the sign-in service).
+  { method: "GET", path: "/v1/dev/company/details", requires: "full" },
+  { method: "PUT", path: "/v1/dev/company/details", requires: "full" },
   // L4-EGR: Rovara's fixed outbound addresses (read only; a live owner or admin of the company).
   { method: "GET", path: "/v1/dev/company/egress-addresses", requires: "full" },
   // The CLI's own routes, which no named scope opens.

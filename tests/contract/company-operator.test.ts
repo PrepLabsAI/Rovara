@@ -68,7 +68,9 @@ const operatorKinds = ["company-create", "company-preapprove", "company-preappro
   // DEC 254a, 253z: invite codes and the self-serve switch (an administrator's applied change), and self-serve create (the broker's route).
   "company-invite-create", "company-invite-list", "company-invite-revoke", "company-self-serve-set", "company-self-create",
   // #1612: the install's own company, made or adopted once, and read.
-  "company-install-ensure", "company-install-read"];
+  "company-install-ensure", "company-install-read",
+  // #1613: the company's new name (the broker's company details route, which pins the live owner or admin).
+  "company-rename"];
 const operatorOwners = new Set([
   "packages/broker/src/developer/server.ts", "packages/broker/src/developer/company-operator.ts",
   "packages/broker/src/developer/company-membership.ts", "packages/broker/src/developer/company-issuer.ts",
@@ -83,7 +85,8 @@ it("only the strict member helper constructs member kinds; broker sources never 
   // All broker directories, with exact owner exceptions (no company-*.ts wildcard).
   for (const source of sources.filter((entry) => entry.path.startsWith("packages/broker/src/") && !operatorOwners.has(entry.path))) {
     expect(source.text, source.path).not.toContain("company-operator");
-    const allowed = source.path === "packages/broker/src/aws/developer-routes.ts" ? ["company-preapprove", "company-preapproval-withdraw", "company-preapproval-resend", "company-invite-create", "company-invite-list", "company-invite-revoke", "company-self-serve-set", "company-self-create"] : source.path === "packages/broker/src/aws/company-member-forwarding.ts" ? ["company-member-revoke", "company-member-role-set", "company-member-list"] : [];
+    const allowed = source.path === "packages/broker/src/aws/developer-routes.ts" ? ["company-preapprove", "company-preapproval-withdraw", "company-preapproval-resend", "company-invite-create", "company-invite-list", "company-invite-revoke", "company-self-serve-set", "company-self-create"] : source.path === "packages/broker/src/aws/company-member-forwarding.ts" ? ["company-member-revoke", "company-member-role-set", "company-member-list"]
+      : source.path === "packages/broker/src/aws/company-details-routes.ts" ? ["company-rename"] : [];
     for (const kind of operatorKinds.filter((kind) => !allowed.includes(kind))) {
       expect(source.text, source.path).not.toMatch(new RegExp(`["'\x60]${kind}["'\x60]`));
     }

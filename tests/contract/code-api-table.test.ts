@@ -17,8 +17,9 @@ describe("the one route table", () => {
     // D1-2 (owner DEC 254zzz519): the unconnected `POST /v1/dev/tasks/{taskId}/merge` row is deleted (180 became 179). No other row moved; the digest below is the one of this table without that row.
     // RD-2d: one app row for the file behind a link of the checks read, GET /v1/app/tasks/{taskId}/evidence/{sha}, after the merge rows (111 became 112). It carries only its scope: no schema, no version bump.
     // #1589: one app row for the task's agent activity, GET /v1/app/sessions/{sessionId}/activity, after the session log's row (112 became 113). Only its scope, as RD-2d's.
-    expect([DEV_ROUTES.length, APP_ROUTES.length]).toEqual([179, 113]);
-    expect(digest(DEV_ROUTES.map(keyOf))).toBe("50d4111fb426355a956f2101b7045cd11f4605e86aea6322d2b6f522b9d5a720");
+    // #1613: two developer rows for the caller's own company, GET and PUT /v1/dev/company/details, after the learning model's rows (179 became 181).
+    expect([DEV_ROUTES.length, APP_ROUTES.length]).toEqual([181, 113]);
+    expect(digest(DEV_ROUTES.map(keyOf))).toBe("31492053b189311c8900801698e1f56d5517bb4d146f62ad6b1bb1bb663c7f10");
     expect(digest(APP_ROUTES.map(keyOf))).toBe("f40c2f404a4db5174de53b97ac33d9888dbaae998201a32d83ac7139fe75c68e");
   });
 

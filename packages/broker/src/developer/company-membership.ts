@@ -211,6 +211,25 @@ export class CompanySignInStore {
       { Put: { TableName: this.input.tableName, Item: { ...preapprovalKey(companyId, email), ...approval }, ConditionExpression: "attribute_not_exists(pk)" } },
     ]);
   }
+  /**
+   * #1613: the company's new name. The actor (the broker pins the caller's live membership) is checked now and again inside the write (a live owner or admin of this company);
+   * the record changes only while it is still the active company with the name read here. The company log row names the actor, never the names. A direct operator invoke names no actor.
+   */
+  async rename(companyId: string, name: string, createdBy?: string): Promise<"changed" | "unchanged" | "not_found"> {
+    if (!OrgIdSchema.safeParse(companyId).success || companyId === IMPLICIT_COMPANY_ID) return "not_found";
+    const found = CompanyRecord.safeParse(await this.read(companyKey(companyId)));
+    if (!found.success || found.data.companyId !== companyId) return "not_found";
+    await this.checkActor(companyId, createdBy);
+    if (found.data.name === name) return "unchanged";
+    await this.operatorWrite(companyId, "company-rename", [
+      { Update: { TableName: this.input.tableName, Key: companyKey(companyId), UpdateExpression: "SET #name = :name",
+        ConditionExpression: "#entity = :entity AND companyId = :company AND #status = :active AND #name = :previous",
+        ExpressionAttributeNames: { "#name": "name", "#entity": "entityType", "#status": "status" },
+        ExpressionAttributeValues: { ":name": name, ":previous": found.data.name, ":entity": "COMPANY", ":company": companyId, ":active": "active" } } },
+      ...(createdBy === undefined ? [] : [this.liveMemberCheck(companyId, createdBy, false)]),
+    ], createdBy);
+    return "changed";
+  }
   private approval(role: "admin" | "member", hours: number, createdBy: string) {
     return CompanyPreapproval.parse({ entityType: "COMPANY_PREAPPROVAL", role, status: "live", expiresAt: this.seconds() + CompanyExpiryHours.parse(hours) * 3600, createdAt: this.iso(), createdBy });
   }

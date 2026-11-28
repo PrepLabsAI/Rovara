@@ -71,7 +71,7 @@ import { companyReadsFromEnvironment, policyHookInstallFromEnvironment } from ".
 import { developerTokenVerifier } from "../developer/verify-token.js";
 import { brokerCoreWorkerMachines } from "./worker-machines/broker-core.js";
 import { adminOfferedModelsFromEnvironment } from "../core-host/offered-models-http.js";
-import { installEngineModel } from "../core-host/company-engine-model.js"; import { installLearningModel } from "../core-host/company-learning-model.js";
+import { companyRenameThroughLambda } from "./company-details-routes.js"; import { installEngineModel } from "../core-host/company-engine-model.js"; import { installLearningModel } from "../core-host/company-learning-model.js";
 import { createHostedLessonsPeople } from "./hosted-lessons-people.js"; import { hostedLessonsSlack } from "./hosted-slack-thread.js";
 import { hostedLessonsLearning } from "../core-host/hosted-learning.js";
 import { CORE_MODEL_ACCESS_PATH, brokerCoreModuleDeps, createBrokerCoreRoot, taskTokensFromEnvironment, withCoreRoutes } from "./core-engine-root.js";
@@ -7515,7 +7515,7 @@ function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["in
       companySelfCreate: companySelfCreateThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
       companyInvites: companyInvitesThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
       // Lane W part 4: the company admin routes' member helper (T3b), through the same sign-in Lambda.
-      companyMembers: companyMemberActionsThroughLambda({ documentClient, tableName: requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME"), invoke: (payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload })) }),
+      companyMembers: companyMemberActionsThroughLambda({ documentClient, tableName: requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME"), invoke: (payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload })) }), companyRename: companyRenameThroughLambda({ invoke: (payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload })) }),
       // Guided onboarding PR 1: GitHub connect (github-connect-routes.ts), through the same App secret's client (slug, OAuth client) and the State table's bindings.
       githubConnect: { bindings: new GithubInstallationBindings(documentClient, requiredEnvironment("STATE_TABLE_NAME")), github: new GitHubAppClient(github.clientOptions), log: brokerLogLine },
       // L4-GH: a person links their own GitHub account (github-account-link-routes.ts), through the same App client's OAuth client and the core's own store.

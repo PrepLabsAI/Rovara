@@ -38,7 +38,7 @@ import type { KnowledgeSwitchApi } from "../core-host/knowledge-switch-api.js";
 import { isCompanyMemberPath, routeCompanyMembers, type CompanyMemberActions, type CompanyMemberRouteContext } from "./company-member-routes.js";
 import { isSlackInstallPath, routeSlackInstall, type SlackInstallWiring } from "./slack-company-install.js";
 import { isSlackChannelLinkPath, routeSlackChannelLink, type SlackChannelWiring } from "./slack-channel-link.js";
-import { isCompanyEngineModelPath, routeCompanyEngineModel, type CompanyEngineModelWiring } from "./company-engine-model-routes.js"; import { isCompanyLearningModelPath, routeCompanyLearningModel, type CompanyLearningModelWiring } from "./company-learning-model-routes.js"; import { isCompanyEgressPath, routeCompanyEgress, type CompanyEgressWiring } from "./company-egress-routes.js";
+import { isCompanyEngineModelPath, routeCompanyEngineModel, type CompanyEngineModelWiring } from "./company-engine-model-routes.js"; import { isCompanyLearningModelPath, routeCompanyLearningModel, type CompanyLearningModelWiring } from "./company-learning-model-routes.js"; import { isCompanyEgressPath, routeCompanyEgress, type CompanyEgressWiring } from "./company-egress-routes.js"; import { isCompanyDetailsPath, routeCompanyDetails, type CompanyRename } from "./company-details-routes.js";
 import {
   AgentXNameSchema, AgentXError,
   IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, type OrgRole,
@@ -229,7 +229,7 @@ export interface DeveloperApiConfiguration {
   /** L2-4: the company's hosted intake (the first team pick seeds the ticket updates); its waiting-ticket routes are the core's (core-host/intake-routes.ts). Set only where a core is wired and Linear is wired. */
   coreIntake?: HostedIntake;
   /** Guided onboarding PR 14 (DEC 254n item 1): the company engine model route (company-engine-model-routes.ts). Absent (no model gateway, or no company layer): the route is unknown. */
-  companyEngineModel?: CompanyEngineModelWiring; companyLearningModel?: CompanyLearningModelWiring; companyEgress?: CompanyEgressWiring; // L4-EGR (company-egress-routes.ts): Rovara's outbound addresses; absent (or no company layer): the route is unknown. Kept on this line so the forwarding sites below do not move.
+  companyEngineModel?: CompanyEngineModelWiring; companyLearningModel?: CompanyLearningModelWiring; companyEgress?: CompanyEgressWiring; /** #1613 (company-details-routes.ts): the company rename, through the sign-in Lambda. */ companyRename?: CompanyRename; // L4-EGR (company-egress-routes.ts): Rovara's outbound addresses; absent (or no company layer): the route is unknown. Kept on this line so the forwarding sites below do not move.
   /*
    * DEC 254zzz81: spec 065's `clientRoutes` switch was here. It is gone: the `/v1/dev/client/*` routes are always on, and each one checks the client's token, its route scope and the
    * person's live company and role (routeClientRequest). Five lines, as the switch's were, so the line-keyed company inventory sites below do not move.
@@ -2871,6 +2871,15 @@ function routeReviewRequest(deps: DeveloperRouteDependencies, request: AdaptedHt
   })(request, url);
 }
 
+/** The company's own settings and details: its engine and learning models, #1613's details and rename, and Rovara's outbound addresses. */
+function routeCompanyOwnPath(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> | undefined {
+  if (isCompanyEngineModelPath(url.pathname)) return companyEngineModelRoute(deps, request, url);
+  if (isCompanyLearningModelPath(url.pathname)) return companyLearningModelRoute(deps, request, url);
+  if (isCompanyDetailsPath(url.pathname)) return companyDetailsRoute(deps, request, url);
+  if (isCompanyEgressPath(url.pathname)) return companyEgressRoute(deps, request, url);
+  return undefined;
+}
+
 function routePreAuthDeveloperPath(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> | undefined {
   if (isServerReadRequest(request.method, url.pathname)) return routeServerRead(deps, request, url);
   if (isCompanyMemberPath(url.pathname)) return companyAdminRoute(deps, request, url);
@@ -2879,9 +2888,8 @@ function routePreAuthDeveloperPath(deps: DeveloperRouteDependencies, request: Ad
   if (isSlackChannelLinkPath(url.pathname)) return slackChannelLinkRoute(deps, request, url);
   if (isSlackInstallPath(url.pathname)) return slackInstallRoute(deps, request, url);
   if (isLinearConnectPath(url.pathname)) return linearConnectRoute(deps, request, url);
-  if (isCompanyEngineModelPath(url.pathname)) return companyEngineModelRoute(deps, request, url);
-  if (isCompanyLearningModelPath(url.pathname)) return companyLearningModelRoute(deps, request, url);
-  if (isCompanyEgressPath(url.pathname)) return companyEgressRoute(deps, request, url);
+  const companyOwn = routeCompanyOwnPath(deps, request, url);
+  if (companyOwn !== undefined) return companyOwn;
   if (url.pathname === "/v1/dev/company/preapprovals" || url.pathname.startsWith("/v1/dev/company/preapprovals/")) return companyPreapprovalRoute(deps, request, url);
   if (url.pathname === "/v1/dev/company") return companySelfCreateRoute(deps, request, url);
   // Spec 062 FR-031: the page a link_required event links to. Signed in like the task page, but needs no tasks.
@@ -3128,6 +3136,17 @@ async function companyLearningModelRoute(deps: DeveloperRouteDependencies, reque
   const companyId = await resolveCompany(deps.companies, caller.developerId);
   if (companyId === undefined) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
   return routeCompanyLearningModel({ documentClient: deps.documentClient, tableName: deps.tableName, signInTableName: deps.developer.signInTableName, now: deps.now, wiring }, caller, companyId, request);
+}
+
+/** #1613: the caller's own company (`rovara company show`) and its rename (`rovara company rename`). Unknown before anyone is authenticated and without the company layer. */
+async function companyDetailsRoute(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  if (deps.companies === undefined) throw agentXError("NOT_FOUND", "route not found");
+  const route = devRouteOf(request.method, url.pathname);
+  if (route === undefined) throw agentXError("NOT_FOUND", "not found");
+  // Full access only (the route table's row), checked while authenticating, before any membership is read. A person in no company is let through to be told so.
+  const caller = await authenticateCaller(deps, request.headers.authorization, route, { companyless: true });
+  return routeCompanyDetails({ documentClient: deps.documentClient, signInTableName: deps.developer.signInTableName, ...(deps.developer.companyRename === undefined ? {} : { rename: deps.developer.companyRename }),
+    log: (entry) => logDeveloperEvent(Object.fromEntries(Object.entries(entry).filter((field): field is [string, string | number] => typeof field[1] === "string" || typeof field[1] === "number"))) }, caller, request);
 }
 
 const START_REQUEST_READ_PATH = "/v1/dev/tasks/start-requests/{requestId}";
