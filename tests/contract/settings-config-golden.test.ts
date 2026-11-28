@@ -15,7 +15,9 @@ interface GoldenKey {
   shownSamples: Record<string, string> | null;
   results: { accepts: Record<string, string>; refuses: Record<string, string[]> };
 }
-const golden = JSON.parse(readFileSync("tests/contract/golden/config-keys.golden.json", "utf8")) as GoldenKey[];
+/** #1614: the keys deleted since the golden was taken (company mode is the only mode, so its three switches are gone). Everything else must still match exactly. */
+const DELETED_KEYS = ["company.signIn", "company.selfServe", "slack.companyWorkspaces"];
+const golden = (JSON.parse(readFileSync("tests/contract/golden/config-keys.golden.json", "utf8")) as GoldenKey[]).filter((entry) => !DELETED_KEYS.includes(entry.key));
 const BATTERY = [...new Set(golden.flatMap((entry) => [...Object.keys(entry.results.accepts), ...Object.values(entry.results.refuses).flat()]))];
 
 function grouped(parse: (value: string) => string, inputs: readonly string[]): GoldenKey["results"] {
@@ -30,7 +32,7 @@ function grouped(parse: (value: string) => string, inputs: readonly string[]): G
 describe("CONFIG_KEYS is generated from the rows and equals the old list (F1 L1b)", () => {
   it("has the same keys in the same order", () => {
     expect(CONFIG_KEYS.map((entry) => entry.key)).toEqual(golden.map((entry) => entry.key));
-    expect(CONFIG_KEYS).toHaveLength(29);
+    expect(CONFIG_KEYS).toHaveLength(29 - DELETED_KEYS.length);
   });
 
   it("lists each key with the same description, target, where text, default and flags (config list is unchanged)", () => {
@@ -61,7 +63,7 @@ describe("CONFIG_KEYS is generated from the rows and equals the old list (F1 L1b
 });
 
 describe("docs/day-two.md's config table is generated from the rows (F1 L1b)", () => {
-  const goldenTable = readFileSync("tests/contract/golden/config-keys-docs-table.golden.md", "utf8").trimEnd().split("\n");
+  const goldenTable = readFileSync("tests/contract/golden/config-keys-docs-table.golden.md", "utf8").trimEnd().split("\n").filter((line) => !DELETED_KEYS.some((key) => line.startsWith(`| \`${key}\``)));
 
   it("generates exactly the table the guide had before", () => {
     expect(configDocsTable(CODE_SETTING_ROWS)).toEqual(goldenTable);

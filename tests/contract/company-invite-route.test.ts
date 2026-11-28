@@ -169,7 +169,8 @@ it.each([{ revokedAt: TIME }, { personId: "b".repeat(64) }])("a membership chang
   expect((await h.post()).statusCode).toBe(401); expect(h.forwarded).toEqual([]);
 });
 
-it("production bootstrap enables company reads only for the exact enabled switch", async () => {
+// #1614: company mode is the only mode: production's broker reads the admin's company whatever the retired COMPANY_SIGNIN variable says.
+it("production bootstrap always reads the admin's company", async () => {
   const { loadSlackBroker, call, issuer } = await import("../support/slack-broker.js");
   await loadSlackBroker();
   const { DynamoDBDocumentClient } = await import("@aws-sdk/lib-dynamodb");
@@ -190,9 +191,9 @@ it("production bootstrap enables company reads only for the exact enabled switch
       vi.stubEnv("COMPANY_SIGNIN", flag); vi.resetModules(); reads.mockClear(); invoke.mockClear();
       const { handler } = await import("../../packages/broker/src/aws/broker.js");
       expect((await call((event) => handler(event as Parameters<typeof handler>[0]), { method: "GET", path: "/v1/admin/sign-in-clients", user: { subject: "admin-subject", admin: true } })).status).toBe(200);
-      expect(reads).toHaveBeenCalledTimes(flag === "enabled" ? 1 : 0);
+      expect(reads).toHaveBeenCalledTimes(1);
       const command = invoke.mock.calls[0]?.[0] as { input: { Payload: Uint8Array } };
-      expect(JSON.parse(Buffer.from(command.input.Payload).toString()) as unknown).toEqual({ kind: "list-sign-in-clients", ...(flag === "enabled" ? { companyId: A } : {}) });
+      expect(JSON.parse(Buffer.from(command.input.Payload).toString()) as unknown).toEqual({ kind: "list-sign-in-clients", companyId: A });
     }
   } finally { from.mockRestore(); invoke.mockRestore(); reads.mockRestore(); secret.restore(); vi.unstubAllEnvs(); vi.resetModules(); }
 });

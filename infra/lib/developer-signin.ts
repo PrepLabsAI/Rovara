@@ -8,7 +8,7 @@ import { addBrokerName, addBrokerSetting, addDerivedBrokerVariable } from "./bro
 import { addRouteSettings } from "./route-settings.js";
 import { publicApiHostSetting, publicApiIssuer } from "./public-api-url.js";
 import { packagedFunction } from "./control-plane.js";
-import { COMPANY_SELF_SERVE_VARIABLE, companySignInParameters, type CompanySignInParameters, type CompanySignInSwitch } from "./company-signin.js";
+import type { CompanySignInGrants } from "./company-signin.js";
 import { canaryParametersWhere, canarySessionWhere, tokenSigners, type CanarySessionParameters } from "./canary-session.js";
 
 const SIGN_IN_ROUTE_KEY = "ANY /v1/auth/{proxy+}";
@@ -25,8 +25,6 @@ export interface DeveloperSignInParameters {
   tasks?: DeveloperTaskParameters;
   /** DEC 254h (the legacy deployment too since #1129): GitHub sign-in (offered only with Code's company layer), its OAuth app's client id, and when it was last turned on. */
   github?: { enabled: CfnParameter; clientId: CfnParameter; since: CfnParameter };
-  /** DEC 254zg (a): Code's company layer (CompanySignIn) and self-serve create (CompanySelfServe), both off by default (company-signin.ts); the legacy deployment too since #1129. */
-  company?: CompanySignInParameters;
   /** CANARY-SESSION, the legacy deployment only (beta and production share that template; only beta's deploy ever sets them): the settings of the canary person's session function, all empty by default. */
   canary?: CanarySessionParameters;
 }
@@ -63,17 +61,15 @@ export function developerSignInParameters(stack: Stack, options: { tasks: boolea
     mcpConfirmElicitation: new CfnParameter(stack, "McpConfirmElicitation", { type: "String", default: "enabled", allowedValues: ["enabled", "disabled"], description: "enabled: an admin may confirm a change from an AI tool in the tool's own pop-up; disabled: only the Slack Confirm button (or the CLI)" }),
   };
   // #1129: the legacy deployment (production) declares the ones below too, after all of its own, so its existing parameters keep their order and values: GitHub sign-in
-  // (disabled) and Code's company layer (both switches disabled). DEC 254zzz73 removed the StepUpEmailSender parameter that stood first here.
+  // (disabled). DEC 254zzz73 removed the StepUpEmailSender parameter that stood first here; #1614 removed the company layer's two switches that stood last.
   // DEC 254h: the client secret is never a parameter: it lives in the secret agentx/<env>/developer-github, which only the sign-in function may read.
   const github = {
     enabled: new CfnParameter(stack, "DeveloperSignInGithub", { type: "String", default: "disabled", allowedValues: ["enabled", "disabled"], description: "enabled: developers may sign in with GitHub (only with company sign-in on); disabled: they may not" }),
     clientId: new CfnParameter(stack, "DeveloperGithubClientId", { type: "String", default: "", allowedPattern: "^[A-Za-z0-9._-]{0,64}$", description: "Client ID of the GitHub OAuth app for developer sign-in" }),
     since: new CfnParameter(stack, "DeveloperGithubSince", { type: "String", default: "0", allowedPattern: "^[0-9]{1,12}$", description: "When GitHub sign-in was last turned on, in epoch seconds; GitHub sessions started before it are refused" }),
   };
-  // DEC 254zg (a): declared last, so every parameter before them keeps its order.
-  const company = companySignInParameters(stack);
   // CANARY-SESSION: declared after every other parameter, so each keeps its order.
-  return { ...signIn, tasks, github, company, ...canaryParametersWhere(stack, options.canary) };
+  return { ...signIn, tasks, github, ...canaryParametersWhere(stack, options.canary) };
 }
 
 /**
@@ -113,8 +109,8 @@ export interface DeveloperSignInProps {
   stateTable: dynamodb.Table;
   /** The control plane's operator alerts topic (the legacy layout's canary session alarms send there). */
   alerts?: sns.ITopic;
-  /** DEC 254zg (a), named environments only: the company layer's switch (control-plane.ts makes it from parameters.company, before the Slack company mode that requires it). */
-  company?: CompanySignInSwitch;
+  /** The company layer's grants (#1614: always on). */
+  company?: CompanySignInGrants;
 }
 
 export class DeveloperSignIn extends Construct {
@@ -306,10 +302,9 @@ export class DeveloperSignIn extends Construct {
       addBrokerName(props.broker, props.naming, "policyHookKey", policyHookKey.keyId, policyHookKey.keyArn);
     }
     const named = props.naming.env !== undefined;
-    // #1129: in the legacy deployment (production) too: GitHub sign-in (served only while DeveloperSignInGithub and CompanySignIn are both enabled).
+    // #1129: in the legacy deployment (production) too: GitHub sign-in (served while DeveloperSignInGithub is enabled).
     if (tasks !== undefined) {
       if (p.github === undefined) throw new Error("a deployment with developer tasks declares the GitHub sign-in parameters");
-      if (p.company === undefined) throw new Error("a deployment with developer tasks declares the company sign-in parameters");
       // DEC 254h: GitHub sign-in. The client secret is read by reference (its name) by this function only; the grant names that one secret.
       const githubSecretName = `agentx/${props.env}/developer-github`;
       fn.addEnvironment("DEVELOPER_SIGNIN_GITHUB", p.github.enabled.valueAsString);
@@ -326,22 +321,17 @@ export class DeveloperSignIn extends Construct {
       // DEC 254zzz73: no step-up, so the sign-in function sends no email (no STEP_UP_EMAIL_FROM, no ses:SendEmail) and keeps no passkeys (no DEVELOPER_PASSKEYS, no PASSKEYS# reads or deletes).
     }
     props.slackSecret.grantRead(fn);
-    // DEC 254zg (a): the company layer's switch; #1129: in the legacy deployment (production) too, off by default.
+    // The company layer's grants (#1614: company mode is the only mode, in the legacy deployment too).
     const company = props.company;
-    if (named && company === undefined) throw new Error("a named environment has the company sign-in switch");
-    if (company !== undefined) {
-      company.addTo(fn);
-      fn.addEnvironment(COMPANY_SELF_SERVE_VARIABLE, company.selfServeValue);
-      // Guided onboarding PR 4 (slack-install-identity.ts): Add to Slack's code exchange runs here, beside the Slack app's client secret; the bot token it gets is stored, read
-      // (to revoke) and dropped under agentx/<env>/slack-workspaces/<company>/<team>, the family slack-workspace-tokens.ts reads. Creates carry no tags (no TagResource) and
-      // nothing deletes: a dropped token is overwritten with a value holding none. DEC 254zg (a): a separate policy under CompanySignInOn, so with company sign-in off the
-      // template holds no such grant.
-      company.grant("SlackWorkspaceTokens", fn.role!, [new iam.PolicyStatement({
-        sid: "WriteSlackWorkspaceTokens",
-        actions: ["secretsmanager:CreateSecret", "secretsmanager:PutSecretValue", "secretsmanager:GetSecretValue"],
-        resources: [stack.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `agentx/${props.env}/slack-workspaces/*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
-      })]);
-    }
+    if (company === undefined) throw new Error("a control plane has the company layer's grants");
+    // Guided onboarding PR 4 (slack-install-identity.ts): Add to Slack's code exchange runs here, beside the Slack app's client secret; the bot token it gets is stored, read
+    // (to revoke) and dropped under agentx/<env>/slack-workspaces/<company>/<team>, the family slack-workspace-tokens.ts reads. Creates carry no tags (no TagResource) and
+    // nothing deletes: a dropped token is overwritten with a value holding none. DEC 254zg (a): a separate policy.
+    company.grant("SlackWorkspaceTokens", fn.role!, [new iam.PolicyStatement({
+      sid: "WriteSlackWorkspaceTokens",
+      actions: ["secretsmanager:CreateSecret", "secretsmanager:PutSecretValue", "secretsmanager:GetSecretValue"],
+      resources: [stack.formatArn({ service: "secretsmanager", resource: "secret", resourceName: `agentx/${props.env}/slack-workspaces/*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
+    })]);
     fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ["secretsmanager:GetSecretValue"],
       // Secrets Manager appends "-" and six characters to a secret's name in its ARN.
@@ -383,14 +373,14 @@ export class DeveloperSignIn extends Construct {
       ],
     };
     // DEC 254zzz202: the existing company-audit reader queries State; the sign-in role gets one PutItem on that exact key family only.
-    if (company !== undefined) fn.addToRolePolicy(new iam.PolicyStatement({
+    fn.addToRolePolicy(new iam.PolicyStatement({
       actions: ["dynamodb:PutItem"], resources: [props.stateTable.tableArn],
       conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ORG#org_????????????????????#AUDIT"] }, Null: { "dynamodb:LeadingKeys": "false" } },
     }));
-    // Named: one policy, as deployed. #1129, the legacy deployment (production): the company sign-in grants (1)-(4) only while CompanySignIn is on (a conditional policy,
-    // company-signin.ts), and the import undo (5) always, since the operator imports the members (and may undo it) BEFORE switching company sign-in on (DEC 254b (b)).
+    // Named: one policy, as deployed. #1129, the legacy deployment (production): the company sign-in grants (1)-(4) as their own policy (company-signin.ts, unconditional since
+    // #1614), and the import undo (5).
     if (named) new iam.Policy(this, "SignInCompanyGrants", { roles: [fn.role!], statements: [...companyStatements.signIn.slice(0, 3), ...companyStatements.importUndo, ...companyStatements.signIn.slice(3)] });
-    else if (company !== undefined) {
+    else {
       company.grant("SignInCompanyGrants", fn.role!, companyStatements.signIn);
       new iam.Policy(this, "SignInCompanyImportUndo", { roles: [fn.role!], statements: companyStatements.importUndo });
     }
@@ -446,9 +436,6 @@ export class DeveloperSignIn extends Construct {
     broker.addEnvironment("DEVELOPER_OIDC_ISSUER", p.oidcIssuer.valueAsString);
     addBrokerSetting(broker, props.naming, "signInSlackSince", p.slackSince.valueAsString);
     addBrokerSetting(broker, props.naming, "oidcSince", p.oidcSince.valueAsString);
-    // DEC 254zg (a): the broker's COMPANY_SIGNIN (packed, a switch flag "1" or "0" the broker reads as "enabled" or "disabled"), from the same switch. #1149: the legacy broker packs
-    // it too, so it gets the flag as well (it took the variable whole, "enabled" or "disabled", since #1129).
-    if (company !== undefined) addBrokerSetting(broker, props.naming, "companySignIn", company.flag);
     if (tasks !== undefined) {
       addBrokerSetting(broker, props.naming, "mcpConfirmElicitation", tasks.mcpConfirmElicitation.valueAsString);
       // Hosted wiring (d), named environments only: the company audit and event reads (the /v1/dev/client/* routes are always on since DEC 254zzz81). Membership is read from

@@ -174,7 +174,7 @@ export function createDeveloperTaskActions(input: AwsBrokerInput): DeveloperTask
 /** Spec 025 phase 25d: what the admin read routes need, from the broker's own dependencies. */
 function adminReadDependencies(dependencies: AwsBrokerDependencies): AdminReadDependencies {
   const developer = dependencies.developer;
-  // DEC 254zzz6 D2: production sets the membership reader on the developer configuration only (COMPANY_SIGNIN), never top-level; without it here every admin read's company check passed.
+  // DEC 254zzz6 D2: production sets the membership reader on the developer configuration only, never top-level; without it here every admin read's company check passed.
   const companies = adminCompanyReader(dependencies);
   return {
     ...(companies === undefined ? {} : { companies }),
@@ -7474,9 +7474,9 @@ const ec2Sessions = new SessionManager({
   ...optionalPicker(machineSizePicker({ documentClient, tableName: process.env.STATE_TABLE_NAME ?? "" })),
 });
 const github = createGitHubAppCredentials(secretsManager, brokerLogLine);
-/** Guided onboarding PR 4: Add to Slack (slack-company-install.ts), with the company layer only. Slack's side (the app's client secret, the code exchange, the token store's
+/** Guided onboarding PR 4: Add to Slack (slack-company-install.ts). Slack's side (the app's client secret, the code exchange, the token store's
  * writer) runs in DeveloperIdentity (slack-install-identity.ts), which this broker already invokes; the broker never reads the Slack app secret. */
-const slackInstallSlack = process.env.COMPANY_SIGNIN !== "enabled" || !process.env.DEVELOPER_IDENTITY_FUNCTION_ARN ? undefined
+const slackInstallSlack = !process.env.DEVELOPER_IDENTITY_FUNCTION_ARN ? undefined
   : slackInstallThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: process.env.DEVELOPER_IDENTITY_FUNCTION_ARN, Payload: payload })));
 const slackInstallWiring: SlackInstallWiring | undefined = slackInstallSlack === undefined ? undefined : { slack: slackInstallSlack, log: brokerLogLine };
 /** Guided onboarding PR 5: channel links (slack-channel-link.ts) and /rovara (slack-rovara-command.ts), through the same sign-in Lambda calls (the company's own token stays there). */
@@ -7509,7 +7509,8 @@ function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["in
     slackAuthCheck: slackAuthCheckThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     endDeveloperSessions: endDeveloperSessionsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     setDisplayName: setDisplayNameThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
-    ...(process.env.COMPANY_SIGNIN === "enabled" ? { companies: companyMembershipFromDynamo(documentClient, requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME")), companyPreapprovals: companyPreapprovalsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
+    // #1614: company mode is the only mode.
+    companies: companyMembershipFromDynamo(documentClient, requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME")), companyPreapprovals: companyPreapprovalsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
       // DEC 253z, 254a: self-serve company create and the install's invite codes, through the same sign-in Lambda, which owns those writes.
       companySelfCreate: companySelfCreateThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
       companyInvites: companyInvitesThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
@@ -7531,9 +7532,9 @@ function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["in
       // L4-EGR: Rovara's outbound addresses (the stack parameter NatEgressAddresses); an empty or absent value reads as an empty list.
       companyEgress: { addresses: () => process.env[EGRESS_ADDRESSES_VARIABLE] },
       // DEC 254w: connected sign-ins, through the same sign-in Lambda (it owns the sign-in table).
-      signInLinks: signInLinksThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))) } : {}),
+      signInLinks: signInLinksThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     signInClients: signInClientsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
-    // DEC 254b (b): the operator's company import runs BEFORE COMPANY_SIGNIN is switched on, so it is wired with the company layer on or off.
+    // DEC 254b (b): the operator's company import.
     companyImport: companyImportThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     channelByName: channelByNameThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     // D17: kept for the Lambda's lifetime; an unknown kid refetches at most once a minute.
@@ -7804,7 +7805,7 @@ function brokerLogLine(entry: Record<string, unknown>): void { console.log(JSON.
  * No membership, or one that can't be read, counts as another company's: the caller then gets the missing grant's answer. Without company sign-in there is one company and nothing changes.
  */
 async function administratorOfTaskCompany(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, task: DeveloperTaskRecord): Promise<boolean> {
-  // The deployment wires the reader on the developer sign-in (COMPANY_SIGNIN=enabled), as the other admin routes read it; the top-level reader is the same reader where a host sets it.
+  // The deployment wires the reader on the developer sign-in, as the other admin routes read it; the top-level reader is the same reader where a host sets it.
   const companies = dependencies.developer?.companies ?? dependencies.companies;
   if (companies === undefined) return true;
   let companyId: string | undefined;

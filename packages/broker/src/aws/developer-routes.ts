@@ -472,8 +472,8 @@ export function developerSinceFromEnvironment(env: NodeJS.ProcessEnv): { slack?:
   const github = methodSince(env.DEVELOPER_GITHUB_SINCE);
   return { ...(slack === undefined ? {} : { slack }), ...(oidc === undefined ? {} : { oidc }), ...(github === undefined ? {} : { github }) };
 }
-/** DEC 254h: GitHub sign-in counts as on only with Code's company layer on as well (the sign-in server never offers it otherwise). */
-export const githubSignInFromEnvironment = (env: NodeJS.ProcessEnv): boolean => env.DEVELOPER_SIGNIN_GITHUB === "enabled" && env.COMPANY_SIGNIN === "enabled";
+/** DEC 254h: GitHub sign-in is on when its own switch is (#1614: company mode is the only mode). */
+export const githubSignInFromEnvironment = (env: NodeJS.ProcessEnv): boolean => env.DEVELOPER_SIGNIN_GITHUB === "enabled";
 const methodName = (amr: DeveloperSignInMethod) => (amr === "slack" ? "Slack" : amr === "github" ? "GitHub" : "Company");
 
 /** The sign-in server's public keys, read by invoking DeveloperIdentity's JWKS route (D17). */

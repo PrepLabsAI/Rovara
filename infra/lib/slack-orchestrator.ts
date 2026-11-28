@@ -64,20 +64,12 @@ export class SlackOrchestratorStack extends Stack {
       slackAdapterSecretName: new CfnParameter(this, "SlackAdapterSecretName", { type: "String", default: "", allowedPattern: "^$|^agentx/[a-z0-9-]+/channel-adapter/slack$" }),
     };
     const threadsTableName = new CfnParameter(this, "SlackThreadsTableName", { type: "String", minLength: 3 });
-    // DEC 254o (b), L2-2 PR 18d: Slack company mode's inputs, named environments only. DEC 254zk: the table and team come from the control plane's outputs on every deploy; the
-    // switch (SlackCompanyWorkspacesState) is the operator's (agentx config set slack.companyWorkspaces, kept across upgrades), and the service also needs COMPANY_SIGNIN=enabled.
-    // #1171: the legacy deployment (production) too, both switches disabled by default (the release keeps their previous values).
+    // DEC 254o (b), L2-2 PR 18d: Slack company mode's inputs. DEC 254zk: the table and team come from the control plane's outputs on every deploy. #1171: the legacy deployment
+    // (production) too. #1614: company mode is the only mode, so there is no switch.
     const slackCompany = {
-      state: new CfnParameter(this, "SlackCompanyWorkspacesState", { type: "String", default: "disabled", allowedValues: ["enabled", "disabled"], description: "Slack company mode for the Slack service, set with the control plane's SlackCompanyWorkspaces (agentx config set slack.companyWorkspaces); the service also needs CompanySignIn" }),
       table: new CfnParameter(this, "SlackCompanyStateTableName", { type: "String", default: "", allowedPattern: "^$|^[A-Za-z0-9_.-]{3,255}$", description: "SlackCompanyStateTableName output of the control plane (Slack company mode)" }),
       team: new CfnParameter(this, "SlackCompanyTeamId", { type: "String", default: "", allowedPattern: "^$|^T[A-Z0-9]{2,31}$", description: "SlackCompanyTeamId output of the control plane (Slack company mode)" }),
     };
-    // DEC 254zg (a), named environments only: the control plane's CompanySignIn switch for the Slack service (Slack company mode reads COMPANY_SIGNIN). agentx config set
-    // company.signIn sets both stacks' parameter with one yes (keys.ts `also`), and an upgrade keeps it (OPERATOR_PARAMETERS).
-    const companySignIn = new CfnParameter(this, "CompanySignIn", {
-      type: "String", default: "disabled", allowedValues: ["enabled", "disabled"],
-      description: "The control plane's CompanySignIn switch, for the Slack service: enabled or disabled (agentx config set company.signIn sets both)",
-    });
     const sessionBucketName = new CfnParameter(this, "ThreadSessionBucketName", { type: "String", minLength: 3 });
     const turnRecordsTableName = new CfnParameter(this, "TurnRecordsTableName", {
       type: "String",
@@ -396,11 +388,9 @@ export class SlackOrchestratorStack extends Stack {
           { name: "AGENTX_GATE_CLASSIFIER_PROVIDER", value: classifierProvider.valueAsString },
           { name: "AGENTX_GATE_CLASSIFIER_MODEL", value: gateClassifierModelId.valueAsString },
           { name: "AGENTX_MODEL_FALLBACK", value: modelFallback.valueAsString },
-          { name: "SLACK_COMPANY_WORKSPACES", value: slackCompany.state.valueAsString },
           { name: "STATE_TABLE_NAME", value: slackCompany.table.valueAsString },
           { name: "SLACK_TEAM_ID", value: slackCompany.team.valueAsString },
           { name: "AGENTX_ENV", value: naming.env ?? "production" },
-          { name: "COMPANY_SIGNIN", value: companySignIn.valueAsString },
           // R5 step 1 (DEC 254zzz444): the company-scoped Slack token reader role the service assumes per company (contracts slack-company-tokens.ts; created by the control plane only while Slack company
           // mode is on, and only read by the service in company mode). Release 1 falls back to the task role's own family-wide read; release 2 drops the fallback variable and that read.
           { name: SLACK_COMPANY_TOKEN_ROLE_VARIABLE, value: slackTokenReaderRoleArn({ env: naming.env ?? "production", partition: Aws.PARTITION, account: Aws.ACCOUNT_ID, named: naming.env !== undefined }) },

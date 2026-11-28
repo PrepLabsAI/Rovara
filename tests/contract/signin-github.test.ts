@@ -51,7 +51,7 @@ describe("agentx signin enable github (DEC 254h)", () => {
     expect(h.prompter.asked).toEqual(["Apply this change?"]);
     const printed = h.lines.join("\n");
     expect(printed).toContain("GitHub sign-in: off -> on (client Ov23liAbCdEf0123; secret agentx/staging/developer-github)");
-    expect(printed).toContain("only while company sign-in (COMPANY_SIGNIN) is on");
+    expect(printed).not.toContain("COMPANY_SIGNIN");
   });
 
   it("refuses a missing or malformed client id before anything changes", async () => {

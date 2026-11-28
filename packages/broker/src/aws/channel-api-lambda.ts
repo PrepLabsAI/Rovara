@@ -11,7 +11,7 @@ import { channelApiHandler, type ChannelActionSurface, type ChannelIngressEvent,
 import { isHandedOffChatGptFinish, type HandedOffChatGptFinish } from "./slack-chatgpt.js";
 import { createAwsSlackChannelPresses, createAwsSlackChatGptFinish, splitChannelActionSurfaceByTenant } from "./slack-channel-presses.js";
 import { createAwsSlackChannelRouter, splitChannelSurfaceByTenant } from "./slack-channel-router.js";
-import { slackCompanyDependenciesFromEnvironment, slackCompanyModeRequested, type SlackCompanyWiring } from "./slack-company-wiring.js";
+import { slackCompanyDependenciesFromEnvironment, type SlackCompanyWiring } from "./slack-company-wiring.js";
 import type { SlackCompanyDependencies } from "./slack-person.js";
 import type { BrokerReply } from "./slack-workflow-choice.js";
 
@@ -27,7 +27,7 @@ const AWS_MAKERS: ChannelApiSlackMakers = { router: createAwsSlackChannelRouter,
 /** This Lambda's company wiring, or undefined (today's Lambda): link notices are issued by the broker through its existing invoke, as in the Slack Lambda. */
 export function channelApiSlackCompany(env: NodeJS.ProcessEnv): SlackCompanyWiring | undefined {
   const functionName = env.BROKER_FUNCTION_NAME ?? "";
-  if (!slackCompanyModeRequested(env) || functionName === "") return undefined;
+  if (functionName === "") return undefined;
   const clientConfiguration = env.AWS_REGION === undefined ? {} : { region: env.AWS_REGION };
   const dynamo = new DynamoDBClient(clientConfiguration);
   const lambda = new LambdaClient(clientConfiguration);

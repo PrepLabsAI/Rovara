@@ -4,7 +4,7 @@
 // IAM fences a wrong session (a bug, a steered tool), not a compromised process (see company-secrets.ts, same limit).
 //
 // Additive (release 1): the orchestrator KEEPS its family-wide read (slackCompany.tokenRead()), and the service falls back to it while SLACK_COMPANY_TOKEN_FALLBACK=shared. Release 2 drops both.
-// Everything here is created only while SlackCompanyWorkspacesOn holds (the role AND its policy), so with company mode off the orchestrator gains no new path to any token.
+// #1614: company mode is the only mode, so the role and its policy always exist.
 // Trust: the orchestrator's role ARN, sts:AssumeRole + sts:TagSession, only with exactly the one company tag, and with no transitive tag keys (sts:TransitiveTagKeys absent), so a caller cannot make
 // the company tag travel into a role chain. A same-account trust that names a role ARN needs no statement in the orchestrator's own policy; the RUNTIME permissions boundary allows the assume
 // (access-policies.ts `SlackTokenReader`, built from contracts slackTokenReaderBoundaryStatement), and the deploy boundary and the service role list the fixed-name lookup.
@@ -40,7 +40,6 @@ export class SlackCompanyTokenReader extends Construct {
       description: "The hosted Slack service acting for one company: that company's Slack bot token only (session tag rovara:org)",
       assumedBy: new iam.PrincipalWithConditions(new iam.ArnPrincipal(props.readerRole.roleArn).withSessionTags(), trustConditions()),
     });
-    (this.role.node.defaultChild as iam.CfnRole).cfnOptions.condition = props.slackCompany.isOn;
     const ownCompany = new iam.PolicyStatement({
       sid: "ReadOwnCompanySlackToken",
       actions: ["secretsmanager:GetSecretValue"],

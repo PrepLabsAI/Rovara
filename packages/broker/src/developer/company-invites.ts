@@ -43,8 +43,8 @@ const strip = (item: unknown, key: { pk: string; sk: string }): unknown => {
 
 export class CompanyInviteStore {
   /**
-   * `selfServeAllowed`: the CompanySelfServe stack switch (COMPANY_SELF_SERVE, DEC 254zg (a)), always given. False: every create is the uniform refusal, whatever the stored
-   * setting says, so self-serve stays closed while company sign-in is on until the operator enables it too.
+   * `selfServeAllowed`: always given. False: every create is the uniform refusal, whatever the stored setting says. #1614: the deployment passes true (there is no stack switch
+   * any more), so the stored self-serve setting decides, behind an operator's invite code.
    */
   constructor(private readonly input: { documentClient: { send(command: unknown): Promise<unknown> }; tableName: string; now: () => number; company: CompanySignInStore; selfServeAllowed: boolean; newCompanyId?: () => string }) {}
   private iso() { return new Date(this.input.now()).toISOString(); }

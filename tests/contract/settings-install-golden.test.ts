@@ -55,10 +55,15 @@ const DELETED_PARAMETERS = {
  *    its row is deleted here too.
  *  - eef504228 (G1 CORE-RUN-STOP-RELAY, train 56, merged 2026-11-25), new on code/next since ff38d0e00: the broker setting `coreOutboxStreamRelay` (code `rl`, variable ROVARA_CORE_OUTBOX_STREAM_RELAY),
  *    a constant the template writes (not a stack parameter), packed right after `coreSystemRuns` and before `slackCompanyWorkspaces`. Its row is `core.outboxStreamRelay` (declaredIn neither, like install.layout).
+ *  - #1614 (company mode is the only mode): the company mode switches are deleted with their rows. The control plane no longer keeps CompanySignIn, CompanySelfServe or
+ *    SlackCompanyWorkspaces, the slack stack no longer keeps CompanySignIn or SlackCompanyWorkspacesState, and the broker no longer packs `companySignIn` (si) or
+ *    `slackCompanyWorkspaces` (cw); both codes are reserved.
  */
 const ON_CODE_NEXT_SINCE_BASE = {
   keptAdded: { foundation: ["PublicApiUrl"], "control-plane": ["PublicApiUrl"] } as Record<string, string[]>,
-  deletedFromKept: { "control-plane": ["TaskPersonProofEnabled"] } as Record<string, string[]>,
+  deletedFromKept: { "control-plane": ["TaskPersonProofEnabled", "CompanySignIn", "CompanySelfServe", "SlackCompanyWorkspaces"], slack: ["CompanySignIn", "SlackCompanyWorkspacesState"] } as Record<string, string[]>,
+  /** Packed settings deleted since the base (#1614), by key. */
+  packedRemoved: ["companySignIn", "slackCompanyWorkspaces"],
   packedAdded: [{ key: "publicApiUrl", code: "pu", variable: "ROVARA_PUBLIC_API_URL", httpsOrigin: true }] as Golden["brokerSettings"],
   /** Packed settings that sit in the middle of the list: inserted right after the named key. */
   packedInserted: [{ after: "coreSystemRuns", entry: { key: "coreOutboxStreamRelay", code: "rl", variable: "ROVARA_CORE_OUTBOX_STREAM_RELAY" } }] as Array<{ after: string; entry: Golden["brokerSettings"][number] }>,
@@ -66,7 +71,7 @@ const ON_CODE_NEXT_SINCE_BASE = {
 
 /** The golden's packed settings with each inserted entry put right after the one it names, then the appended ones. */
 function packedNow(): Golden["brokerSettings"] {
-  const list = [...golden.brokerSettings];
+  const list = golden.brokerSettings.filter((entry) => !ON_CODE_NEXT_SINCE_BASE.packedRemoved.includes(entry.key));
   for (const { after, entry } of ON_CODE_NEXT_SINCE_BASE.packedInserted) list.splice(list.findIndex((each) => each.key === after) + 1, 0, entry);
   return [...list, ...ON_CODE_NEXT_SINCE_BASE.packedAdded];
 }
@@ -129,7 +134,8 @@ describe("OPERATOR_PARAMETERS is derived from the rows (F1 L1a-0, grown in L1a-1
     const before = Object.entries(base.operatorParameters).flatMap(([part, names]) => names.map((name) => `${part}/${name}`));
     const now = new Set(Object.entries(OPERATOR_PARAMETERS).flatMap(([part, names]) => names.map((name) => `${part}/${name}`)));
     const dropped = before.filter((entry) => !now.has(entry));
-    expect(dropped.sort()).toEqual([...DELETED_PARAMETERS.control_plane, ...ON_CODE_NEXT_SINCE_BASE.deletedFromKept["control-plane"]!].map((name) => `control-plane/${name}`).sort());
+    expect(dropped.sort()).toEqual([...DELETED_PARAMETERS.control_plane.map((name) => `control-plane/${name}`),
+      ...Object.entries(ON_CODE_NEXT_SINCE_BASE.deletedFromKept).flatMap(([part, names]) => names.map((name) => `${part}/${name}`))].sort());
   });
 
   it("no longer names TaskPersonProofEnabled (deleted on code/next by 356c3ae57, new since e2344f187), and has the PublicApiUrl row's two kept entries last (515e9d67c)", () => {
@@ -190,9 +196,9 @@ describe("BROKER_SETTINGS is derived from the rows (F1 L1a-0, two settings fewer
 });
 
 describe("every parameter still named anywhere has a row (F1 L1a-0), and the deleted ones are gone", () => {
-  it("has a row for every name in the base lists except the deleted parameters (the two invitation switches, and TaskPersonProofEnabled deleted on code/next by 356c3ae57)", () => {
+  it("has a row for every name in the base lists except the deleted parameters (the two invitation switches, TaskPersonProofEnabled deleted on code/next by 356c3ae57, and the company mode switches, #1614)", () => {
     const named = new Set(INSTALL_ROWS.flatMap((row) => rowStackParameters(row).map((each) => each.parameter)));
     const missing = [...Object.values(base.operatorParameters).flat(), ...base.namedEnvironmentOnlyParameters].filter((name) => !named.has(name));
-    expect([...new Set(missing)].sort()).toEqual([...DELETED_PARAMETERS.control_plane, ...ON_CODE_NEXT_SINCE_BASE.deletedFromKept["control-plane"]!].sort());
+    expect([...new Set(missing)].sort()).toEqual([...new Set([...DELETED_PARAMETERS.control_plane, ...Object.values(ON_CODE_NEXT_SINCE_BASE.deletedFromKept).flat()])].sort());
   });
 });

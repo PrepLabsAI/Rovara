@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { IMPLICIT_COMPANY_ID } from "@agentx/contracts";
 import { slackTokens } from "../../packages/testing/src/channel/slack-world.js";
 import { MemoryDocumentStore } from "../../packages/broker/src/ports/memory-document-store.js";
-import { answerSlackLinkNotice, isSlackLinkNoticeEvent, slackCompanyDependenciesFromEnvironment, slackCompanyModeRequested } from "../../packages/broker/src/aws/slack-company-wiring.js";
+import { answerSlackLinkNotice, isSlackLinkNoticeEvent, slackCompanyDependenciesFromEnvironment } from "../../packages/broker/src/aws/slack-company-wiring.js";
 import { slackIngressTeam } from "../../packages/broker/src/aws/slack-company-split.js";
 import { slackLinkNotice } from "../../packages/broker/src/aws/slack-person.js";
 import { createSlackWorkspaceTokens } from "../../packages/broker/src/aws/slack-workspace-tokens.js";
@@ -16,10 +16,9 @@ const ON = { SLACK_COMPANY_WORKSPACES: "enabled", COMPANY_SIGNIN: "enabled", STA
 const clients = (send: { (command: never): Promise<unknown> } = vi.fn(async (): Promise<unknown> => ({}))) => ({ documentClient: { send }, dynamo: { send }, secrets: { send } });
 
 describe("the factory", () => {
-  it("builds nothing unless both switches are on and the Lambda is fully configured", () => {
-    expect(slackCompanyModeRequested(ON)).toBe(true);
-    for (const off of [{ SLACK_COMPANY_WORKSPACES: "disabled" }, { SLACK_COMPANY_WORKSPACES: undefined }, { COMPANY_SIGNIN: "disabled" }, { COMPANY_SIGNIN: undefined },
-      { STATE_TABLE_NAME: "" }, { AGENTX_ENV: "" }, { AGENTX_ENV: "Bad/Env" }, { SLACK_TEAM_ID: "" }, { SLACK_TEAM_ID: "E0GRID000" }, { SLACK_COMPANY_WORKSPACES: "on" }]) {
+  it("builds nothing unless the Lambda is fully configured (#1614: no switch to turn it off)", () => {
+    expect(slackCompanyDependenciesFromEnvironment({ ...ON, SLACK_COMPANY_WORKSPACES: "disabled", COMPANY_SIGNIN: undefined }, clients())).toBeDefined();
+    for (const off of [{ STATE_TABLE_NAME: "" }, { AGENTX_ENV: "" }, { AGENTX_ENV: "Bad/Env" }, { SLACK_TEAM_ID: "" }, { SLACK_TEAM_ID: "E0GRID000" }]) {
       const send = vi.fn();
       expect(slackCompanyDependenciesFromEnvironment({ ...ON, ...off }, clients(send)), JSON.stringify(off)).toBeUndefined();
       expect(send).not.toHaveBeenCalled();
@@ -210,11 +209,11 @@ describe("the broker side", () => {
 });
 
 describe("the Slack Lambda's export", () => {
-  it("is today's handler alone when off, and when on adds the company handler with the token cache's removal hook", async () => {
+  it("is today's handler alone without the company factory's inputs, and with them adds the company handler with the token cache's removal hook", async () => {
     const { createAwsSlackHandlerFromEnvironment } = await import("../../packages/broker/src/aws/slack-ingress.js");
     const made: Array<Record<string, unknown>> = [];
     const make = (company: Record<string, unknown>) => { made.push(company); const body = "workspaces" in company ? "company" : "legacy"; const handler = async () => ({ statusCode: 200, headers: {}, body }); return handler as never; };
-    const off = createAwsSlackHandlerFromEnvironment({ ...ON, COMPANY_SIGNIN: undefined, BROKER_FUNCTION_NAME: "broker" }, make as never);
+    const off = createAwsSlackHandlerFromEnvironment({ ...ON, STATE_TABLE_NAME: "", BROKER_FUNCTION_NAME: "broker" }, make as never);
     expect(made).toEqual([{}]);
     expect(await (off as (event: unknown) => Promise<{ body: string }>)({})).toMatchObject({ body: "legacy" });
     made.length = 0;

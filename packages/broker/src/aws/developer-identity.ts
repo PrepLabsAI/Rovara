@@ -234,8 +234,6 @@ export function extraPublicKeysFromEnvironment(env: NodeJS.ProcessEnv, kms: Para
 
 let built: ReturnType<typeof createDeveloperIdentityHandler> | undefined;
 
-/** DEC 254zg (a): self-serve company create is served only with BOTH switches on (CompanySignIn and CompanySelfServe); anything else, a missing variable included, is closed. */
-export const companySelfServeFromEnvironment = (env: NodeJS.ProcessEnv): boolean => env.COMPANY_SIGNIN === "enabled" && env.COMPANY_SELF_SERVE === "enabled";
 
 export function createAwsDeveloperIdentityHandler(env: NodeJS.ProcessEnv, workspaces?: SlackCallerWorkspaces, legacyTeamId?: string): ReturnType<typeof createDeveloperIdentityHandler> {
   const region = env.AWS_REGION === undefined ? {} : { region: env.AWS_REGION };
@@ -261,7 +259,8 @@ export function createAwsDeveloperIdentityHandler(env: NodeJS.ProcessEnv, worksp
   if (config.oidcProblem !== undefined) log({ event: "signin.not_configured", method: "oidc", detail: config.oidcProblem });
   const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(region), { marshallOptions: { removeUndefinedValues: true } });
   const tableName = required(env, "DEVELOPER_SIGNIN_TABLE_NAME");
-  const company = env.COMPANY_SIGNIN === "enabled" ? new CompanySignInStore({ documentClient, tableName, now }) : undefined;
+  // #1614: company mode is the only mode.
+  const company = new CompanySignInStore({ documentClient, tableName, now });
   const readCompanySecret = companySecretReader(secrets);
   const companyJwksFor = remoteJwksCache(undefined, 50);
   const directory = slackDirectory({ teamId: config.slack.teamId, botToken: async () => (await slackSecret()).botToken, fetch, now, ...directoryCall(secrets),
@@ -273,21 +272,20 @@ export function createAwsDeveloperIdentityHandler(env: NodeJS.ProcessEnv, worksp
       tableName,
       now,
     }),
-    ...(company === undefined ? {} : { company, companyIssuer: companyIssuerProvider({ store: company, env: config.env, readSecret: readCompanySecret, fetch, jwksFor: companyJwksFor, now }),
-      // The State table is read only with the company layer on (the audit write is its only use here); with the layer off, init needs no STATE_TABLE_NAME.
+    company, companyIssuer: companyIssuerProvider({ store: company, env: config.env, readSecret: readCompanySecret, fetch, jwksFor: companyJwksFor, now }),
+      // The State table: the company sign-in audit write.
       signInAudit: createCompanySignInAuditWriter({ documentClient, tableName: required(env, "STATE_TABLE_NAME"), now }),
-      // DEC 254a, 253z: invite codes and self-serve create, only with the company layer.
-      // DEC 254zg (a): self-serve create only while the CompanySelfServe switch is on as well (infra/lib/company-signin.ts gives "enabled" only with CompanySignIn on).
-      companyInvites: new CompanyInviteStore({ documentClient, tableName, now, company, selfServeAllowed: companySelfServeFromEnvironment(env) }),
+      // DEC 254a, 253z: invite codes and self-serve create; the stored self-serve setting decides (#1614: no stack switch).
+      companyInvites: new CompanyInviteStore({ documentClient, tableName, now, company, selfServeAllowed: true }),
       // #1612: the install's own company, made or adopted once by the operator (init and upgrade).
-      installCompany: new InstallCompanyStore({ company, documentClient, tableName, now }) }),
-    // DEC 254b (b): the operator's company import runs BEFORE the company layer is switched on, so it is there with the layer on or off.
+      installCompany: new InstallCompanyStore({ company, documentClient, tableName, now }),
+    // DEC 254b (b): the operator's company import.
     companyImport: new CompanyImportStore({ documentClient, tableName, now }),
     signer: kmsTokenSigner({ kms: new KMSClient(region), keyId: required(env, "DEVELOPER_TOKEN_KEY_ARN") }),
     extraPublicKeys: extraPublicKeysFromEnvironment(env, new KMSClient(region)),
     providers: {
-      // DEC 254e: with Code's company layer on, any Slack workspace may sign in (the company still comes only from membership).
-      slack: slackSignInProvider({ ...(company === undefined ? {} : { anyWorkspace: true }), teamId: config.slack.teamId, credentials: slackSecret, fetch, jwks: jwksFor(SLACK_JWKS_URI), now }),
+      // DEC 254e: any Slack workspace may sign in (the company still comes only from membership).
+      slack: slackSignInProvider({ anyWorkspace: true, teamId: config.slack.teamId, credentials: slackSecret, fetch, jwks: jwksFor(SLACK_JWKS_URI), now }),
       ...(oidc === undefined ? {} : { oidc }),
       ...(github === undefined ? {} : { github }),
     },
@@ -295,8 +293,8 @@ export function createAwsDeveloperIdentityHandler(env: NodeJS.ProcessEnv, worksp
     ...(workspaces === undefined ? {} : { directoryForWorkspace: createWorkspaceSlackDirectory({ legacy: directory, workspaces, fetch, now, ...(legacyTeamId === undefined ? {} : { legacyTeamId }) }) }),
     now,
     log,
-    // Guided onboarding PR 4: Add to Slack's Slack side, beside the Slack app's client secret; with the company layer only.
-    ...(company === undefined ? {} : { slackInstall: (event: unknown) => handleSlackInstallRequest({ appClient: slackSecret, secrets: slackInstallSecretsFromSecretsManager(secrets, config.env), fetch }, event) }),
+    // Guided onboarding PR 4: Add to Slack's Slack side, beside the Slack app's client secret.
+    slackInstall: (event: unknown) => handleSlackInstallRequest({ appClient: slackSecret, secrets: slackInstallSecretsFromSecretsManager(secrets, config.env), fetch }, event),
   });
 }
 
