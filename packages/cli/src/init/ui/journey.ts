@@ -38,7 +38,7 @@ export interface StepPlan { phase: JourneyPhaseId; title: string; usualSeconds: 
  * it now stands. */
 export const INSTALL_STEP_ORDER: readonly InitStepId[] = [
   "prerequisites", "access", "core", "control-plane", "slack-service", "github-app", "slack-app", "slack-check", "developer-signin",
-  "admin-user", "first-project", "connectors", "alerts", "e2e",
+  "admin-user", "first-project", "connectors", "company", "alerts", "e2e",
 ];
 
 /** First estimates from the live run of 2026-10-01 (spec 048 Assumptions). Phase 4 replaces them
@@ -57,6 +57,7 @@ export const STEP_PLAN: Readonly<Record<InitStepId, StepPlan>> = {
   "admin-user": { phase: "finish", title: "Sign in to Rovara", usualSeconds: 120, needsYou: true },
   "first-project": { phase: "finish", title: "Set up your first project", usualSeconds: 120, needsYou: true },
   connectors: { phase: "finish", title: "Connect your issue trackers", usualSeconds: 60, needsYou: true },
+  company: { phase: "finish", title: "Set up your company", usualSeconds: 30, needsYou: false },
   alerts: { phase: "finish", title: "Turn on alerts", usualSeconds: 60, needsYou: true },
   e2e: { phase: "finish", title: "Get a first reply in Slack", usualSeconds: 60, needsYou: true },
 };

@@ -45,6 +45,8 @@ export interface SetupServices {
   /** Task 7: a stack's outputs (the foundation's EC2 worker outputs), or undefined when the stack
    * does not exist. */
   stackOutputs: (stackName: string) => Promise<StackOutputs | undefined>;
+  /** #1612: the install company step's DynamoDB client, with the operator's own credentials in the environment's region. Absent: the step is skipped. */
+  installCompanyClient?: (region: string) => { send(command: unknown): Promise<unknown> };
   /** Task 7: where project files live (the global --config-dir, default ~/.agentx/projects). */
   configDir: string;
   /** Task 8: finding and joining the project's Slack channel with the bot token. */

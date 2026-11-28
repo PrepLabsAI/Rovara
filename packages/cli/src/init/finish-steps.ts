@@ -1,6 +1,7 @@
 // The init steps after developer sign-in (phase 15d2), and the message init ends with. Each step
 // is a thin wrapper around a setup/ module, so agentx init and the day-2 commands behave the same.
 import { agentXError, environmentStackName } from "@agentx/contracts";
+import { companyStep } from "./company-step.js";
 import { AlertEmailSchema } from "../deploy/answer-schemas.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
@@ -371,9 +372,9 @@ export function e2eStep(): InitStep<InitContext> {
   };
 }
 
-/** admin-user, first-project, connectors, alerts, e2e, in that order. */
+/** admin-user, first-project, connectors, company (#1612), alerts, e2e, in that order. */
 export function finishSteps(): InitStep<InitContext>[] {
-  return [adminUserStep(), firstProjectStep(), connectorsStep(), alertsStep(), e2eStep()];
+  return [adminUserStep(), firstProjectStep(), connectorsStep(), companyStep(), alertsStep(), e2eStep()];
 }
 
 /** The message a finished agentx init ends with: where to talk to AgentX, how developers sign in,
