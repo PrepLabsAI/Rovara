@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { decodeJwt } from "jose";
 import { describe, expect, it, vi } from "vitest";
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
-import { AgentXError, COMPANY_SELF_CREATE_TEXT, IMPLICIT_COMPANY_ID, companyScoped, newCompanyInviteCode } from "@agentx/contracts";
+import { AgentXError, COMPANY_SELF_CREATE_TEXT, IMPLICIT_COMPANY_ID, NOT_IN_A_COMPANY_MESSAGE, companyScoped, newCompanyInviteCode } from "@agentx/contracts";
 import { COMPANY_A, COMPANY_B } from "../../packages/testing/src/isolation/two-company.js";
 import { companyMembershipFromDynamo, membershipKey } from "../../packages/broker/src/aws/company-check.js";
 import { companySelfCreateThroughLambda, routeDeveloperRequest, type DeveloperRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
@@ -131,7 +131,8 @@ describe("a sign-in with no company (DEC 253z)", () => {
     const w = world();
     const { access: token } = await w.signIn("new");
     expect((await w.access(token)).status).toBe(200);
-    const probes = [...COMPANY_CHECKED_ROUTES.filter((route) => route !== "POST /v1/dev/access" && !route.includes("/v1/admin/")), "PUT /v1/dev/me/name", "GET /v1/dev/workspaces", "GET /v1/dev/channel-links"];
+    // #1613: the company details route is the one that tells such a person, in plain words, that they are in no company (checked below), never that their sign-in ended.
+    const probes = [...COMPANY_CHECKED_ROUTES.filter((route) => route !== "POST /v1/dev/access" && !route.includes("/v1/admin/") && !route.endsWith(" /v1/dev/company/details")), "PUT /v1/dev/me/name", "GET /v1/dev/workspaces", "GET /v1/dev/channel-links"];
     for (const probe of probes) {
       const [method, template] = probe.split(" ") as [string, string];
       const path = template.replace("{taskId}", TASK).replace("{id}", method === "GET" && template.includes("/members/") ? "f".repeat(64) : template.includes("/members/") ? "f".repeat(64) : "shared-project");
@@ -141,6 +142,10 @@ describe("a sign-in with no company (DEC 253z)", () => {
     // The routes that reach authentication refuse it as a sign-in that ended.
     for (const [method, path] of [["GET", "/v1/dev/projects"], ["GET", "/v1/dev/tasks"], ["PUT", "/v1/dev/me/name"], ["POST", "/v1/dev/company/preapprovals"], ["GET", "/v1/dev/workspaces"]] as const) {
       expect((await w.call(method, path, token, method === "GET" ? undefined : { name: "New Name" })).status, path).toBe(401);
+    }
+    for (const method of ["GET", "PUT"]) {
+      const answer = await w.call(method, "/v1/dev/company/details", token, method === "GET" ? undefined : { name: "New Name" });
+      expect([answer.status, (answer.body as { error?: { message?: string } }).error?.message], method).toEqual([403, NOT_IN_A_COMPANY_MESSAGE]);
     }
   });
 

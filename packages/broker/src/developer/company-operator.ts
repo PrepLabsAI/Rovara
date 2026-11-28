@@ -32,6 +32,8 @@ const request = z.discriminatedUnion("kind", [
   // #1612: the install's own company: made once (or adopted, when an operator already moved the install into a named company) and read. Idempotent.
   z.object({ kind: z.literal("company-install-ensure"), name: InstallCompanyName, ownerEmail: CompanyEmail.optional(), adoptCompanyId: OrgIdSchema.refine((id) => id !== IMPLICIT_COMPANY_ID).optional() }).strict(),
   z.object({ kind: z.literal("company-install-read") }).strict(),
+  // #1613: the company's new name, by a live owner or admin the broker pins (`createdBy`); the store checks that person again inside the write. Never the built-in company.
+  z.object({ kind: z.literal("company-rename"), companyId: OrgIdSchema.refine((id) => id !== IMPLICIT_COMPANY_ID), name: CompanySelfServeNameSchema, createdBy: CompanyPersonId.optional() }).strict(),
 ]);
 export type CompanyOperatorRequest = z.infer<typeof request>;
 export type CompanyOperatorResponse = { ok: true; companyId?: string; expiresAt?: number; preapprovals?: Awaited<ReturnType<CompanySignInStore["list"]>>["preapprovals"]; more?: boolean }
@@ -107,6 +109,7 @@ export async function companyOperator(deps: { store: CompanySignInStore; invites
         break;
       }
       case "company-member-list": return { ok: true, ...await deps.store.listMembers(companyId, input.cursor, input.limit) };
+      case "company-rename": return await renameCompany(deps, input);
       case "company-issuer-set": {
         const settings = { issuer: input.issuer, clientId: input.clientId, displayName: input.displayName,
           requiredValues: input.requiredValues, enabled: input.enabled,
@@ -118,6 +121,13 @@ export async function companyOperator(deps: { store: CompanySignInStore; invites
     deps.log({ event: input.kind, companyId });
     return input.kind === "company-create" ? { ok: true, companyId } : { ok: true };
   } catch (error) { return error instanceof CompanyMemberRefusal ? error.response : { ok: false, error: "unavailable" }; }
+}
+
+/** #1613: the company's new name; the store checks the named actor again inside its write. */
+async function renameCompany(deps: Pick<Parameters<typeof companyOperator>[0], "store" | "log">, input: Extract<CompanyOperatorRequest, { kind: "company-rename" }>): Promise<CompanyOperatorResponse> {
+  if (await deps.store.rename(input.companyId, input.name, input.createdBy) === "not_found") return { ok: false, error: "not_found" };
+  deps.log({ event: input.kind, companyId: input.companyId });
+  return { ok: true };
 }
 
 type InviteRequest = Extract<CompanyOperatorRequest, { kind: "company-invite-create" | "company-invite-list" | "company-invite-revoke" | "company-self-serve-set" | "company-self-create" }>;

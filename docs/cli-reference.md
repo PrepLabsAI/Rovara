@@ -52,7 +52,7 @@ error says so and suggests `--region` or `agentx env list`.
 | `init`, `destroy` | AWS administrator credentials. |
 | `doctor`, `upgrade`, `config`, `signin`, `env` | The operator role `init` created (`agentx-<env>-operator`). See [The operator role](day-two.md#the-operator-role). |
 | `project`, `channel`, `connector`, `alerts` | AWS credentials that can read the environment's settings, plus an admin sign-in. |
-| `login <url>`, `whoami`, `workspaces`, `sessions`, `session`, `mcp` | A developer sign-in; no AWS credentials. |
+| `login <url>`, `whoami`, `workspaces`, `sessions`, `session`, `company`, `mcp` | A developer sign-in; no AWS credentials. |
 
 An admin sign-in is stored on this computer and reused until it expires. If there is none, the
 command prints a sign-in address and opens a browser; a person has to finish that sign-in. Do it
@@ -250,6 +250,8 @@ All take `--project <name>`, test a read, and register the project's next revisi
 | `sessions [--mine\|--shared\|--project <name>]` | List sessions. |
 | `session start <instructions> --project <name>` | Start work on a project and print the link to its page. |
 | `session show\|watch\|comment\|tell\|answer\|stop\|retry\|share <session-id>` | Look at, steer or share a session. |
+| `company show` | Your company: its name, ID, your role in it and how many members it has. |
+| `company rename <name>` | Give your company a new name (1 to 80 characters). Only an owner or administrator of the company can. |
 | `mcp install --client claude-code\|codex\|cursor` | Add Rovara's MCP server to your AI tool. See [mcp-install.md](mcp-install.md). |
 | `chatgpt connect` / `status` / `disconnect` | Use your own ChatGPT plan. See [chatgpt.md](chatgpt.md). |
 

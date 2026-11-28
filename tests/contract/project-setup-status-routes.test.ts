@@ -1324,9 +1324,12 @@ describe("what did not change", () => {
     // RD-2.0 (rule D): the four new task page reads (spec, checks, changes, timeline) are additive, task-read scope; removing exactly those 4 rows gives back the pin below.
     const taskPageReads = ["spec", "checks", "changes", "timeline"].map((read) => `GET /v1/dev/tasks/{taskId}/${read} tasks:read`);
     expect(rows.filter((row) => taskPageReads.includes(row))).toEqual(taskPageReads);
-    const withPreview = rows.filter((row) => !added.some((path) => row === `${path} full`) && row !== inviteResend && !serverReads.includes(row) && !linearLinks.includes(row) && !taskPageReads.includes(row));
+    // #1613 (rule D): the company details rows (show and rename) are additive, full access only; removing exactly those 2 rows gives back the pins below.
+    const companyDetails = ["GET /v1/dev/company/details full", "PUT /v1/dev/company/details full"];
+    expect(rows.filter((row) => companyDetails.includes(row))).toEqual(companyDetails);
+    const withPreview = rows.filter((row) => !added.some((path) => row === `${path} full`) && row !== inviteResend && !serverReads.includes(row) && !linearLinks.includes(row) && !taskPageReads.includes(row) && !companyDetails.includes(row));
     const existing = withPreview.filter((row) => row !== preview && row !== closePreview);
-    expect(existing).toHaveLength(DEV_ROUTES.length - 19);
+    expect(existing).toHaveLength(DEV_ROUTES.length - 21);
     // R1 + L1 6.2b (rule D): the three hosted-only `/v1/dev/projects/{project}/intake*` rows moved to the one `/v1/app` address (the MCP and CLI's own). They are put back where they stood, so this pin proves exactly those three rows are gone and every other row is unchanged.
     const movedIntake = ["GET /v1/dev/projects/{project}/intake full", "POST /v1/dev/projects/{project}/intake/{itemId}/start full", "POST /v1/dev/projects/{project}/intake/{itemId}/dismiss full"];
     expect(rows.filter((row) => movedIntake.includes(row))).toEqual([]);

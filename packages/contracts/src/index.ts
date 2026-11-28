@@ -513,6 +513,7 @@ export * from "./eval-standin-cassettes.js";
 export * from "./agent-model-choice.js";
 export * from "./company-engine-model.js";
 export * from "./company-learning-model.js";
+export * from "./company-details.js";
 export * from "./report-keys.js";
 export * from "./cost-report.js";
 export * from "./upkeep.js";

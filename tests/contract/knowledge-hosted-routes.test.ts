@@ -167,9 +167,12 @@ describe("the knowledge routes at the developer router", () => {
     // RD-2.0 (Code API 1.5): the task page's four new reads (spec, checks, changes, timeline) are additive, tasks:read only; pinned by name here and kept out of the older digest (removing exactly those 4 rows gives back the pin below).
     const taskPageReads = ["spec", "checks", "changes", "timeline"].map((tail) => `GET /v1/dev/tasks/{taskId}/${tail} tasks:read`);
     expect(all.filter((row) => taskPageReads.includes(row))).toEqual(taskPageReads);
-    const withPreview = all.filter((row) => !added.includes(row) && row !== inviteResend && !serverReads.includes(row) && !linearLinks.includes(row) && !taskPageReads.includes(row));
+    // #1613 (rule D): the company details rows (show and rename) are additive, full access only; removing exactly those 2 rows gives back the pins below.
+    const companyDetails = ["GET /v1/dev/company/details full", "PUT /v1/dev/company/details full"];
+    expect(all.filter((row) => companyDetails.includes(row))).toEqual(companyDetails);
+    const withPreview = all.filter((row) => !added.includes(row) && row !== inviteResend && !serverReads.includes(row) && !linearLinks.includes(row) && !taskPageReads.includes(row) && !companyDetails.includes(row));
     const others = withPreview.filter((row) => row !== preview && row !== closePreview);
-    expect(others).toHaveLength(DEV_ROUTES.length - 18);
+    expect(others).toHaveLength(DEV_ROUTES.length - 20);
     // R1 + L1 6.2b (rule D): the three hosted-only `/v1/dev/projects/{project}/intake*` rows moved to the one `/v1/app` address (the MCP and CLI's own). They are put back where they stood, so this pin proves exactly those three rows are gone and every other row is unchanged.
     const movedIntake = ["GET /v1/dev/projects/{project}/intake full", "POST /v1/dev/projects/{project}/intake/{itemId}/start full", "POST /v1/dev/projects/{project}/intake/{itemId}/dismiss full"];
     expect(all.filter((row) => movedIntake.includes(row))).toEqual([]);

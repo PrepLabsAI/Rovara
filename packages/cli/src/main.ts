@@ -52,6 +52,7 @@ import { fetchDeveloperWorkspaces, type DeveloperWorkspacesResult } from "./deve
 import { runWorkspacesCommand } from "./workspaces-ui/index.js";
 import { registerRecordCommands, type RecordCommandContext } from "./record/register.js";
 import { registerSessionCommands } from "./session/register.js";
+import { registerCompanyCommands } from "./company/commands.js";
 import { listAdminWorkspaces } from "./admin/workspaces.js";
 import { loadDeploymentSettings, type DeploymentSettings } from "./deployment.js";
 import { installMcp, MCP_CLIENTS, runCommand, type McpClientKind, type McpInstallDeps } from "./mcp/install.js";
@@ -1398,6 +1399,8 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
 
   // Lane L8: `sessions` and `session *`.
   registerSessionCommands(program, { developerSession, developerEnv, globalOptions, write: (text) => services.stdout.write(text) });
+  // #1613: `company show` and `company rename`.
+  registerCompanyCommands(program, { developerSession, developerEnv, globalOptions, write: (text) => services.stdout.write(text) });
 
   // SM5: `record sagemaker`. Runs on the customer's own computer against their own endpoint; no sign-in.
   registerRecordCommands(program, { write: (text) => services.stdout.write(text), json: (command) => globalOptions(command).json, version: CLI_VERSION, ...(dependencies.record ?? {}) });
