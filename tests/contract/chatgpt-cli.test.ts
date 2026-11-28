@@ -77,7 +77,8 @@ async function signedIn(options: {
       answers.push(response.status);
     }
   });
-  const run = (argv: string[]) => executeCli(argv, {
+  // Issue #1611: the sign-in is to staging and commands without --env use production, so name it.
+  const run = (argv: string[]) => executeCli(["--env", "staging", ...argv], {
     fetchImplementation, tokenStore, environments: { home },
     stdout: { write: (text: string) => out.push(text) }, stderr: { write: (text: string) => err.push(text) },
     stdin: Readable.from(options.paste === undefined ? [] : [`${options.paste}\n`]),

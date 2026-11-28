@@ -1,8 +1,9 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { developerTokenKey, readDeveloperConfig, saveDeveloperEnvironment } from "../../packages/cli/src/developer/config.js";
+import YAML from "yaml";
+import { developerConfigPath, developerTokenKey, readDeveloperConfig, saveDeveloperEnvironment } from "../../packages/cli/src/developer/config.js";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
 
@@ -42,8 +43,10 @@ async function signedIn(options: { revoke?: () => Promise<Response>; name?: stri
     if (url === `${ISSUER}/revoke`) return options.revoke?.() ?? Response.json({});
     throw new Error(`unexpected ${url}`);
   });
-  const run = (argv: string[]) => executeCli(argv, { fetchImplementation, tokenStore, environments: { home }, stdout: { write: (text: string) => out.push(text) }, stderr: { write: (text: string) => err.push(text) } });
-  return { home, tokenStore, out, err, run, fetchImplementation };
+  const runAsTyped = (argv: string[]) => executeCli(argv, { fetchImplementation, tokenStore, environments: { home }, stdout: { write: (text: string) => out.push(text) }, stderr: { write: (text: string) => err.push(text) } });
+  // Issue #1611: the sign-in is to staging and the default stays production, so name staging unless the test names one.
+  const run = (argv: string[]) => runAsTyped(argv.includes("--env") ? argv : ["--env", "staging", ...argv]);
+  return { home, tokenStore, out, err, run, runAsTyped, fetchImplementation };
 }
 
 describe("agentx whoami and logout (FR-011)", () => {
@@ -79,13 +82,42 @@ describe("agentx whoami and logout (FR-011)", () => {
     expect(odd.err.join("")).toContain(`your AgentX sign-in for staging has ended; run npx @preplabsai/rovara-code login ${URL_}`);
   });
 
-  it("logout of the default environment moves the default to a remaining one (#221)", async () => {
+  it("logout removes only that environment's sign-in, and names no default (#221, #1611)", async () => {
     const h = await signedIn();
     const other = { url: "https://other.example.test", issuer: "https://other.example.test/v1/auth", tokenEndpoint: "https://other.example.test/v1/auth/token", revocationEndpoint: "https://other.example.test/v1/auth/revoke" };
     await saveDeveloperEnvironment(h.home, "other", other);
     await saveDeveloperEnvironment(h.home, "staging", entry);
     expect(await h.run(["logout"])).toBe(0);
-    expect(await readDeveloperConfig(h.home)).toEqual({ default: "other", environments: { other } });
+    expect(await readDeveloperConfig(h.home)).toEqual({ environments: { other } });
+  });
+
+  it("without --env, whoami uses production, not the environment signed in to last, and says how to reach that one (#1611)", async () => {
+    const h = await signedIn();
+    expect(await h.runAsTyped(["whoami"])).toBe(3);
+    expect(h.err.join("")).toContain("this computer is not signed in to AgentX environment production; it is signed in to staging: add --env staging, or run npx @preplabsai/rovara-code login <your AgentX URL>");
+    expect(h.fetchImplementation).not.toHaveBeenCalled();
+  });
+
+  it("without --env, whoami uses production even when another environment was signed in to after it (#1611)", async () => {
+    const h = await signedIn();
+    const production = { url: "https://prod.example.test", issuer: "https://prod.example.test/v1/auth", tokenEndpoint: "https://prod.example.test/v1/auth/token", revocationEndpoint: "https://prod.example.test/v1/auth/revoke" };
+    await saveDeveloperEnvironment(h.home, "production", production);
+    await saveDeveloperEnvironment(h.home, "staging", entry);
+    await h.tokenStore.set(developerTokenKey(production.issuer), { accessToken: "prod-access", refreshToken: REFRESH, expiresAt: Date.now() + 3_600_000 });
+    h.fetchImplementation.mockImplementation(async (input) => {
+      expect(urlOf(input)).toBe("https://prod.example.test/v1/dev/projects");
+      return Response.json(projects);
+    });
+    expect(await h.runAsTyped(["whoami"])).toBe(0);
+    expect(h.out.join("")).toContain("Signed in to AgentX environment production (https://prod.example.test)");
+  });
+
+  it("reads a developer.yaml an older CLI wrote with a default, and ignores that default (#1611)", async () => {
+    const h = await signedIn();
+    await writeFile(developerConfigPath(h.home), YAML.stringify({ schemaVersion: 1, default: "staging", environments: { staging: entry } }));
+    expect(await readDeveloperConfig(h.home)).toEqual({ environments: { staging: entry } });
+    expect(await h.runAsTyped(["whoami"])).toBe(3);
+    expect(h.err.join("")).toContain("not signed in to AgentX environment production; it is signed in to staging");
   });
 
   it("logout still removes the local tokens when the server cannot be reached, and says the server session may stay", async () => {
@@ -107,7 +139,7 @@ describe("agentx whoami and logout (FR-011)", () => {
   it("logout without a developer sign-in names the admin logout too", async () => {
     const h = await signedIn();
     expect(await h.run(["--env", "other", "logout"])).toBe(3);
-    expect(h.err.join("")).toContain("this computer is not signed in to AgentX environment other; run npx @preplabsai/rovara-code login <your AgentX URL>; for the admin login, run agentx logout --admin");
+    expect(h.err.join("")).toContain("this computer is not signed in to AgentX environment other; it is signed in to staging: add --env staging, or run npx @preplabsai/rovara-code login <your AgentX URL>; for the admin login, run agentx logout --admin");
   });
 
   it("logout --json reports whether the server revoked the session", async () => {
@@ -120,5 +152,46 @@ describe("agentx whoami and logout (FR-011)", () => {
     const h = await signedIn();
     expect(await h.run(["login", URL_, "--admin"])).toBe(2);
     expect(h.err.join("")).toContain("use either agentx login <url> (developer sign-in) or agentx login --admin, not both");
+  });
+});
+
+describe("agentx login <url> and the default environment (#1611)", () => {
+  async function login(env: string) {
+    const home = await mkdtemp(join(tmpdir(), "agentx-dev-cli-login-"));
+    dirs.push(home);
+    const out: string[] = [];
+    const err: string[] = [];
+    const fetchImplementation = vi.fn<typeof fetch>(async (input) => {
+      const url = urlOf(input);
+      if (url === `${ISSUER}/.well-known/agentx-configuration`) {
+        return Response.json({ env, apiVersion: "1.0", issuer: ISSUER, authorizationEndpoint: `${ISSUER}/authorize`, tokenEndpoint: `${ISSUER}/token`, revocationEndpoint: `${ISSUER}/revoke`, clientId: "agentx-cli", methods: { slack: true, oidc: null } });
+      }
+      if (url === `${ISSUER}/token`) return Response.json({ access_token: "access", token_type: "Bearer", expires_in: 3600, refresh_token: REFRESH });
+      if (url === `${URL_}/v1/dev/projects`) return Response.json(projects);
+      throw new Error(`unexpected ${url}`);
+    });
+    const run = executeCli(["login", URL_, "--no-browser"], { fetchImplementation, tokenStore: new InMemoryTokenStore(), environments: { home }, stdout: { write: (text: string) => out.push(text) }, stderr: { write: (text: string) => err.push(text) } });
+    // The browser: follow the printed link back to the loopback with a code.
+    await vi.waitFor(() => { expect(err.join("")).toContain(`${ISSUER}/authorize?`); });
+    const authorize = new URL(/https:\/\/\S+authorize\?\S+/.exec(err.join(""))?.[0] ?? "");
+    const callback = new URL(authorize.searchParams.get("redirect_uri") ?? "");
+    callback.searchParams.set("state", authorize.searchParams.get("state") ?? "");
+    callback.searchParams.set("code", "agxc_code");
+    await fetch(callback);
+    expect(await run).toBe(0);
+    return { home, out: out.join(""), err: err.join("") };
+  }
+
+  it("signing in to another environment keeps production the default, and says how to use the other one", async () => {
+    const h = await login("staging");
+    expect(h.out).toContain("Signed in to AgentX environment staging");
+    expect(h.err).toContain("Commands without --env still use production; add --env staging to use staging.\n");
+    expect(await readFile(developerConfigPath(h.home), "utf8")).not.toMatch(/^default:/m);
+  });
+
+  it("signing in to production says nothing about the default", async () => {
+    const h = await login("production");
+    expect(h.out).toContain("Signed in to AgentX environment production");
+    expect(h.err).not.toContain("Commands without --env");
   });
 });

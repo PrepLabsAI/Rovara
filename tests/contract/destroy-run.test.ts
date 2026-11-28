@@ -132,7 +132,7 @@ describe("agentx destroy (FR-055, item 3)", () => {
     expect(h.lines.join("\n")).not.toContain("SECRET");
   });
 
-  it("removes the environment's developer sign-in and moves the default to a remaining environment (#221)", async () => {
+  it("removes the environment's developer sign-in and keeps the others (#221)", async () => {
     const h = await harness();
     const entry = (name: string) => ({ url: `https://${name}.example.test`, issuer: `https://${name}.example.test/v1/auth`, tokenEndpoint: `https://${name}.example.test/v1/auth/token`, revocationEndpoint: `https://${name}.example.test/v1/auth/revoke` });
     await saveDeveloperEnvironment(h.home, "other", entry("other"));
@@ -143,20 +143,19 @@ describe("agentx destroy (FR-055, item 3)", () => {
     const result = await runDestroy({ env: "staging", keepData: false }, h.deps);
     expect(result.removed).toBe(true);
     const config = await readDeveloperConfig(h.home);
-    expect(Object.keys(config.environments)).toEqual(["other"]);
-    expect(config.default).toBe("other");
+    expect(config).toEqual({ environments: { other: entry("other") } });
     expect(tokens.values.has(developerTokenKey(entry("staging").issuer))).toBe(false);
     expect(tokens.values.has(developerTokenKey(entry("other").issuer))).toBe(true);
     expect(await access(environmentCachePath(h.home, "staging")).then(() => true, () => false)).toBe(false);
-    expect(h.lines).toContain("Removed this computer's developer sign-in for staging; the default developer environment is now other.");
+    expect(h.lines).toContain("Removed this computer's developer sign-in for staging.");
   });
 
-  it("clears the default developer environment when the destroyed one was the only one (#221)", async () => {
+  it("removes the developer sign-in when the destroyed environment was the only one (#221)", async () => {
     const h = await harness();
     await saveDeveloperEnvironment(h.home, "staging", { url: "https://staging.example.test", issuer: "https://staging.example.test/v1/auth", tokenEndpoint: "https://staging.example.test/v1/auth/token", revocationEndpoint: "https://staging.example.test/v1/auth/revoke" });
     await runDestroy({ env: "staging", keepData: false }, h.deps);
     expect(await readDeveloperConfig(h.home)).toEqual({ environments: {} });
-    expect(h.lines).toContain("Removed this computer's developer sign-in for staging; no developer environment is the default now.");
+    expect(h.lines).toContain("Removed this computer's developer sign-in for staging.");
   });
 
   it("refuses up front when the access stack is gone but a stack deployed through its role remains", async () => {

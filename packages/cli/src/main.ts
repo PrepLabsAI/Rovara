@@ -347,6 +347,10 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         });
         const projects = await fetchDeveloperProjects(developerSession(), result.env);
         services.stdout.write(globals.json ? formatSuccess({ env: projects.env, url: projects.url, ...projects.projects }, true) : whoamiText(projects));
+        // Issue #1611: signing in never moves the default, so say how to reach this environment.
+        if (result.env !== DEFAULT_ENVIRONMENT) {
+          services.stderr.write(`Commands without --env still use ${DEFAULT_ENVIRONMENT}; add --env ${result.env} to use ${result.env}.\n`);
+        }
         return;
       }
       // A bare login (or --admin) is today's admin login, unchanged.
@@ -362,7 +366,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       services.stdout.write(formatSuccess({ controlPlaneUrl: settings.controlPlaneUrl, authenticated: true }, globals.json));
     });
 
-  /** The developer environment: --env when typed, otherwise the default agentx login set. */
+  /** The developer environment: --env when typed, otherwise production (issue #1611), as for every other command. */
   const developerEnv = (command: Command): string | undefined =>
     command.getOptionValueSourceWithGlobals("env") === "cli" ? globalOptions(command).env : undefined;
 
