@@ -6,6 +6,7 @@ import { emailIndexKey, type DeveloperSignInStore } from "./store.js";
 import { CompanyMemberRefusal, MemberListInput, type CompanyMemberReply } from "./company-member-contract.js";
 import { CompanyIssuerSettings } from "./company-issuer.js";
 import type { CompanyInviteStore, SelfCreateResult } from "./company-invites.js";
+import { InstallCompanyName, type EnsureInstallCompanyResult, type InstallCompanyStore } from "./install-company.js";
 
 const request = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("company-create"), name: z.string().trim().min(1).max(80), firstAdminEmail: CompanyEmail, expiresInHours: CompanyExpiryHours }).strict(),
@@ -28,16 +29,19 @@ const request = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("company-self-serve-set"), open: z.boolean(), createdBy: CompanyPersonId.optional() }).strict(),
   // DEC 253z: a signed-in person with no company makes their own, with a code. The broker pins the person; the name is checked again here.
   z.object({ kind: z.literal("company-self-create"), personId: CompanyPersonId, name: CompanySelfServeNameSchema, codeHash: CompanyInviteCodeHashSchema }).strict(),
+  // #1612: the install's own company: made once (or adopted, when an operator already moved the install into a named company) and read. Idempotent.
+  z.object({ kind: z.literal("company-install-ensure"), name: InstallCompanyName, ownerEmail: CompanyEmail.optional(), adoptCompanyId: OrgIdSchema.refine((id) => id !== IMPLICIT_COMPANY_ID).optional() }).strict(),
+  z.object({ kind: z.literal("company-install-read") }).strict(),
 ]);
 export type CompanyOperatorRequest = z.infer<typeof request>;
 export type CompanyOperatorResponse = { ok: true; companyId?: string; expiresAt?: number; preapprovals?: Awaited<ReturnType<CompanySignInStore["list"]>>["preapprovals"]; more?: boolean }
-  | CompanyMemberReply | { ok: true; codeId: string } | ({ ok: true } & CompanyInviteList) | SelfCreateResult;
-export async function companyOperator(deps: { store: CompanySignInStore; invites?: CompanyInviteStore; clients?: DeveloperSignInStore; now: () => number; log: (entry: Record<string, unknown>) => void; newCompanyId?: () => string }, event: unknown): Promise<CompanyOperatorResponse> {
+  | CompanyMemberReply | { ok: true; codeId: string } | ({ ok: true } & CompanyInviteList) | SelfCreateResult | ({ ok: true } & EnsureInstallCompanyResult);
+export async function companyOperator(deps: { store: CompanySignInStore; invites?: CompanyInviteStore; installCompany?: InstallCompanyStore; clients?: DeveloperSignInStore; now: () => number; log: (entry: Record<string, unknown>) => void; newCompanyId?: () => string }, event: unknown): Promise<CompanyOperatorResponse> {
   const parsed = request.safeParse(event);
   if (!parsed.success) return { ok: false, error: "invalid_request" };
   try {
     const input = parsed.data;
-    if (input.kind === "company-invite-create" || input.kind === "company-invite-list" || input.kind === "company-invite-revoke" || input.kind === "company-self-serve-set" || input.kind === "company-self-create") {
+    if (isInviteRequest(input)) {
       const invites = deps.invites;
       if (invites === undefined) return { ok: false, error: "unavailable" };
       switch (input.kind) {
@@ -61,6 +65,7 @@ export async function companyOperator(deps: { store: CompanySignInStore; invites
         }
       }
     }
+    if (isInstallRequest(input)) return await installCompanyOperator(deps, input);
     if (input.kind === "company-signin-client-set") {
       const companyId = input.client.companyId ?? IMPLICIT_COMPANY_ID;
       if (deps.clients === undefined || !await deps.store.companyExists(companyId)) return { ok: false, error: "invalid_request" };
@@ -113,4 +118,28 @@ export async function companyOperator(deps: { store: CompanySignInStore; invites
     deps.log({ event: input.kind, companyId });
     return input.kind === "company-create" ? { ok: true, companyId } : { ok: true };
   } catch (error) { return error instanceof CompanyMemberRefusal ? error.response : { ok: false, error: "unavailable" }; }
+}
+
+type InviteRequest = Extract<CompanyOperatorRequest, { kind: "company-invite-create" | "company-invite-list" | "company-invite-revoke" | "company-self-serve-set" | "company-self-create" }>;
+type InstallRequest = Extract<CompanyOperatorRequest, { kind: "company-install-ensure" | "company-install-read" }>;
+const INVITE_KINDS: ReadonlySet<string> = new Set<InviteRequest["kind"]>(["company-invite-create", "company-invite-list", "company-invite-revoke", "company-self-serve-set", "company-self-create"]);
+const INSTALL_KINDS: ReadonlySet<string> = new Set<InstallRequest["kind"]>(["company-install-ensure", "company-install-read"]);
+const isInviteRequest = (input: CompanyOperatorRequest): input is InviteRequest => INVITE_KINDS.has(input.kind);
+const isInstallRequest = (input: CompanyOperatorRequest): input is InstallRequest => INSTALL_KINDS.has(input.kind);
+
+/** #1612: the install's company events. A read before the company is made answers `not_found`. */
+async function installCompanyOperator(
+  deps: { installCompany?: InstallCompanyStore; log: (entry: Record<string, unknown>) => void },
+  input: InstallRequest,
+): Promise<CompanyOperatorResponse> {
+  const store = deps.installCompany;
+  if (store === undefined) return { ok: false, error: "unavailable" };
+  if (input.kind === "company-install-read") {
+    const companyId = await store.companyId();
+    return companyId === undefined ? { ok: false, error: "not_found" } : { ok: true, companyId, outcome: "existing" };
+  }
+  const result = await store.ensure({ name: input.name, ...(input.ownerEmail === undefined ? {} : { ownerEmail: input.ownerEmail }), ...(input.adoptCompanyId === undefined ? {} : { adoptCompanyId: input.adoptCompanyId }) });
+  // Only the outcome and the opaque id: never the name or the email.
+  deps.log({ event: input.kind, companyId: result.companyId, outcome: result.outcome });
+  return { ok: true, ...result };
 }
