@@ -13,6 +13,7 @@ import { withoutNatEgressAddresses, withoutNatEgressControlPlane } from "../supp
 import { withoutGithubSignIn } from "../support/github-signin-template.js";
 import { withoutDnsFirewall, withoutDnsFirewallAccess, withoutGatewayAccess, withoutSwitchoverControlPlaneParity } from "../support/switchover-parity-template.js";
 import { normalizedTemplate } from "../support/template-snapshot.js";
+import { withoutInstallCompanyOutput } from "../support/install-company-output-template.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { withoutSlackCompanyMode, withoutSlackCompanyService } from "../support/slack-company-template.js";
 import { createHash } from "node:crypto";
@@ -288,7 +289,7 @@ describe("named environment templates", () => {
   const stacks = buildAgentXApp({ agentxEnv: "staging" }).node.children.filter((child): child is Stack => Stack.isStack(child));
   it("pins L1a's broker core dispatch queue references", () => {
     const stack = stacks.find((candidate) => candidate.stackName === "agentx-staging-control-plane")!;
-    const template = normalizedTemplate(stack) as { Resources: Record<string, Resource> };
+    const template = withoutInstallCompanyOutput(stack.stackName, normalizedTemplate(stack)) as { Resources: Record<string, Resource> };
     const broker = Object.entries(template.Resources).find(([id, resource]) => /^Broker[0-9A-F]{8}$/u.test(id) && resource.Type === "AWS::Lambda::Function")![1];
     const variables = (broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
     expect({ CORE_DISPATCH_QUEUE_URL: variables.CORE_DISPATCH_QUEUE_URL, CORE_DISPATCH_DEAD_LETTER_URL: variables.CORE_DISPATCH_DEAD_LETTER_URL }).toMatchSnapshot();
@@ -300,14 +301,14 @@ describe("named environment templates", () => {
       it("removing only Batch F additions preserves code/next's agentx-staging-control-plane template", () => {
         // F1 L1a-1: the two deleted invitation switches are put back innermost (Rule D, tests/support/task-people-invitations-template.ts), so this older pin holds as recorded.
         // Linear webhook guard: the Linear route's throttle and alarm are asserted and taken out too (outermost), so this recorded pin still holds.
-        const beforeBatchF = withoutLinearWebhookGuard(withoutWebhookSecretLane(withoutBatchFAdditions(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(withoutMachineGone(withTaskPeopleInvitationSwitches(withoutCoreOutboxStreamRelay(normalizedTemplate(stack)))), "named")), { named: true, sites: PUBLIC_API_SITES }), { env: "staging" }), STAGING)))));
+        const beforeBatchF = withoutLinearWebhookGuard(withoutWebhookSecretLane(withoutBatchFAdditions(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(withoutMachineGone(withTaskPeopleInvitationSwitches(withoutCoreOutboxStreamRelay(withoutInstallCompanyOutput(stack.stackName, normalizedTemplate(stack))))), "named")), { named: true, sites: PUBLIC_API_SITES }), { env: "staging" }), STAGING)))));
         // D1-2 (declared change set, D1-PLAN section 8, rebased onto train 90): every pin below moved for exactly the removal of the three recovery Schedules, the two Scheduler roles and their policies (and, in the named template, the PlanEvidence function, its log group, role and policy); the removed resources were in every older state these pins describe.
         expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("e9e3bb2f879909dcac49c02f22a5d668625f55b052d54c121cb67fd83301d17c");
       }, 120_000);
     }
     it(`${stack.stackName} is unchanged`, () => {
       // DEC 254zzz432: the alarm is taken out first, so every pin below holds as recorded (checked to be exactly one resource).
-      let template = stack.stackName === "agentx-staging-control-plane" ? withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(normalizedTemplate(stack), STAGING)) : normalizedTemplate(stack);
+      let template = stack.stackName === "agentx-staging-control-plane" ? withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutInstallCompanyOutput(stack.stackName, normalizedTemplate(stack)), STAGING)) : withoutInstallCompanyOutput(stack.stackName, normalizedTemplate(stack));
       // SIGNIN-MEMBER-CONDITIONCHECK, DEC 254zzz282 B014-A: pin the new full synth
       // before the existing normalizers, then preserve every old policy/snapshot assertion.
       if (stack.stackName === "agentx-staging-control-plane") {
