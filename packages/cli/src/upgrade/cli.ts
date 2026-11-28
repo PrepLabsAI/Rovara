@@ -1,5 +1,6 @@
 // The `agentx upgrade` command (FR-042 to FR-044, FR-026's upgrade --export), kept out of main.ts.
 import { CloudFormationClient } from "@aws-sdk/client-cloudformation";
+import { installCompanyClient } from "@agentx/broker/install-company";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { STSClient } from "@aws-sdk/client-sts";
 import type { Command } from "commander";
@@ -71,6 +72,7 @@ export function registerUpgradeCommand(program: Command, context: UpgradeCommand
         isInteractive: overrides.isInteractive ?? (() => process.stdin.isTTY === true),
         githubWebhook: overrides.githubWebhook ?? ((settings) => ({ secrets: secretsManagerInitSecrets(new SecretsManagerClient({ region: settings.region })), github: githubRestApi(context.fetch) })),
         doctor: overrides.doctor ?? ((env) => runDoctor({ env, store, services: (settings) => realDoctorServices({ settings, store, fetch: context.fetch, home: context.home, configDir: globals.configDir, stderr: context.stderr }) })),
+        installCompany: installCompanyDependency(overrides),
         write,
         now: overrides.now ?? Date.now,
         cliVersion: "cliVersion" in overrides ? overrides.cliVersion : RELEASE_VERSION,
@@ -92,4 +94,9 @@ export function registerUpgradeCommand(program: Command, context: UpgradeCommand
         ? `Wrote the upgrade of ${result.env} to ${result.to} to ${result.exported}; give it to your platform team.\n`
         : `Upgraded ${result.env} from ${result.from} to ${result.to}.\n`);
     });
+}
+
+/** #1612: the install company step's DynamoDB client, with the operator's own credentials in the environment's region (a test's override instead). */
+function installCompanyDependency(overrides: Partial<UpgradeDependencies>): NonNullable<UpgradeDependencies["installCompany"]> {
+  return overrides.installCompany ?? ((settings) => ({ documentClient: installCompanyClient(settings.region) }));
 }

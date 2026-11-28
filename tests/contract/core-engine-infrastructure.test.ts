@@ -33,6 +33,7 @@ import { withoutBrokerMemberConditionCheck } from "../support/broker-member-cond
 import { withoutWebhookSecretLane } from "../support/webhook-secret-template.js";
 import { withoutLinearWebhookRoute } from "../support/linear-webhook-route-template.js";
 import { withoutCanarySession } from "../support/canary-session-template.js";
+import { withoutDeveloperSignInTableOutput } from "../support/install-company-output-template.js";
 
 skipLambdaBundling();
 
@@ -653,7 +654,8 @@ describe("L1a broker environment derivation", () => {
     // their two DefaultPolicies; every digest below is re-pinned from the received value for exactly that removal (the ladder's steps are unchanged; the removed resources were in every older state too).
     // RETAIN (arch ruling 2026-11-24): Retain on the control plane's five keys, channel state table and adapter secret is asserted and put back to Delete first (withoutRetainPolicies, innermost), so they hold too.
     // WORKER-DELIVERY-IDENTITY (2026-11-25): the instance state-change handler, its rule and the dispatcher's one Describe statement are asserted and taken out first (withoutMachineGone, innermost), so every pin holds as recorded.
-    const machineless = () => withoutMachineGone(structuredClone(legacy.toJSON()));
+    // #1612 (Rule D): the DeveloperSignInTableName output is asserted and taken out first too (tests/support/install-company-output-template.ts), so every pin below holds as recorded.
+    const machineless = () => withoutMachineGone(withoutDeveloperSignInTableOutput(structuredClone(legacy.toJSON())));
     // CORE-RUN-STOP-RELAY (G1) + F1 L1a-1: every pin below except the full-template ones was recorded without the relay setting and with the two invitation switches, so each starts from the template with exactly the relay taken out and exactly the switches put back (Rule D).
     const relayless = () => withTaskPeopleInvitationSwitches(withoutCoreOutboxStreamRelay(withoutCanarySession(machineless())));
     const beforeFirstGateway = withoutLinearWebhookRoute(withoutWebhookSecretLane(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(relayless())), { named: false }) as Json & { Outputs: Record<string, unknown> }), stuckStoppingInstall()))));

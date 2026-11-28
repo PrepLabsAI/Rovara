@@ -1,5 +1,6 @@
 // tests/contract/developer-signin-infrastructure.test.ts
 import { createHash } from "node:crypto";
+import { withoutDeveloperSignInTableOutput } from "../support/install-company-output-template.js";
 import { STARTBUILD_OVERRIDE_KEYS, brokerCodeBuildStartStatements, withoutBrokerCodeBuildStart } from "../support/broker-codebuild-start-template.js";
 import { withoutWebhookSecretLane } from "../support/webhook-secret-template.js";
 import { withoutLinearWebhookGuard } from "../support/linear-webhook-route-template.js";
@@ -163,7 +164,8 @@ beforeAll(() => {
   const app = buildAgentXApp({ agentxEnv: "staging" });
   // WORKER-DELIVERY-IDENTITY (2026-11-25), Rule D: the instance state-change handler, its rule and the dispatcher's one Describe statement are asserted and taken out of the control plane first
   // (withoutMachineGone), so every pin, tuple list and resource-type map below holds as recorded; tests/contract/instance-state-change-infrastructure.test.ts pins the addition itself.
-  const raw = withoutMachineGone(controlPlane(app, "agentx-staging-control-plane"));
+  // #1612 (Rule D): the DeveloperSignInTableName output is asserted and taken out too (tests/support/install-company-output-template.ts), so every pin below holds as recorded.
+  const raw = withoutDeveloperSignInTableOutput(withoutMachineGone(controlPlane(app, "agentx-staging-control-plane")));
   namedRaw = structuredClone(raw);
   const full = withoutSlackCompanyMode(raw) as TemplateJson;
   namedWithSignInGrants = structuredClone(full);
@@ -178,7 +180,7 @@ beforeAll(() => {
   brokerEstimate = document.statements.reduce((total, statement) => total + statement._estimateSize({ actionEstimate: 20, arnEstimate: brokerArnEstimate }), 0);
   longestNamed = withoutSlackCompanyMode(controlPlane(buildAgentXApp({ agentxEnv: LONGEST_ENV }), `agentx-${LONGEST_ENV}-control-plane`)) as TemplateJson;
   // CANARY-SESSION: the legacy template as every pin below recorded it (tests/support/canary-session-template.ts asserts and takes out the canary function; canary-session-infrastructure.test.ts proves it).
-  legacy = withoutCanarySession(withoutMachineGone(controlPlane(buildAgentXApp(), "AgentXControlPlane")));
+  legacy = withoutDeveloperSignInTableOutput(withoutCanarySession(withoutMachineGone(controlPlane(buildAgentXApp(), "AgentXControlPlane"))));
 }, 300_000);
 
 // DEC 254zzz284: the only new authority is the broker's membership transaction fence.
