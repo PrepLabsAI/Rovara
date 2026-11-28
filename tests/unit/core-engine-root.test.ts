@@ -8,7 +8,7 @@ import { FakeHostModel } from "@agentx/broker/fakes";
 import type { CodeModuleDeps } from "../../packages/broker/src/core-host/code-modules.js";
 import * as codeModulesModule from "../../packages/broker/src/core-host/code-modules.js";
 import { createFakeWorld } from "../support/core-host-fakes.js";
-import type { OrgId, Principal } from "@agentx/contracts";
+import { NOT_IN_A_COMPANY_MESSAGE, type OrgId, type Principal } from "@agentx/contracts";
 import {
   brokerCoreDispatchQueue, NOT_A_MEMBER_HERE, deployedCallerFromMembership, personStandingFromDynamo, withCoreRoutes, policyHookSettingsFromEnvironment, projectRoleOf, NO_PROJECT_GRANT, brokerCoreModuleDeps, createBrokerCoreRoot, hostedTaskAccess, setupRunStandingFrom, membershipWithRoleFromDynamo, projectGrantFromDynamo,
   type BrokerCoreRootInputs,
@@ -129,12 +129,12 @@ describe("the broker's core root", () => {
     void seen;
   });
 
-  it("gives the HTTP API its /v1/app entry (lane L12): a non-member is asked to sign in again, and a core that cannot be built answers fixed words, never the registry's", async () => {
+  it("gives the HTTP API its /v1/app entry (lane L12): a person in no company is told so (#1612), and a core that cannot be built answers fixed words, never the registry's", async () => {
     const tables = fakeTables([member("dev-a", ORG, "owner")]);
     const lines: Array<Record<string, unknown>> = [];
     const root = createBrokerCoreRoot(rootInputs({}, tables.client, { log: (entry) => lines.push(entry) }));
     expect(root.coreApp).toBeDefined();
-    expect((await root.coreApp!.route({ method: "GET", path: "/v1/app/script-tokens", headers: {} }, { developerId: "dev-b", sessionId: "s", name: "Bo" }))?.statusCode).toBe(401);
+    expect((await root.coreApp!.route({ method: "GET", path: "/v1/app/script-tokens", headers: {} }, { developerId: "dev-b", sessionId: "s", name: "Bo" }))).toMatchObject({ statusCode: 403, body: JSON.stringify({ error: { code: "FORBIDDEN", message: NOT_IN_A_COMPANY_MESSAGE } }) });
     for (const request of [{ method: "GET", path: "/v1/app/script-tokens", headers: {} }, { method: "POST", path: "/v1/app/people/dev-c/erase", headers: {}, body: "{}" }]) {
       const answer = await root.coreApp!.route(request, { developerId: "dev-a", sessionId: "s", name: "Ada" });
       expect(answer?.statusCode, request.path).toBe(503);

@@ -3,11 +3,13 @@
 // The developer API (aws/developer-routes.ts, `routeAppRequest`) refuses a method and path with no row in the route table (dev-route-scopes.ts, APP_ROUTES) before anyone is
 // authenticated, verifies the developer token itself (no API Gateway authorizer, as /v1/dev/*), checks the row's scope, and only then hands the signed-in caller here. This entry:
 //   - maps the broker's signed-in caller to the principal the core knows (`deployedCallerOf`: the company and role from LIVE membership, never a token claim; the sign-in method and client only as the
-//     verified token states them). No mapping, or a mapping that throws, is the sign-in refusal; nothing is read for the core.
+//     verified token states them). No mapping is the sign-in refusal, or the not-in-a-company refusal (403, #1612) for a person with no membership row at all; a mapping that throws is the retryable 503.
+//     Nothing is read for the core.
 //   - hands a person erase (`POST /v1/app/people/<id>/erase`) to the person-erase route (#687), and every other /v1/app path to the core host's dev routes, which check the company,
 //     the person's level, grant or role on every act (DEC 254zzz73: no step-up).
 //   - answers anything the core's handlers throw (a runtime or registry that cannot be built) with fixed words and a log line naming only the error's kind.
 // Where no core is wired the deployment builds no entry at all, so the developer API answers every /v1/app/* path "route not found" and reads nothing.
+import { NOT_IN_A_COMPANY_MESSAGE } from "@agentx/contracts";
 import { MEMBERSHIP_READ_FAILED_WORDS } from "../core/membership-read.js";
 import type { DeployedCaller, SlackThreadAnswer, SlackThreadAnswerInput } from "../core-host/dev-routes.js";
 import type { PersonEraseCaller } from "../core-host/person-erase-route.js";
@@ -36,8 +38,10 @@ export interface CoreAppEntryOptions {
   routes: { route(request: BrokerRequest, caller: DeployedCaller): Promise<BrokerResponse | undefined>; answerForSlackThread?: CoreAppEntry["answerForSlackThread"] };
   /** The person-erase route (`createPersonEraseRoute`, through the root's `personErase`). */
   personErase: { route(request: BrokerRequest, caller: PersonEraseCaller): Promise<BrokerResponse | undefined> };
-  /** The deployment's identity mapping: the company and role from membership. Undefined: not a member of any company (the sign-in refusal). */
+  /** The deployment's identity mapping: the company and role from membership. Undefined: not a member of any company (the sign-in refusal, or not-in-a-company: `notInACompany`). */
   deployedCallerOf(caller: CoreEntryCaller): Promise<DeployedCaller | undefined>;
+  /** #1612: whether a caller the mapping names no company for has no membership row at all (never joined), as against a revoked one. Absent: always the sign-in refusal. */
+  notInACompany?(caller: CoreEntryCaller): Promise<boolean>;
   log: (entry: Record<string, unknown>) => void;
 }
 
@@ -51,9 +55,14 @@ export function coreAppEntryFrom(options: CoreAppEntryOptions): CoreAppEntry {
       const path = request.path.split("?")[0] ?? "";
       if (!path.startsWith(CORE_APP_PREFIX)) return undefined;
       let deployed: DeployedCaller | undefined;
-      // A membership read that FAILED is the retryable 503 (membership-read.ts); only a read that says "no membership" is the sign-in refusal.
+      // A membership read that FAILED is the retryable 503 (membership-read.ts); only a read that says "no membership" is a refusal. #1612: a person with no membership row at all is told
+      // they are in no company (403), since a 401 reads as a sign-in that ended; a revoked membership stays the sign-in refusal.
       try { deployed = await options.deployedCallerOf(caller); } catch { return answer(503, "RUNTIME_UNAVAILABLE", MEMBERSHIP_READ_FAILED_WORDS); }
-      if (deployed === undefined || deployed === null) return answer(401, "UNAUTHENTICATED", CORE_APP_SIGN_IN_AGAIN);
+      if (deployed === undefined || deployed === null) {
+        let absent: boolean;
+        try { absent = options.notInACompany === undefined ? false : await options.notInACompany(caller); } catch { return answer(503, "RUNTIME_UNAVAILABLE", MEMBERSHIP_READ_FAILED_WORDS); }
+        return absent ? answer(403, "FORBIDDEN", NOT_IN_A_COMPANY_MESSAGE) : answer(401, "UNAUTHENTICATED", CORE_APP_SIGN_IN_AGAIN);
+      }
       try {
         return PERSON_ERASE.test(path) ? await options.personErase.route(request, deployed) : await options.routes.route(request, deployed);
       } catch (error) {

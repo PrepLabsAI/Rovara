@@ -568,7 +568,7 @@
     "packages/cli/src/destroy/cli.ts": 5,
     "packages/cli/src/destroy/run.ts": 49,
     "packages/cli/src/destroy/wait.ts": 17,
-    "packages/cli/src/developer/commands.ts": 9,
+    "packages/cli/src/developer/commands.ts": 3,
     "packages/cli/src/developer/lessons-replay.ts": 7,
     "packages/cli/src/developer/login.ts": 2,
     "packages/cli/src/doctor/account.ts": 25,

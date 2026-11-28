@@ -177,6 +177,12 @@ export const ON_THE_WEBSITE_MESSAGE = "Do this on the Rovara website: the comman
 /** What LAST_OWNER (409) says: the organization's last owner may not step down, leave or be removed. */
 export const LAST_OWNER_MESSAGE = "An organization needs at least one owner. Make someone else an owner first.";
 
+/**
+ * #1612: what a signed-in person with no company membership on the install is told (403 FORBIDDEN). Not "sign in again": a fresh sign-in cannot change it, only an
+ * administrator adding them can.
+ */
+export const NOT_IN_A_COMPANY_MESSAGE = "You are not in a company on this install: ask your administrator to add you.";
+
 /** What PROJECT_NAME_TAKEN (409) says. The name is shown between backticks; the caller has checked it is a project name. */
 export const projectNameTakenMessage = (name: string): string => `Your organization already has a project named \`${name}\` (it may be archived). Choose another name.`;
 

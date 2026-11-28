@@ -148,7 +148,7 @@ import { DocumentLocalToolsSettings } from "../lessons/document-settings.js";
 import { mayUseProject } from "../developer/task-project-access.js";
 import { SYSTEM_OWNER_NOT_ALLOWED, isSystemPrincipal, systemStartVerdict, systemStepVerdict, type SetupRepairMark, type WikiRefreshMark } from "../core/system-runs/access.js";
 import { readWikiBuildPointer } from "../core/wiki-build/run.js";
-import { Membership, membershipKey, ownPartitionRow } from "./company-check.js";
+import { Membership, companyMembershipFromDynamo, membershipKey, ownPartitionRow } from "./company-check.js";
 import { grantKeyFor, namedCompany } from "./company-layout.js";
 import { coreTaskEntryFrom, taskActionMethodsOf, type CoreEntryCaller, type CoreTaskEntry } from "./engine-boundary.js";
 import { coreAppEntryFrom, type CoreAppEntry } from "./core-app-routes.js";
@@ -655,9 +655,16 @@ export function hostedTaskOwner(inputs: { membershipOf: Parameters<typeof hosted
   return ({ companyId, store, principal, task }) => hostedTaskAccess({ membershipOf: inputs.membershipOf, projectGrant: inputs.projectGrant, companyId, storage: async () => store, people: inputs.people }).canAct(principal, task);
 }
 
+/** #1612: a caller with no membership row at all is told they are in no company (core-app-routes.ts), not to sign in again. No sign-in table: no check (the sign-in refusal). */
+function notInACompanyCheck(documentClient: DynamoSender, signInTableName: string | undefined): { notInACompany?: (caller: CoreEntryCaller) => Promise<boolean> } {
+  if (signInTableName === undefined || signInTableName === "") return {};
+  const rows = companyMembershipFromDynamo(documentClient, signInTableName);
+  return { notInACompany: async (caller) => await rows.absent?.(caller.developerId) === true };
+}
+
 /**
  * The deployment's caller mapping (lane ID): the broker's signed-in developer -> the principal the core knows. The company and role come from the person's LIVE membership, read on every
- * call (never a token claim); the sign-in method and the client ride along only as the broker's sign-in set them from the verified token. No membership: undefined (the sign-in refusal).
+ * call (never a token claim); the sign-in method and the client ride along only as the broker's sign-in set them from the verified token. No membership: undefined (the not-in-a-company refusal, #1612).
  */
 export function deployedCallerFromMembership(membershipOf: (personId: string) => Promise<{ companyId: OrgId; role: OrgRole } | undefined>): (caller: CoreEntryCaller) => Promise<DeployedCaller | undefined> {
   return async (caller) => {
@@ -1396,7 +1403,9 @@ export function createBrokerCoreRoot(inputs: BrokerCoreRootInputs): BrokerCoreRo
         },
       }, deployed, press));
     // Lane L12: the same routes and caller mapping on /v1/app/*, with the person erase (below) next to them.
-    const coreApp = coreAppEntryFrom({ routes, personErase: { route: async (request, caller) => await personErase(request, caller) }, deployedCallerOf, log });
+    const coreApp = coreAppEntryFrom({
+      routes, personErase: { route: async (request, caller) => await personErase(request, caller) }, deployedCallerOf, log, ...notInACompanyCheck(inputs.documentClient, inputs.signInTableName),
+    });
     // Lane LM8: the lessons API, where the lessons switch is on and the deployment gives its people. The company and role come from membership; a company's lessons are its own
     // runtime's (built once); the person's project role is the broker's own project grant (administrator: maintainer, developer: contributor).
     const lessonsPeopleOf = inputs.lessonsPeople;

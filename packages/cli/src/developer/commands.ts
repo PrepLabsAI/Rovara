@@ -1,5 +1,5 @@
 // agentx whoami and agentx logout (FR-011).
-import { CLI_PACKAGE_NAME, AGENTX_CLI_CLIENT_ID, AgentXError, DeveloperProjectsResponseSchema, agentXError, type DeveloperProjectsResponse } from "@agentx/contracts";
+import { CLI_PACKAGE_NAME, AGENTX_CLI_CLIENT_ID, AgentXError, DeveloperProjectsResponseSchema, NOT_IN_A_COMPANY_MESSAGE, agentXError, type DeveloperProjectsResponse } from "@agentx/contracts";
 import { sanitizeServerText } from "../auth.js";
 import { developerTokenKey, removeDeveloperEnvironment, resolveDeveloperEnvironment } from "./config.js";
 import { developerAccessToken, type DeveloperSessionDeps } from "./session.js";
@@ -41,15 +41,7 @@ export async function developerRequest<T>(
   } catch {
     throw agentXError("RUNTIME_UNAVAILABLE", `could not reach AgentX at ${session.entry.url}; check your connection and try again`);
   }
-  if (response.status === 401) {
-    const reason = refusalReason(await response.json().catch(() => undefined));
-    throw agentXError("AUTH_REQUIRED", `your AgentX sign-in for ${session.env} has ended${reason === undefined ? "" : ` (${reason})`}; run npx ${CLI_PACKAGE_NAME} login ${session.entry.url}`);
-  }
-  if (options.explain === true && (response.status === 400 || response.status === 403 || response.status === 404)) {
-    const reason = refusalMessage(await response.json().catch(() => undefined));
-    if (reason !== undefined) throw agentXError(response.status === 400 ? "CONFIG_INVALID" : response.status === 403 ? "FORBIDDEN" : "NOT_FOUND", reason);
-  }
-  if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `AgentX answered HTTP ${response.status}; try again`);
+  if (!response.ok) throw await refusalError(response, session, options.explain === true);
   const parsed = schema.safeParse(await response.json().catch(() => undefined));
   if (!parsed.success) throw agentXError("RUNTIME_UNAVAILABLE", `AgentX answered with something unexpected; try again, or upgrade: npx ${CLI_PACKAGE_NAME}@latest whoami`);
   return { env: session.env, url: session.entry.url, body: parsed.data };
@@ -65,6 +57,25 @@ export async function fetchDeveloperProjects(deps: DeveloperSessionDeps, env: st
  * show. Every one describes a token that was already verified (a bad token gets one generic line),
  * so it tells a caller only about their own sign-in.
  */
+/**
+ * The error for a refused request: a sign-in that has ended (401); the server's reason for a 400, 403 or 404 where the route explains its refusals; a person in no company on the
+ * install (#1612), on every route; else the HTTP status.
+ */
+async function refusalError(response: Response, session: { env: string; entry: { url: string } }, explain: boolean): Promise<AgentXError> {
+  const body: unknown = await response.json().catch(() => undefined);
+  if (response.status === 401) {
+    const reason = refusalReason(body);
+    return agentXError("AUTH_REQUIRED", `your AgentX sign-in for ${session.env} has ended${reason === undefined ? "" : ` (${reason})`}; run npx ${CLI_PACKAGE_NAME} login ${session.entry.url}`);
+  }
+  const reason = refusalMessage(body);
+  if (response.status === 403 && reason === NOT_IN_A_COMPANY_MESSAGE) return agentXError("FORBIDDEN", NOT_IN_A_COMPANY_MESSAGE);
+  const code = explain ? EXPLAINED_CODES[response.status] : undefined;
+  if (code !== undefined && reason !== undefined) return agentXError(code, reason);
+  return agentXError("RUNTIME_UNAVAILABLE", `AgentX answered HTTP ${response.status}; try again`);
+}
+
+const EXPLAINED_CODES: Readonly<Record<number, "CONFIG_INVALID" | "FORBIDDEN" | "NOT_FOUND">> = { 400: "CONFIG_INVALID", 403: "FORBIDDEN", 404: "NOT_FOUND" };
+
 function refusalReason(body: unknown): string | undefined {
   const message = refusalMessage(body);
   if (message === undefined) return undefined;

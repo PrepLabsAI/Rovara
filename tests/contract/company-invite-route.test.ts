@@ -121,8 +121,9 @@ it.each(["missing", "malformed", "revoked", "throws", "wrong-company"])("%s memb
   if (damage === "revoked") h.db.set({ ...h.db.get(key.pk, key.sk)!, revokedAt: TIME });
   if (damage === "throws") h.deps.companies = { companyOf: async () => { throw new Error("private-canary"); } };
   if (damage === "wrong-company") h.deps.companies = { companyOf: async () => B };
-  // A membership read that throws is the retryable 503 (nothing forwarded, nothing leaked); one that answers none, malformed, revoked or another company is the 401 refusal.
-  const answer = await h.post(); expect(answer.statusCode).toBe(damage === "throws" ? 503 : 401); expect(answer.body).not.toMatch(/private-canary|org_/); expect(h.forwarded).toEqual([]);
+  // A membership read that throws is the retryable 503 (nothing forwarded, nothing leaked); no membership row at all is the 403 not-in-a-company refusal (#1612); one that is malformed,
+  // revoked or another company's is the 401 refusal.
+  const answer = await h.post(); expect(answer.statusCode).toBe(damage === "throws" ? 503 : damage === "missing" ? 403 : 401); expect(answer.body).not.toMatch(/private-canary|org_/); expect(h.forwarded).toEqual([]);
 });
 
 it("off routes are unknown and do not authenticate or invoke", async () => {
