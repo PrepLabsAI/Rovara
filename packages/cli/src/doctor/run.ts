@@ -8,6 +8,7 @@ import { plainMessage } from "../output.js";
 import { alertChecks, capacityChecks, modelChecks, signInChecks } from "./account.js";
 import { check, doctorReport, guarded, type DoctorCheck, type DoctorContext, type DoctorGroup, type DoctorReport, type DoctorServices } from "./checks.js";
 import { chatGptChecks } from "./chatgpt.js";
+import { companyChecks } from "./company.js";
 import { connectorChecks } from "./connectors.js";
 import { githubChecks, githubWebhookChecks } from "./github.js";
 import { runtimeChecks } from "./runtime.js";
@@ -18,7 +19,7 @@ import { stackChecks } from "./stacks.js";
 
 const GROUPS: ReadonlyArray<[DoctorGroup, (context: DoctorContext) => Promise<DoctorCheck[]>]> = [
   ["stacks", stackChecks], ["secrets", secretChecks], ["slack", slackChecks], ["github", githubChecks], ["github", githubWebhookChecks], ["connectors", connectorChecks],
-  ["models", modelChecks], ["models", projectModelChecks], ["alerts", alertChecks], ["capacity", capacityChecks], ["sign-in", signInChecks], ["chatgpt", chatGptChecks], ["runtime", runtimeChecks],
+  ["models", modelChecks], ["models", projectModelChecks], ["alerts", alertChecks], ["capacity", capacityChecks], ["sign-in", signInChecks], ["sign-in", companyChecks], ["chatgpt", chatGptChecks], ["runtime", runtimeChecks],
 ];
 
 export async function runDoctor(input: { env: string; store: ParameterStore; services: (settings: EnvironmentSettings) => DoctorServices }): Promise<DoctorReport> {

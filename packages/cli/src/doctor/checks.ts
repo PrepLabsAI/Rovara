@@ -48,6 +48,8 @@ export interface DoctorServices {
   chatgpt?: () => Promise<ChatGptHealthRead>;
   /** RUN-3: the browser and API runtime registrations, as the control plane reports them through this computer's admin sign-in. */
   runtime?: () => Promise<RuntimeStatusRead>;
+  /** #1612: a DynamoDB client (the operator's own credentials) for the install company check, which only reads. Absent: not checked. */
+  installCompanyClient?: { send(command: unknown): Promise<unknown> };
   now: () => number;
   sleep: (ms: number) => Promise<void>;
 }
