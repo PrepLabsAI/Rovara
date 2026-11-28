@@ -779,12 +779,16 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       const installLevel = request.clientId === undefined || registered?.installLevel === true;
       let candidate: string | undefined;
       let revokedMember = false;
+      // #1612: this sign-in joins the install's own company (no membership anywhere, the install's own Slack workspace or OIDC, no company asked for).
+      let installJoin = false;
       // DEC 254e: the same for Slack, from any workspace: the company comes only from live membership (or `company=`), never from the workspace.
       try {
         const member = request.companyId === undefined && installLevel ? await deps.company.membership(developerId) : undefined;
         if (member !== undefined) outcome.companyId = member.companyId;
         revokedMember = member?.revokedAt !== undefined;
         candidate = request.companyId ?? member?.companyId ?? IMPLICIT_COMPANY_ID;
+        const own = await installCompanyFor({ asked: request.companyId, member, installLevel, installProvider, method, identity });
+        if (own !== undefined) { candidate = own; installJoin = true; }
       } catch { candidate = undefined; }
       const clientAllowed = request.clientId === undefined || (registered !== undefined && (registered.installLevel === true || (registered.companyId ?? IMPLICIT_COMPANY_ID) === candidate));
       // The install's methods (its OIDC, its Slack app) admit into a company other than the built-in one only when that company has no issuer of
@@ -810,7 +814,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
         || (byInvite && request.companyId === undefined)
         ? { ok: false as const, reason: "not_invited" as const }
         : byInvite ? await deps.company.joinByInvite({ personId: developerId, companyId: candidate, inviteHash: request.inviteHash!, ...inviteProof })
-          : await deps.company.join({ personId: developerId, companyId: candidate, ...(identity.email === undefined ? {} : { email: identity.email }) });
+          : await joinCandidate(deps.company, installJoin, { personId: developerId, companyId: candidate, ...(identity.email === undefined ? {} : { email: identity.email }) });
       if (joined.ok) outcome.companyId = joined.membership.companyId;
       else if (joined.attributedCompanyId !== undefined) outcome.companyId = joined.attributedCompanyId;
       // DEC 253z: not invited anywhere, no company asked for, signing in to the web app: a session with no company (it can only create one).
@@ -873,13 +877,34 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       ...(installMethod ? { installMethod: true as const } : {}),
       ...(joinedByInvite ? { joinedByInvite: true as const } : {}),
       // FR-005: only a company sign-in can make an administrator; only the install issuer can make an install-wide administrator (T3).
-      // DEC 254b (a): and only into the built-in company, as before; a member of another company signed in through the shared method never is one.
-      ...(method === "oidc" && request.companyId === undefined && identity.administrator === true && !companyless && (companyId === undefined || companyId === IMPLICIT_COMPANY_ID) ? { administrator: true as const } : {}),
+      // DEC 254b (a): and only into the built-in company, as before (#1612: or the install's own company); a member of another company signed in through the shared method never is one.
+      ...(method === "oidc" && request.companyId === undefined && identity.administrator === true && !companyless && await installAdministratorCompany(companyId) ? { administrator: true as const } : {}),
     };
     const agentxCode = await store.issueCode(grant);
     const response = toClient(grant.redirectUri, { code: agentxCode, state: request.clientState });
     outcome.successLog = { event: "signin.succeeded", method: grant.amr, developerId: grant.developerId, linkedToSlack: grant.slackUserId !== undefined, ...(grant.clientId === undefined ? {} : { clientId: grant.clientId }) };
     return response;
+  }
+
+  /**
+   * #1612: the install's own company, for a sign-in that names no company, by a person with no membership anywhere, through an install-level client and the install's own method that
+   * speaks for the install (ownInstallIdentity). Undefined: the sign-in goes on as before. A read that fails throws (the caller refuses).
+   */
+  async function installCompanyFor(input: { asked: string | undefined; member: unknown; installLevel: boolean; installProvider: boolean; method: DeveloperSignInMethod; identity: { slackUserId?: string } }): Promise<string | undefined> {
+    if (input.asked !== undefined || input.member !== undefined || !input.installLevel || !input.installProvider || !ownInstallIdentity(input.method, input.identity)) return undefined;
+    return await deps.installCompany?.companyId();
+  }
+
+  /** The join for the sign-in's company: the install's own company joins by the install rule (#1612), any other by pre-approval or the legacy rule. */
+  async function joinCandidate(company: CompanySignInStore, installJoin: boolean, input: { personId: string; companyId: string; email?: string }): Promise<CompanyJoin> {
+    if (installJoin && deps.installCompany !== undefined) return await deps.installCompany.join({ personId: input.personId, ...(input.email === undefined ? {} : { email: input.email }) });
+    return await company.join(input);
+  }
+
+  /** FR-005 / DEC 254b (a): the companies an install-wide administrator may sign in to: none, the built-in one, or (#1612) the install's own company. A read that fails grants nothing. */
+  async function installAdministratorCompany(companyId: string | undefined): Promise<boolean> {
+    if (companyId === undefined || companyId === IMPLICIT_COMPANY_ID) return true;
+    try { return await deps.installCompany?.companyId() === companyId; } catch { return false; }
   }
 
   /**
@@ -1264,4 +1289,9 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
         : oauthError(500, "server_error", "sign-in failed on the server; try again");
     }
   };
+}
+
+/** #1612: a sign-in through the install's own method that speaks for the install: its OIDC, or Slack from the install's own workspace (only that one carries a Slack user id, providers.ts). */
+function ownInstallIdentity(method: DeveloperSignInMethod, identity: { slackUserId?: string }): boolean {
+  return method === "oidc" || (method === "slack" && identity.slackUserId !== undefined);
 }
