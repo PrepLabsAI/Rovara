@@ -121,7 +121,7 @@ export class InstallCompanyStore {
    * takes the owner seat (once); everyone else joins as a member. A person who already has a membership keeps it (a member elsewhere is never moved, a removed member is told so).
    * Before the install has a company, or on a read that fails, nobody joins.
    */
-  async join(input: { personId: string; email?: string }): Promise<CompanyJoin> {
+  async join(input: { personId: string; email?: string; byEmailIndex?: true }): Promise<CompanyJoin> {
     if (!CompanyPersonId.safeParse(input.personId).success) return NOT_INVITED;
     try {
       const record = await this.read();
@@ -129,7 +129,7 @@ export class InstallCompanyStore {
       const existing = await this.input.company.membership(input.personId);
       if (existing !== undefined) return memberResult(existing, record.companyId);
       if (!await this.input.company.companyExists(record.companyId)) return NOT_INVITED;
-      const owner = ownerSeatFor(record, input.email);
+      const owner = await this.takesOwnerSeat(record, input);
       try { return await this.seat(record, input.personId, owner); }
       catch (error) {
         if (!lostTheSeatRace(error)) throw error;
@@ -139,6 +139,23 @@ export class InstallCompanyStore {
         return owner ? await this.seat(record, input.personId, false) : NOT_INVITED;
       }
     } catch (error) { return isUnreadableMembershipRow(error) ? NOT_INVITED : { ok: false, reason: "not_invited", readFailed: true }; }
+  }
+
+  /**
+   * Whether this join takes the owner seat: the sign-in's verified email is the owner's, or (`byEmailIndex`, the operator's move, for a person who signed in before the install had a
+   * company) the email index, which only a verified sign-in writes, names this person for the owner's email.
+   */
+  private async takesOwnerSeat(record: InstallCompanyRecord, input: { personId: string; email?: string; byEmailIndex?: true }): Promise<boolean> {
+    if (ownerSeatFor(record, input.email)) return true;
+    return input.byEmailIndex === true && await this.ownerByEmailIndex(record) === input.personId;
+  }
+
+  /** The person the install's (unscoped) email index names for the owner's email hash, while the owner seat is free. */
+  private async ownerByEmailIndex(record: InstallCompanyRecord): Promise<string | undefined> {
+    if (record.ownerEmailHash === undefined || record.ownerClaimedBy !== undefined) return undefined;
+    const row = await this.input.company.read({ pk: `EMAIL#${record.ownerEmailHash}`, sk: "META" }) as Record<string, unknown> | undefined;
+    const developerId = row?.["entityType"] === "DEVELOPER_EMAIL" ? row["developerId"] : undefined;
+    return typeof developerId === "string" && CompanyPersonId.safeParse(developerId).success ? developerId : undefined;
   }
 
   /** One transaction: the membership, its mirror, and either the owner seat's claim or a check that the setting still names this company. */
