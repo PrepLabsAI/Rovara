@@ -22,6 +22,7 @@ import { CompanySignInStore } from "../developer/company-membership.js";
 import { companyIssuerProvider } from "../developer/company-issuer.js";
 import { CompanyInviteStore } from "../developer/company-invites.js";
 import { CompanyImportStore } from "../developer/company-import.js";
+import { InstallCompanyStore } from "../developer/install-company.js";
 import { createCompanySignInAuditWriter } from "../developer/company-signin-audit.js";
 import { POLICY_QUESTION_KEY_PURPOSE, kmsTokenSigner } from "../developer/tokens.js";
 import type { HttpApiV2Event } from "./lambda.js";
@@ -277,7 +278,9 @@ export function createAwsDeveloperIdentityHandler(env: NodeJS.ProcessEnv, worksp
       signInAudit: createCompanySignInAuditWriter({ documentClient, tableName: required(env, "STATE_TABLE_NAME"), now }),
       // DEC 254a, 253z: invite codes and self-serve create, only with the company layer.
       // DEC 254zg (a): self-serve create only while the CompanySelfServe switch is on as well (infra/lib/company-signin.ts gives "enabled" only with CompanySignIn on).
-      companyInvites: new CompanyInviteStore({ documentClient, tableName, now, company, selfServeAllowed: companySelfServeFromEnvironment(env) }) }),
+      companyInvites: new CompanyInviteStore({ documentClient, tableName, now, company, selfServeAllowed: companySelfServeFromEnvironment(env) }),
+      // #1612: the install's own company, made or adopted once by the operator (init and upgrade).
+      installCompany: new InstallCompanyStore({ company, tableName, now }) }),
     // DEC 254b (b): the operator's company import runs BEFORE the company layer is switched on, so it is there with the layer on or off.
     companyImport: new CompanyImportStore({ documentClient, tableName, now }),
     signer: kmsTokenSigner({ kms: new KMSClient(region), keyId: required(env, "DEVELOPER_TOKEN_KEY_ARN") }),

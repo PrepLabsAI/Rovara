@@ -66,7 +66,9 @@ it.each([{ entityType: "OTHER" }, { personId: "2".repeat(64) }, { companyId: "wr
 
 const operatorKinds = ["company-create", "company-preapprove", "company-preapproval-withdraw", "company-preapproval-resend", "company-preapprovals-list", "company-member-revoke", "company-member-restore", "company-member-role-set", "company-member-list", "company-issuer-set", "company-signin-client-set",
   // DEC 254a, 253z: invite codes and the self-serve switch (an administrator's applied change), and self-serve create (the broker's route).
-  "company-invite-create", "company-invite-list", "company-invite-revoke", "company-self-serve-set", "company-self-create"];
+  "company-invite-create", "company-invite-list", "company-invite-revoke", "company-self-serve-set", "company-self-create",
+  // #1612: the install's own company, made or adopted once, and read.
+  "company-install-ensure", "company-install-read"];
 const operatorOwners = new Set([
   "packages/broker/src/developer/server.ts", "packages/broker/src/developer/company-operator.ts",
   "packages/broker/src/developer/company-membership.ts", "packages/broker/src/developer/company-issuer.ts",

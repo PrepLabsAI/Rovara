@@ -75,6 +75,7 @@ import { endedByAdmin, refreshableBy, startedBeforeMethodOn, type AuthRequestRec
 import { issueAccessToken, pkceChallengeMatches, type TokenSigner, type PublicSigningJwk, type SigningKeyPurpose } from "./tokens.js";
 import type { CompanySignInStore } from "./company-membership.js";
 import type { CompanyInviteStore } from "./company-invites.js";
+import type { InstallCompanyStore } from "./install-company.js";
 import type { SelectedCompanyIssuer } from "./company-issuer.js";
 import { companyOperator, type CompanyOperatorRequest, type CompanyOperatorResponse } from "./company-operator.js";
 import { companyImportOperator, type CompanyImportEventInput, type CompanyImportReplyValue, type CompanyImportStore } from "./company-import.js";
@@ -100,6 +101,8 @@ export interface DeveloperIdentityDependencies {
   signInAudit?: (input: CompanySignInAuditInput) => Promise<void>;
   /** DEC 254a, 253z: invite codes and self-serve create (with `company` only). Absent: those events answer unavailable, and nobody signs in with no company. */
   companyInvites?: CompanyInviteStore;
+  /** #1612: the install's own company (with `company` only): made or adopted once by the operator's `company-install-ensure`, and read. */
+  installCompany?: InstallCompanyStore;
   /** DEC 254b (b): an operator's import of the install's old company layout, and its undo, with Code's company layer on or off. */
   companyImport?: CompanyImportStore;
   companyIssuer?: (companyId: string) => Promise<SelectedCompanyIssuer | undefined>;
@@ -1124,7 +1127,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     if ("kind" in event) {
       if (event.kind === "slack-install") return deps.slackInstall === undefined ? { ok: false, error: "not_set_up" } : deps.slackInstall(event);
       if (deps.companyImport !== undefined && (event.kind === "company-import" || event.kind === "company-import-undo")) return companyImportOperator({ store: deps.companyImport, log: deps.log }, event);
-      if (deps.company !== undefined && typeof event.kind === "string" && event.kind.startsWith("company-")) return companyOperator({ store: deps.company, ...(deps.companyInvites === undefined ? {} : { invites: deps.companyInvites }), clients: store, now: deps.now, log: deps.log }, event);
+      if (deps.company !== undefined && typeof event.kind === "string" && event.kind.startsWith("company-")) return companyOperator({ store: deps.company, ...(deps.companyInvites === undefined ? {} : { invites: deps.companyInvites }), ...(deps.installCompany === undefined ? {} : { installCompany: deps.installCompany }), clients: store, now: deps.now, log: deps.log }, event);
       // DEC 254w: connected sign-ins. Each checks the caller's own live session in this table.
       if (event.kind === "sign-in-link-start") return signInLinks.start(event);
       if (event.kind === "sign-in-link-finish") return signInLinks.finish(event);
