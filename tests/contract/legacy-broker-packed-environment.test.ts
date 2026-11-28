@@ -23,13 +23,15 @@ const BEFORE = [
   "TURN_RECORDS_TABLE_NAME",
 ];
 /** F1 L1a-1 deleted the two invitation switches (the parameters and their packed settings tu and tv): the broker no longer has these two of the 45. Nothing read either variable. */
-const RETIRED = ["AGENTX_TASK_PEOPLE_PRIVATE_INVITATIONS_ENABLED", "AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED"];
+// #1614: COMPANY_SIGNIN went with the company mode switches (company mode is the only mode).
+const RETIRED = ["AGENTX_TASK_PEOPLE_PRIVATE_INVITATIONS_ENABLED", "AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED", "COMPANY_SIGNIN"];
 /** What packing adds, and nothing else: the account (ARNs and URLs are built from it), the names parameter's pointer and revision (and the names read from it), the settings, and the layout. */
 const PACKING = ["AGENTX_ACCOUNT_ID", "AGENTX_INSTALL_LAYOUT", "AGENTX_NAMES", "AGENTX_NAMES_PARAMETER", "AGENTX_NAMES_REVISION", "AGENTX_SETTINGS"];
 /** CODE-PUBLIC-URL: the public address the broker derives its issuer from (packed `pu`); empty while the install has none. */
 const PUBLIC_API = ["ROVARA_PUBLIC_API_URL"];
 /** #1171: Slack company mode's switch (packed `cw`), "disabled" while off. */
-const SLACK_COMPANY = ["SLACK_COMPANY_WORKSPACES"];
+// #1614: SLACK_COMPANY_WORKSPACES went with the company mode switches.
+const SLACK_COMPANY: string[] = [];
 /** #1148: what the core engine brought to the legacy install, on purpose: its switches and model settings, its queues and attention email (derived), the keys and the saved environments' roles. */
 const CORE = [
   "ATTENTION_EMAIL_FUNCTION_NAME", "COMPANY_READS", "CORE_DISPATCH_DEAD_LETTER_URL", "CORE_DISPATCH_QUEUE_URL", "CORE_LESSONS_REFLECT_DEAD_LETTER_URL", "CORE_LESSONS_REFLECT_QUEUE_URL",
@@ -119,17 +121,17 @@ describe("production's broker, packed (#1149)", () => {
   let template: Template;
   beforeAll(() => { template = buildAgentXApp().synth().getStackByName("AgentXControlPlane").template as Template; }, 300_000);
 
-  for (const companySignIn of ["disabled", "enabled"]) {
-    it(`boots with exactly the variables it had before, plus the packing's own (company sign-in ${companySignIn})`, async () => {
-      const { env, reads, parameterName } = await bootedBroker(template, { CompanySignIn: companySignIn, CompanySelfServe: companySignIn });
+  {
+    it("boots with exactly the variables it had before, plus the packing's own (#1614: no company mode switch left)", async () => {
+      const { env, reads, parameterName } = await bootedBroker(template, {});
       expect(parameterName).toBe("/agentx/production/broker-names");
       expect(reads).toEqual(["/agentx/production/broker-names"]);
       expect(Object.keys(env).sort()).toEqual([...BEFORE.filter((name) => !RETIRED.includes(name)), ...PACKING, ...CORE, ...SLACK_COMPANY, ...WEBHOOK, ...PUBLIC_API].sort());
-      expect(env.SLACK_COMPANY_WORKSPACES).toBe("disabled");
+      expect(env).not.toHaveProperty("SLACK_COMPANY_WORKSPACES");
       expect(env.AGENTX_INSTALL_LAYOUT).toBe("legacy");
       expect(env.GITHUB_WEBHOOK_SECRET_ID).toBe("agentx/production/github-webhook-secret");
       expect(env.AGENTX_ENV).toBe("production");
-      expect(env.COMPANY_SIGNIN).toBe(companySignIn);
+      expect(env).not.toHaveProperty("COMPANY_SIGNIN");
       // What a named environment would derive differently stays production's own: the alarm prefix is passed whole, and the roles keep their ARNs (no /agentx/production/ path).
       expect(env.AGENTX_ALARM_PREFIX).toBe("AgentX");
       expect(env.SLACK_ORCHESTRATOR_ROLE_ARN).toMatch(/^arn:aws:iam::123456789012:role\/PHYS-SlackOrchestratorTaskRole/u);

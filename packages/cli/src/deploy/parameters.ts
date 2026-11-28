@@ -449,8 +449,7 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
         SlackRequestQueueUrl: required(outputs, "control-plane", "SlackRequestQueueUrl", answers.env),
         // Spec 062: present once the control plane has the channel API.
         ...optionalOutputs(outputs, "control-plane", ["ChannelRequestQueueUrl", "ChannelEventQueueUrl", "SlackAdapterCommandsUrl", "SlackAdapterSecretName"]),
-        // L2-2 PR 18d: Slack company mode's inputs (the control plane always outputs them, DEC 254zk). The switch itself (SlackCompanyWorkspacesState) is the operator's, set with
-        // agentx config set slack.companyWorkspaces and kept across upgrades (OPERATOR_PARAMETERS), so an upgrade never turns it off behind the control plane's back.
+        // L2-2 PR 18d: Slack company mode's inputs (the control plane always outputs them, DEC 254zk). #1614: company mode is the only mode, so there is no switch to carry.
         SlackCompanyStateTableName: "", SlackCompanyTeamId: "",
         ...optionalOutputs(outputs, "control-plane", ["SlackCompanyStateTableName", "SlackCompanyTeamId"]),
         SlackThreadsTableName: required(outputs, "control-plane", "SlackThreadsTableName", answers.env),

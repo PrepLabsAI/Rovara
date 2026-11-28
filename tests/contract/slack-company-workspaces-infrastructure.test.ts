@@ -1,6 +1,6 @@
-// L2-2 PR 18a (DEC 254o b): Slack company mode's infrastructure. One stack parameter, SlackCompanyWorkspaces (default disabled), named environments only. Each consumer's
-// grant is its own inline policy under the switch's condition, so with the switch off CloudFormation creates none of them (the rest of the template is pinned unchanged by
-// named-templates.test.ts through tests/support/slack-company-template.ts). Here every grant is checked in full, plus the boundary and the #126 rule (no ingress State write).
+// L2-2 PR 18a (DEC 254o b): Slack company mode's infrastructure. Each consumer's grant is its own inline policy (the rest of the template is pinned unchanged by named-templates.test.ts
+// through tests/support/slack-company-template.ts). #1614: company mode is the only mode, so there is no SlackCompanyWorkspaces switch: no parameter, no condition, every grant
+// unconditional. Here every grant is checked in full, plus the boundary and the #126 rule (no ingress State write).
 import { Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
@@ -44,33 +44,28 @@ const BINDINGS = ["SLACK_TEAM#*", "SLACK_WORKSPACE_BINDING"];
 
 let named: TemplateJson;
 let legacy: TemplateJson;
-let on: string;
 beforeAll(() => {
   named = controlPlane("staging");
   legacy = controlPlane(undefined);
-  on = Object.keys(named.Conditions).find((id) => id.startsWith("SlackCompanyModeOn"))!;
   // #1120: control plane synths; on a busy CI runner they pass the 10 s default, as the other stack tests allow for.
 }, 240_000);
 
-describe("Slack company mode's switch (18a)", () => {
-  it("is one default-off parameter whose condition is exactly 'enabled' AND company sign-in on (DEC 254zk)", () => {
-    expect(named.Parameters.SlackCompanyWorkspaces).toMatchObject({ Type: "String", Default: "disabled", AllowedValues: ["enabled", "disabled"] });
-    const companyOn = Object.keys(named.Conditions).find((id) => id.startsWith("CompanySignInSwitchOn"))!;
-    expect(named.Conditions[companyOn]).toStrictEqual({ "Fn::Equals": [{ Ref: "CompanySignIn" }, "enabled"] });
-    expect(named.Conditions[on]).toStrictEqual({ "Fn::And": [{ "Fn::Equals": [{ Ref: "SlackCompanyWorkspaces" }, "enabled"] }, { Condition: companyOn }] });
+describe("Slack company mode (18a; #1614: always on)", () => {
+  it("has no switch: no parameter, no condition, no SLACK_COMPANY_WORKSPACES anywhere, in a named environment and in the deployment that predates environments", () => {
+    for (const template of [named, legacy]) {
+      expect(template.Parameters).not.toHaveProperty("SlackCompanyWorkspaces");
+      expect(Object.keys(template.Conditions ?? {}).filter((id) => id.startsWith("SlackCompanyMode") || id.startsWith("CompanySignInSwitch"))).toEqual([]);
+      expect(JSON.stringify(template)).not.toContain("SLACK_COMPANY_WORKSPACES");
+    }
   });
 
-  it("exists in the deployment that predates environments too (#1171), off by default, every grant a policy under its condition, its tokens under production", () => {
-    // Owner 2026-11-19: no named-only feature. The legacy deployment (production) gets the same default-off parameter and the same condition, and nothing while it is off.
-    expect(legacy.Parameters.SlackCompanyWorkspaces).toStrictEqual(named.Parameters.SlackCompanyWorkspaces);
-    const legacyOn = Object.keys(legacy.Conditions).find((id) => id.startsWith("SlackCompanyModeOn"))!;
-    const companyOn = Object.keys(legacy.Conditions).find((id) => id.startsWith("CompanySignInSwitchOn"))!;
-    expect(legacy.Conditions[legacyOn]).toStrictEqual({ "Fn::And": [{ "Fn::Equals": [{ Ref: "SlackCompanyWorkspaces" }, "enabled"] }, { Condition: companyOn }] });
+  it("exists in the deployment that predates environments too (#1171), every grant an unconditional policy of its own, its tokens under production", () => {
+    // Owner 2026-11-19: no named-only feature.
     const added = Object.entries(legacy.Resources).filter(([id]) => id.startsWith("SlackCompanyMode"));
     expect(added.length).toBeGreaterThan(0);
     for (const [id, resource] of added) {
       expect(resource.Type, id).toBe("AWS::IAM::Policy");
-      expect(resource.Condition, id).toBe(legacyOn);
+      expect(resource.Condition, id).toBeUndefined();
     }
     // The same consumers as a named environment's.
     const consumers = (template: TemplateJson) => Object.keys(template.Resources).filter((id) => id.startsWith("SlackCompanyMode")).map((id) => id.replace(/^SlackCompanyMode/u, "").replace(/[0-9A-F]{8}$/u, "")).sort();
@@ -80,17 +75,17 @@ describe("Slack company mode's switch (18a)", () => {
     expect(text).not.toContain("agentx/undefined");
   });
 
-  it("grants only through policies under its condition, one per consumer", () => {
+  it("grants only through policies of its own, one per consumer", () => {
     const added = Object.entries(named.Resources).filter(([id]) => id.startsWith("SlackCompanyMode"));
     expect(added.map(([id]) => id.replace(/^SlackCompanyMode/u, "").replace(/[0-9A-F]{8}$/u, "")).sort()).toEqual([...SLACK_COMPANY_POLICIES].sort());
     for (const [id, resource] of added) {
       expect(resource.Type, id).toBe("AWS::IAM::Policy");
-      expect(resource.Condition, id).toBe(on);
+      expect(resource.Condition, id).toBeUndefined();
     }
-    // No other policy anywhere reaches the token family except DeveloperIdentity's Add to Slack grant, now its own policy under company sign-in's condition (DEC 254zg (a)).
+    // No other policy anywhere reaches the token family except DeveloperIdentity's Add to Slack grant, its own policy (DEC 254zg (a)).
     const others = Object.entries(named.Resources).filter(([id, resource]) => !id.startsWith("SlackCompanyMode") && JSON.stringify(resource.Properties).includes("slack-workspaces/"));
     expect(others.map(([id]) => id.replace(/[0-9A-F]{8}$/u, ""))).toEqual(["CompanySignInSwitchSlackWorkspaceTokens"]);
-    expect(others[0]![1].Condition).toMatch(/^CompanySignInSwitchOn[0-9A-F]{8}$/u);
+    expect(others[0]![1].Condition).toBeUndefined();
   });
 
   it("gives the Slack Lambda and the channel API reads only: bindings, the company link row, project revisions, memberships and the token", () => {
@@ -114,7 +109,7 @@ describe("Slack company mode's switch (18a)", () => {
   it("gives the Slack Lambda (only) a NAMED company's own channel-binding rows, by key, with the exact company-id shape and the Null guard (DEC 254zzz80, owner-approved)", () => {
     const resource = policy(named, "SlackIngressCompanyBindings");
     expect(roleOf(resource)).toEqual([roleOfFunction(named, "SlackIngress")]);
-    expect(resource.Condition).toBe(on);
+    expect(resource.Condition).toBeUndefined();
     expect(resource.Properties.PolicyName).toBe("slack-company-workspaces-slackingresscompanybindings");
     expect(statementsOf(resource)).toStrictEqual([reads("ReadCompanySlackChannelBindings", tableArn(named, "State"), ["ORG#org_????????????????????#SLACK_BINDING#*"])]);
     // What the pattern lets in, as DynamoDB's LeadingKeys StringLike matches it (? one character, * any run): the staging company's binding partition and no other family.
@@ -129,7 +124,7 @@ describe("Slack company mode's switch (18a)", () => {
     // #1171: the legacy deployment has it under the same condition only (nothing while Slack company mode is off).
     const legacyPolicies = Object.entries(legacy.Resources).filter(([, r]) => r.Type === "AWS::IAM::Policy" && JSON.stringify(r.Properties).includes("#SLACK_BINDING#"));
     expect(legacyPolicies.map(([id]) => id.replace(/[0-9A-F]{8}$/u, ""))).toEqual(["SlackCompanyModeSlackIngressCompanyBindings"]);
-    expect(legacyPolicies[0]![1].Condition).toMatch(/^SlackCompanyModeOn[0-9A-F]{8}$/u);
+    expect(legacyPolicies[0]![1].Condition).toBeUndefined();
   });
 
   it("gives the Slack Lambda and the channel API a NAMED company's project revisions: Query, keys plus companyId and candidate, the exact company-id shape (R2-F1 lane 1 review M2)", () => {
@@ -137,7 +132,7 @@ describe("Slack company mode's switch (18a)", () => {
     for (const [id, fn] of [["SlackIngressCompanyProjects", "SlackIngress"], ["ChannelApiCompanyProjects", "ChannelApiIngress"]] as const) {
       const resource = policy(named, id);
       expect(roleOf(resource)).toEqual([roleOfFunction(named, fn)]);
-      expect(resource.Condition).toBe(on);
+      expect(resource.Condition).toBeUndefined();
       expect(statementsOf(resource)).toStrictEqual([{ Sid: "ReadCompanyProjectRevisions", Effect: "Allow", Action: "dynamodb:Query", Resource: state,
         Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ORG#org_????????????????????#PROJECT#*"] }, "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "companyId", "candidate"] },
           StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" }, Null: { "dynamodb:LeadingKeys": "false", "dynamodb:Attributes": "false" } } }]);
@@ -150,10 +145,10 @@ describe("Slack company mode's switch (18a)", () => {
     // #1171: the legacy deployment has them under the same condition only (nothing while Slack company mode is off).
     const legacyPolicies = Object.entries(legacy.Resources).filter(([, r]) => r.Type === "AWS::IAM::Policy" && JSON.stringify(r.Properties).includes("ReadCompanyProjectRevisions"));
     expect(legacyPolicies.map(([id]) => id.replace(/[0-9A-F]{8}$/u, "")).sort()).toEqual(["SlackCompanyModeChannelApiCompanyProjects", "SlackCompanyModeSlackIngressCompanyProjects"]);
-    for (const [, resource] of legacyPolicies) expect(resource.Condition).toMatch(/^SlackCompanyModeOn[0-9A-F]{8}$/u);
+    for (const [, resource] of legacyPolicies) expect(resource.Condition).toBeUndefined();
   });
 
-  it("never lets the Slack Lambda write the State table, switch on or off (#126)", () => {
+  it("never lets the Slack Lambda write the State table (#126)", () => {
     const role = roleOfFunction(named, "SlackIngress");
     const stateId = byPrefix(named, "State", "AWS::DynamoDB::Table")[0];
     // Every write action DynamoDB has, matched against each granted pattern (so "dynamodb:Put*", "*Item" or "*" count too), on the State table or on "*".
@@ -186,35 +181,29 @@ describe("Slack company mode's switch (18a)", () => {
     expect(roleOf(policy(named, "Broker"))).toEqual([roleOfFunction(named, "Broker")]);
     const slackSecret = byPrefix(named, "SlackSecret", "AWS::SecretsManager::Secret")[0];
     expect(statementsOf(policy(named, "Broker"))).toStrictEqual([TOKENS, { Sid: "ReadInstallSlackToken", Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: { Ref: slackSecret } }]);
-    expect(policy(named, "Broker").Condition).toBe(on);
+    expect(policy(named, "Broker").Condition).toBeUndefined();
     expect(policy(named, "Broker").Properties.PolicyName).toBe("slack-company-workspaces-broker");
   });
 
-  it("hands each consumer the switch, 'disabled' (or no table) while it is off", () => {
-    const off = (value: unknown) => ({ "Fn::If": [on, value, "disabled"] });
-    for (const fn of ["SlackIngress", "ChannelApiIngress", "DeveloperTaskNotifierFunction", "DeveloperSignInFunction", "SessionsReconciler"]) {
-      expect(variablesOf(named, fn).SLACK_COMPANY_WORKSPACES, fn).toStrictEqual(off("enabled"));
-    }
-    // SIGNIN-STATE-TABLE: the sign-in function's State table is its own variable, always the real table (not the switch's; sign-in's company audit write needs it with the switch off).
+  it("hands each consumer what its company factory needs, as plain values (#1614: no switch to condition them)", () => {
+    for (const fn of ["SlackIngress", "ChannelApiIngress", "DeveloperTaskNotifierFunction", "DeveloperSignInFunction", "SessionsReconciler"]) expect(variablesOf(named, fn), fn).not.toHaveProperty("SLACK_COMPANY_WORKSPACES");
+    // SIGNIN-STATE-TABLE: the sign-in function's State table is its own variable, always the real table.
     expect(variablesOf(named, "DeveloperSignInFunction").STATE_TABLE_NAME).toStrictEqual({ Ref: byPrefix(named, "State", "AWS::DynamoDB::Table")[0] });
-    // 18d: the environment's name for the channel API, notifier and reconciler factories, "" while off.
-    for (const fn of ["DeveloperTaskNotifierFunction", "SessionsReconciler"]) expect(variablesOf(named, fn).AGENTX_ENV, fn).toStrictEqual({ "Fn::If": [on, "staging", ""] });
-    // DEC 254zk: the channel API's factory needs the environment's name too.
-    expect(variablesOf(named, "ChannelApiIngress").AGENTX_ENV).toStrictEqual({ "Fn::If": [on, "staging", ""] });
-    // 18d, DEC 254zk: the Slack service's table and team are always output (its switch is the slack stack's own, set by agentx config set slack.companyWorkspaces).
+    // 18d, DEC 254zk: the environment's name for the channel API, notifier, reconciler and Slack Lambda factories.
+    for (const fn of ["DeveloperTaskNotifierFunction", "SessionsReconciler", "ChannelApiIngress", "SlackIngress"]) expect(variablesOf(named, fn).AGENTX_ENV, fn).toBe("staging");
+    // 18d, DEC 254zk: the Slack service's table and team are always output.
     const outputs = (named as unknown as { Outputs: Record<string, { Value: unknown; Condition?: string }> }).Outputs;
     expect(outputs).not.toHaveProperty("SlackCompanyWorkspacesState");
     expect(outputs.SlackCompanyStateTableName).toStrictEqual({ Value: { Ref: byPrefix(named, "State", "AWS::DynamoDB::Table")[0] } });
     expect(outputs.SlackCompanyTeamId).toStrictEqual({ Value: { Ref: "SlackTeamId" } });
-    // 18c: the Slack Lambda's factory inputs, "" while off.
-    expect(variablesOf(named, "SlackIngress").AGENTX_ENV).toStrictEqual({ "Fn::If": [on, "staging", ""] });
-    expect(variablesOf(named, "SlackIngress").SLACK_TEAM_ID).toStrictEqual({ "Fn::If": [on, { Ref: "SlackTeamId" }, ""] });
+    // 18c: the Slack Lambda's factory inputs.
+    expect(variablesOf(named, "SlackIngress").SLACK_TEAM_ID).toStrictEqual({ Ref: "SlackTeamId" });
     for (const fn of ["SlackIngress", "ChannelApiIngress"]) {
-      expect(variablesOf(named, fn).DEVELOPER_SIGNIN_TABLE_NAME, fn).toStrictEqual({ "Fn::If": [on, { Ref: byPrefix(named, "DeveloperSignInTable", "AWS::DynamoDB::Table")[0] }, ""] });
+      expect(variablesOf(named, fn).DEVELOPER_SIGNIN_TABLE_NAME, fn).toStrictEqual({ Ref: byPrefix(named, "DeveloperSignInTable", "AWS::DynamoDB::Table")[0] });
     }
     const broker = unpackedBrokerVariables(variablesOf(named, "Broker"), named);
-    // DEC 254zk: the conditioned switch flag ("1" only with company sign-in on too).
-    expect(broker.SLACK_COMPANY_WORKSPACES).toEqual({ "Fn::If": [on, "1", "0"] });
+    expect(broker).not.toHaveProperty("SLACK_COMPANY_WORKSPACES");
+    expect(broker).not.toHaveProperty("COMPANY_SIGNIN");
     // Derived now (room in the 4 KB environment); the broker still reads "enabled".
     expect(broker.COMPANY_READS).toBe("enabled");
     expect(variablesOf(named, "Broker")).not.toHaveProperty("COMPANY_READS");
@@ -226,10 +215,10 @@ describe("Slack company mode's switch (18a)", () => {
     const actions = Object.values(named.Resources).filter((r) => r.Type === "AWS::IAM::Policy" && roleOf(r).includes(brokerRole))
       .flatMap(statementsOf).filter((s) => s.Effect === "Allow" && s.Condition === undefined && JSON.stringify(s.Resource).includes(stateId)).flatMap((s) => [s.Action].flat());
     for (const action of ["dynamodb:Query", "dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:ConditionCheckItem"]) expect(actions, action).toContain(action);
-    // DEC 254zzz32/35: the broker's one conditional policy holds secret reads only (asserted in full above), no table grant.
-    const conditional = Object.values(named.Resources).filter((r) => r.Type === "AWS::IAM::Policy" && r.Condition === on && roleOf(r).includes(brokerRole));
-    expect(conditional).toHaveLength(1);
-    expect(conditional.flatMap(statementsOf).flatMap((s) => [s.Action].flat())).toEqual(["secretsmanager:GetSecretValue", "secretsmanager:GetSecretValue"]);
+    // DEC 254zzz32/35: the broker's one Slack company mode policy holds secret reads only (asserted in full above), no table grant.
+    const own = Object.entries(named.Resources).filter(([id, r]) => r.Type === "AWS::IAM::Policy" && id.startsWith("SlackCompanyMode") && roleOf(r).includes(brokerRole)).map(([, r]) => r);
+    expect(own).toHaveLength(1);
+    expect(own.flatMap(statementsOf).flatMap((s) => [s.Action].flat())).toEqual(["secretsmanager:GetSecretValue", "secretsmanager:GetSecretValue"]);
   });
 
   it("stays inside the default permissions boundary (allowed service, no Deny matches)", () => {

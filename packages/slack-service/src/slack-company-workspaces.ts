@@ -1,6 +1,6 @@
 // DEC 254o (b), L2-2 PR 18d: Slack company mode in the hosted Slack service (ECS). The service cannot import the broker, so this is the same read-only reader the broker's
 // slack-workspace-binding.ts / slack-workspace-tokens.ts implement, kept to what the service needs and checked against them in
-// tests/contract/slack-company-rest.test.ts. Nothing is built unless SLACK_COMPANY_WORKSPACES=enabled AND COMPANY_SIGNIN=enabled with STATE_TABLE_NAME, AGENTX_ENV and a
+// tests/contract/slack-company-rest.test.ts. Nothing is built unless (#1614: company mode is the only mode) STATE_TABLE_NAME, AGENTX_ENV and a
 // valid SLACK_TEAM_ID present. The install's team never reaches it (createWorkspaceSlackClients keeps it on the install token); every other team needs its binding
 // (SLACK_TEAM#<team>/BINDING) and its company's own secret (agentx/<env>/slack-workspaces/<company>/<team>). No fallback to another token, no write.
 //
@@ -96,7 +96,6 @@ async function readCompanySecret(input: { client: Sender; sessionClient: (() => 
 }
 
 export function serviceSlackWorkspacesFromEnvironment(env: NodeJS.ProcessEnv, clients: { documentClient: Sender; secrets: Sender; now?: () => number; scoped?: ScopedSecrets; log?: (event: string, fields: Record<string, unknown>) => void }): { workspaces: ServiceSlackWorkspaces; legacyTeamId: string } | undefined {
-  if (env.SLACK_COMPANY_WORKSPACES !== "enabled" || env.COMPANY_SIGNIN !== "enabled") return undefined;
   const tableName = env.STATE_TABLE_NAME ?? "";
   const environment = env.AGENTX_ENV ?? "";
   const legacyTeamId = env.SLACK_TEAM_ID ?? "";

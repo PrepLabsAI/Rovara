@@ -118,13 +118,14 @@ it("issuer required values need a claim; a refused replacement preserves the pri
   expect([...h.db.items.values()]).toEqual(before);
 });
 
-it.each([undefined, "disabled", "unknown", "enabled"])("Lambda switch is strictly opt-in: %s", async (flag) => {
+// #1614: company mode is the only mode: the operator's company events are served whatever the retired COMPANY_SIGNIN variable says.
+it.each([undefined, "disabled", "unknown", "enabled"])("the Lambda serves company events whatever the retired switch says: %s", async (flag) => {
   vi.resetModules(); wiring.db = new FakeDynamoDb(); wiring.secrets.length = 0;
   for (const [key, value] of Object.entries({ AGENTX_ENV: "test", AWS_REGION: "us-east-1", DEVELOPER_TOKEN_ISSUER: "https://signin.example.test/v1/auth", DEVELOPER_SIGNIN_TABLE_NAME: "signin", STATE_TABLE_NAME: "state", DEVELOPER_TOKEN_KEY_ARN: "test-key", SLACK_SECRET_ARN: "test-slack", TASK_TOKEN_KEY_ARN: "", DEVELOPER_OIDC_ISSUER: "" })) vi.stubEnv(key, value);
   vi.stubEnv("COMPANY_SIGNIN", flag);
   const { handler } = await import("../../packages/broker/src/aws/developer-identity.js");
   const answer = await handler(create as never);
-  expect(answer).toMatchObject(flag === "enabled" ? { ok: true, companyId: expect.stringMatching(/^org_[a-z0-9]{20}$/) as unknown } : { ok: false, error: "invalid_request" });
+  expect(answer).toMatchObject({ ok: true, companyId: expect.stringMatching(/^org_[a-z0-9]{20}$/) as unknown });
   expect(wiring.secrets).toEqual([]);
 });
 

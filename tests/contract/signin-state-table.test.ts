@@ -1,5 +1,5 @@
-// SIGNIN-STATE-TABLE (0.5.34): the sign-in function's init must not need the State table with the company layer off, and with the company layer on the audit rows go to the real
-// State table whether or not Slack company mode is on (the Slack switch is SLACK_COMPANY_WORKSPACES; STATE_TABLE_NAME is never a switch). infra/lib/developer-signin.ts sets the
+// SIGNIN-STATE-TABLE (0.5.34): the sign-in function's company audit rows go to the real State table (STATE_TABLE_NAME is never a switch). #1614: company mode is the only mode, so
+// there is no "company layer off" init any more; the old switch variables, set or not, change nothing. infra/lib/developer-signin.ts sets the
 // variable always; tests/contract/developer-signin-infrastructure.test.ts pins the synthesized value.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -27,19 +27,6 @@ async function init(env: Record<string, string>) {
 }
 
 describe("DeveloperIdentity's init and the State table", () => {
-  it("company layer off: init succeeds without STATE_TABLE_NAME and no audit writer is built", async () => {
-    const { createAwsDeveloperIdentityHandler } = await init({});
-    expect(process.env.STATE_TABLE_NAME).toBeUndefined();
-    expect(() => createAwsDeveloperIdentityHandler(process.env)).not.toThrow();
-    expect(seen.auditTables).toEqual([]);
-  });
-
-  it("company layer off: an empty STATE_TABLE_NAME is no problem either", async () => {
-    const { createAwsDeveloperIdentityHandler } = await init({ COMPANY_SIGNIN: "disabled", STATE_TABLE_NAME: "" });
-    expect(() => createAwsDeveloperIdentityHandler(process.env)).not.toThrow();
-    expect(seen.auditTables).toEqual([]);
-  });
-
   it.each([["disabled"], [""]])("CompanySignIn on, SlackCompanyWorkspaces %j: init succeeds and audit writes go to the real State table", async (slack) => {
     const { handler } = await init({ COMPANY_SIGNIN: "enabled", SLACK_COMPANY_WORKSPACES: slack, STATE_TABLE_NAME: "agentx-staging-state" });
     // The handler's own init (Slack company mode stays off): a company-layer request is served.

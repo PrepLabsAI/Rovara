@@ -661,18 +661,23 @@ describe("L1a broker environment derivation", () => {
     const beforeFirstGateway = withoutLinearWebhookRoute(withoutWebhookSecretLane(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(relayless())), { named: false }) as Json & { Outputs: Record<string, unknown> }), stuckStoppingInstall()))));
     expect(beforeFirstGateway.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
     delete beforeFirstGateway.Outputs.ModelRunPriceVersion;
-    expect(digest(beforeFirstGateway), "legacy without the first-gateway output retains the upstream member-check pin").toBe("20bd0691086691655a03275ce4dfa80ee84a6497ebc31e59110a6c64454c5dca");
+    // #1614 (re-pin): moved for exactly the removal of the company mode switches (CompanySignIn, CompanySelfServe, SlackCompanyWorkspaces: their parameters, conditions, variables and packed si/cw); the old value was 20bd0691...
+    expect(digest(beforeFirstGateway), "legacy without the first-gateway output retains the upstream member-check pin").toBe("922523f3c7a20ecf7e427ade568628443f43aa39b44ca8685d1cf2148a1d65e0");
     const beforeMemberCheck = withoutBrokerMemberConditionCheck(beforeFirstGateway);
-    expect(digest(beforeMemberCheck), "legacy without the first-gateway output and broker member check").toBe("f80f345e75de0fc14cfe3bf8a208ad3635dca72883603a54ec95cc6840d16a74");
+    // #1614 (re-pin): moved for exactly the removal of the company mode switches (CompanySignIn, CompanySelfServe, SlackCompanyWorkspaces: their parameters, conditions, variables and packed si/cw); the old value was f80f345e...
+    expect(digest(beforeMemberCheck), "legacy without the first-gateway output and broker member check").toBe("5b607ea5d96e813f7045f35aa097f9fb7e7d072d2992eab58b4fc0ebd44b19b4");
     // Rule D proof: removing exactly the two capability routes retains the switch-removal pin.
     const withoutCapabilityRoutes = structuredClone(beforeMemberCheck);
     delete withoutCapabilityRoutes.Resources.ContextToolsListRoute;
     delete withoutCapabilityRoutes.Resources.DesignReviewPacketRoute;
-    expect(digest(withoutCapabilityRoutes), "legacy with the two capability routes taken out").toBe("b0cd22e46184f1783ebe18c918770193e4be4159c1f478aa5b850012f0549886");
-    expect(digest(withoutLinearWebhookRoute(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(relayless())), { named: false })), stuckStoppingInstall()))))).toBe("3650752da60ba92814efe0cd9ef11c21a21edf3c695ddc39d4f5ad318e3d2eae");
+    // #1614 (re-pin): moved for exactly the removal of the company mode switches (CompanySignIn, CompanySelfServe, SlackCompanyWorkspaces: their parameters, conditions, variables and packed si/cw); the old value was b0cd22e4...
+    expect(digest(withoutCapabilityRoutes), "legacy with the two capability routes taken out").toBe("a2494d0dccb517d2f6e12341d6ead183c77fc628f8c947c573438db12902539f");
+    // #1614 (re-pin): moved for exactly the removal of the company mode switches (CompanySignIn, CompanySelfServe, SlackCompanyWorkspaces: their parameters, conditions, variables and packed si/cw); the old value was 3650752d...
+    expect(digest(withoutLinearWebhookRoute(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(relayless())), { named: false })), stuckStoppingInstall()))))).toBe("af8d0d6c5839b7ef064fdab5dbd3e423595784ba4c3d6700b0728eaf4adb95d7");
     // RETAIN (Rule D, arch ruling 2026-11-24): every pin above was taken with the nine policies put back (withoutRetainPolicies, innermost); the same template with them in (Retain on the five keys, the channel table and
     // the adapter secret) has its own pin.
-    expect(digest(withoutLinearWebhookRoute(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(relayless()), { named: false })), stuckStoppingInstall()))))).toBe("16951d4cd06727eaa592a744e70237ddd6ff1455077ca21f45daf3475fd05f76");
+    // #1614 (re-pin): moved for exactly the removal of the company mode switches (CompanySignIn, CompanySelfServe, SlackCompanyWorkspaces: their parameters, conditions, variables and packed si/cw); the old value was 16951d4c...
+    expect(digest(withoutLinearWebhookRoute(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(relayless()), { named: false })), stuckStoppingInstall()))))).toBe("f39313edb180b297e98bb317bba391ab20b6eba24cace2d16eb17fdeb2ff83ae");
     // CODE-PUBLIC-URL (Rule D, 2026-11-24): the same template with exactly the PublicApiUrl additions in (and the RETAIN policies in) has its own pin; with them taken out the pin above holds.
     // LINEAR-WEBHOOKS + guard (Rule D, rebased onto the public-URL pin): the same template with the Linear route, its throttle and its alarm in has its own pin; with exactly those taken out the pin after it (3175a57d...) holds.
     // CORE-RUN-STOP-RELAY (G1, 2026-11-25): the same template with the packed `rl=on` on the broker and the dispatcher in has its own pin; Rule D: with exactly that taken out (withoutCoreOutboxStreamRelay) the pin after it (6694babb...) holds.
@@ -680,10 +685,14 @@ describe("L1a broker environment derivation", () => {
     // (withTaskPeopleInvitationSwitches) the pin recorded before holds (the first line below), and with the relay taken out too the pin after it (6694babb...) holds.
     const withRelay = withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutDispatcherLessonsPeople(withoutCanarySession(machineless()))), stuckStoppingInstall()));
     // D1-2 (declared change set, D1-PLAN section 8, rebased onto train 90): every pin below moved for exactly the removal of the three recovery Schedules, the two Scheduler roles and their policies (and, in the named template, the PlanEvidence function, its log group, role and policy); the removed resources were in every older state these pins describe.
-    expect(digest(withRelay), "legacy with the outbox stream relay setting, without the two deleted invitation switches").toBe("a94e8d0feac4963f84e7b1400f6e3a27415cb4a874ef2500238589da510edb49");
-    expect(digest(withTaskPeopleInvitationSwitches(structuredClone(withRelay))), "legacy with the outbox stream relay setting and the switches put back").toBe("ed6ab230064aa3b7cbd79d118f5b6847f2c2a9697b2ac5ee6d29a57f69714125");
-    expect(digest(withTaskPeopleInvitationSwitches(withoutCoreOutboxStreamRelay(structuredClone(withRelay)))), "legacy minus only the outbox stream relay setting").toBe("1b1d92bc847ac332d13ae0b8c25217950f4a7887129ba2df73b550876fbe0936");
-    expect(digest(withoutLinearWebhookRoute(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutDispatcherLessonsPeople(relayless())), stuckStoppingInstall()))))).toBe("cf965725d6844761a3a522d7802915538ec2fc2c2c501ab1c84748ac0e170988");
+    // #1614 (re-pin): moved for exactly the removal of the company mode switches (CompanySignIn, CompanySelfServe, SlackCompanyWorkspaces: their parameters, conditions, variables and packed si/cw); the old value was a94e8d0f...
+    expect(digest(withRelay), "legacy with the outbox stream relay setting, without the two deleted invitation switches").toBe("4acfc225bccaa8d3901122551a843dc8f44056297102996c573ba8fcf81b8291");
+    // #1614 (re-pin): moved for exactly the removal of the company mode switches (CompanySignIn, CompanySelfServe, SlackCompanyWorkspaces: their parameters, conditions, variables and packed si/cw); the old value was ed6ab230...
+    expect(digest(withTaskPeopleInvitationSwitches(structuredClone(withRelay))), "legacy with the outbox stream relay setting and the switches put back").toBe("c43af97449cfc036f472bb0c8d5d571f4db66a6a73e79ed692e6a640aaccce5d");
+    // #1614 (re-pin): moved for exactly the removal of the company mode switches (CompanySignIn, CompanySelfServe, SlackCompanyWorkspaces: their parameters, conditions, variables and packed si/cw); the old value was 1b1d92bc...
+    expect(digest(withTaskPeopleInvitationSwitches(withoutCoreOutboxStreamRelay(structuredClone(withRelay)))), "legacy minus only the outbox stream relay setting").toBe("6234529a6f819aace57d57156c0b86cc6061ec08ad22f9397897129475c1605c");
+    // #1614 (re-pin): moved for exactly the removal of the company mode switches (CompanySignIn, CompanySelfServe, SlackCompanyWorkspaces: their parameters, conditions, variables and packed si/cw); the old value was cf965725...
+    expect(digest(withoutLinearWebhookRoute(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutDispatcherLessonsPeople(relayless())), stuckStoppingInstall()))))).toBe("dcf73dd52d6928c51abbc333667f245909c34e2c2bcdbeb86c336b8ab16537b4");
   });
 });
 import { createHash } from "node:crypto";

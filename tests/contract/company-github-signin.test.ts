@@ -351,9 +351,9 @@ describe("GitHub sign-in settings (DEC 254h)", () => {
       expect(config.githubProblem).toMatch(/^DEVELOPER_GITHUB_(CLIENT|SECRET)_ID is not set; ask an admin to run agentx signin enable github$/);
     }
   });
-  it("the broker counts GitHub on only with the company layer on too", () => {
+  it("the broker counts GitHub on when its own switch is (#1614: company mode is the only mode)", () => {
     expect(githubSignInFromEnvironment({ DEVELOPER_SIGNIN_GITHUB: "enabled", COMPANY_SIGNIN: "enabled" })).toBe(true);
-    expect(githubSignInFromEnvironment({ DEVELOPER_SIGNIN_GITHUB: "enabled" })).toBe(false);
+    expect(githubSignInFromEnvironment({ DEVELOPER_SIGNIN_GITHUB: "enabled" })).toBe(true);
     expect(githubSignInFromEnvironment({ DEVELOPER_SIGNIN_GITHUB: "disabled", COMPANY_SIGNIN: "enabled" })).toBe(false);
   });
   it("reads the client secret from a JSON object and never echoes it", () => {

@@ -15,29 +15,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         },
       ],
     },
-    "CompanySignInSwitchOn6E5AE93A": {
-      "Fn::Equals": [
-        {
-          "Ref": "CompanySignIn",
-        },
-        "enabled",
-      ],
-    },
-    "CompanySignInSwitchSelfServeOnC579A03A": {
-      "Fn::And": [
-        {
-          "Condition": "CompanySignInSwitchOn6E5AE93A",
-        },
-        {
-          "Fn::Equals": [
-            {
-              "Ref": "CompanySelfServe",
-            },
-            "enabled",
-          ],
-        },
-      ],
-    },
     "CoreEngineJobsAttentionEmailAttentionEmailIsOn114D3B79": {
       "Fn::Equals": [
         {
@@ -79,21 +56,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             },
             "",
           ],
-        },
-      ],
-    },
-    "SlackCompanyModeOnBF1D0D56": {
-      "Fn::And": [
-        {
-          "Fn::Equals": [
-            {
-              "Ref": "SlackCompanyWorkspaces",
-            },
-            "enabled",
-          ],
-        },
-        {
-          "Condition": "CompanySignInSwitchOn6E5AE93A",
         },
       ],
     },
@@ -363,24 +325,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Description": "enabled: administrators can register channel adapters (spec 062) and the channel API accepts their signed requests",
       "Type": "String",
     },
-    "CompanySelfServe": {
-      "AllowedValues": [
-        "enabled",
-        "disabled",
-      ],
-      "Default": "disabled",
-      "Description": "enabled: a person with an invite code may create their own company, only while CompanySignIn is enabled too; disabled: self-serve create is refused",
-      "Type": "String",
-    },
-    "CompanySignIn": {
-      "AllowedValues": [
-        "enabled",
-        "disabled",
-      ],
-      "Default": "disabled",
-      "Description": "enabled: Code's company layer is on (company membership sign-in, invites, Add to Slack); disabled: it is off and no company-only grant exists. Close self-serve and migrate the members first",
-      "Type": "String",
-    },
     "CoreAgentModel": {
       "AllowedPattern": "^([a-z0-9][a-z0-9._:-]{0,63})?$",
       "Default": "",
@@ -629,15 +573,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       ],
       "Default": "accept",
       "Description": "accept: answer mentions a person posts through another app with their own Slack token; ignore: answer only typed mentions",
-      "Type": "String",
-    },
-    "SlackCompanyWorkspaces": {
-      "AllowedValues": [
-        "enabled",
-        "disabled",
-      ],
-      "Default": "disabled",
-      "Description": "enabled: Slack workspaces other than SlackTeamId use their company's own bot token and company checks (needs company sign-in); disabled: only the install's workspace is served, as before",
       "Type": "String",
     },
     "SlackMemberWorkspaceLimit": {
@@ -946,14 +881,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                   {
                     "Ref": "CoreTaskCapUsd",
                   },
-                  ",cw=",
-                  {
-                    "Fn::If": [
-                      "SlackCompanyModeOnBF1D0D56",
-                      "1",
-                      "0",
-                    ],
-                  },
                   ",gh=",
                   {
                     "Ref": "DeveloperSignInGithub",
@@ -989,14 +916,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                   ",os=",
                   {
                     "Ref": "DeveloperOidcSince",
-                  },
-                  ",si=",
-                  {
-                    "Fn::If": [
-                      "CompanySignInSwitchOn6E5AE93A",
-                      "1",
-                      "0",
-                    ],
                   },
                   ",sn=",
                   {
@@ -2548,13 +2467,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         "Environment": {
           "Variables": {
             "ADMIN_CHANGES": "enabled",
-            "AGENTX_ENV": {
-              "Fn::If": [
-                "SlackCompanyModeOnBF1D0D56",
-                "production",
-                "",
-              ],
-            },
+            "AGENTX_ENV": "production",
             "BROKER_FUNCTION_NAME": {
               "Ref": "BrokerE1355FD6",
             },
@@ -2609,21 +2522,8 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             "CHANNEL_STATE_TABLE_NAME": {
               "Ref": "ChannelApiStateE5478A65",
             },
-            "COMPANY_SIGNIN": {
-              "Fn::If": [
-                "CompanySignInSwitchOn6E5AE93A",
-                "enabled",
-                "disabled",
-              ],
-            },
             "DEVELOPER_SIGNIN_TABLE_NAME": {
-              "Fn::If": [
-                "SlackCompanyModeOnBF1D0D56",
-                {
-                  "Ref": "DeveloperSignInTable26CE739E",
-                },
-                "",
-              ],
+              "Ref": "DeveloperSignInTable26CE739E",
             },
             "SHARED_TASKS": "disabled",
             "SLACK_ADAPTER_TEAM_ID": {
@@ -2631,13 +2531,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             },
             "SLACK_APP_POSTED_MESSAGES": {
               "Ref": "SlackAppPostedMessages",
-            },
-            "SLACK_COMPANY_WORKSPACES": {
-              "Fn::If": [
-                "SlackCompanyModeOnBF1D0D56",
-                "enabled",
-                "disabled",
-              ],
             },
             "SLACK_THREADS_TABLE_NAME": {
               "Ref": "SlackThreads36E14C1E",
@@ -3760,7 +3653,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Type": "AWS::IAM::Policy",
     },
     "CompanySignInSwitchSignInCompanyGrants87369E9E": {
-      "Condition": "CompanySignInSwitchOn6E5AE93A",
       "Properties": {
         "PolicyDocument": {
           "Statement": [
@@ -3867,7 +3759,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Type": "AWS::IAM::Policy",
     },
     "CompanySignInSwitchSlackWorkspaceTokens2CAD7A63": {
-      "Condition": "CompanySignInSwitchOn6E5AE93A",
       "Properties": {
         "PolicyDocument": {
           "Statement": [
@@ -5309,20 +5200,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               ],
             },
             "BUILT_IN_ADAPTER_SECRET_NAME": "agentx/production/channel-adapter/slack",
-            "COMPANY_SELF_SERVE": {
-              "Fn::If": [
-                "CompanySignInSwitchSelfServeOnC579A03A",
-                "enabled",
-                "disabled",
-              ],
-            },
-            "COMPANY_SIGNIN": {
-              "Fn::If": [
-                "CompanySignInSwitchOn6E5AE93A",
-                "enabled",
-                "disabled",
-              ],
-            },
             "DEVELOPER_GITHUB_CLIENT_ID": {
               "Ref": "DeveloperGithubClientId",
             },
@@ -5392,13 +5269,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             },
             "SLACK_ADAPTER_TEAM_ID": {
               "Ref": "SlackTeamId",
-            },
-            "SLACK_COMPANY_WORKSPACES": {
-              "Fn::If": [
-                "SlackCompanyModeOnBF1D0D56",
-                "enabled",
-                "disabled",
-              ],
             },
             "SLACK_SECRET_ARN": {
               "Ref": "SlackSecretEA96F13F",
@@ -6153,13 +6023,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         },
         "Environment": {
           "Variables": {
-            "AGENTX_ENV": {
-              "Fn::If": [
-                "SlackCompanyModeOnBF1D0D56",
-                "production",
-                "",
-              ],
-            },
+            "AGENTX_ENV": "production",
             "AGENTX_METRICS_NAMESPACE": "AgentX",
             "AGENTX_TASK_PEOPLE_CHANGES_ENABLED": {
               "Ref": "TaskPeopleChangesEnabled",
@@ -6203,13 +6067,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               ],
             },
             "BUILT_IN_ADAPTER_SECRET_NAME": "agentx/production/channel-adapter/slack",
-            "COMPANY_SIGNIN": {
-              "Fn::If": [
-                "CompanySignInSwitchOn6E5AE93A",
-                "enabled",
-                "disabled",
-              ],
-            },
             "CONTROL_PLANE_URL": {
               "Fn::GetAtt": [
                 "HttpApi",
@@ -6221,13 +6078,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             },
             "SLACK_ADAPTER_TEAM_ID": {
               "Ref": "SlackTeamId",
-            },
-            "SLACK_COMPANY_WORKSPACES": {
-              "Fn::If": [
-                "SlackCompanyModeOnBF1D0D56",
-                "enabled",
-                "disabled",
-              ],
             },
             "SLACK_SECRET_ARN": {
               "Ref": "SlackSecretEA96F13F",
@@ -9733,13 +9583,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         },
         "Environment": {
           "Variables": {
-            "AGENTX_ENV": {
-              "Fn::If": [
-                "SlackCompanyModeOnBF1D0D56",
-                "production",
-                "",
-              ],
-            },
+            "AGENTX_ENV": "production",
             "AGENTX_METRICS_NAMESPACE": "AgentX",
             "BUILT_IN_ADAPTER": {
               "Ref": "SlackViaChannel",
@@ -9775,13 +9619,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             },
             "BUILT_IN_ADAPTER_SECRET_NAME": "agentx/production/channel-adapter/slack",
             "CALLBACK_SIGNING_KEY_SECRET_ID": "agentx/production/callback-key",
-            "COMPANY_SIGNIN": {
-              "Fn::If": [
-                "CompanySignInSwitchOn6E5AE93A",
-                "enabled",
-                "disabled",
-              ],
-            },
             "DELETER_ARN": {
               "Ref": "SessionsDeleterB48741EA",
             },
@@ -9791,13 +9628,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             },
             "SLACK_ADAPTER_TEAM_ID": {
               "Ref": "SlackTeamId",
-            },
-            "SLACK_COMPANY_WORKSPACES": {
-              "Fn::If": [
-                "SlackCompanyModeOnBF1D0D56",
-                "enabled",
-                "disabled",
-              ],
             },
             "SLACK_SECRET_ARN": {
               "Ref": "SlackSecretEA96F13F",
@@ -10952,7 +10782,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Type": "AWS::CloudWatch::Alarm",
     },
     "SlackCompanyModeBroker5AF74ADF": {
-      "Condition": "SlackCompanyModeOnBF1D0D56",
       "Properties": {
         "PolicyDocument": {
           "Statement": [
@@ -11002,7 +10831,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Type": "AWS::IAM::Policy",
     },
     "SlackCompanyModeChannelApi057978C5": {
-      "Condition": "SlackCompanyModeOnBF1D0D56",
       "Properties": {
         "PolicyDocument": {
           "Statement": [
@@ -11099,7 +10927,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Type": "AWS::IAM::Policy",
     },
     "SlackCompanyModeChannelApiCompanyProjects22DDBD31": {
-      "Condition": "SlackCompanyModeOnBF1D0D56",
       "Properties": {
         "PolicyDocument": {
           "Statement": [
@@ -11149,7 +10976,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Type": "AWS::IAM::Policy",
     },
     "SlackCompanyModeChannelApiMembers684C47C2": {
-      "Condition": "SlackCompanyModeOnBF1D0D56",
       "Properties": {
         "PolicyDocument": {
           "Statement": [
@@ -11187,7 +11013,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Type": "AWS::IAM::Policy",
     },
     "SlackCompanyModeDeveloperIdentity8A474833": {
-      "Condition": "SlackCompanyModeOnBF1D0D56",
       "Properties": {
         "PolicyDocument": {
           "Statement": [
@@ -11226,7 +11051,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Type": "AWS::IAM::Policy",
     },
     "SlackCompanyModeDeveloperTaskNotifierF02DDC6F": {
-      "Condition": "SlackCompanyModeOnBF1D0D56",
       "Properties": {
         "PolicyDocument": {
           "Statement": [
@@ -11291,7 +11115,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Type": "AWS::IAM::Policy",
     },
     "SlackCompanyModeSessionReconciler15C78111": {
-      "Condition": "SlackCompanyModeOnBF1D0D56",
       "Properties": {
         "PolicyDocument": {
           "Statement": [
@@ -11333,7 +11156,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Type": "AWS::IAM::Policy",
     },
     "SlackCompanyModeSlackIngress20718FF7": {
-      "Condition": "SlackCompanyModeOnBF1D0D56",
       "Properties": {
         "PolicyDocument": {
           "Statement": [
@@ -11430,7 +11252,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Type": "AWS::IAM::Policy",
     },
     "SlackCompanyModeSlackIngressCompanyBindingsFE0B0B1B": {
-      "Condition": "SlackCompanyModeOnBF1D0D56",
       "Properties": {
         "PolicyDocument": {
           "Statement": [
@@ -11468,7 +11289,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Type": "AWS::IAM::Policy",
     },
     "SlackCompanyModeSlackIngressCompanyProjects229C896B": {
-      "Condition": "SlackCompanyModeOnBF1D0D56",
       "Properties": {
         "PolicyDocument": {
           "Statement": [
@@ -11518,7 +11338,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Type": "AWS::IAM::Policy",
     },
     "SlackCompanyModeSlackIngressMembers394B4740": {
-      "Condition": "SlackCompanyModeOnBF1D0D56",
       "Properties": {
         "PolicyDocument": {
           "Statement": [
@@ -11556,7 +11375,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Type": "AWS::IAM::Policy",
     },
     "SlackCompanyModeSlackOrchestratorF6E6A0DD": {
-      "Condition": "SlackCompanyModeOnBF1D0D56",
       "Properties": {
         "PolicyDocument": {
           "Statement": [
@@ -11620,7 +11438,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Type": "AWS::IAM::Policy",
     },
     "SlackCompanyModeSlackTokenReaderF2E827A1": {
-      "Condition": "SlackCompanyModeOnBF1D0D56",
       "Properties": {
         "PolicyDocument": {
           "Statement": [
@@ -11667,7 +11484,6 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Type": "AWS::IAM::Policy",
     },
     "SlackCompanyTokenReaderRole3917AFD9": {
-      "Condition": "SlackCompanyModeOnBF1D0D56",
       "Properties": {
         "AssumeRolePolicyDocument": {
           "Statement": [
@@ -11816,13 +11632,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         "Environment": {
           "Variables": {
             "ADMIN_CHANGES": "enabled",
-            "AGENTX_ENV": {
-              "Fn::If": [
-                "SlackCompanyModeOnBF1D0D56",
-                "production",
-                "",
-              ],
-            },
+            "AGENTX_ENV": "production",
             "BROKER_FUNCTION_NAME": {
               "Ref": "BrokerE1355FD6",
             },
@@ -11832,33 +11642,13 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                 "ApiEndpoint",
               ],
             },
-            "COMPANY_SIGNIN": {
-              "Fn::If": [
-                "CompanySignInSwitchOn6E5AE93A",
-                "enabled",
-                "disabled",
-              ],
-            },
             "DEVELOPER_SIGNIN_TABLE_NAME": {
-              "Fn::If": [
-                "SlackCompanyModeOnBF1D0D56",
-                {
-                  "Ref": "DeveloperSignInTable26CE739E",
-                },
-                "",
-              ],
+              "Ref": "DeveloperSignInTable26CE739E",
             },
             "SHARED_TASKS": "enabled",
             "SLACK_ADAPTER_SECRET_NAME": "agentx/production/channel-adapter/slack",
             "SLACK_APP_POSTED_MESSAGES": {
               "Ref": "SlackAppPostedMessages",
-            },
-            "SLACK_COMPANY_WORKSPACES": {
-              "Fn::If": [
-                "SlackCompanyModeOnBF1D0D56",
-                "enabled",
-                "disabled",
-              ],
             },
             "SLACK_REQUEST_QUEUE_URL": {
               "Ref": "SlackRequestQueueCC82C864",
@@ -11867,13 +11657,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               "Ref": "SlackSecretEA96F13F",
             },
             "SLACK_TEAM_ID": {
-              "Fn::If": [
-                "SlackCompanyModeOnBF1D0D56",
-                {
-                  "Ref": "SlackTeamId",
-                },
-                "",
-              ],
+              "Ref": "SlackTeamId",
             },
             "SLACK_THREADS_TABLE_NAME": {
               "Ref": "SlackThreads36E14C1E",
@@ -19520,15 +19304,6 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
       "Default": "",
       "Type": "String",
     },
-    "CompanySignIn": {
-      "AllowedValues": [
-        "enabled",
-        "disabled",
-      ],
-      "Default": "disabled",
-      "Description": "The control plane's CompanySignIn switch, for the Slack service: enabled or disabled (agentx config set company.signIn sets both)",
-      "Type": "String",
-    },
     "ControlPlaneUrl": {
       "AllowedPattern": "^https://.+$",
       "Type": "String",
@@ -19618,15 +19393,6 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
       "AllowedPattern": "^$|^T[A-Z0-9]{2,31}$",
       "Default": "",
       "Description": "SlackCompanyTeamId output of the control plane (Slack company mode)",
-      "Type": "String",
-    },
-    "SlackCompanyWorkspacesState": {
-      "AllowedValues": [
-        "enabled",
-        "disabled",
-      ],
-      "Default": "disabled",
-      "Description": "Slack company mode for the Slack service, set with the control plane's SlackCompanyWorkspaces (agentx config set slack.companyWorkspaces); the service also needs CompanySignIn",
       "Type": "String",
     },
     "SlackRequestQueueUrl": {
@@ -20258,12 +20024,6 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
                 },
               },
               {
-                "Name": "SLACK_COMPANY_WORKSPACES",
-                "Value": {
-                  "Ref": "SlackCompanyWorkspacesState",
-                },
-              },
-              {
                 "Name": "STATE_TABLE_NAME",
                 "Value": {
                   "Ref": "SlackCompanyStateTableName",
@@ -20278,12 +20038,6 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
               {
                 "Name": "AGENTX_ENV",
                 "Value": "production",
-              },
-              {
-                "Name": "COMPANY_SIGNIN",
-                "Value": {
-                  "Ref": "CompanySignIn",
-                },
               },
               {
                 "Name": "SLACK_COMPANY_TOKEN_ROLE_ARN",

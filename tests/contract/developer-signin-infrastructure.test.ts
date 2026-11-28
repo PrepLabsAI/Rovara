@@ -208,13 +208,17 @@ describe("broker membership condition-check grant", () => {
     const before = withoutLinearWebhookGuard(withoutWebhookSecretLane(withoutBrokerMemberConditionCheck(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withTaskPeopleInvitationSwitches(withoutCoreOutboxStreamRelay(structuredClone(namedRaw)))), { named: true }), { env: "staging" }), stuckStoppingInstall("staging"))))));
     // The providers branch also adds this exact capability output. Keep a measured
     // combined pin, then remove only the asserted output to retain the upstream pin.
-    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("4859939e1f0594a059bb1a2c17f24e861a3694d43b89831acaded77ae53cb5b3");
+    // #1614 (re-pin): moved for exactly the removal of the company mode switches (CompanySignIn, CompanySelfServe, SlackCompanyWorkspaces: their parameters, conditions, variables and packed si/cw); the old value was 4859939e...
+    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("b4d32e8754cea8556bade1d80baf2d034b3f6ca3605a9db40bd188d16ddb8797");
     // RETAIN (arch ruling 2026-11-24, Rule D): with exactly the nine policies put back (withoutRetainPolicies) the pins recorded before it hold.
-    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(before), "named")).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("0443b97efb9578488b4601e765df5365df5f0149e9246610f4c391ebeae1f409");
+    // #1614 (re-pin): moved for exactly the removal of the company mode switches (CompanySignIn, CompanySelfServe, SlackCompanyWorkspaces: their parameters, conditions, variables and packed si/cw); the old value was 0443b97e...
+    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(before), "named")).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("34a4215d4cf4d0dcc88c2c134f5ab87a96a63a75b33289734701b9013ca57a7d");
     expect(before.Outputs.ModelRunPriceVersion).toEqual({ Value: "1", Description: "Broker signs task run-price ceilings; deploy gateway before broker before workers" });
     delete before.Outputs.ModelRunPriceVersion;
-    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("68e457236b2e2337cec3d36503b417aae7e6cacb3fca95661add60ab9c3d8cc2");
-    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(before), "named")).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("c3c34f987059b2e6765394dc932aceaf9df144c0151cc30c5fcb2ad789ca2a34");
+    // #1614 (re-pin): moved for exactly the removal of the company mode switches (CompanySignIn, CompanySelfServe, SlackCompanyWorkspaces: their parameters, conditions, variables and packed si/cw); the old value was 68e45723...
+    expect(createHash("sha256").update(JSON.stringify(before).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex")).toBe("786385b256b78f37597cb0315f8090684fcb5558a1314cf5a214825f24c48ec0");
+    // #1614 (re-pin): moved for exactly the removal of the company mode switches (CompanySignIn, CompanySelfServe, SlackCompanyWorkspaces: their parameters, conditions, variables and packed si/cw); the old value was c3c34f98...
+    expect(createHash("sha256").update(JSON.stringify(withoutRetainPolicies(structuredClone(before), "named")).replace(/[a-f0-9]{64}/g, "<asset-hash>")).digest("hex"), "minus only the RETAIN policies").toBe("e7086eccaa1f16d955ba794b676302821a7093b24bd83cf247c6c2b0d6c2661c");
     const afterTuples = accessTuples(namedRaw);
     const beforeTuples = accessTuples(before);
     const broker = "role:BrokerServiceRole";
@@ -351,8 +355,8 @@ describe("developer sign-in infrastructure (named environments)", () => {
     const variables = (t.Resources[functionId(t, "DeveloperSignInFunction")]!.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
     expect(variables.STATE_TABLE_NAME).toEqual({ Ref: stateId });
     expect(JSON.stringify(variables.STATE_TABLE_NAME)).not.toContain("Fn::If");
-    // The Slack company switch stays its own variable, still conditioned.
-    expect(JSON.stringify(variables.SLACK_COMPANY_WORKSPACES)).toContain("Fn::If");
+    // #1614: and there is no Slack company switch left to condition anything.
+    expect(variables).not.toHaveProperty("SLACK_COMPANY_WORKSPACES");
   });
 
   it("lets only the broker invoke DeveloperIdentity directly, and API Gateway only on /v1/auth/*", () => {
@@ -2280,10 +2284,10 @@ describe("company sign-in issuer read (DEC 254zzz29)", () => {
     expect(namedWithSignInGrants.Resources[policies[0]!]!.Type).toBe("AWS::IAM::Policy");
     // The helper asserts the exact five statements before taking it out; what is left is byte-identical to the pinned template.
     expect(JSON.stringify(withoutSignInCompanyGrants(structuredClone(namedWithSignInGrants)))).toBe(JSON.stringify(named));
-    // #1129: the legacy (production) template holds statements (1)-(4) in a policy that exists only while CompanySignIn is on, and the import undo (5) in its own, always.
+    // #1129: the legacy (production) template holds statements (1)-(4) in a policy of its own (#1614: unconditional, company mode is the only mode), and the import undo (5) in its own.
     const legacyGrants = Object.entries(legacy.Resources).filter(([id]) => id.startsWith("CompanySignInSwitchSignInCompanyGrants"));
     expect(legacyGrants).toHaveLength(1);
-    expect((legacyGrants[0]![1] as { Condition?: string }).Condition).toMatch(/^CompanySignInSwitchOn/u);
+    expect((legacyGrants[0]![1] as { Condition?: string }).Condition).toBeUndefined();
     expect(JSON.stringify(legacyGrants[0]![1])).toContain("secret:agentx/production/org-signin/*/oidc-??????");
     const undo = Object.entries(legacy.Resources).filter(([id]) => /^DeveloperSignInSignInCompanyImportUndo[0-9A-F]{8}$/u.test(id));
     expect(undo).toHaveLength(1);

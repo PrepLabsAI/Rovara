@@ -55,9 +55,9 @@ function statementsForRole(template: Template, roleLogicalIdPrefix: string, opti
   return (Object.entries(template.findResources("AWS::IAM::Policy")) as Array<[string, {
     Condition?: string; Properties: { PolicyDocument: { Statement: PolicyStatement[] }; Roles: Array<{ Ref?: string }> };
   }]>)
-    // #1171: with `switchedOff`, the grants that exist only under a switch's CloudFormation condition (Slack company mode's, slack-company-workspaces.ts) are left out:
-    // with the switch off (its default) CloudFormation creates none of them. They are pinned on their own in slack-company-workspaces-infrastructure.test.ts.
-    .filter(([id, policy]) => !(options.switchedOff === true && policy.Condition !== undefined && id.startsWith("SlackCompanyMode")))
+    // #1171: with `switchedOff`, Slack company mode's own policies (slack-company-workspaces.ts) are left out, so a test reads the role's base grants. #1614: company mode is the
+    // only mode, so those policies are unconditional now; they are pinned on their own in slack-company-workspaces-infrastructure.test.ts.
+    .filter(([id]) => !(options.switchedOff === true && id.startsWith("SlackCompanyMode")))
     .filter(([, policy]) => policy.Properties.Roles.some((role) => role.Ref?.startsWith(roleLogicalIdPrefix)))
     .flatMap(([, policy]) => policy.Properties.PolicyDocument.Statement);
 }
@@ -185,7 +185,7 @@ describe("hosted Slack control-plane infrastructure", () => {
         Statement: Match.arrayWith([Match.objectLike({ Principal: { Service: "ecs-tasks.amazonaws.com" } })]),
       }),
     });
-    // Slack company mode off (its default): its read of the team's binding (#1171) exists only under the switch's condition.
+    // The base grants (Slack company mode's read of the team's binding, #1171, is its own policy, pinned elsewhere).
     const statements = statementsForRole(template, "SlackOrchestratorTaskRole", { switchedOff: true });
     const invoke = statements.find((statement) => actionsOf(statement).includes("execute-api:Invoke"));
     expect(JSON.stringify(invoke?.Resource)).toContain("/*/*/v1/service/*");
@@ -194,7 +194,7 @@ describe("hosted Slack control-plane infrastructure", () => {
   });
 
   it("limits the ingress Lambda to reading items by key from the state table: channel bindings, shared threads and task buttons", () => {
-    // Slack company mode off (its default): its project-company Query (#1171) exists only under the switch's condition.
+    // The base grants (Slack company mode's project-company Query, #1171, is its own policy, pinned elsewhere).
     const statements = statementsForRole(template, "SlackIngress", { switchedOff: true });
     const stateAccess = statements.filter((statement) => JSON.stringify(statement.Resource).match(/"State[0-9A-F]{8}"/));
     for (const statement of stateAccess) expect(actionsOf(statement)).toEqual(["dynamodb:GetItem"]);

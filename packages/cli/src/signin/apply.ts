@@ -109,8 +109,8 @@ export async function applySignInChange(input: ApplySignInInput): Promise<{ chan
       ...(current?.slack === true && !next.slack ? [signedOut("Slack")] : []),
       ...(current?.oidc !== undefined && next.oidc === undefined ? [signedOut("company sign-in")] : []),
       ...(current?.github !== undefined && next.github === undefined ? [signedOut("GitHub")] : []),
-      // DEC 254h: GitHub is served only while Code's company layer is on (COMPANY_SIGNIN); its client secret is stored by the owner, never here.
-      ...(next.github !== undefined && current?.github === undefined ? [`GitHub sign-in is offered only while company sign-in (COMPANY_SIGNIN) is on, and reads its client secret from ${next.github.clientSecretName}, which must already hold {"clientSecret": "..."}.`] : []),
+      // DEC 254h: GitHub's client secret is stored by the owner, never here.
+      ...(next.github !== undefined && current?.github === undefined ? [`GitHub sign-in reads its client secret from ${next.github.clientSecretName}, which must already hold {"clientSecret": "..."}.`] : []),
     ];
     const credentialsLine = input.credentials === undefined ? [] : [`The client credentials will be stored in ${input.credentials.secretName}.`];
 

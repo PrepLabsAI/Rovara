@@ -124,6 +124,8 @@ export const RESERVED_PACKED_CODES: Readonly<Record<string, string>> = {
   tx: "Cloud's own test services switch (off by default); Code's test services switch is `td`",
   tu: "retired in F1 L1a-1 with the TaskPeoplePublicInvitationsEnabled parameter (nothing read it)",
   tv: "retired in F1 L1a-1 with the TaskPeoplePrivateInvitationsEnabled parameter (nothing read it)",
+  si: "retired in #1614 with the CompanySignIn parameter (company mode is the only mode)",
+  cw: "retired in #1614 with the SlackCompanyWorkspaces parameter (company mode is the only mode)",
 };
 
 function duplicates<T>(values: readonly T[]): T[] {

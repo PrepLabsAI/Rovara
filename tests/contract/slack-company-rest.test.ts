@@ -88,14 +88,14 @@ describe("the notifier's routing", () => {
     expect(company).toHaveBeenCalledTimes(1);
   });
 
-  it("the export is today's handler when off and two handlers when on", async () => {
+  it("the export is two handlers once the company factory's inputs are there, whatever the retired switches say (#1614)", async () => {
     const { notifierFromEnvironment } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
     const made: unknown[] = [];
     const make = (workspaces?: unknown) => { made.push(workspaces); return (async () => ({ batchItemFailures: [] })) as never; };
-    notifierFromEnvironment({ ...ON, COMPANY_SIGNIN: undefined }, make);
+    notifierFromEnvironment({ ...ON, AGENTX_ENV: "" }, make);
     expect(made).toEqual([undefined]);
     made.length = 0;
-    notifierFromEnvironment(ON, make);
+    notifierFromEnvironment({ ...ON, COMPANY_SIGNIN: undefined, SLACK_COMPANY_WORKSPACES: undefined }, make);
     expect(made).toHaveLength(2);
     expect(made[0]).toBeUndefined();
     expect(made[1]).toBeDefined();
@@ -129,8 +129,9 @@ describe("the hosted Slack service", () => {
     return { db, bindings, secrets, send };
   }
 
-  it("builds nothing unless both switches are on and it is fully configured", () => {
-    for (const off of [{ SLACK_COMPANY_WORKSPACES: "disabled" }, { COMPANY_SIGNIN: undefined }, { STATE_TABLE_NAME: "" }, { AGENTX_ENV: "" }, { SLACK_TEAM_ID: "" }, { SLACK_TEAM_ID: "E0GRID000" }]) {
+  it("builds nothing unless it is fully configured (#1614: no switch to turn it off)", () => {
+    expect(serviceSlackWorkspacesFromEnvironment({ ...ON, SLACK_COMPANY_WORKSPACES: "disabled", COMPANY_SIGNIN: undefined }, { documentClient: { send: vi.fn() }, secrets: { send: vi.fn() } })).toBeDefined();
+    for (const off of [{ STATE_TABLE_NAME: "" }, { AGENTX_ENV: "" }, { SLACK_TEAM_ID: "" }, { SLACK_TEAM_ID: "E0GRID000" }]) {
       expect(serviceSlackWorkspacesFromEnvironment({ ...ON, ...off }, { documentClient: { send: vi.fn() }, secrets: { send: vi.fn() } }), JSON.stringify(off)).toBeUndefined();
     }
   });

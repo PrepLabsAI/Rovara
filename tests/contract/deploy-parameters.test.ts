@@ -384,12 +384,13 @@ describe("deploy parameters", () => {
 });
 
 describe("L2-2 18d: Slack company mode's slack-stack parameters", () => {
-  it("always send the table and team (empty when the outputs are absent), and never the switch, which the operator sets and an upgrade keeps (DEC 254zk)", () => {
+  it("always send the table and team (empty when the outputs are absent), and no switch (#1614)", () => {
     expect(stackParameters("slack", answers(), outputs, { packages: true })).toMatchObject({ SlackCompanyStateTableName: "", SlackCompanyTeamId: "" });
     const on = { ...outputs, "control-plane": { ...outputs["control-plane"], SlackCompanyWorkspacesState: "enabled", SlackCompanyStateTableName: "agentx-staging-state", SlackCompanyTeamId: "T0INSTALL0" } };
     expect(stackParameters("slack", answers(), on, { packages: true })).toMatchObject({ SlackCompanyStateTableName: "agentx-staging-state", SlackCompanyTeamId: "T0INSTALL0" });
     for (const given of [outputs, on]) expect(stackParameters("slack", answers(), given, { packages: true })).not.toHaveProperty("SlackCompanyWorkspacesState");
-    expect(OPERATOR_PARAMETERS.slack).toEqual(expect.arrayContaining(["CompanySignIn", "SlackCompanyWorkspacesState"]));
+    // #1614: company mode is the only mode, so an upgrade has no switch to keep.
+    for (const gone of ["CompanySignIn", "SlackCompanyWorkspacesState"]) expect(OPERATOR_PARAMETERS.slack).not.toContain(gone);
   });
 });
 

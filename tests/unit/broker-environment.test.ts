@@ -38,7 +38,7 @@ const SETTINGS = {
   memberWorkspaceLimit: "3", organizationWorkspaceLimit: "20", taskPeopleChanges: "false",
   workflowDependencies: "false", slackTeamId: "T0123ABCD", signInSlack: "enabled", signInSlackSince: "1794693600", oidcSince: "0", signInGithub: "disabled", githubSince: "0", mcpConfirmElicitation: "enabled", channelAdapters: "enabled",
   coreTaskCap: "5", coreCompanyDayCap: "25", coreLessons: "off", coreSystemRuns: "off",
-  coreModelGateway: "gateway.example.dev", coreAgentModel: "claude-sonnet-4-6", slackCompanyWorkspaces: "0", companySignIn: "1", testServices: "1", savedEnvironments: "0", testServiceImages: "mirrored", coreAttentionEmail: "off",
+  coreModelGateway: "gateway.example.dev", coreAgentModel: "claude-sonnet-4-6", testServices: "1", savedEnvironments: "0", testServiceImages: "mirrored", coreAttentionEmail: "off",
   coreAnswersModel: "claude-haiku-5-5", coreAgentModelChoice: "on",
   coreLearningModel: "claude-haiku-5-5",
   // CODE-PUBLIC-URL: empty, an install without a public address (the common case, and today's behaviour).
@@ -84,13 +84,7 @@ describe("awsPartitionOf", () => {
 
 describe("hydrateBrokerEnvironment: a named environment's broker", () => {
 
-  // DEC 254zg (a), 254zk: a switch flag reads only "1" (enabled) or "0" (disabled); anything else stops the broker, in fixed words without the value.
-  it.each([["1", "enabled"], ["0", "disabled"]])("a switch flag packed as %s reads as %s", (flag, value) => {
-    expect(hydrated({ ...SCOPE, [BROKER_SETTINGS_VARIABLE]: `si=${flag},cw=${flag}` })).toMatchObject({ COMPANY_SIGNIN: value, SLACK_COMPANY_WORKSPACES: value });
-  });
-  it.each(["enabled", "disabled", "true", "2", "", "10", "constructor", "__proto__", "toString", "hasOwnProperty"])("a switch flag packed as %j stops the broker", (flag) => {
-    expect(() => hydrated({ ...SCOPE, [BROKER_SETTINGS_VARIABLE]: `si=${flag}` })).toThrow(/^AGENTX_SETTINGS has no switch flag for si \(COMPANY_SIGNIN\)$/u);
-  });
+  // #1614: the company mode switches were the only packed switch flags (si, cw); both are gone and their codes reserved.
 
   it("builds in the region's own partition and hosts", () => {
     const env = hydrated({ ...packed(), AWS_REGION: "cn-north-1" });

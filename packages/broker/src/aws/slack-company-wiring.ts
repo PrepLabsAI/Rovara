@@ -1,6 +1,6 @@
 // DEC 254o (b), L2-2 PR 18c: Slack company mode's one factory. Every Slack consumer that takes part builds its company dependencies here, and only here, from its own
-// environment: nothing unless SLACK_COMPANY_WORKSPACES=enabled AND COMPANY_SIGNIN=enabled, with the State table, the environment's name and the install's team all present.
-// Off, consumers keep their legacy exports exactly (each export checks for undefined and builds today's handler).
+// environment: nothing unless the State table, the environment's name and the install's team are all present (#1614: company mode is the only mode).
+// Without them, consumers keep their legacy exports exactly (each export checks for undefined and builds today's handler).
 // The token is read by the consumer's own role (agentx/<env>/slack-workspaces/<company>/<team>, 18a's grants), always through the team's binding; the install's team stays
 // on the legacy path in every consumer (slack-company-split.ts), so its token, notices and checks are today's.
 import { installTeamOnLegacyPath } from "./slack-company-split.js";
@@ -47,13 +47,8 @@ export interface SlackCompanyClients {
   installToken?: true;
 }
 
-/** Whether this process's environment asks for company mode at all (the two switches). */
-export function slackCompanyModeRequested(env: NodeJS.ProcessEnv): boolean {
-  return env.SLACK_COMPANY_WORKSPACES === "enabled" && env.COMPANY_SIGNIN === "enabled";
-}
 
 export function slackCompanyDependenciesFromEnvironment(env: NodeJS.ProcessEnv, clients: SlackCompanyClients): SlackCompanyWiring | undefined {
-  if (!slackCompanyModeRequested(env)) return undefined;
   const tableName = env.STATE_TABLE_NAME ?? "";
   const environment = env.AGENTX_ENV ?? "";
   const legacyTeamId = env.SLACK_TEAM_ID ?? env.SLACK_ADAPTER_TEAM_ID ?? "";
