@@ -1,5 +1,6 @@
 import { assertDeployGatewayReady, templateParameterNames } from "../deploy/deploy-environment.js";
 import { initDeployAnswers } from "./deploy-steps.js";
+import { installCompanyClient } from "@agentx/broker/install-company";
 // agentx init (FR-015 to FR-020): find the release and region, read any install already under way,
 // ask and check and confirm on a first run, then run the steps. Every AWS, GitHub, Slack, browser
 // and clock dependency is overridable through InitCliDependencies (main.ts's CliDependencies.init).
@@ -271,6 +272,7 @@ export function realSetupServices(input: { region: string; fetch: typeof fetch; 
     github: githubRestApi(input.fetch),
     // Task 7: the foundation's EC2 worker outputs, and where project files are written.
     stackOutputs: cloudFormationOutputsReader(new CloudFormationClient({ region: input.region })),
+    installCompanyClient,
     configDir: input.configDir,
     // Task 8: both use the bot token read from agentx/<env>/slack, only in the authorization header.
     slackChannels: slackChannelApi(input.fetch),

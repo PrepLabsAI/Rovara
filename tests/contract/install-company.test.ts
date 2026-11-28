@@ -18,7 +18,7 @@ function world(ids: string[] = [FIRST, SECOND]) {
   const db = new FakeDynamoDb();
   const company = new CompanySignInStore({ documentClient: db, tableName: "signin", now: () => at });
   const queue = [...ids];
-  const install = new InstallCompanyStore({ company, tableName: "signin", now: () => at, newCompanyId: () => queue.shift()! });
+  const install = new InstallCompanyStore({ company, documentClient: db, tableName: "signin", now: () => at, newCompanyId: () => queue.shift()! });
   const logs: Record<string, unknown>[] = [];
   const invoke = (event: unknown) => companyOperator({ store: company, installCompany: install, now: () => at, log: (entry) => logs.push(entry) }, event);
   const setting = () => db.get(INSTALL_COMPANY_KEY.pk, INSTALL_COMPANY_KEY.sk);

@@ -21,7 +21,7 @@ describe("the journey", () => {
   });
 
   it("adds the phases up to the total, and says how long the user is needed", () => {
-    expect(JOURNEY_PHASE_IDS.reduce((sum, id) => sum + phaseSeconds(id), 0)).toBe(2670);
+    expect(JOURNEY_PHASE_IDS.reduce((sum, id) => sum + phaseSeconds(id), 0)).toBe(2700); // #1612: the company step's 30 seconds
     expect(phaseSeconds("your-choices")).toBe(330);
     expect(phaseSeconds("build")).toBe(1260);
     expect(phaseSeconds("connect")).toBe(540);
@@ -42,7 +42,7 @@ describe("the journey", () => {
     });
     expect(view.overdue).toBe(true);
     // After this step: slack-service (180), Connect GitHub and Slack (540) and Finish (420), 1140 seconds.
-    expect(view.timeLeftText).toBe("Taking longer than usual. About 19 minutes after this step.");
+    expect(view.timeLeftText).toBe("Taking longer than usual. About 20 minutes after this step.");
     expect(view.timeLeftText).not.toMatch(/\b0 minutes|-\d/);
   });
 
@@ -52,7 +52,7 @@ describe("the run order: every stack first, then the GitHub and Slack apps", () 
   it("deploys every stack before the GitHub app, and lists every step once", () => {
     expect(INSTALL_STEP_ORDER).toEqual([
       "prerequisites", "access", "core", "control-plane", "slack-service", "github-app", "slack-app", "slack-check", "developer-signin",
-      "admin-user", "first-project", "connectors", "alerts", "e2e",
+      "admin-user", "first-project", "connectors", "company", "alerts", "e2e",
     ]);
     expect([...INSTALL_STEP_ORDER].sort()).toEqual([...INIT_STEP_IDS].sort());
     expect(initSteps({ github: fakeGitHubApi(), slack: fakeSlackApi() }).map((step) => step.id)).toEqual([...INSTALL_STEP_ORDER]);

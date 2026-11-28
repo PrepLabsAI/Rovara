@@ -15,7 +15,9 @@ import { withEnvironmentLock, type LockRecord } from "../environments/lock.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
 import { activeHintLine, ensureGithubWebhook, missingEventsLine } from "../github/webhook-setup.js";
+import { installCompanyLines, runInstallCompanyStep } from "../company/install-company-step.js";
 import { isOperatorRole } from "../init/commands.js";
+import { installProgressParameterName } from "../init/install-state.js";
 import type { InitSecrets } from "../init/context.js";
 import { githubAppJwt, githubAppSecretName, githubWebhookUrl, parseAppSecret, type GitHubApi } from "../init/github-app.js";
 import { plainMessage } from "../output.js";
@@ -48,6 +50,8 @@ export interface UpgradeDependencies {
   /** The clients that point the GitHub App's webhook at the control plane: Secrets Manager (read and write) and GitHub. */
   githubWebhook(settings: EnvironmentSettings): { secrets: Pick<InitSecrets, "get" | "put" | "hasValue">; github: GitHubApi };
   doctor(env: string): Promise<DoctorReport>;
+  /** #1612: the DynamoDB client the install's company step reads and writes with (the operator's own credentials). Absent: the step is skipped. */
+  installCompany?(settings: EnvironmentSettings): { documentClient: { send(command: unknown): Promise<unknown> } };
   write: (line: string) => void;
   now: () => number;
   /** This agentx's own release (RELEASE_VERSION); undefined for a build from source. */
@@ -175,6 +179,48 @@ async function setUpGithubWebhook(env: string, deps: UpgradeDependencies): Promi
   }
 }
 
+/**
+ * #1612: makes (or finds) the install's own company and moves the built-in company's records into it, once the stacks are upgraded. Like the webhook, a failure is told and doctor
+ * still runs; a second upgrade finishes it.
+ */
+async function setUpInstallCompany(env: string, deps: UpgradeDependencies): Promise<void> {
+  if (deps.installCompany === undefined) return;
+  try {
+    const settings = await readEnvironmentSettings(deps.store, env);
+    if (settings === undefined) return;
+    const controlPlane = await deps.stacks.describe(settings.stacks["control-plane"]);
+    if (controlPlane?.outputs.DeveloperSignInTableName === undefined) return;
+    const ownerEmail = await initAdminEmail(deps.store, env);
+    const result = await runInstallCompanyStep({
+      documentClient: deps.installCompany(settings).documentClient, installations: async () => await githubInstallations(env, settings, deps), now: deps.now, write: deps.write,
+    }, { env, outputs: controlPlane.outputs, parameters: controlPlane.parameters, ...(ownerEmail === undefined ? {} : { ownerEmail }), apply: true });
+    for (const line of installCompanyLines(result)) deps.write(line);
+  } catch (error) {
+    deps.write(`Company: could not be set up (${plainMessage(error)}); run agentx upgrade again`);
+  }
+}
+
+/** The email of the admin user init made (its progress record), the install company's first owner. */
+async function initAdminEmail(store: ParameterStore, env: string): Promise<string | undefined> {
+  const raw = (await store.get(installProgressParameterName(env)))?.value;
+  if (raw === undefined) return undefined;
+  try {
+    const username = (JSON.parse(raw) as { admin?: { username?: unknown } }).admin?.username;
+    return typeof username === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/u.test(username) ? username : undefined;
+  } catch { return undefined; }
+}
+
+/** The GitHub App's installations, read with the App's own key; none while the App is not set up. */
+async function githubInstallations(env: string, settings: EnvironmentSettings, deps: UpgradeDependencies): Promise<Array<{ installationId: number; accountLogin: string }>> {
+  const { secrets, github } = deps.githubWebhook(settings);
+  const secretName = githubAppSecretName(env);
+  const raw = await secrets.get(secretName);
+  if (raw === undefined) return [];
+  const app = parseAppSecret(raw, secretName);
+  const listed = await github.listInstallations(githubAppJwt({ appId: app.appId, privateKey: app.privateKey, nowSeconds: Math.floor(deps.now() / 1000) }));
+  return listed.map((installation) => ({ installationId: installation.id, accountLogin: installation.account.login }));
+}
+
 export async function runUpgrade(options: UpgradeOptions, deps: UpgradeDependencies): Promise<UpgradeResult> {
   const { env } = options;
   const first = upgradableSettings(await readEnvironmentSettings(deps.store, env), env);
@@ -300,6 +346,7 @@ export async function runUpgrade(options: UpgradeOptions, deps: UpgradeDependenc
 
   // Outside the lock on purpose: it changes only GitHub's hook and the App secret, never the environment's settings or stacks.
   await setUpGithubWebhook(env, deps);
+  await setUpInstallCompany(env, deps);
 
   deps.write("Checking the environment with agentx doctor");
   let report: DoctorReport;
