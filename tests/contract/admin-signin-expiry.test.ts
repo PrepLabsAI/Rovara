@@ -112,7 +112,7 @@ describe("agentx mcp with an expired admin sign-in (#218)", () => {
     await tokenStore.set(tokenStoreKey(cacheFromSettings(stagingSettings).auth), { accessToken: ADMIN_TOKEN, expiresAt: admin.expiresAt });
     const stdin = new PassThrough();
     const stdout = new PassThrough();
-    const running = executeCli(["mcp"], { environments: { home }, tokenStore, fetchImplementation: controlPlane(), stdin, stdout, stderr: { write: () => true }, cliInvocation });
+    const running = executeCli(["--env", "staging", "mcp"], { environments: { home }, tokenStore, fetchImplementation: controlPlane(), stdin, stdout, stderr: { write: () => true }, cliInvocation });
     const client = new Client({ name: "claude-code", version: "2.1.0" });
     await client.connect(streamTransport(stdin, stdout));
     return { client, stop: async () => { await client.close(); return running; } };
@@ -138,7 +138,7 @@ describe("an admin sign-in about to expire (#218)", () => {
     const tokenStore = new InMemoryTokenStore();
     await saveDeveloperEnvironment(home, "staging", { url: URL_BASE, issuer: ISSUER, tokenEndpoint: `${ISSUER}/token`, revocationEndpoint: `${ISSUER}/revoke` });
     await tokenStore.set(developerTokenKey(ISSUER), { accessToken: "developer-token", refreshToken: `agxr_${"a".repeat(43)}`, expiresAt: Date.now() + 3_600_000 });
-    const mcp = agentxMcpServer({
+    const mcp = agentxMcpServer({ env: "staging",
       home, tokenStore, fetch: controlPlane(), stderr: { write: () => true },
       adminSignedIn: async () => expiresAt > Date.now(),
       adminSession: async () => (expiresAt > Date.now() ? { baseUrl: URL_BASE, accessToken: ADMIN_TOKEN } : undefined),

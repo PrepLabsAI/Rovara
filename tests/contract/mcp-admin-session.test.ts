@@ -53,7 +53,7 @@ async function server(options: { admin?: { expiresAt: number }; adminApiVersion?
     return Response.json({ developer: { id: "d".repeat(64), name: "Ada", provider: "slack" }, projects: [], notices: [] });
   });
   const stderr: string[] = [];
-  const mcp = agentxMcpServer({
+  const mcp = agentxMcpServer({ env: "staging",
     home, tokenStore, fetch, stderr: { write: (text: string) => stderr.push(text) },
     adminSignedIn: async () => options.admin !== undefined && options.admin.expiresAt > Date.now(),
     adminSession: async () => (options.admin !== undefined && options.admin.expiresAt > Date.now() ? { baseUrl: URL_BASE, accessToken: ADMIN_TOKEN } : undefined),
@@ -131,7 +131,7 @@ describe("agentx mcp's own admin sign-in (main.ts, A14)", () => {
     const stderr: string[] = [];
     // Issue #218 follow-up (owner decision 2026-10-02): an expired sign-in's command is shown bare,
     // as if this computer ran the published package's installed command, not through npx.
-    const running = executeCli(["mcp"], {
+    const running = executeCli(["--env", "staging", "mcp"], {
       environments: { home }, tokenStore, fetchImplementation: fetch, stdin, stdout, stderr: { write: (text: string) => stderr.push(text) },
       cliInvocation: { published: true, version: "1.4.0", cliPath: "/opt/node_modules/@charterarc/agentx/dist/main.js", invokedViaNpx: false },
     });

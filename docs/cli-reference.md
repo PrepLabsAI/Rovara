@@ -24,7 +24,8 @@ An environment is one Rovara install. You name it when you install, for example 
 and the name tells them apart in AWS, GitHub and Slack.
 
 Pass `--env <name>` to every command. **Without it, `agentx` uses the environment named
-`production`**, which is rarely what you want. Only `destroy` refuses to run without it.
+`production`**, which is rarely what you want. That holds for every command, and signing in to
+another environment with `login <url>` does not change it. Only `destroy` refuses to run without it.
 
 ```sh
 agentx env list --region <region>      # the environments in this AWS account and region

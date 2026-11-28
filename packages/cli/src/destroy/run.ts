@@ -275,12 +275,11 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
   for (const path of localFiles) await rm(path, { force: true });
   if (settings !== undefined) await deps.tokenStore.delete(tokenStoreKey({ issuer: settings.identity.issuer, clientId: settings.identity.clientId, audience: settings.identity.audience }));
   result.localFiles = localFiles;
-  // Issue #221: the developer sign-in for the removed environment, so it is never left the default.
+  // Issue #221: the developer sign-in for the removed environment, so none is left for a gone one.
   // The environment is already gone: a developer.yaml that cannot be read is said, not thrown.
   try {
-    const forgotten = await forgetDeveloperSignIn(deps.home, env, deps.tokenStore);
-    if (forgotten !== undefined) {
-      deps.write(`Removed this computer's developer sign-in for ${env}; ${forgotten.default === undefined ? "no developer environment is the default now" : `the default developer environment is now ${forgotten.default}`}.`);
+    if (await forgetDeveloperSignIn(deps.home, env, deps.tokenStore)) {
+      deps.write(`Removed this computer's developer sign-in for ${env}.`);
     }
   } catch (error) {
     deps.write(`Could not remove this computer's developer sign-in for ${env}: ${error instanceof Error ? plainMessage(error) : String(error)}`);

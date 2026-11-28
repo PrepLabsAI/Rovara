@@ -3,16 +3,18 @@
 import { CLI_PACKAGE_NAME } from "@agentx/contracts";
 import { chmod, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { AGENTX_CLI_CLIENT_ID, DEVELOPER_TOKEN_AUDIENCE, EnvironmentNameSchema, agentXError } from "@agentx/contracts";
+import { AGENTX_CLI_CLIENT_ID, DEFAULT_ENVIRONMENT, DEVELOPER_TOKEN_AUDIENCE, EnvironmentNameSchema, agentXError } from "@agentx/contracts";
 import YAML from "yaml";
 import { z } from "zod";
 import { tokenStoreKey } from "../auth.js";
 import type { TokenStore } from "../token-store.js";
 
 const EntrySchema = z.object({ url: z.string().url(), issuer: z.string().url(), tokenEndpoint: z.string().url(), revocationEndpoint: z.string().url() }).strict();
+// Issue #1611: `default` is still read, so a file an older CLI wrote stays valid, but it is ignored
+// and never written. Commands without --env always use production, whatever was signed in to last.
 const ConfigSchema = z.object({ schemaVersion: z.literal(1), default: EnvironmentNameSchema.optional(), environments: z.record(EnvironmentNameSchema, EntrySchema) }).strict();
 export type DeveloperEnvironment = z.infer<typeof EntrySchema>;
-interface DeveloperConfig { default?: string; environments: Record<string, DeveloperEnvironment> }
+interface DeveloperConfig { environments: Record<string, DeveloperEnvironment> }
 
 export const developerConfigPath = (home: string): string => join(home, ".agentx", "developer.yaml");
 export const developerTokenKey = (issuer: string): string => tokenStoreKey({ issuer, clientId: AGENTX_CLI_CLIENT_ID, audience: DEVELOPER_TOKEN_AUDIENCE });
@@ -33,7 +35,7 @@ export async function readDeveloperConfig(home: string): Promise<DeveloperConfig
   }
   const parsed = ConfigSchema.safeParse(document);
   if (!parsed.success) throw agentXError("CONFIG_INVALID", `${developerConfigPath(home)} is invalid; delete it and run agentx login <url> again`);
-  return { ...(parsed.data.default === undefined ? {} : { default: parsed.data.default }), environments: parsed.data.environments };
+  return { environments: parsed.data.environments };
 }
 
 /** Writes the whole file atomically (a 0600 temp file renamed over it). */
@@ -57,41 +59,46 @@ async function write(home: string, config: DeveloperConfig): Promise<void> {
   }
 }
 
-/** Records a signed-in environment; it becomes the default. */
+/** Records a signed-in environment. It never becomes the default (issue #1611): that stays production. */
 export async function saveDeveloperEnvironment(home: string, env: string, entry: DeveloperEnvironment): Promise<void> {
   const config = await readDeveloperConfig(home);
-  await write(home, { default: env, environments: { ...config.environments, [env]: EntrySchema.parse(entry) } });
+  await write(home, { environments: { ...config.environments, [env]: EntrySchema.parse(entry) } });
 }
 
-/** Drops an environment's entry; a default it was moves to the first remaining one, or is cleared. Returns the default after. */
-export async function removeDeveloperEnvironment(home: string, env: string): Promise<string | undefined> {
+/** Drops an environment's entry. */
+export async function removeDeveloperEnvironment(home: string, env: string): Promise<void> {
   const config = await readDeveloperConfig(home);
   // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the key
   const { [env]: _removed, ...rest } = config.environments;
-  const nextDefault = config.default === env ? Object.keys(rest).sort()[0] : config.default;
-  await write(home, { ...(nextDefault === undefined ? {} : { default: nextDefault }), environments: rest });
-  return nextDefault;
+  await write(home, { environments: rest });
 }
 
 /**
  * Issue #221: forgets this computer's developer sign-in for an environment that no longer exists
- * (agentx destroy): its token and its entry, moving the default as removeDeveloperEnvironment does.
- * Undefined when there was no entry for it; otherwise the default after.
+ * (agentx destroy): its token and its entry. False when there was no entry for it.
  */
-export async function forgetDeveloperSignIn(home: string, env: string, tokenStore: Pick<TokenStore, "delete">): Promise<{ default: string | undefined } | undefined> {
+export async function forgetDeveloperSignIn(home: string, env: string, tokenStore: Pick<TokenStore, "delete">): Promise<boolean> {
   const entry = (await readDeveloperConfig(home)).environments[env];
-  if (entry === undefined) return undefined;
+  if (entry === undefined) return false;
   await tokenStore.delete(developerTokenKey(entry.issuer));
-  return { default: await removeDeveloperEnvironment(home, env) };
+  await removeDeveloperEnvironment(home, env);
+  return true;
 }
 
-/** The environment named, or the default one agentx login set. */
+/**
+ * The environment named, or production when none is (issue #1611: the same default every command
+ * and --help use, never the environment signed in to last). Not signed in to it names the
+ * environments this computer is signed in to, so the person can add --env.
+ */
 export async function resolveDeveloperEnvironment(home: string, env: string | undefined): Promise<{ env: string; entry: DeveloperEnvironment }> {
   const config = await readDeveloperConfig(home);
-  const name = env ?? config.default;
-  const entry = name === undefined ? undefined : config.environments[name];
-  if (name === undefined || entry === undefined) {
-    throw agentXError("AUTH_REQUIRED", `this computer is not signed in to AgentX${name === undefined ? "" : ` environment ${name}`}; run npx ${CLI_PACKAGE_NAME} login <your AgentX URL>`);
+  const name = env ?? DEFAULT_ENVIRONMENT;
+  const entry = config.environments[name];
+  if (entry === undefined) {
+    const others = Object.keys(config.environments).sort();
+    const signIn = `run npx ${CLI_PACKAGE_NAME} login <your AgentX URL>`;
+    const next = others.length === 0 ? signIn : `it is signed in to ${others.join(", ")}: add --env ${others.length === 1 ? others[0] : "<name>"}, or ${signIn}`;
+    throw agentXError("AUTH_REQUIRED", `this computer is not signed in to AgentX environment ${name}; ${next}`);
   }
   return { env: name, entry };
 }

@@ -76,7 +76,7 @@ export async function signedInClient(harness: Harness, who: Developer | undefine
   if (accessToken !== undefined) await tokenStore.set(developerTokenKey(DEV_ISSUER), { accessToken, refreshToken: REFRESH_TOKEN, expiresAt: Date.now() + 3_600_000 });
   const stderr: string[] = [];
   let now = 0;
-  const server = agentxMcpServer({
+  const server = agentxMcpServer({ env: "staging",
     home, tokenStore, fetch: mcpBrokerFetch(harness), adminSignedIn: async () => false, adminSession: async () => undefined, stderr: { write: (text: string) => stderr.push(text) },
     clock: { now: () => now, sleep: async (ms) => { now += ms; await onSleep(); } },
   });
@@ -128,7 +128,7 @@ export async function adminSignedInClient(harness: Harness, options: {
   const stderr: string[] = [];
   const sent: SentRequest[] = [];
   const clock = options.clock;
-  const server = agentxMcpServer({
+  const server = agentxMcpServer({ env: "staging",
     home, tokenStore, stderr: { write: (text: string) => stderr.push(text) },
     fetch: mcpBrokerFetch(harness, { ...options.config, onRequest: (request) => { sent.push(request); options.config?.onRequest?.(request); } }),
     adminSignedIn: async () => adminToken !== undefined,
