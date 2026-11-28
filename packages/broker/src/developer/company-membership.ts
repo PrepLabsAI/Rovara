@@ -44,7 +44,7 @@ export const CompanyInviteLink = z.object({
 }).strict();
 type Member = z.infer<typeof CompanyMember>;
 export const companyMemberKey = (companyId: string, personId: string) => ({ pk: companyScoped(OrgIdSchema.parse(companyId), "MEMBERS"), sk: `MEMBER#${CompanyPersonId.parse(personId)}` });
-type Write = NonNullable<TransactWriteCommandInput["TransactItems"]>[number];
+export type Write = NonNullable<TransactWriteCommandInput["TransactItems"]>[number];
 /** `viaPreapproval`: DEC 254b (f), this very call wrote the membership by consuming a live pre-approval (never an existing member, a legacy join or a lost race). */
 /**
  * DEC 254zzz84 (5): what a removal with a hand-over fences inside the removal's own transaction: the role the remover saw (the target's snapshot CAS
@@ -460,4 +460,4 @@ const UNAVAILABLE_WORDS = "company sign-in unavailable";
 export const isUnreadableMembershipRow = (error: unknown): boolean => error instanceof Error && error.message === UNAVAILABLE_WORDS;
 
 /** A seat write lost a RACE only when a condition failed (a ConditionalCheckFailed reason); a cancelled transaction for any other reason (throttled, conflicting) is a failed write: a retryable failure, never "no" (membership-read.ts). */
-const lostTheSeatRace = (error: unknown): boolean => error instanceof Error && (error.name === "ConditionalCheckFailedException" || (error.name === "TransactionCanceledException" && ((error as { CancellationReasons?: Array<{ Code?: string }> }).CancellationReasons ?? []).some((reason) => reason.Code === "ConditionalCheckFailed")));
+export const lostTheSeatRace = (error: unknown): boolean => error instanceof Error && (error.name === "ConditionalCheckFailedException" || (error.name === "TransactionCanceledException" && ((error as { CancellationReasons?: Array<{ Code?: string }> }).CancellationReasons ?? []).some((reason) => reason.Code === "ConditionalCheckFailed")));

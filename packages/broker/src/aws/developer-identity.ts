@@ -280,7 +280,7 @@ export function createAwsDeveloperIdentityHandler(env: NodeJS.ProcessEnv, worksp
       // DEC 254zg (a): self-serve create only while the CompanySelfServe switch is on as well (infra/lib/company-signin.ts gives "enabled" only with CompanySignIn on).
       companyInvites: new CompanyInviteStore({ documentClient, tableName, now, company, selfServeAllowed: companySelfServeFromEnvironment(env) }),
       // #1612: the install's own company, made or adopted once by the operator (init and upgrade).
-      installCompany: new InstallCompanyStore({ company, tableName, now }) }),
+      installCompany: new InstallCompanyStore({ company, documentClient, tableName, now }) }),
     // DEC 254b (b): the operator's company import runs BEFORE the company layer is switched on, so it is there with the layer on or off.
     companyImport: new CompanyImportStore({ documentClient, tableName, now }),
     signer: kmsTokenSigner({ kms: new KMSClient(region), keyId: required(env, "DEVELOPER_TOKEN_KEY_ARN") }),
