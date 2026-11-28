@@ -353,9 +353,9 @@ describe("read", () => {
     w.db.set({ pk: `ORG#${B}#GITHUB_INSTALLATIONS`, sk: "INSTALLATION#101", entityType: "GITHUB_COMPANY_INSTALLATION", companyId: B, installationId: 101, accountLogin: "acme", boundAt: TIME, boundBy: PERSON_B });
     expect((await w.read()).body.installations).toEqual([]);
   });
-  it("a person with no membership is refused", async () => {
+  it("a person with no membership is refused, told they are in no company (#1612)", async () => {
     const w = world(); w.db.delete(membershipKey(PERSON).pk, membershipKey(PERSON).sk);
-    expect((await w.read()).status).toBe(401);
+    expect((await w.read()).status).toBe(403);
   });
 });
 

@@ -125,8 +125,8 @@ describe("the hosted broker's core root and how we work", () => {
     expect(refused?.statusCode).toBe(404);
     expect(refused!.body).toBe(missing!.body);
     expect(t.reads.slice(before).some((read) => read.includes("CODE_SETTINGS"))).toBe(false);
-    // Not a member of any company: the sign-in refusal.
-    expect((await get("dev-c", "/v1/app/projects/payments/how-we-work"))?.statusCode).toBe(401);
+    // Not a member of any company: told so (#1612), not asked to sign in again.
+    expect((await get("dev-c", "/v1/app/projects/payments/how-we-work"))?.statusCode).toBe(403);
   });
 
   it("is not served when the deployment passes no settings (the page never says anything about the company it cannot read)", async () => {

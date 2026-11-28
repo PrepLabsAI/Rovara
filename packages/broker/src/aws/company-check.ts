@@ -4,9 +4,14 @@ import { membershipReadFailed, isMembershipReadFailure, readingMembership } from
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import type { DeveloperTaskActions } from "./developer-task-actions.js";
-import { AgentXError, agentXError, IMPLICIT_COMPANY_ID, OrgIdSchema, OrgRoleSchema, type DocumentStore, type OrgRole } from "@agentx/contracts";
+import { AgentXError, agentXError, IMPLICIT_COMPANY_ID, NOT_IN_A_COMPANY_MESSAGE, OrgIdSchema, OrgRoleSchema, type DocumentStore, type OrgRole } from "@agentx/contracts";
 
-export interface CompanyMembershipReader { companyOf(personId: string): Promise<string | undefined>; membershipOf?(personId: string): Promise<{ companyId: string; role: OrgRole } | undefined> }
+export interface CompanyMembershipReader {
+  companyOf(personId: string): Promise<string | undefined>;
+  membershipOf?(personId: string): Promise<{ companyId: string; role: OrgRole } | undefined>;
+  /** #1612: true only when the person has no membership row at all (never joined a company here), as against a revoked or malformed one. A read that fails throws the retryable error. */
+  absent?(personId: string): Promise<boolean>;
+}
 const SIGN_IN_AGAIN = "your AgentX sign-in has ended; run agentx login <url> again";
 export const Membership = z.object({
   entityType: z.literal("COMPANY_MEMBERSHIP"), personId: z.string(), companyId: OrgIdSchema,
@@ -27,7 +32,12 @@ function membershipReader(read: (personId: string) => Promise<unknown>): Company
     const parsed = Membership.safeParse(row);
     return parsed.success && parsed.data.personId === personId && parsed.data.revokedAt === undefined ? { companyId: parsed.data.companyId, role: parsed.data.role } : undefined;
   };
-  return { membershipOf, async companyOf(personId) { return (await membershipOf(personId))?.companyId; } };
+  const absent = async (personId: string) => {
+    if (typeof personId !== "string" || personId.length === 0 || personId.length > 256 || /[#\s]/.test(personId)) return false;
+    const row = await readingMembership(() => read(personId));
+    return row === undefined || row === null;
+  };
+  return { membershipOf, absent, async companyOf(personId) { return (await membershipOf(personId))?.companyId; } };
 }
 
 export function companyMembershipFromStore(store: Pick<DocumentStore, "get">): CompanyMembershipReader {
@@ -41,14 +51,24 @@ export function companyMembershipFromDynamo(client: { send(command: unknown): Pr
   });
 }
 
-/** Only an absent dependency disables the check; every supplied reader fails closed. */
+/**
+ * Only an absent dependency disables the check; every supplied reader fails closed. A person with no membership row at all is FORBIDDEN with the not-in-a-company words (#1612):
+ * signing in again cannot change that. A revoked or malformed membership is still the sign-in refusal (a removed member's access ends at sign-in).
+ */
 export async function resolveCompany(reader: CompanyMembershipReader | undefined, personId: string): Promise<string | undefined> {
   if (reader === undefined) return undefined;
   try {
     const company = OrgIdSchema.safeParse(await reader.companyOf(personId));
     if (company.success) return company.data;
   } catch (error) { throw isMembershipReadFailure(error) ? error : membershipReadFailed(); /* A reader that threw FAILED: no cause of its own belongs in a caller's response, and absence is never inferred from it. */ }
-  throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  throw await noCompanyRefusal(reader, personId);
+}
+
+/** The refusal for a clean answer of no company: not in a company (no membership row at all), else the sign-in refusal. */
+async function noCompanyRefusal(reader: CompanyMembershipReader, personId: string): Promise<AgentXError> {
+  let absent: boolean;
+  try { absent = reader.absent === undefined ? false : await reader.absent(personId); } catch (error) { return isMembershipReadFailure(error) ? error as AgentXError : membershipReadFailed(); }
+  return absent ? agentXError("FORBIDDEN", NOT_IN_A_COMPANY_MESSAGE) : agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
 }
 
 /** P0-14: an administrator's sign-in that is in no company of Code's (an install operator usually is in none). Not "your sign-in has ended": signing in again cannot change it. */
