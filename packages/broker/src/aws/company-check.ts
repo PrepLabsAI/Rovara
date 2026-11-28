@@ -18,7 +18,8 @@ export const Membership = z.object({
   role: OrgRoleSchema, joinedAt: z.iso.datetime(),
   // DEC 253z: "self-serve" is the first owner of a company they made with an invite code. DEC 254b (b): "import" was copied from the install's old
   // company layout by an operator (company-import.ts). Older rows still read.
-  joinedVia: z.enum(["preapproval", "legacy", "self-serve", "import"]).optional(),
+  // #1612: "install" joined the install's own company by signing in with the install's own Slack workspace or OIDC.
+  joinedVia: z.enum(["preapproval", "legacy", "self-serve", "import", "install"]).optional(),
   revokedAt: z.iso.datetime().optional(), revokedBy: z.string().min(1).max(256).optional(),
 });
 export const membershipKey = (personId: string) => ({ pk: `COMPANY_MEMBER#${personId}`, sk: "COMPANY" });
