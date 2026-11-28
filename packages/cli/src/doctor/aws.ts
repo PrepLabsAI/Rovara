@@ -1,6 +1,7 @@
 // agentx doctor's real services, built for the environment's own account and region. Every read here
 // is one the operator role already allows (day-two-actions.ts's DOCTOR_AWS_ACTIONS).
 import { BudgetsClient } from "@aws-sdk/client-budgets";
+import { installCompanyClient } from "@agentx/broker/install-company";
 import { CloudFormationClient, type DescribeStacksCommand, type DescribeStacksCommandOutput } from "@aws-sdk/client-cloudformation";
 import { CloudWatchClient } from "@aws-sdk/client-cloudwatch";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
@@ -41,6 +42,7 @@ export function realDoctorServices(input: {
   return {
     secrets,
     stacks: doctorStackReader(new CloudFormationClient(region)),
+    installCompanyClient: installCompanyClient(settings.region),
     releaseManifest: (version) => readReleaseManifest({ version, home: input.home, fetch: input.fetch }),
     checks: awsPrerequisiteChecks({ region: settings.region, account: settings.account, store: input.store, runner: realCommandRunner(input.stderr), fetch: input.fetch }),
     slackApi,

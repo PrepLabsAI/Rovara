@@ -1015,6 +1015,8 @@ export class ControlPlaneStack extends Stack {
       });
       // The dispatcher's lessons people port (a worker step's source lessons need the project roster): the sign-in table's name and two projected GetItem reads of it, from the real table, both layouts, no switch.
       connectDispatcherLessonsPeople(this, dispatcher, developerSignIn.table);
+      // #1612: init and upgrade make the install's own company and move its records, with the operator's own credentials; they find the sign-in table here.
+      new CfnOutput(this, "DeveloperSignInTableName", { value: developerSignIn.table.tableName });
       // Named: the broker's invoke of the sign-in function (developer-signin.ts leaves its grant to this), ENV-ROOM 2's IAM room.
       // The same resources CDK's grantInvoke gives it: the function and its versions and aliases. (The plan evidence job's invoke left with D1: the core stores plan evidence itself.)
       if (naming.env !== undefined) {

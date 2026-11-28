@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { legacyProductionStacks, normalizedTemplate } from "../support/template-snapshot.js";
+import { withoutInstallCompanyOutput } from "../support/install-company-output-template.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
 import { createHash } from "node:crypto";
 import { withoutBatchFAdditions } from "../support/batch-f-template.js";
@@ -73,13 +74,13 @@ describe("legacy production templates", () => {
       it("removing only Batch F additions preserves code/next's AgentXControlPlane template", () => {
         // F1 L1a-1: the two deleted invitation switches are put back innermost (Rule D, tests/support/task-people-invitations-template.ts), so this older pin holds as recorded.
         // DEC 254zzz488: the Linear webhook route (asserted and taken out, outermost) is the only change to the pins below besides the public-URL, lessons and RETAIN additions.
-        const beforeBatchF = withoutLinearWebhookRoute(withoutWebhookSecretLane(withoutBatchFAdditions(withoutLegacyRuntimeBoundary(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(withoutMachineGone(withTaskPeopleInvitationSwitches(withoutCoreOutboxStreamRelay(withoutCanarySession(normalizedTemplate(stack))))))), { named: false, sites: PUBLIC_API_SITES })), LEGACY))))));
+        const beforeBatchF = withoutLinearWebhookRoute(withoutWebhookSecretLane(withoutBatchFAdditions(withoutLegacyRuntimeBoundary(withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutApiAccessLog(withoutPublicApiUrl(withoutDispatcherLessonsPeople(withoutRetainPolicies(withoutMachineGone(withTaskPeopleInvitationSwitches(withoutCoreOutboxStreamRelay(withoutCanarySession(withoutInstallCompanyOutput(stack.stackName, normalizedTemplate(stack)))))))), { named: false, sites: PUBLIC_API_SITES })), LEGACY))))));
         expect(createHash("sha256").update(JSON.stringify(beforeBatchF)).digest("hex")).toBe("2e4f4f9d632f856e9bf5cb127751c7dab7a7d328467e937585a93c6823022e79");
       }, 120_000);
     }
     it(`${stack.stackName} is unchanged`, () => {
       // DEC 254zzz432: the alarm is taken out first, so every pin below holds as recorded (checked to be exactly one resource). DEC 254zzz488: so is the Linear webhook route.
-      const withCanary = stack.stackName === "AgentXControlPlane" ? withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(normalizedTemplate(stack), LEGACY)) : normalizedTemplate(stack);
+      const withCanary = stack.stackName === "AgentXControlPlane" ? withoutWorkerCallbackAlarm(withoutStuckStoppingAlarm(withoutInstallCompanyOutput(stack.stackName, normalizedTemplate(stack)), LEGACY)) : withoutInstallCompanyOutput(stack.stackName, normalizedTemplate(stack));
       // CANARY-SESSION (Rule D): the control plane's full pin with the canary session function in (its four empty placement parameters, condition, template rule, function, role policy, invoke permission, metric filters,
       // alarms, output and the token key's conditional deny list) is below; with exactly those taken out (withoutCanarySession, asserted field by field in tests/support/canary-session-template.ts) the machine-gone pin after it holds, and so does everything after that.
       if (stack.stackName === "AgentXControlPlane") expect(createHash("sha256").update(JSON.stringify(withCanary)).digest("hex"), "AgentXControlPlane with the canary session function").toBe("2ff78636f2deb8fad5bcb79d923d132b737a47817c1d61091c4cf7e62ee950d6");
