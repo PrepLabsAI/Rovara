@@ -34,7 +34,7 @@ describe("the membership reader tells a person who never joined from a removed o
     const store = storeWith(undefined);
     for (const person of ["", "x#y", "x y", "x".repeat(257)]) expect(await companyMembershipFromStore(store).absent!(person)).toBe(false);
     expect(store.reads).not.toHaveBeenCalled();
-    const failing = companyMembershipFromStore({ get: (async () => { throw new Error("private-canary"); }) as DocumentStore["get"] });
+    const failing = companyMembershipFromStore({ get: (async () => { throw new Error("private-canary"); }) });
     await expect(failing.absent!(PERSON)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
   });
 
