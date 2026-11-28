@@ -70,6 +70,9 @@ it("CLI migration is explicit and exclusive; no HTTP or customer entrypoint impo
   const walk = (dir: string): string[] => readdirSync(dir, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? walk(join(dir, entry.name)) : [join(dir, entry.name)]);
   for (const file of walk("packages/broker/src").filter(file => file.endsWith(".ts") && !file.endsWith("core-backfill-runner.ts"))) {
     expect(readFileSync(file, "utf8"), file).not.toMatch(/(?:from|import\()\s*["'][^"']*core-backfill-runner/);
-    if (!file.endsWith("core-project-backfill.ts") && !file.endsWith("project-catalog-backfill.ts")) expect(readFileSync(file, "utf8"), file).not.toMatch(/\bbackfillCorePage\s*\(/);
+    // #1612: install-company-move.ts is the other operator-only caller: init and upgrade run it from the CLI with the operator's own credentials (no route imports it, below).
+    if (!file.endsWith("core-project-backfill.ts") && !file.endsWith("project-catalog-backfill.ts") && !file.endsWith("install-company-move.ts")) expect(readFileSync(file, "utf8"), file).not.toMatch(/\bbackfillCorePage\s*\(/);
+    // Only the CLI's entry point (install-company.ts) may import the operator move: never a route, a handler or the broker's own wiring.
+    if (!file.endsWith("install-company.ts") && !file.endsWith("install-company-move.ts") && !file.endsWith("install-company-connections.ts")) expect(readFileSync(file, "utf8"), file).not.toMatch(/(?:from|import\()\s*["'][^"']*install-company-(?:move|connections)/);
   }
 });
